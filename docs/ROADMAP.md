@@ -73,8 +73,9 @@ are the order the project was built in; what is open is marked `[ ]` or `[~]`, m
 - [x] cloud compute: training runs on a rented GPU (RunPod) or on another FOLO server, as ordinary runs of this
   server (`TrainConfig.compute`, `/api/cloud`, `folo cloud`, Settings → Cloud and Run on in Studio and Desktop;
   docs/CLOUD.md). The worker side is plain API: `folo serve --token` (with native TLS via `--tls-cert` / `--tls-key`
-  and `folo mcp --tls-ca`), `/api/uploads`, run cursors, weight ranges.
-  Next: providers that expose a raw port (Vast.ai, Lambda); spot instances with automatic resume
+  and `folo mcp --tls-ca`), `/api/uploads`, run cursors, weight ranges, and automatic spot/preemptible checkpoint
+  resume (bounded re-provision and checkpoint recovery on unexpected worker preemption).
+  Next: providers that expose a raw port (Vast.ai, Lambda)
 
 ## M5 — polish
 - [x] README showcase, QUICKSTART, screenshots, llms.txt (#71)

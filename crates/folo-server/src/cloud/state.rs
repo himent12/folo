@@ -64,6 +64,17 @@ pub(crate) struct Private {
     /// Unix seconds `weights/last.folo` was last copied.
     #[serde(default)]
     pub synced: Option<f64>,
+    /// Automatic preemption recovery attempts already started for this run.
+    #[serde(default)]
+    pub preemptions: u32,
+    /// Ledger ids of earlier instances replaced after preemption, so cumulative run cost reconciles dynamically
+    /// against the ledger even when the reaper confirms an old instance's termination later.
+    #[serde(default)]
+    pub prior_instance_ids: Vec<String>,
+    /// True while the run has already released a preempted worker and is waiting to provision its replacement, so
+    /// an ungraceful server crash during backoff resumes recovery on startup instead of abandoning the run.
+    #[serde(default)]
+    pub recovering_preemption: bool,
     /// How the run ended on the worker, once its weights were collected.
     #[serde(default)]
     pub outcome: Option<Outcome>,
@@ -76,6 +87,7 @@ impl std::fmt::Debug for Private {
             .field("instance_id", &self.instance_id)
             .field("worker_url", &self.worker_url)
             .field("run_id", &self.run_id)
+            .field("preemptions", &self.preemptions)
             .finish_non_exhaustive()
     }
 }

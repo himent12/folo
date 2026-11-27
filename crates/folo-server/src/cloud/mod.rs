@@ -83,6 +83,12 @@ pub struct Tuning {
     pub require_gpu: bool,
     /// Every run's time limit, instead of its `compute.max_hours` (test support: a deadline in seconds).
     pub max_run: Option<Duration>,
+    /// Maximum automatic re-provision + checkpoint-resume attempts when a provisioned worker is preempted or
+    /// unexpectedly disappears mid-training after at least one checkpoint was synced (`0` disables auto-resume).
+    pub max_preemption_retries: u32,
+    /// Wait before provisioning a replacement worker after preemption (honors stop requests and shutdown
+    /// immediately).
+    pub preemption_backoff: Duration,
 }
 
 impl Default for Tuning {
@@ -100,6 +106,8 @@ impl Default for Tuning {
             release_wait: Duration::from_secs(60),
             require_gpu: true,
             max_run: None,
+            max_preemption_retries: 3,
+            preemption_backoff: Duration::from_secs(10),
         }
     }
 }

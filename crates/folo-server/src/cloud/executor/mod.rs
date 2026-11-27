@@ -139,6 +139,10 @@ enum Halt {
     Failed(Outcome),
     /// A previous process left the run in this phase, before it trained: released, `stopped`.
     Interrupted(CloudPhase),
+    /// A provisioned worker was preempted or disappeared unexpectedly mid-training; the executor may
+    /// automatically re-provision a replacement worker and resume from `weights/last.folo` within its retry
+    /// budget, or fail with `cloud_instance_lost` when recovery is not possible.
+    Preempted(String),
     /// This process shuts down: a run that trains is left to its worker; an earlier one is released, `stopped`.
     LetGo,
 }
@@ -194,12 +198,33 @@ struct Release {
     core: Arc<Core>,
     entry: Arc<RunEntry>,
     instance: Option<String>,
+    prior_instances: Vec<String>,
     done: bool,
 }
 
+/// Sums estimated USD costs across `prior_ids` (preempted/replaced instances) and optional `current_id` by
+/// reading the live ledger records, so cost reconciles automatically even when the reaper confirms an earlier
+/// instance's termination later.
+fn sum_instance_costs(core: &Core, prior_ids: &[String], current_id: Option<&str>) -> Option<f64> {
+    let mut total = 0.0f64;
+    let mut any = false;
+    for id in prior_ids.iter().map(String::as_str).chain(current_id) {
+        if let Some(c) = core.ledger.get(id).ok().and_then(|i| i.cost_usd) {
+            total += c;
+            any = true;
+        }
+    }
+    any.then(|| (total * 1e4).round() / 1e4)
+}
+
 impl Release {
-    fn new(core: Arc<Core>, entry: Arc<RunEntry>, instance: Option<String>) -> Release {
-        Release { core, entry, instance, done: false }
+    fn new(
+        core: Arc<Core>,
+        entry: Arc<RunEntry>,
+        instance: Option<String>,
+        prior_instances: Vec<String>,
+    ) -> Release {
+        Release { core, entry, instance, prior_instances, done: false }
     }
 
     /// The run has an instance now.
@@ -215,6 +240,48 @@ impl Release {
     /// The run keeps its instance: this process lets go of it.
     fn keep(mut self) {
         self.done = true;
+    }
+
+    /// Terminates the current preempted instance cleanly before provisioning a replacement worker, without ending
+    /// the run (`done` stays `false`, `ended_in` and `CloudPhase::Released` are not set). Moves its ledger id into
+    /// `prior_instances` and returns it so the executor persists it for dynamic cost reconciliation and reaper
+    /// ownership tracking.
+    fn release_for_retry(&mut self) -> Option<String> {
+        let id = self.instance.take()?;
+        self.entry.log(LogLevel::Info, "releasing the preempted instance before resuming on a new worker");
+        let wait = if self.core.halt.is_on() { Duration::ZERO } else { self.core.tuning.release_wait };
+        match self.core.terminate_within(&id, wait) {
+            Ok(i) if !i.status.is_alive() => {
+                let cost_note = i.cost_usd.map_or(String::new(), |c| format!("; it cost about ${c:.2}"));
+                self.entry.log(LogLevel::Info, format!("released the preempted instance{cost_note}"));
+            }
+            Ok(i) => {
+                let why = i.error.as_deref().unwrap_or("the provider has not confirmed it");
+                self.entry.log(
+                    LogLevel::Warn,
+                    format!(
+                        "the preempted instance is not terminated yet ({why}); FOLO keeps trying in the \
+                         background, see GET /api/cloud/instances or `folo cloud instances`"
+                    ),
+                );
+            }
+            Err(e) => {
+                self.entry.log(
+                    LogLevel::Warn,
+                    format!(
+                        "terminating the preempted instance: {}; check GET /api/cloud/instances",
+                        e.body.message
+                    ),
+                );
+            }
+        }
+        if !self.prior_instances.contains(&id) {
+            self.prior_instances.push(id.clone());
+        }
+        if let Some(total) = sum_instance_costs(&self.core, &self.prior_instances, None) {
+            self.entry.update_cloud(|c| c.cost_usd = Some(total));
+        }
+        Some(id)
     }
 
     /// Releases now.
@@ -241,7 +308,8 @@ impl Release {
                 Ok(i) if !i.status.is_alive() => {
                     let cost = i.cost_usd.map_or(String::new(), |c| format!("; it cost about ${c:.2}"));
                     self.entry.log(LogLevel::Info, format!("terminated the instance{cost}"));
-                    self.entry.update_cloud(|c| c.cost_usd = i.cost_usd);
+                    let total = sum_instance_costs(&self.core, &self.prior_instances, Some(&id));
+                    self.entry.update_cloud(|c| c.cost_usd = total);
                 }
                 Ok(i) => {
                     let why = i.error.as_deref().unwrap_or("the provider has not confirmed it");
@@ -252,13 +320,16 @@ impl Release {
                              GET /api/cloud/instances or `folo cloud instances`"
                         ),
                     );
-                    self.entry.update_cloud(|c| c.cost_usd = i.cost_usd);
+                    let total = sum_instance_costs(&self.core, &self.prior_instances, Some(&id));
+                    self.entry.update_cloud(|c| c.cost_usd = total);
                 }
                 Err(e) => self.entry.log(
                     LogLevel::Warn,
                     format!("terminating the instance: {}; check GET /api/cloud/instances", e.body.message),
                 ),
             }
+        } else if let Some(total) = sum_instance_costs(&self.core, &self.prior_instances, None) {
+            self.entry.update_cloud(|c| c.cost_usd = Some(total));
         }
         self.entry.update_cloud(|c| c.phase = CloudPhase::Released);
     }
@@ -373,12 +444,30 @@ impl Exec {
         }
         // What a process that died mid-copy left next to the weights (one process follows a run at a time).
         transfer::remove_partial(&self.dir.join("weights"));
-        let mut release =
-            Release::new(self.core.clone(), self.entry.clone(), self.private.instance_id.clone());
-        let result = match mode {
-            Mode::Start => self.start(&mut release),
-            Mode::Recover => self.recover(),
+        let mut release = Release::new(
+            self.core.clone(),
+            self.entry.clone(),
+            self.private.instance_id.clone(),
+            self.private.prior_instance_ids.clone(),
+        );
+        let mut next_mode = mode;
+        let result = loop {
+            let res = match next_mode {
+                Mode::Start => self.start(&mut release),
+                Mode::Recover => self.recover(&mut release),
+            };
+            match res {
+                Err(Halt::Preempted(why)) => match self.prepare_preemption_resume(&mut release, &why) {
+                    Ok(()) => {
+                        next_mode = Mode::Start;
+                        continue;
+                    }
+                    Err(halt) => break Err(halt),
+                },
+                other => break other,
+            }
         };
+        self.private.recovering_preemption = false;
         let outcome = match result {
             Ok(o) => o,
             Err(Halt::LetGo) if self.phase_now() >= CloudPhase::Training => {
@@ -422,6 +511,11 @@ impl Exec {
                 );
                 Outcome::plain(RunStatus::Stopped)
             }
+            Err(Halt::Preempted(why)) => {
+                let o = Outcome::failed("cloud_instance_lost", why);
+                self.entry.log(LogLevel::Error, o.error.clone().unwrap_or_default());
+                o
+            }
         };
         self.private.outcome = Some(outcome.clone());
         self.save();
@@ -449,9 +543,10 @@ impl Exec {
         self.entry.log(LogLevel::Info, message);
     }
 
-    /// What the run's instance costs so far, as the ledger estimates it (`None` without an instance or a price).
+    /// What the run's instances cost so far (prior preempted instances plus the current one), read dynamically
+    /// from the ledger (`None` without a price).
     fn cost(&self) -> Option<f64> {
-        self.private.instance_id.as_ref().and_then(|id| self.core.ledger.get(id).ok())?.cost_usd
+        sum_instance_costs(&self.core, &self.private.prior_instance_ids, self.private.instance_id.as_deref())
     }
 
     fn offer(&self) -> CloudOffer {
@@ -478,19 +573,48 @@ impl Exec {
         self.entry.update_cloud(|c| c.deadline = Some(rfc3339(deadline)));
     }
 
+    /// Arms the time limit on initial launch, or preserves the existing deadline across preemption re-provisions
+    /// and returns the remaining duration (`Stopped` if the limit has already elapsed).
+    pub(super) fn ensure_deadline(&mut self) -> std::result::Result<Duration, Halt> {
+        if let Some(deadline) = self.private.deadline {
+            let rem = deadline - unix_now();
+            if rem <= 0.0 {
+                return Err(Halt::Stopped(format!(
+                    "the time limit of {} ended the run before a replacement worker could launch",
+                    self.hours()
+                )));
+            }
+            Ok(Duration::from_secs_f64(rem))
+        } else {
+            self.arm_deadline();
+            Ok(self.limit())
+        }
+    }
+
     fn past_deadline(&self) -> bool {
         self.private.deadline.is_some_and(|d| unix_now() >= d)
     }
 
+    /// True when the user requested a stop in this process OR a previous process persisted `RunStatus::Stopping`.
+    pub(super) fn is_stopping(&self) -> bool {
+        self.entry.stop_requested() || self.entry.run().status == RunStatus::Stopping
+    }
+
     /// Whether the run must stop before its worker trains: the process shuts down, its instance was terminated by
     /// hand, a stop was asked for, or the time limit ended.
-    fn interrupted(&self) -> std::result::Result<(), Halt> {
+    pub(super) fn interrupted(&self) -> std::result::Result<(), Halt> {
         if self.core.halt.is_on() {
             Err(Halt::LetGo)
         } else if self.instance_ended() {
             Err(self.lost_by_hand())
-        } else if self.entry.stop_requested() {
-            Err(Halt::Stopped("stopped before the worker trained".into()))
+        } else if self.is_stopping() {
+            let msg = if self.private.preemptions > 0 {
+                "stopped during preemption recovery before the replacement worker trained; synced checkpoint \
+                 weights/last.folo kept"
+            } else {
+                "stopped before the worker trained"
+            };
+            Err(Halt::Stopped(msg.into()))
         } else if self.past_deadline() {
             Err(Halt::Stopped(format!("the time limit of {} ended the run before it trained", self.hours())))
         } else {
@@ -501,6 +625,133 @@ impl Exec {
     /// Waits `d`; `LetGo` when the process shuts down meanwhile.
     fn wait(&self, d: Duration) -> std::result::Result<(), Halt> {
         if self.core.halt.pause(d) { Err(Halt::LetGo) } else { Ok(()) }
+    }
+
+    /// Handles unexpected preemption/loss of a provisioned worker: reaps any finished checkpoint download, checks
+    /// shutdown/stop/deadline/manual-termination/retry-budget/checkpoint-resumability, atomically claims the old
+    /// instance release, rolls local history back to the synced checkpoint, updates `Run.cloud` back to
+    /// `provisioning`, and waits through the stop-responsive backoff before returning `Ok(())` so [`Exec::drive`]
+    /// launches a replacement.
+    fn prepare_preemption_resume(
+        &mut self,
+        release: &mut Release,
+        why: &str,
+    ) -> std::result::Result<(), Halt> {
+        self.reap_copy();
+        self.copying = None;
+        if self.core.halt.is_on() {
+            return Err(Halt::LetGo);
+        }
+        if self.instance_ended() {
+            return Err(self.lost_by_hand());
+        }
+        if self.is_stopping() {
+            return Err(Halt::Stopped(
+                "stop requested during preemption recovery; synced checkpoint weights/last.folo kept".into(),
+            ));
+        }
+        if self.past_deadline() {
+            return Err(Halt::Stopped(format!(
+                "the time limit of {} ended the run after worker preemption",
+                self.hours()
+            )));
+        }
+        let max_retries = self.core.tuning.max_preemption_retries;
+        if max_retries == 0 {
+            return Err(failed(
+                "cloud_instance_lost",
+                format!("{why}; the weights copied so far stay (resume the run to continue from them)"),
+            ));
+        }
+        if self.private.preemptions >= max_retries {
+            return Err(failed(
+                "cloud_instance_lost",
+                format!(
+                    "{why}; automatic checkpoint resume exhausted all {max_retries} attempt(s) — the weights \
+                     copied so far stay (resume the run to continue from them)"
+                ),
+            ));
+        }
+        let Some((resume_epoch, ckpt_best)) = self.entry.resumable_checkpoint() else {
+            let reason = if self.dir.join("weights").join("last.folo").is_file() {
+                "the synced weights/last.folo has no incomplete training state to auto-resume from"
+            } else {
+                "no synced checkpoint (weights/last.folo) is available to auto-resume from"
+            };
+            return Err(failed("cloud_instance_lost", format!("{why}; {reason}")));
+        };
+
+        // Atomically claim the transition to `terminating` under `cloud/.lock`: if manual termination won the race
+        // while we inspected the checkpoint, abort auto-resume as `lost_by_hand`.
+        if let Some(id) = self.private.instance_id.as_deref()
+            && !self.core.ledger.begin_preemption_release(id).unwrap_or(false)
+        {
+            return Err(self.lost_by_hand());
+        }
+        // Release the dead/preempted instance before provisioning its replacement, moving its ledger id into
+        // `prior_instance_ids` so the reaper continues retrying if termination is unconfirmed and cost reconciles.
+        if let Some(old_id) = release.release_for_retry()
+            && !self.private.prior_instance_ids.contains(&old_id)
+        {
+            self.private.prior_instance_ids.push(old_id);
+        }
+        self.private.preemptions += 1;
+        let attempt = self.private.preemptions;
+        self.private.instance_id = None;
+        self.private.worker_url = None;
+        self.private.token = None;
+        self.private.run_id = None;
+        self.private.recovering_preemption = true;
+        (self.private.after_step, self.private.after_epoch, self.private.after_log) = (0, 0, 0);
+        self.queued_at = None;
+        self.copy_failed = None;
+        self.entry.rollback_to_checkpoint(resume_epoch, ckpt_best);
+        self.save();
+
+        let total_cost = self.cost();
+        self.entry.update_cloud(|c| {
+            c.instance_id = None;
+            c.unanswered_since = None;
+            c.progress = None;
+            c.phase = CloudPhase::Provisioning;
+            c.cost_usd = total_cost.or(c.cost_usd);
+        });
+        self.entry.log(
+            LogLevel::Warn,
+            format!(
+                "worker preempted or lost ({why}); auto-resuming from synced checkpoint weights/last.folo \
+                 (epoch {resume_epoch}, attempt {attempt}/{max_retries})"
+            ),
+        );
+        self.wait_preemption_backoff()
+    }
+
+    /// Waits [`super::Tuning::preemption_backoff`] in [`super::Tuning::poll`] slices, cancelling immediately on
+    /// server shutdown, user stop request, or run deadline expiry.
+    fn wait_preemption_backoff(&self) -> std::result::Result<(), Halt> {
+        let backoff = self.core.tuning.preemption_backoff;
+        let t0 = Instant::now();
+        loop {
+            if self.core.halt.is_on() {
+                return Err(Halt::LetGo);
+            }
+            if self.is_stopping() {
+                return Err(Halt::Stopped(
+                    "stopped during preemption recovery; synced checkpoint weights/last.folo kept".into(),
+                ));
+            }
+            if self.past_deadline() {
+                return Err(Halt::Stopped(format!(
+                    "the time limit of {} ended the run during preemption recovery",
+                    self.hours()
+                )));
+            }
+            let remaining = backoff.saturating_sub(t0.elapsed());
+            if remaining.is_zero() {
+                return Ok(());
+            }
+            self.wait(self.core.tuning.poll.min(remaining))?;
+        }
     }
 }
 
@@ -525,6 +776,29 @@ mod tests {
         assert_eq!(disk_for(0), 20);
         assert_eq!(disk_for(4_800_000_000), 30);
         assert_eq!(disk_for(u64::MAX / 4), 4096);
+    }
+
+    #[test]
+    fn begin_preemption_release_detects_manual_termination_race() {
+        let dir = folo_test_support::TestDir::new("cloud-begin-preemption-release");
+        let cloud = dir.join("cloud");
+        let ledger = crate::cloud::ledger::Ledger::new(&cloud, cloud.join(".lock"), Vec::new());
+        let offer = CloudOffer {
+            id: "o".into(),
+            gpu: "G".into(),
+            gpu_count: 1,
+            vram_bytes: 0,
+            price_per_hour: Some(1.0),
+            region: None,
+            detail: None,
+            availability: folo_api::CloudAvailability::High,
+        };
+        let a = ledger.create("cc_1", "p", "run_1", &offer, None, None).unwrap();
+        ledger.update(&a.id, |i| i.status = folo_api::CloudInstanceStatus::Running).unwrap();
+        assert!(ledger.begin_preemption_release(&a.id).unwrap());
+        assert_eq!(ledger.get(&a.id).unwrap().status, folo_api::CloudInstanceStatus::Terminating);
+        // Second call (or manual terminate first) sees Terminating and refuses to claim recovery.
+        assert!(!ledger.begin_preemption_release(&a.id).unwrap());
     }
 
     #[test]

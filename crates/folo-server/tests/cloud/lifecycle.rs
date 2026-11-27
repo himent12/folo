@@ -127,7 +127,8 @@ fn a_lost_or_stopped_run_resumes_on_a_new_instance_and_then_here() {
     no_gpu();
     let t = TestDir::new("cloud-resume");
     let cloud = TestCloud::new(&t.join("workers"));
-    let store = plane(&t.join("home"), &cloud, fast());
+    let store =
+        plane(&t.join("home"), &cloud, folo_server::cloud::Tuning { max_preemption_retries: 0, ..fast() });
     let ds = dataset(&store);
     let conn = connect(&store);
     cloud.hold_epochs(true);
@@ -179,7 +180,11 @@ fn a_stop_before_training_releases_at_once() {
     let stopped = |phase_now: CloudPhase, hold: &dyn Fn(), go: &dyn Fn()| {
         hold();
         let run = store.create_run(cloud_run(&ds, &conn.id, 2)).unwrap();
-        until(&format!("{phase_now:?}"), || (phase(&run_of(&store, &run.id)) == phase_now).then_some(()));
+        until(&format!("{phase_now:?}"), || {
+            (phase(&run_of(&store, &run.id)) == phase_now
+                && (phase_now != CloudPhase::Provisioning || cloud.calls(Call::Launch) > 0))
+                .then_some(())
+        });
         let r = store.stop_run(&run.id).unwrap();
         assert_eq!(r.status, RunStatus::Stopping);
         go();

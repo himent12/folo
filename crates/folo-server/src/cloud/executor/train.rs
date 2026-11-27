@@ -118,10 +118,18 @@ impl Exec {
                     }
                 }
                 Err(e) if e.code() == "run_not_found" => {
-                    return Err(failed(
-                        "cloud_instance_lost",
-                        "the worker no longer has the run (its server restarted or was replaced)",
-                    ));
+                    if self.instance_ended() {
+                        return Err(self.lost_by_hand());
+                    }
+                    let msg = "the worker no longer has the run (its server restarted or was replaced)";
+                    if self.c.provider.info().provisions
+                        && stop_requested_at.is_none()
+                        && !self.is_stopping()
+                        && !self.past_deadline()
+                    {
+                        return Err(Halt::Preempted(msg.into()));
+                    }
+                    return Err(failed("cloud_instance_lost", msg));
                 }
                 Err(e) => {
                     // Said once per silence: the run's log shows why its numbers stand still.
@@ -142,7 +150,7 @@ impl Exec {
                     wait = (wait * 2).min(t.poll_max);
                     let lost = match self.instance_state() {
                         Some(state) => {
-                            if matches!(state, InstanceState::Gone | InstanceState::Stopped) {
+                            if state.is_lost() {
                                 gone.get_or_insert_with(Instant::now);
                             } else {
                                 gone = None;
@@ -152,6 +160,18 @@ impl Exec {
                         None => self.private.instance_id.is_none() && since.elapsed() >= t.lost_grace,
                     };
                     if lost {
+                        if self.instance_ended() {
+                            return Err(self.lost_by_hand());
+                        }
+                        if self.c.provider.info().provisions
+                            && stop_requested_at.is_none()
+                            && !self.is_stopping()
+                            && !self.past_deadline()
+                        {
+                            return Err(Halt::Preempted(format!(
+                                "the worker stopped answering ({e}) and its instance is gone"
+                            )));
+                        }
                         return Err(failed(
                             "cloud_instance_lost",
                             format!(

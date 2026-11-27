@@ -122,10 +122,22 @@ impl Core {
                 self.look_for_unseen(&record);
                 continue;
             }
-            // Followed: its run's process releases it. (A run folder that is gone is followed by nobody.)
+            // Followed: its run's process releases its active instance. Superseded `terminating` instances from an
+            // earlier preemption recovery are no longer owned by the executor's `Release` guard and must keep being
+            // retried in the background while the replacement worker trains. (A run folder that is gone is followed
+            // by nobody.)
             let run_dir = record.run_id.as_deref().map(|r| self.run_dir(r));
             match run_dir.as_deref().map(files::try_lock_run).transpose() {
-                Ok(Some(None)) => continue,
+                Ok(Some(None)) => {
+                    let active = run_dir
+                        .as_deref()
+                        .and_then(|d| super::state::Private::load(d).instance_id)
+                        .as_deref()
+                        == Some(record.id.as_str());
+                    if active || record.status != CloudInstanceStatus::Terminating {
+                        continue;
+                    }
+                }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => {
                     tracing::warn!(instance = %record.id, "checking who follows its run: {e}");

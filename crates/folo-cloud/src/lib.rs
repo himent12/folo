@@ -372,6 +372,14 @@ pub enum InstanceState {
     Gone,
 }
 
+impl InstanceState {
+    /// True when the provider reports the instance is no longer running (`Stopped` or `Gone`): terminated,
+    /// failed, or preempted.
+    pub fn is_lost(&self) -> bool {
+        matches!(self, InstanceState::Stopped | InstanceState::Gone)
+    }
+}
+
 /// A kind of compute. Calls block (HTTP requests with timeouts) and are safe from any thread.
 ///
 /// Errors never contain a credential, and implementations never log one.
@@ -584,5 +592,13 @@ mod tests {
         let err = tls_ca_from_os(Some(bad.as_os_str())).unwrap_err();
         assert_eq!((err.kind, err.code()), (ErrorKind::Invalid, "invalid_body"));
         assert!(err.message.contains(TLS_CA_ENV), "{}", err.message);
+    }
+
+    #[test]
+    fn instance_state_is_lost_flags_stopped_and_gone() {
+        assert!(!InstanceState::Starting.is_lost());
+        assert!(!InstanceState::Running { url: "https://w".into() }.is_lost());
+        assert!(InstanceState::Stopped.is_lost());
+        assert!(InstanceState::Gone.is_lost());
     }
 }

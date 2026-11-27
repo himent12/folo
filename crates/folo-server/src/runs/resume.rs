@@ -128,6 +128,7 @@ impl Runs {
             (ep <= resume_epoch).then_some(BestEpoch { epoch: ep, map50_95: f })
         });
         mark_resume(&e.metrics_path(), resume_epoch);
+        remove_samples_after(&e.dir, resume_epoch);
         let retained = super::history::read_metrics(&e.metrics_path());
         let prev_epochs_done = st.file.epochs_done;
         if resume_epoch != prev_epochs_done {
@@ -224,4 +225,139 @@ fn resumable(st: &RunState, id: &str) -> Result<()> {
             .hint("start a new run with `weights` set to its model to train further"));
     }
     Ok(())
+}
+
+/// Removes any mirrored validation sample files (`samples/epoch_NNN.json`) for epochs strictly after
+/// `resume_epoch` so rolled-back epochs are never served after resuming from an earlier checkpoint.
+fn remove_samples_after(run_dir: &Path, resume_epoch: u32) {
+    let dir = run_dir.join("samples");
+    let Ok(entries) = std::fs::read_dir(&dir) else { return };
+    for path in entries.filter_map(|e| e.ok()).map(|e| e.path()) {
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
+        let Some(num) = name.strip_prefix("epoch_").and_then(|s| s.strip_suffix(".json")) else { continue };
+        if let Ok(epoch) = num.parse::<u32>()
+            && epoch > resume_epoch
+        {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+}
+
+impl RunEntry {
+    /// Checks whether `weights/last.folo` in this run's folder holds a valid, incomplete training checkpoint
+    /// matching the same schedule, best-epoch consistency, and early-stopping (`patience`) checks enforced by
+    /// `RealStore::continue_run`. Returns `Some((resume_epoch, best))` when a replacement cloud worker can
+    /// continue training from it.
+    pub(crate) fn resumable_checkpoint(&self) -> Option<(u32, Option<BestEpoch>)> {
+        let last = self.dir.join("weights").join("last.folo");
+        if !last.is_file() {
+            return None;
+        }
+        let file = crate::engine::read_model_file(&last).ok()?;
+        let ckpt = file.checkpoint()?;
+        let ckpt_cfg = serde_json::from_value::<folo_vision::TrainConfig>(ckpt.train.clone()).ok();
+        let done = ckpt.epoch;
+        let run_epochs = self.state.lock().unwrap().file.run.epochs as u64;
+        let sched_total =
+            ckpt_cfg.as_ref().map_or(ckpt.sched.epochs, |c| ckpt.sched.epochs.min(c.epochs as u64));
+        let total = sched_total.min(run_epochs);
+        if done > i64::MAX as u64 {
+            return None;
+        }
+        if ckpt.best.fitness.is_some()
+            && (ckpt.best.epoch < 0 || done == 0 || (ckpt.best.epoch as u64) >= done)
+        {
+            return None;
+        }
+        if done >= total {
+            return None;
+        }
+        if done > 0
+            && ckpt.best.fitness.is_some()
+            && ckpt_cfg
+                .as_ref()
+                .is_some_and(|c| (done as i64 - 1).saturating_sub(ckpt.best.epoch) >= c.patience as i64)
+        {
+            return None;
+        }
+        let resume_epoch = done.min(u32::MAX as u64) as u32;
+        let best = ckpt.best.fitness.map(|v| v as f32).filter(|f| f.is_finite()).and_then(|f| {
+            let ep = ckpt.best.epoch.saturating_add(1).clamp(1, i64::from(u32::MAX)) as u32;
+            (ep <= resume_epoch).then_some(BestEpoch { epoch: ep, map50_95: f })
+        });
+        Some((resume_epoch, best))
+    }
+
+    /// Rolls `metrics.jsonl`, validation sample files, and live `Run` progress (`epoch`, `step`, `best`,
+    /// `epochs_done`, `last_metrics`, `eta_s`, `attempt`) back to match a synced checkpoint at `resume_epoch`
+    /// before a replacement cloud worker continues training from `weights/last.folo`, keeping `Run.status` active.
+    pub(crate) fn rollback_to_checkpoint(&self, resume_epoch: u32, ckpt_best: Option<BestEpoch>) {
+        let mut st = self.state.lock().unwrap();
+        mark_resume(&self.metrics_path(), resume_epoch);
+        remove_samples_after(&self.dir, resume_epoch);
+        let retained = super::history::read_metrics(&self.metrics_path());
+        if resume_epoch != st.file.epochs_done {
+            st.file.epochs_done = resume_epoch;
+            st.file.last_metrics = retained
+                .epochs
+                .last()
+                .filter(|ep| ep.epoch == resume_epoch)
+                .map(|ep| super::entry::model_metrics(&ep.val));
+        }
+        let r = &mut st.file.run;
+        r.epoch = resume_epoch;
+        r.step = if resume_epoch == 0 {
+            0
+        } else {
+            retained
+                .steps
+                .last()
+                .filter(|s| s.epoch == resume_epoch)
+                .map(|s| s.step)
+                .unwrap_or_else(|| u64::from(resume_epoch).saturating_mul(r.steps_per_epoch))
+        };
+        if resume_epoch == 0 {
+            r.best = None;
+        } else {
+            let mut best = r.best.filter(|b| b.epoch <= resume_epoch);
+            for ep in &retained.epochs {
+                if best.is_none_or(|b| ep.val.map50_95 > b.map50_95) {
+                    best = Some(BestEpoch { epoch: ep.epoch, map50_95: ep.val.map50_95 });
+                }
+            }
+            if let Some(cb) = ckpt_best
+                && best.is_none_or(|b| cb.map50_95 > b.map50_95)
+            {
+                best = Some(cb);
+            }
+            r.best = best;
+        }
+        r.eta_s = None;
+        st.tail.clear();
+        // Bump `attempt` so any concurrent `Runs::metrics` reader that snapshotted `st.tail` from the dead worker
+        // retries instead of merging discarded steps onto the rolled-back history.
+        st.attempt += 1;
+        self.persist(&st);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::remove_samples_after;
+    use folo_test_support::TestDir;
+
+    #[test]
+    fn remove_samples_after_prunes_only_epochs_past_resume_epoch() {
+        let dir = TestDir::new("resume-prune-samples");
+        let samples = dir.join("samples");
+        std::fs::create_dir_all(&samples).unwrap();
+        for name in ["epoch_001.json", "epoch_002.json", "epoch_003.json", "notes.txt"] {
+            std::fs::write(samples.join(name), b"{}").unwrap();
+        }
+        remove_samples_after(&dir, 1);
+        assert!(samples.join("epoch_001.json").is_file());
+        assert!(!samples.join("epoch_002.json").exists());
+        assert!(!samples.join("epoch_003.json").exists());
+        assert!(samples.join("notes.txt").is_file());
+    }
 }
