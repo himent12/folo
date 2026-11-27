@@ -139,5 +139,31 @@ describe('deviceSummary', () => {
     });
     expect(portable[3]).toMatchObject({ id: 'cpu_simd', state: 'none', word: 'portable' });
     expect(portable[3]!.note).toContain('portable scalar kernel');
+
+    // Forced scalar override (`FOLO_Q8_SCALAR=1` on AVX2) and ARM64 NEON with portable int8 kernel must report
+    // `state: 'none'` (portable scalar) and list detected ISA separately without claiming SIMD acceleration.
+    const forcedScalar = capabilityRows(on, [gpu], {
+      avx2: true,
+      avx_vnni: false,
+      avx512_vnni: false,
+      neon: false,
+      int8_fast: false,
+      int8_kernel: 'portable',
+    });
+    expect(forcedScalar[3]).toMatchObject({ id: 'cpu_simd', state: 'none', word: 'portable' });
+    expect(forcedScalar[3]!.note).toContain('portable scalar kernel (detected ISA: AVX2)');
+    expect(forcedScalar[3]!.note).not.toMatch(/SIMD accelerates/i);
+
+    const armNeonPortable = capabilityRows(on, [gpu], {
+      avx2: false,
+      avx_vnni: false,
+      avx512_vnni: false,
+      neon: true,
+      int8_fast: false,
+      int8_kernel: 'portable',
+    });
+    expect(armNeonPortable[3]).toMatchObject({ id: 'cpu_simd', state: 'none', word: 'portable' });
+    expect(armNeonPortable[3]!.note).toContain('portable scalar kernel (detected ISA: NEON)');
+    expect(armNeonPortable[3]!.note).not.toMatch(/SIMD accelerates/i);
   });
 });

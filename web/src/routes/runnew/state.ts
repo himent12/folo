@@ -10,12 +10,13 @@ import { archFromCli, archNameSuffix, archScale, archWithFamily, isFolo2Arch, su
 import { hasCloud, hasCloudSpotResume, validPreemptRetries } from '$lib/cloud';
 import { sentence } from '$lib/format';
 import { fitFix, isOom, oomCalibration, vramForecaster, type OomFix } from '$lib/oom';
+import { prefs } from '$lib/prefs';
 import { REF_CPU, REF_GPU } from '$lib/reference';
 import { router } from '$lib/router';
 import { modelChoices, scoreMeta } from '$lib/scoreSummary';
 import { watched } from '$lib/shell/runList';
 import { hasFeature } from '$lib/throughput';
-import { serverCommand } from '$lib/trainCli';
+import { cliServerUrl, serverCommand } from '$lib/trainCli';
 import { toast } from '$lib/ui/toast';
 import { queueToastKey } from '../run/queueActions';
 import { ampBlockOf } from './amp';
@@ -613,12 +614,20 @@ export function runNewState() {
   }
 
   // The same run from a terminal (runnew/CliCommand): the server's command for local runs (where it built one);
-  // cloud runs use Studio's cloud-aware builder so `--cloud`, `--offer`, `--max-hours`, and `--max-preempt-retries` match `folo train`.
+  // cloud runs use Studio's cloud-aware builder so `--cloud`, `--offer`, `--max-hours`, `--max-preempt-retries`,
+  // and `--server` match `folo train`.
   const activePreemptRetries = computed(() =>
     onCloud.get() && cloudPick.provisions && spotResumeOn.get() && validPreemptRetries(cloudPick.preemptRetries)
       ? cloudPick.preemptRetries
       : null,
   );
+  const cliBlocked = computed(() => {
+    if (!onCloud.get()) return null;
+    if (errors.get().preempt) return `${errors.get().preempt} Fix this before copying the command.`;
+    if (cloudPick.offers.loading) return 'Loading cloud GPU offers…';
+    if (!cloudPick.compute) return 'Finish cloud compute settings first: the command needs a valid cloud target.';
+    return null;
+  });
   const cli = cliOf(
     () => config.get(),
     () => dataset.get()?.path ?? datasetId.get(),
@@ -631,6 +640,7 @@ export function runNewState() {
       return cmd ? withServerCliName(cmd, s.name, config.get().name) : null;
     },
     () => activePreemptRetries.get(),
+    () => (onCloud.get() ? cliServerUrl(prefs.serverUrl, hub.mode) : null),
   );
 
   async function jump(key: Jump) {
@@ -817,6 +827,7 @@ export function runNewState() {
     fixLoading,
     applyFix,
     cli,
+    cliBlocked,
     review,
     jump,
     submit,

@@ -200,8 +200,14 @@ export function resolveDeviceLabel(system?: SystemInfo): { id: string; summary: 
 export function resolveCpuSimd(simd?: CpuSimd): { kernel: string; extensions: string[]; detail: string } | null {
   if (!simd) return null;
   const kernel = simd.int8_kernel.trim() || 'portable';
+  const isPortable = kernel.toLowerCase() === 'portable';
   const extensions = simdExtensions(simd);
-  const detail = extensions.length > 0 ? `ISA: ${extensions.join(', ')}` : 'Portable scalar fallback (no SIMD ISA detected)';
+  const detail =
+    isPortable && extensions.length > 0
+      ? `Portable scalar kernel (detected ISA: ${extensions.join(', ')})`
+      : extensions.length > 0
+        ? `ISA: ${extensions.join(', ')}`
+        : 'Portable scalar fallback (no SIMD ISA detected)';
   return { kernel, extensions, detail };
 }
 

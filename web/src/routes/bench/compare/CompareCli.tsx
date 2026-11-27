@@ -6,8 +6,10 @@
 import Check from '$icons/check';
 import ChevronRight from '$icons/chevron-right';
 import { computed, createUniqueId, css, effect, signal, untrack } from 'fw';
+import { hub } from '$lib/api/index';
 import type { BenchEntry } from '$lib/api/types';
-import { SHELL } from '$lib/trainCli';
+import { prefs } from '$lib/prefs';
+import { cliServerUrl, SHELL } from '$lib/trainCli';
 import CommandLine from '$lib/ui/CommandLine';
 import Segmented from '$lib/ui/Segmented';
 import Select from '$lib/ui/Select';
@@ -31,6 +33,7 @@ const FORMATS: { value: BenchCompareCliFormat; label: string }[] = [
 
 export default function CompareCli(props: CompareCliProps) {
   const uid = createUniqueId();
+  const bodyId = `${uid}-body`;
   const candSelectId = `${uid}-cand`;
   const minDeltaId = `${uid}-min-delta`;
   const minDeltaErrId = `${uid}-min-delta-err`;
@@ -64,6 +67,8 @@ export default function CompareCli(props: CompareCliProps) {
     candidates.get().map((e) => ({ value: e.id, label: props.labelOf(e) })),
   );
 
+  const serverUrl = computed(() => cliServerUrl(prefs.serverUrl, hub.mode));
+
   const cli = computed(() => {
     const base = baseline.get();
     const cand = candidate.get();
@@ -75,6 +80,7 @@ export default function CompareCli(props: CompareCliProps) {
       format: format.get(),
       failOnRegression: failOnRegression.get(),
       minDelta: minDelta.get(),
+      serverUrl: serverUrl.get(),
     });
   });
 
@@ -97,6 +103,7 @@ export default function CompareCli(props: CompareCliProps) {
         type="button"
         class="cmp-cli-toggle"
         aria-expanded={open.get()}
+        aria-controls={open.get() ? bodyId : undefined}
         data-compare-cli-toggle
         onclick={() => open.set(!open.peek())}
       >
@@ -105,7 +112,7 @@ export default function CompareCli(props: CompareCliProps) {
         <span class="cmp-cli-meta mono">folo bench compare</span>
       </button>
       {open.get() && baseline.get() && candidate.get() && cli.get() ? (
-        <div class="cmp-cli-body">
+        <div class="cmp-cli-body" id={bodyId}>
           <div class="cmp-cli-head">
             <span class="cmp-cli-shell">In {SHELL}:</span>
             <Segmented label="Output format" size="sm" bind:value={format} options={FORMATS} />
@@ -187,6 +194,13 @@ export default function CompareCli(props: CompareCliProps) {
             <p class="cmp-cli-note">
               One of these entries is from an earlier benchmark fingerprint; <span class="mono">folo bench compare</span>{' '}
               will print a comparability warning.
+            </p>
+          ) : null}
+
+          {serverUrl.get() ? (
+            <p class="cmp-cli-note">
+              Targets <span class="mono">{serverUrl.get()}</span>; if this server requires a token, set{' '}
+              <span class="mono">FOLO_TOKEN</span> in your terminal or CI.
             </p>
           ) : null}
         </div>
@@ -357,7 +371,7 @@ css`
       min-height: 44px;
     }
     .delta-in {
-      height: 40px;
+      height: 44px;
       font-size: var(--type-lg-size);
     }
   }

@@ -4,6 +4,7 @@ import { flush as flushSync, signal, tick } from 'fw';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { hub } from '$lib/api/index';
 import { MockApi } from '$lib/api/mock';
+import { prefs } from '$lib/prefs';
 import { parse, router } from '$lib/router';
 import { splitCliFlags, withAutoBatch } from '$lib/trainCli';
 import { toast } from '$lib/ui/toast';
@@ -158,21 +159,36 @@ describe('CliCommand auto-batch preview', () => {
     expect(target.querySelector('.cli code')?.textContent).not.toContain('--set auto_batch=true');
     expect(target.querySelector('.cli code')?.textContent).not.toContain('--max-preempt-retries');
 
-    // Change Spot auto-resume to 0 (disable automatic preemption recovery).
+    // Invalid retry budget (e.g. blank or 21) holds the CLI command instead of silently dropping --max-preempt-retries.
     const preemptInput = target.querySelector<HTMLInputElement>('input#preempt')!;
-    preemptInput.value = '0';
+    preemptInput.value = '21';
     preemptInput.dispatchEvent(new Event('input', { bubbles: true }));
     flushSync();
-    expect(target.querySelector('.cli code')?.textContent).toContain('--max-preempt-retries 0');
+    expect(target.querySelector('.cli code')).toBeNull();
+    expect(target.querySelector('.cli .cli-note')?.textContent).toMatch(/0.*20/);
 
-    // Submit: createRun receives max_preempt_retries: 0, while estimateRun never receives it.
-    target.querySelector('form')!.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
-    await tick();
-    expect(createSpy).toHaveBeenCalledOnce();
-    expect(createSpy.mock.calls[0]![0].compute?.connection_id).toBe('cc_4d2a');
-    expect(createSpy.mock.calls[0]![1]).toEqual({ max_preempt_retries: 0 });
-    for (const call of estimateSpy.mock.calls) {
-      expect('max_preempt_retries' in (call[0] as unknown as Record<string, unknown>)).toBe(false);
+    // Explicit serverUrl is forwarded via --server for cloud CLI commands.
+    const prevServer = prefs.serverUrl;
+    prefs.serverUrl = 'http://gpu-box:7878';
+    try {
+      // Change Spot auto-resume to 0 (disable automatic preemption recovery).
+      preemptInput.value = '0';
+      preemptInput.dispatchEvent(new Event('input', { bubbles: true }));
+      flushSync();
+      expect(target.querySelector('.cli code')?.textContent).toContain('--max-preempt-retries 0');
+      expect(target.querySelector('.cli code')?.textContent).toContain('--server http://gpu-box:7878');
+
+      // Submit: createRun receives max_preempt_retries: 0, while estimateRun never receives it.
+      target.querySelector('form')!.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+      await tick();
+      expect(createSpy).toHaveBeenCalledOnce();
+      expect(createSpy.mock.calls[0]![0].compute?.connection_id).toBe('cc_4d2a');
+      expect(createSpy.mock.calls[0]![1]).toEqual({ max_preempt_retries: 0 });
+      for (const call of estimateSpy.mock.calls) {
+        expect('max_preempt_retries' in (call[0] as unknown as Record<string, unknown>)).toBe(false);
+      }
+    } finally {
+      prefs.serverUrl = prevServer;
     }
   });
 });

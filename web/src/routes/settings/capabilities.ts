@@ -106,12 +106,15 @@ export function cpuSimdRow(s: CpuSimd): CapRow {
   const exts = simdExtensions(s);
   const extSuffix = exts.length ? ` (${exts.join(', ')})` : '';
   const kernel = s.int8_kernel.trim() || 'portable';
-  const accelerated = s.int8_fast || s.avx2 || s.neon;
+  const isPortable = kernel.toLowerCase() === 'portable';
+  const accelerated = s.int8_fast || !isPortable;
   const note = s.int8_fast
     ? `Hardware VNNI accelerates quantized int8 CPU inference${extSuffix}.`
-    : accelerated
+    : !isPortable
       ? `SIMD accelerates quantized int8 CPU inference without hardware VNNI${extSuffix}.`
-      : 'Quantized int8 CPU inference runs on the portable scalar kernel (no AVX2, VNNI, or NEON detected).';
+      : exts.length
+        ? `Quantized int8 CPU inference runs on the portable scalar kernel (detected ISA: ${exts.join(', ')}).`
+        : 'Quantized int8 CPU inference runs on the portable scalar kernel (no AVX2, VNNI, or NEON detected).';
   return {
     id: 'cpu_simd',
     label: 'CPU int8 SIMD',

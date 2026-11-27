@@ -116,6 +116,7 @@ export function SummaryRail(props: SummaryProps) {
               onCloud={s.onCloud.get()}
               pending={!s.prefilled.get() ? 'Loading run settings…' : s.pendingWeights.get() ? 'Waiting for linked weights to load…' : null}
               seedMissing={!!s.errors.get().seed}
+              cloudBlocked={s.cliBlocked.get()}
             />
           </div>
         </div>

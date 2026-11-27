@@ -19,9 +19,13 @@ export function cliOf(
   model: () => Model | undefined,
   served: () => string | null,
   maxPreemptRetries?: () => number | null,
+  serverUrl?: () => string | null,
 ) {
   const own = computed(() =>
-    trainCommand(config(), data(), model(), { maxPreemptRetries: maxPreemptRetries?.() ?? null }),
+    trainCommand(config(), data(), model(), {
+      maxPreemptRetries: maxPreemptRetries?.() ?? null,
+      serverUrl: serverUrl?.() ?? null,
+    }),
   );
   return {
     parts: computed(() => {
@@ -45,6 +49,8 @@ export interface CliCommandProps {
   pending?: string | null;
   /** The Seed field holds no seed: held as Start is (lib/seed), never a command that would run with another seed. */
   seedMissing?: boolean;
+  /** Cloud compute or retry policy incomplete/invalid: hold the command so it never drops `--cloud` or `--max-preempt-retries`. */
+  cloudBlocked?: string | null;
 }
 
 export default function CliCommand(props: CliCommandProps) {
@@ -80,6 +86,8 @@ export default function CliCommand(props: CliCommandProps) {
         <p class="cli-note">{props.pending}</p>
       ) : props.seedMissing ? (
         <p class="cli-note">Enter a seed first: the command needs one.</p>
+      ) : props.cloudBlocked ? (
+        <p class="cli-note">{props.cloudBlocked}</p>
       ) : (
         <>
           <div class="cli-top">

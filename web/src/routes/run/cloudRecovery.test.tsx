@@ -272,12 +272,59 @@ describe('parseSpotRecovery & SpotRecoveryTracker', () => {
 
     const exhausted = parseSpotRecovery(
       baseCloud({ phase: 'released', ended_in: 'training' }),
-      { status: 'failed', error_code: 'cloud_instance_lost', error: 'lost', cloud_preemption: { retries: 5, max_retries: 5, recovering: false } },
+      {
+        status: 'failed',
+        error_code: 'cloud_instance_lost',
+        error: 'worker gone; automatic checkpoint resume exhausted all 5 attempt(s)',
+        cloud_preemption: { retries: 5, max_retries: 5, recovering: false },
+      },
       [],
     )!;
     expect(exhausted.kind).toBe('exhausted');
     expect(exhausted.badge).toBe('Auto-resume exhausted');
     expect(exhausted.maxAttempts).toBe(5);
+
+    // Stale `recovering: true` snapshot from before SSE resumes training must clear once training begins.
+    const clearedByPhase = parseSpotRecovery(
+      baseCloud({ phase: 'training' }),
+      { status: 'running', error: null, cloud_preemption: { retries: 1, max_retries: 1, recovering: true } },
+      [log('the worker took the run as r_w2', 'info')],
+    )!;
+    expect(clearedByPhase.kind).toBe('resumed');
+    expect(clearedByPhase.badge).toBe('Auto-resumed (1×)');
+
+    // After 1 successful recovery on a 1-retry budget, manually terminating the replacement (`cloud_instance_lost`
+    // without exhaustion message) must NOT falsely report "Auto-resume exhausted".
+    const manuallyEndedReplacement = parseSpotRecovery(
+      baseCloud({ phase: 'released', ended_in: 'training' }),
+      {
+        status: 'failed',
+        error_code: 'cloud_instance_lost',
+        error: 'the worker was ended before the run finished',
+        cloud_preemption: { retries: 1, max_retries: 1, recovering: false },
+      },
+      [
+        log('worker preempted or lost (gone); auto-resuming from synced checkpoint weights/last.folo (epoch 4, attempt 1/1)'),
+        log('the worker took the run as r_w2', 'info'),
+      ],
+    )!;
+    expect(manuallyEndedReplacement.kind).toBe('resumed');
+    expect(manuallyEndedReplacement.badge).toBe('Auto-resumed (1×)');
+
+    // If the replacement fails to boot and recovery logs are absent, retries=1 indicates a failed recovery attempt,
+    // NEVER "Auto-resumed (1×)".
+    const replacementBootFailed = parseSpotRecovery(
+      baseCloud({ phase: 'released', ended_in: 'booting' }),
+      {
+        status: 'failed',
+        error_code: 'cloud_boot_failed',
+        error: 'worker did not come up in time',
+        cloud_preemption: { retries: 1, max_retries: 3, recovering: false },
+      },
+      [],
+    )!;
+    expect(replacementBootFailed.kind).toBe('failed');
+    expect(replacementBootFailed.badge).toBe('Spot recovery failed');
 
     // Configured with retries=0 and not recovering: no active recovery banner.
     expect(

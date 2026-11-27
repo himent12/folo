@@ -6,6 +6,7 @@ import { flush as flushSync } from 'fw';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { hub } from '$lib/api/index';
 import { MockApi } from '$lib/api/mock';
+import { prefs } from '$lib/prefs';
 import { parse, router } from '$lib/router';
 import { toast } from '$lib/ui/toast';
 import { render, type Rendered } from '../../../../framework/testing';
@@ -109,9 +110,21 @@ describe('buildBenchCompareCli & parseMinDelta', () => {
       baselineId: 'be_1',
       candidateId: 'be_2',
       format: 'markdown',
+      serverUrl: 'http://gpu-box:7878',
     });
-    expect(dashPos.argv).toEqual(['bench', 'compare', '--format', 'markdown', '--', '-bn', 'be_1', 'be_2']);
-    expect(dashPos.line).toBe('folo bench compare --format markdown -- -bn be_1 be_2');
+    expect(dashPos.argv).toEqual([
+      'bench',
+      'compare',
+      '--format',
+      'markdown',
+      '--server',
+      'http://gpu-box:7878',
+      '--',
+      '-bn',
+      'be_1',
+      'be_2',
+    ]);
+    expect(dashPos.line).toBe('folo bench compare --format markdown --server http://gpu-box:7878 -- -bn be_1 be_2');
 
     const bad = buildBenchCompareCli({
       benchId: 'bn_1',
@@ -202,5 +215,16 @@ describe('CompareCli inside BenchCompare', () => {
     flushSync();
     expect(cmdText()).not.toContain(`${e2!.id} ${e2!.id}`);
     expect(cmdText()).toMatch(/^folo bench compare bn_3c90 be_\w+ be_\w+ --format markdown$/);
+
+    // Configured remote serverUrl is included via --server with a FOLO_TOKEN hint.
+    const prevServer = prefs.serverUrl;
+    prefs.serverUrl = 'http://gpu-box:7878';
+    try {
+      flushSync();
+      expect(cmdText()).toContain('--server http://gpu-box:7878');
+      expect(root.textContent).toContain('FOLO_TOKEN');
+    } finally {
+      prefs.serverUrl = prevServer;
+    }
   });
 });

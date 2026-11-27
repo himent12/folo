@@ -16,6 +16,8 @@ export interface BenchCompareCliOptions {
   failOnRegression?: boolean;
   /** Optional `--min-delta` points as raw user input (empty omits the flag, using the CLI default `0.0`). */
   minDelta?: string;
+  /** Optional FOLO server URL (`--server <URL>`) so the command targets the same server from CI or another host. */
+  serverUrl?: string | null;
 }
 
 export interface BenchCompareCliResult {
@@ -77,6 +79,18 @@ export function buildBenchCompareCli(opts: BenchCompareCliOptions): BenchCompare
         argv.push('--min-delta', text);
         parts.push(`--min-delta ${quote(text)}`);
       }
+    }
+  }
+
+  const server = opts.serverUrl?.trim();
+  if (server) {
+    if (server.startsWith('-')) {
+      const attached = `--server=${server}`;
+      argv.push(attached);
+      parts.push(quote(attached));
+    } else {
+      argv.push('--server', server);
+      parts.push(`--server ${quote(server)}`);
     }
   }
 
