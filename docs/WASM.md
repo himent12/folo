@@ -35,6 +35,8 @@ det.info();                                            // see below
 
 const res = await det.detect(imageData, undefined, undefined, { conf: 0.25, iou: 0.7, maxDet: 300 });
 // or: await det.detect(rgbaBytes, width, height, options)
+const tiled = await det.detectTiled(imageData, undefined, undefined, { tileSize: 640, overlap: 0.2, fullImage: true });
+const tta = await det.detectTta(imageData, undefined, undefined, { hflip: true, scales: [0.83, 1.0, 1.17] });
 det.free();                                            // releases the model (wasm memory, GPU buffers)
 ```
 
@@ -77,7 +79,51 @@ queued work, the readback is where the GPU time shows), and `postprocess_ms` is 
 matches the native predictor: on the candidate-first path (`predict_candidates`), forward, candidate selection, and
 sparse box decode count in `inference_ms` while `finish_candidates` (NMS / top-k) and rescaling count in
 `postprocess_ms`; on the dense fallback path (`out.detections`), decode counts in `postprocess_ms`.
-Several `detect` calls may be in flight on one detector; each awaits its own readback.
+Several `detect` calls may be in flight on one detector; each awaits its own readback. Repeated frames of the same
+or smaller size reuse `FoloDetector`'s internal RGBA input copy buffer, RGB staging buffer (WebGPU), and letterbox
+work buffers (CPU) with zero per-frame scratch reallocations. All numeric arguments (`width`, `height`, and every
+numeric option) reject `NaN`, `±Infinity`, zero/negative dimensions, and out-of-range values with a rejected `Error`
+instead of silently coercing or panicking.
+
+### `detector.detectTiled(image, width?, height?, options?) → Promise<FoloDetectResult>`
+Runs **SAHI (Slicing Aided Hyper Inference)** overlapping tiled detection for small objects in high-resolution
+images, matching `folo_vision::Predictor::predict_tiled`: slices the image into uniform overlapping tiles, runs them
+(in bounded batches of `tileBatch` on WebGPU with automatic OOM half-splitting, or direct zero-RGB-intermediate RGBA
+crops on the CPU), optionally runs one full-image pass so large boundary-spanning objects stay intact, and merges all
+detections deterministically in original-image pixel coordinates. When the image fits in a single tile, it degrades
+directly to a single pass with zero slicing overhead.
+
+Options extend `FoloDetectOptions` (`conf`, `iou`, `maxDet`):
+
+| option | default | meaning |
+|---|---|---|
+| `tileSize` | `640` | convenience square tile size in pixels (`tileWidth` / `tileHeight` override it when set) |
+| `tileWidth`, `tileHeight` | `tileSize` (or `640`) | target tile dimensions in pixels (`>= 1`, clamped to image size) |
+| `overlap` | `0.2` | convenience symmetric overlap ratio in `[0, 1)` (`overlapX` / `overlapY` override it) |
+| `overlapX`, `overlapY` | `overlap` (or `0.2`) | horizontal / vertical overlap ratios in `[0, 1)` |
+| `fullImage` | `true` | also run one full-image pass alongside the tiles (also accepts `fullImagePass`) |
+| `tileBatch` | `8` | maximum cropped tiles predicted per WebGPU batch (`>= 1`) |
+| `mergeMetric` | `"ios"` | `"ios"` (Intersection-over-Smaller, suppresses truncated tile-seam fragments) or `"iou"` |
+| `mergeThreshold` | `0.5` | cross-tile merge overlap threshold in `[0, 1]` (also accepts `mergeIou`) |
+| `mergeFusion` | `"vote"` | cross-tile box refinement: `"vote"`, `"none"`, `"dfl"`, or `"sebf"` |
+| `classAgnostic` | `false` | merge overlapping detections across different classes |
+
+### `detector.detectTta(image, width?, height?, options?) → Promise<FoloDetectResult>`
+Runs **Test-Time Augmentation (TTA)** matching `folo_vision::Predictor::predict_tta`: evaluates each resolved
+stride-32 inference scale (and optionally a horizontally flipped mirror — batched together per scale on WebGPU, or
+mirrored via SIMD128 4-pixel-per-instruction RGBA reversal on the CPU), maps mirrored boxes back to original pixel
+coordinates, and merges all views deterministically. When TTA resolves to a single unflipped view, it runs a single
+pass at that size without cross-view merging.
+
+Options extend `FoloDetectOptions` (`conf`, `iou`, `maxDet`):
+
+| option | default | meaning |
+|---|---|---|
+| `hflip` | `true` | also evaluate a horizontally flipped copy of the image at each scale |
+| `scales` | `[0.83, 1.0, 1.17]` | positive finite multipliers applied to the detector's `imgsz` (each rounded multiple of 32 must lie in `32..=8192`; duplicates are deduplicated in first-seen order) |
+| `mergeIou` | `iou` (`0.7`) | cross-view IoU threshold in `[0, 1]` |
+| `mergeFusion` | `"vote"` | cross-view box refinement: `"vote"`, `"none"`, `"dfl"`, or `"sebf"` |
+| `classAgnostic` | `false` | merge overlapping detections across different classes |
 
 ### `detector.info() → FoloDetectorInfo`
 `{ backend, device, adapter, fallback, precision, precisionFallback, simd128, threads, arch, imgsz, classes, modelId }`:
@@ -90,7 +136,8 @@ why `auto` chose the CPU (`null` otherwise); `precision` is what the model runs 
 - `hasWebGpu()`: whether `navigator.gpu` exists. A `true` does not guarantee a usable device; `auto` checks that.
 - `version()`: the crate version.
 
-`folo_wasm.d.ts` types all of the above (`FoloLoadOptions`, `FoloDetectOptions`, `FoloDetectResult`, `FoloBox`,
+`folo_wasm.d.ts` types all of the above (`FoloLoadOptions`, `FoloDetectOptions`, `FoloTileDetectOptions`,
+`FoloTtaDetectOptions`, `FoloTileMergeMetric`, `FoloBoxFusion`, `FoloDetectResult`, `FoloBox`,
 `FoloDetectorInfo`, `FoloImage`). wasm-bindgen's class declaration uses `Symbol.dispose`, so a strict type check of
 it needs the `esnext.disposable` lib (or `skipLibCheck`, as Studio has). `crates/folo-wasm/demo/api-check.ts`
 exercises the documented calls; CI runs `tsc -p crates/folo-wasm/demo/tsconfig.json` on it.
@@ -103,8 +150,9 @@ and reuse it per image: loading parses and fuses the model and, on WebGPU, compi
 ## How it works
 - **Same engine.** folo-core, folo-nn, folo-vision and folo-gpu compile for `wasm32-unknown-unknown` with no forked
   code paths in the math. `folo-wasm` drives `folo_vision::Predictor`'s steps (`prepare` → `forward` → decode →
-  `finish`); `crates/folo-wasm/src/detector.rs` has no wasm-bindgen types and is tested natively
-  (`cargo test -p folo-wasm`: identical boxes to `Predictor` on the CPU, the GPU path against the CPU).
+  `finish`), SAHI tiling (`folo_vision::tile`), and TTA (`folo_vision::tta`); `crates/folo-wasm/src/detector/` has
+  no wasm-bindgen types and is tested natively (`cargo test -p folo-wasm`: identical boxes to `Predictor` on the
+  CPU for single-pass, tiled, and TTA, and the GPU paths against the CPU).
 - **WebGPU.** The browser creates adapters and devices asynchronously and never lets the page's thread block, so
   folo-gpu has async entry points used on every target: `GpuContext::new_async` / `shared_async`,
   `folo_gpu::init_async()` and `folo_gpu::download_async(ctx, tensor)` (a readback that resolves when WebGPU has
@@ -121,8 +169,9 @@ and reuse it per image: loading parses and fuses the model and, on WebGPU, compi
 - **CPU.** rayon runs on the calling thread on wasm (no threads without the `atomics` target feature), so the
   parallel paths need no separate code. `.cargo/config.toml` (and the build script, and CI) enable `+simd128` for
   wasm32, which every current browser supports:
-  - `folo-wasm/src/simd.rs` provides explicit Wasm SIMD128 RGBA→RGB stripping (`rgba_to_rgb`, used before WebGPU
-    uploads) and direct RGBA→planar-`f32` letterboxing (`letterbox_rgba_planar_f32`, zero intermediate RGB allocation,
+  - `folo-wasm/src/simd/` provides explicit Wasm SIMD128 RGBA→RGB stripping (`rgba_to_rgb`, used before WebGPU
+    uploads), 4-pixel-per-op RGBA horizontal mirroring (`flip_rgba_h`), and direct RGBA→planar-`f32` letterboxing
+    (`letterbox_rgba_planar_f32_with_scratch`, zero intermediate RGB allocation, reusable `RgbaScratch` buffers,
     bit-exact with `folo_data::Letterbox::apply_planar_f32`), paired with candidate-first / sparse CPU decode.
   - `folo-core` adds explicit Wasm SIMD128 kernels for 4-lane non-FMA elementwise transcendentals and binary ops
     (`cpu/elementwise/wasm_simd.rs`), stride-1 depthwise convs with register-fused bias/SiLU/ReLU (`cpu/conv/depthwise.rs`),

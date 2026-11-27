@@ -161,13 +161,14 @@ Each step names the file and the function or type that does it. Paths are under 
 2. Studio's Playground (`web/src/routes/Playground.tsx`) uses `BrowserEngine` (`web/src/lib/inference/browser.ts`),
    which imports `folo-wasm/folo_wasm.js` and gets the weights with `client.ts` `modelWeights`
    (`GET /api/models/{id}/weights?format=f16`).
-3. `FoloDetector.load` (`folo-wasm/src/lib.rs`) → `Detector::load` (`detector.rs`): parse the `.folo` file, build the
-   fused eval-mode model, place it on WebGPU or the CPU (`auto` checks WebGPU with one small forward pass).
-4. `FoloDetector.detect` → `Detector::detect`: on WebGPU, runs `Predictor::prepare` (device letterbox when supported,
-   or host letterbox + upload) + forward + `Tensor::detect_candidates` and awaits the compact candidate readback
-   (`folo_gpu::download_async`: ~28 KiB initial readback for the count plus up to 1,024 candidate slots, a second
-   compact readback on overflow, or dense decode fallback when candidate extraction returns no tensor); on the CPU,
-   letterboxes RGBA directly into planar `f32` (`folo-wasm/src/simd.rs`, WASM SIMD128) and runs candidate-first /
+3. `FoloDetector.load` (`folo-wasm/src/lib.rs`) → `Detector::load` (`detector/mod.rs`): parse the `.folo` file, build
+   the fused eval-mode model, place it on WebGPU or the CPU (`auto` checks WebGPU with one small forward pass).
+4. `FoloDetector.detect` / `detectTiled` / `detectTta` → `Detector` (`detector/mod.rs`, `tiled.rs`, `tta.rs`): on
+   WebGPU, strips RGBA into a reusable RGB scratch buffer, runs `Predictor::prepare` (batched for tiles and TTA
+   views, with OOM half-splitting) + forward + `Tensor::detect_candidates`, and awaits the compact candidate readback
+   (`folo_gpu::download_async`: ~28 KiB/image initial readback for the count plus up to 1,024 candidate slots, a
+   second compact readback on overflow, or dense decode fallback); on the CPU, crops/flips/letterboxes RGBA directly
+   into planar `f32` (`folo-wasm/src/simd/`, WASM SIMD128 with reusable `RgbaScratch`) and runs candidate-first /
    sparse decode. The result is `/api/predict`'s response shape plus `backend`.
 
 ### A cloud run

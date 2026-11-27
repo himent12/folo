@@ -12,10 +12,12 @@ documents the JS API, how it works and its performance.
 
 | Path | What it holds |
 |---|---|
-| `src/lib.rs` | The JS API: `FoloDetector` (`load`, `detect`, `info`, `backend`), `hasWebGpu`, `version`, the panic hook, and the hand-written TypeScript declarations (`TS_TYPES`) |
-| `src/detector.rs` | `Detector`: the logic behind the bindings, free of wasm-bindgen types; `BackendChoice`, `LoadOptions`, `DetectOptions`, `DetectorInfo`; candidate-compacted async GPU readback and direct CPU path |
-| `src/simd.rs` | WASM SIMD128 (and portable fallback) RGBA→RGB stripping, box-prefilter downsampling, and 2×4-unrolled direct RGBA→planar-`f32` letterbox preprocessing |
-| `tests/detector.rs` | The detector run natively: the CPU path against folo-vision's `Predictor`, the GPU path against the CPU path, the JSON shape, the options |
+| `src/lib.rs` | The JS API: `FoloDetector` (`load`, `detect`, `detectTiled`, `detectTta`, `info`, `backend`), `hasWebGpu`, `version`, strict JS numeric validation, pooled RGBA input copies, the panic hook, and the hand-written TypeScript declarations (`TS_TYPES`) |
+| `src/detector/mod.rs` | `Detector`: the logic behind the bindings, free of wasm-bindgen types; `BackendChoice`, `LoadOptions`, `DetectOptions`, `TileDetectOptions`, `TtaDetectOptions`, `DetectorInfo`; batched candidate-compacted async GPU readback with OOM chunk-splitting, reusable RGBA/RGB scratch buffers, and direct CPU path |
+| `src/detector/tiled.rs` | SAHI overlapping tiled inference (`Detector::detect_tiled`): direct RGBA tile cropping on CPU, batched tile execution on WebGPU, optional full-image pass, and deterministic IoS/IoU merging |
+| `src/detector/tta.rs` | Multi-scale & horizontal-flip Test-Time Augmentation (`Detector::detect_tta`): SIMD128 RGBA horizontal mirror on CPU, batched views on WebGPU, box un-flipping, and cross-view fusion |
+| `src/simd/mod.rs`, `src/simd/wasm_simd.rs` | WASM SIMD128 (and portable fallback) RGBA→RGB stripping, box-prefilter downsampling, 2×4-unrolled direct RGBA→planar-`f32` letterbox preprocessing with reusable `RgbaScratch`, RGBA tile cropping, and 4-pixel-per-op RGBA horizontal flipping |
+| `tests/detector.rs` | The detector run natively: single-pass, tiled, and TTA CPU paths against folo-vision's `Predictor`, GPU paths against CPU, invalid parameter rejection, JSON shape, and options parsing |
 | `demo/index.html` | A standalone page: pick a model and an image, pick the backend, detect, benchmark |
 | `demo/test.mjs` | End-to-end check in headless Chrome (Playwright): each backend, latency, boxes against `folo predict --json` |
 | `demo/api-check.ts`, `demo/tsconfig.json` | Type-checks the documented JS API against the generated declarations |
@@ -36,18 +38,20 @@ rustup when missing) and `wasm-bindgen-cli` at exactly the `wasm-bindgen` versio
 ## Start here
 
 1. The module docs and `FoloDetector` in `src/lib.rs`: the whole JS API in one place.
-2. `Detector::load` in `src/detector.rs`: parsing the `.folo` file and picking WebGPU or the CPU (`auto` checks
+2. `Detector::load` in `src/detector/mod.rs`: parsing the `.folo` file and picking WebGPU or the CPU (`auto` checks
    WebGPU with one small forward pass and falls back to the CPU).
-3. `Detector::detect`: folo-vision's `Predictor` pipeline, with device-side candidate extraction and an awaited
-   `folo_gpu::download_async` on WebGPU (downloading only the above-threshold candidates, ~28 KiB per frame,
-   with a dense fallback) and direct SIMD128 RGBA→planar-`f32` letterboxing + candidate-first decode on the CPU.
+3. `Detector::detect` (`src/detector/mod.rs`), `Detector::detect_tiled` (`src/detector/tiled.rs`), and
+   `Detector::detect_tta` (`src/detector/tta.rs`): folo-vision's `Predictor` pipeline, with batched device-side
+   candidate extraction and an awaited `folo_gpu::download_async` on WebGPU (~28 KiB per image, with OOM
+   chunk-splitting and a dense fallback), direct SIMD128 RGBA→planar-`f32` letterboxing + candidate-first decode
+   on the CPU, and reusable RGBA/RGB scratch buffers across repeated frames.
 
 ## Common changes
 
 | To do this | Touch these files |
 |---|---|
-| Add or change an option or a result field | `LoadOptions`, `DetectOptions` or `DetectorInfo` in `src/detector.rs`; a result field in `DetectResult` (`src/detector.rs`) or in `folo_api::PredictResponse`, which it flattens; the matching interface in `TS_TYPES` in `src/lib.rs`; `tests/detector.rs`; `demo/api-check.ts`; WASM.md (JS API) |
-| Change the JS bindings | `src/lib.rs` (keep `TS_TYPES` in step: `load` and `detect` are declared there, not generated); `demo/api-check.ts`; WASM.md |
+| Add or change an option or a result field | `LoadOptions`, `DetectOptions`, `TileDetectOptions`, `TtaDetectOptions` or `DetectorInfo` in `src/detector/mod.rs`; a result field in `DetectResult` (`src/detector/mod.rs`) or in `folo_api::PredictResponse`, which it flattens; the matching interface in `TS_TYPES` in `src/lib.rs`; `tests/detector.rs`; `demo/api-check.ts`; WASM.md (JS API) |
+| Change the JS bindings | `src/lib.rs` (keep `TS_TYPES` in step: `load`, `detect`, `detectTiled`, and `detectTta` are declared there, not generated); `demo/api-check.ts`; WASM.md |
 
 ## Tests
 
