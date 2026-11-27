@@ -550,6 +550,40 @@ describe('Playground: Local Video Frame Scrubber & Live Webcam', () => {
       decoder.dispatchEvent(new Event('seeked'));
       flushSync();
       expect(bar.textContent).toContain('f 1 / 11');
+
+      // Playtest R20 P3-3: focusing +1f or Detect frame and activating restores focus once transient disabled clears.
+      const stepFwdBtn = bar.querySelector<HTMLButtonElement>('button[aria-label="Step forward 1 frame"]')!;
+      stepFwdBtn.focus();
+      expect(document.activeElement).toBe(stepFwdBtn);
+      stepFwdBtn.click();
+      flushSync();
+      // Simulate browser blur-to-body when button becomes disabled while seeking
+      stepFwdBtn.blur();
+      decoder.dispatchEvent(new Event('seeked'));
+      flushSync();
+      await until(() => document.activeElement === stepFwdBtn, 'focus restored to +1f button after seek');
+
+      let resolveDetect!: (p: { model_id: string; image: { width: number; height: number }; boxes: []; timing: { preprocess_ms: number; inference_ms: number; postprocess_ms: number; total_ms: number }; device: string }) => void;
+      vi.spyOn(api, 'predict').mockImplementation(
+        () =>
+          new Promise((r) => {
+            resolveDetect = r;
+          }),
+      );
+      const detectBtn = bar.querySelector<HTMLButtonElement>('button[data-video-action="detect"]')!;
+      detectBtn.focus();
+      detectBtn.click();
+      flushSync();
+      detectBtn.blur();
+      await until(() => typeof resolveDetect === 'function', 'detect prediction in flight');
+      resolveDetect({
+        model_id: 'm_hard_s',
+        image: { width: 320, height: 180 },
+        boxes: [],
+        timing: { preprocess_ms: 1, inference_ms: 4, postprocess_ms: 1, total_ms: 6 },
+        device: 'cpu',
+      });
+      await until(() => document.activeElement === detectBtn, 'focus restored to Detect frame button after predict');
     } finally {
       URL.createObjectURL = origCreateUrl;
       URL.revokeObjectURL = origRevokeUrl;

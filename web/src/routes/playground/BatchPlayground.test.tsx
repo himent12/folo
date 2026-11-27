@@ -469,7 +469,7 @@ describe('Playground multi-image batch filmstrip', () => {
     const runAll2 = [...target.querySelectorAll<HTMLButtonElement>('[data-batch-bar] button')].find((b) => b.textContent?.includes('Run all'))!;
     runAll2.click();
     await until(() => target.querySelector('[data-batch-idx="1"] [data-batch-badge]')?.textContent?.includes('+'), 'item 1 finished with capped + badge');
-    await new Promise((r) => setTimeout(r, 30));
+    await until(() => !target.querySelector('button[data-batch-run]')?.textContent?.includes('Stop'), 'Run All exited');
     flushSync();
     expect(allCalls).toBe(allCallsBefore + 1);
   });
@@ -552,5 +552,61 @@ describe('Playground multi-image batch filmstrip', () => {
     runAllBtn.click();
     await until(() => target.querySelector('[data-batch-summary]')?.textContent?.includes('2/2 run'), 'both dense images completed');
     expect(predictSpy.mock.calls.filter((c) => c[1].max_det === 30_000).length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('preserves page scroll on filmstrip mount, keeps focus across Run all -> Stop -> Batch JSON, and labels Model A scope in Compare mode (Playtest R20)', async () => {
+    const origScrollIntoView = Element.prototype.scrollIntoView;
+    const scrollIntoViewSpy = vi.fn();
+    Element.prototype.scrollIntoView = scrollIntoViewSpy;
+
+    const resolvers: ((p: Prediction) => void)[] = [];
+    const predictSpy = vi.fn<Api['predict']>((_input, _opts, signal) => {
+      return new Promise<Prediction>((resolve, reject) => {
+        signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), { once: true });
+        resolvers.push(resolve);
+      });
+    });
+
+    try {
+      setupPlayground(predictSpy);
+      await until(() => target.querySelector('.model-pick'), 'model picker');
+      selectBatchFiles([makeImageFile('f1.png'), makeImageFile('f22.png')]);
+      await until(() => target.querySelectorAll('[data-batch-filmstrip] [role="option"]').length === 2, '2 thumbnails');
+
+      // Playtest R20 P3-1: mounting the filmstrip must NOT call scrollIntoView (which scrolls the whole page down)
+      expect(scrollIntoViewSpy).not.toHaveBeenCalled();
+
+      // Resolve initial image 0
+      await until(() => resolvers.length === 1, 'item 0 predict');
+      resolvers[0]!(fakePrediction('m_hard_s', 2));
+      await until(() => target.querySelector('[data-batch-idx="0"] [data-batch-badge]')?.textContent === '2', 'item 0 done');
+
+      // Playtest R20 P3-2: focus Run all -> clicking turns the SAME <button> into Stop without dropping focus
+      const runBtn = target.querySelector<HTMLButtonElement>('button[data-batch-run]')!;
+      runBtn.focus();
+      expect(document.activeElement).toBe(runBtn);
+      runBtn.click();
+      flushSync();
+      expect(runBtn.textContent?.trim()).toBe('Stop');
+      expect(document.activeElement).toBe(runBtn);
+
+      // Finish item 1 -> Run all completes and disables runBtn -> focus moves cleanly to Batch JSON (never body)
+      await until(() => resolvers.length === 2, 'item 1 predict');
+      resolvers[1]!(fakePrediction('m_hard_s', 1));
+      await until(() => runBtn.disabled, 'run button disabled at completion');
+      const jsonBtn = target.querySelector<HTMLButtonElement>('button[data-batch-export="json"]')!;
+      await until(() => document.activeElement === jsonBtn, 'focus moved to Batch JSON');
+
+      // Playtest R20 P3-4: Compare A/B clarifies Model A scope on summary, run button, and batch export buttons
+      const cmpBtn = [...target.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('Compare A/B'))!;
+      cmpBtn.click();
+      flushSync();
+      expect(target.querySelector('[data-batch-summary]')?.textContent).toContain('Model A ·');
+      expect(runBtn.textContent?.trim()).toBe('All A run');
+      expect(jsonBtn.getAttribute('aria-label')).toBe('Export Model A batch JSON');
+      expect(target.querySelector<HTMLButtonElement>('button[data-batch-export="csv"]')?.getAttribute('aria-label')).toBe('Export Model A batch CSV');
+    } finally {
+      Element.prototype.scrollIntoView = origScrollIntoView;
+    }
   });
 });

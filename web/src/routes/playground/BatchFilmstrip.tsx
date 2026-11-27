@@ -19,19 +19,46 @@ import type { BatchSession } from './useBatchSession';
 export interface BatchFilmstripProps {
   batch: BatchSession;
   hasModel: boolean;
+  /** True when Compare A/B is active, clarifying that batch execution and export target Model A. */
+  compare?: boolean;
 }
 
 export default function BatchFilmstrip(props: BatchFilmstripProps) {
   const b = props.batch;
   const stripEl = signal<HTMLDivElement | undefined>(undefined);
+  const actionsEl = signal<HTMLDivElement | undefined>(undefined);
+  let runBtnFocused = false;
 
-  // Keep the active thumbnail scrolled into view when stepping via keyboard or Prev/Next buttons.
+  // Keep the active thumbnail visible inside the horizontal filmstrip without scrolling ancestor containers (`window`).
   effect(() => {
     const idx = b.activeIndex.get();
     const root = stripEl.get();
     if (!root) return;
     const btn = root.querySelector<HTMLButtonElement>(`button[data-batch-idx="${idx}"]`);
-    btn?.scrollIntoView?.({ inline: 'nearest', block: 'nearest' });
+    if (!btn) return;
+    const rr = root.getBoundingClientRect();
+    const br = btn.getBoundingClientRect();
+    if (rr.width <= 0 || br.width <= 0) return;
+    if (br.left < rr.left) root.scrollLeft += br.left - rr.left - 2;
+    else if (br.right > rr.right) root.scrollLeft += br.right - rr.right + 2;
+  });
+
+  // When Run all completes and disables the run button while it held focus, move focus cleanly to an enabled batch action.
+  effect(() => {
+    const running = b.runningAll.get();
+    const s = b.summary.get();
+    const allDone = !running && s.total > 0 && s.done >= s.total;
+    if (!allDone || !runBtnFocused) return;
+    runBtnFocused = false;
+    queueMicrotask(() => {
+      const active = document.activeElement;
+      const runBtn = actionsEl.peek()?.querySelector<HTMLButtonElement>('button[data-batch-run]');
+      if (active && active !== document.body && active !== runBtn) return;
+      const next =
+        actionsEl.peek()?.querySelector<HTMLButtonElement>('button[data-batch-export="json"]:not(:disabled)') ??
+        stripEl.peek()?.querySelector<HTMLButtonElement>(`button[data-batch-idx="${b.activeIndex.peek()}"]`);
+      next?.focus({ preventScroll: true });
+    });
   });
 
   function onStripKey(e: KeyboardEvent) {
@@ -78,55 +105,101 @@ export default function BatchFilmstrip(props: BatchFilmstripProps) {
         <span class="meta num" aria-live="polite" data-batch-summary>
           {(() => {
             const s = b.summary.get();
+            const prefix = props.compare ? 'Model A · ' : '';
             if (b.runningAll.get()) {
               const cur = (b.runningIndex.get() ?? 0) + 1;
-              return `Running ${cur} of ${s.total}…`;
+              return `${prefix}Running ${cur} of ${s.total}…`;
             }
             const parts = [`${s.done}/${s.total} run`];
             if (s.done > 0) parts.push(`${s.totalDetections}${s.truncated > 0 ? '+' : ''} ${s.totalDetections === 1 && s.truncated === 0 ? 'det' : 'dets'}`);
             if (s.failed > 0) parts.push(`${s.failed} failed`);
-            return parts.join(' · ');
+            return `${prefix}${parts.join(' · ')}`;
           })()}
         </span>
 
-        <div class="actions">
-          {b.runningAll.get() ? (
-            <Button size="sm" variant="secondary" icon={Square} onclick={() => b.stopRunAll()}>
-              Stop
-            </Button>
-          ) : (
-            <Button
-              size="sm"
-              variant={b.summary.get().done < b.summary.get().total ? 'primary' : 'secondary'}
-              icon={b.summary.get().done < b.summary.get().total ? Play : Check}
-              disabled={!props.hasModel || b.summary.get().done >= b.summary.get().total}
-              onclick={() => void b.runAll()}
-            >
-              {b.summary.get().done < b.summary.get().total ? 'Run all' : 'All run'}
-            </Button>
-          )}
-          <span use:tooltip={b.summary.get().done > 0 ? 'Export all completed batch detections as JSON' : 'Run inference on at least one image first'}>
+        <div class="actions" ref={actionsEl}>
+          <Button
+            size="sm"
+            variant={b.runningAll.get() ? 'secondary' : b.summary.get().done < b.summary.get().total ? 'primary' : 'secondary'}
+            icon={b.runningAll.get() ? Square : b.summary.get().done < b.summary.get().total ? Play : Check}
+            disabled={!b.runningAll.get() && (!props.hasModel || b.summary.get().done >= b.summary.get().total)}
+            data-batch-run
+            aria-label={
+              b.runningAll.get()
+                ? props.compare
+                  ? 'Stop Model A batch run'
+                  : 'Stop batch run'
+                : b.summary.get().done < b.summary.get().total
+                  ? props.compare
+                    ? 'Run all images on Model A'
+                    : 'Run all images'
+                  : props.compare
+                    ? 'All Model A batch images run'
+                    : 'All batch images run'
+            }
+            onfocus={() => {
+              runBtnFocused = true;
+            }}
+            onblur={(e) => {
+              const btn = e.currentTarget as HTMLButtonElement;
+              if (!btn.disabled && e.relatedTarget !== null) runBtnFocused = false;
+              else if (!btn.disabled && b.summary.peek().done < b.summary.peek().total) runBtnFocused = false;
+            }}
+            onclick={() => {
+              if (b.runningAll.peek()) b.stopRunAll();
+              else void b.runAll();
+            }}
+          >
+            {b.runningAll.get()
+              ? 'Stop'
+              : b.summary.get().done < b.summary.get().total
+                ? props.compare
+                  ? 'Run all A'
+                  : 'Run all'
+                : props.compare
+                  ? 'All A run'
+                  : 'All run'}
+          </Button>
+          <span
+            use:tooltip={
+              b.summary.get().done > 0
+                ? props.compare
+                  ? 'Export completed Model A batch detections as JSON'
+                  : 'Export all completed batch detections as JSON'
+                : 'Run inference on at least one image first'
+            }
+          >
             <Button
               size="sm"
               variant="ghost"
               icon={FileJson}
-              aria-label="Export batch JSON"
+              data-batch-export="json"
+              aria-label={props.compare ? 'Export Model A batch JSON' : 'Export batch JSON'}
               disabled={b.runningAll.get() || b.summary.get().done === 0}
               onclick={() => b.onExportJson()}
             >
-              Batch JSON
+              {props.compare ? 'A JSON' : 'Batch JSON'}
             </Button>
           </span>
-          <span use:tooltip={b.summary.get().done > 0 ? 'Export all completed batch detections as CSV' : 'Run inference on at least one image first'}>
+          <span
+            use:tooltip={
+              b.summary.get().done > 0
+                ? props.compare
+                  ? 'Export completed Model A batch detections as CSV'
+                  : 'Export all completed batch detections as CSV'
+                : 'Run inference on at least one image first'
+            }
+          >
             <Button
               size="sm"
               variant="ghost"
               icon={Download}
-              aria-label="Export batch CSV"
+              data-batch-export="csv"
+              aria-label={props.compare ? 'Export Model A batch CSV' : 'Export batch CSV'}
               disabled={b.runningAll.get() || b.summary.get().done === 0}
               onclick={() => b.onExportCsv()}
             >
-              Batch CSV
+              {props.compare ? 'A CSV' : 'Batch CSV'}
             </Button>
           </span>
         </div>

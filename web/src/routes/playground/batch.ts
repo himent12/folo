@@ -141,8 +141,6 @@ export function buildBatchJson(input: BatchExportInput) {
     ? { conf: input.filter.conf, max_det: input.filter.maxDet }
     : { conf: input.filter.conf, iou: input.filter.iou, max_det: input.filter.maxDet };
 
-  const truncatedCount = input.items.filter((it) => it.status === 'done' && isPredictionCutAt(it.pred, input.filter.conf)).length;
-
   return {
     model_id: input.modelId,
     model_name: input.modelName,
@@ -153,7 +151,7 @@ export function buildBatchJson(input: BatchExportInput) {
       completed_images: summary.done,
       failed_images: summary.failed,
       total_detections: summary.totalDetections,
-      ...(truncatedCount > 0 ? { truncated_images: truncatedCount } : {}),
+      ...(summary.truncated > 0 ? { truncated_images: summary.truncated } : {}),
     },
     images: input.items.map((item) => {
       const boxes = item.status === 'done' ? filterBatchBoxes(item.pred, input.filter, input.hidden) : [];
@@ -229,13 +227,12 @@ export function exportBatchJson(input: BatchExportInput): boolean {
 export function exportBatchCsv(input: BatchExportInput): boolean {
   const summary = summarizeBatch(input.items, input.filter, input.hidden);
   if (summary.done === 0) return false;
-  const truncated = input.items.filter((it) => it.status === 'done' && isPredictionCutAt(it.pred, input.filter.conf)).length;
   const rows = buildBatchCsvRows(input);
   const ok = exportTableCsv(batchFilenameBase(input.modelName, input.items.length), BATCH_CSV_HEADERS, rows);
   if (ok) {
     toast.success(
       'Batch CSV exported',
-      `${rows.length} ${rows.length === 1 ? 'detection' : 'detections'} across ${summary.done} ${summary.done === 1 ? 'image' : 'images'}${truncated ? ` (${truncated} capped at 1,000 candidates)` : ''}.`,
+      `${rows.length} ${rows.length === 1 ? 'detection' : 'detections'} across ${summary.done} ${summary.done === 1 ? 'image' : 'images'}${summary.truncated ? ` (${summary.truncated} capped at 1,000 candidates)` : ''}.`,
     );
   }
   return ok;
