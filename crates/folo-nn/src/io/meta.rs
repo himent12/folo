@@ -59,7 +59,7 @@ impl FloatDType {
     }
 }
 
-/// `(depth, width, max_channels)` of a scale (docs/MODEL.md §3).
+/// `(depth, width, max_channels)` of a v1 scale (docs/MODEL.md §3).
 pub fn scale_row(scale: &str) -> Option<(f64, f64, u32)> {
     Some(match scale {
         "n" => (0.50, 0.25, 1024),
@@ -67,6 +67,18 @@ pub fn scale_row(scale: &str) -> Option<(f64, f64, u32)> {
         "m" => (0.50, 1.00, 512),
         "l" => (1.00, 1.00, 512),
         "x" => (1.00, 1.50, 512),
+        _ => return None,
+    })
+}
+
+/// `(depth, width, max_channels)` of a v2-Iso scale (`folo2-n/s/m/l/x`, docs/MODEL.md §11).
+pub fn scale_row_v2(scale: &str) -> Option<(f64, f64, u32)> {
+    Some(match scale {
+        "n" => (1.00, 0.25, 1024),
+        "s" => (1.00, 0.50, 1024),
+        "m" => (1.00, 0.75, 768),
+        "l" => (1.00, 1.00, 768),
+        "x" => (1.00, 1.25, 1024),
         _ => return None,
     })
 }
@@ -79,13 +91,13 @@ fn default_bn_momentum() -> f64 {
     crate::BN_MOMENTUM
 }
 
-/// The model config, `folo.config` (docs/MODEL.md §3).
+/// The model config, `folo.config` (docs/MODEL.md §3 for v1 `"folo"`, §11 for v2 `"folo2"`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelConfig {
-    /// `"folo"`.
+    /// `"folo"` (v1, spec 1) or `"folo2"` (v2-Iso, spec 2).
     pub family: String,
-    /// Spec version, 1.
+    /// Spec version: `1` for `"folo"`, `2` for `"folo2"`.
     pub spec: u32,
     /// `n s m l x`.
     pub scale: String,
@@ -112,6 +124,21 @@ pub struct ModelConfig {
     /// BatchNorm momentum.
     #[serde(default = "default_bn_momentum")]
     pub bn_momentum: f64,
+    /// FOLO v2 only: separate `iou_out` localization-quality head branch (absent in v1 files).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iou_head: Option<bool>,
+    /// FOLO v2 only: lossless `SPD(2×2) + Conv1×1` stem (`true`) vs `Conv3×3 s=2` (`false`; absent in v1 files).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spd_stem: Option<bool>,
+    /// FOLO v2 only: high-capacity `v2-Plus` depth tier (absent in v1 files).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plus: Option<bool>,
+    /// FOLO v2 only: relocated `FullPAD-Lite` FiLM gates on P3/P4 head inputs (absent in v1 files).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fullpad: Option<bool>,
+    /// FOLO v2 only: initialise `cls.out.bias` with the MAL focal bias prior (absent in v1 files).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mal_bias_prior: Option<bool>,
 }
 
 impl ModelConfig {
@@ -133,9 +160,47 @@ impl ModelConfig {
             head: "o2m".into(),
             bn_eps: crate::BN_EPS,
             bn_momentum: crate::BN_MOMENTUM,
+            iou_head: None,
+            spd_stem: None,
+            plus: None,
+            fullpad: None,
+            mal_bias_prior: None,
         };
         c.validate()?;
         Ok(c)
+    }
+
+    /// The v2-Iso (`folo2-<scale>`) config of a scale with `num_classes` classes.
+    pub fn new_v2(scale: &str, num_classes: usize) -> Result<Self> {
+        let (depth, width, max_channels) = scale_row_v2(scale)
+            .ok_or_else(|| Error::Metadata(format!("unknown scale `{scale}` (expected n, s, m, l or x)")))?;
+        let c = ModelConfig {
+            family: "folo2".into(),
+            spec: 2,
+            scale: scale.into(),
+            depth,
+            width,
+            max_channels,
+            num_classes,
+            in_channels: 3,
+            strides: vec![8, 16, 32],
+            reg_max: 16,
+            head: "o2m".into(),
+            bn_eps: crate::BN_EPS,
+            bn_momentum: crate::BN_MOMENTUM,
+            iou_head: Some(false),
+            spd_stem: Some(true),
+            plus: Some(false),
+            fullpad: Some(true),
+            mal_bias_prior: Some(false),
+        };
+        c.validate()?;
+        Ok(c)
+    }
+
+    /// Whether this config describes a FOLO v2 (`folo2-*`) model.
+    pub fn is_v2(&self) -> bool {
+        self.family == "folo2"
     }
 
     /// Whether the model has the one-to-one (NMS-free) branch, `head = "o2o"` (docs/MODEL.md §6.6).
@@ -143,37 +208,68 @@ impl ModelConfig {
         self.head == "o2o"
     }
 
-    /// The v1 rules of docs/MODEL.md §3.
+    /// Validate against docs/MODEL.md §3 (v1 `"folo"`) or §11 (v2 `"folo2"`).
     pub fn validate(&self) -> Result<()> {
         let mut bad = Vec::new();
-        if self.family != "folo" {
-            bad.push(format!("family is `{}`, expected `folo`", self.family));
-        }
-        if self.spec != 1 {
-            bad.push(format!("spec {} is not supported (this reader implements spec 1)", self.spec));
-        }
-        match scale_row(&self.scale) {
-            None => bad.push(format!("unknown scale `{}`", self.scale)),
-            Some((d, w, m)) => {
-                if self.depth != d || self.width != w || self.max_channels != m {
-                    bad.push(format!(
-                        "scale `{}` requires depth {d}, width {w}, max_channels {m}; got {}, {}, {}",
-                        self.scale, self.depth, self.width, self.max_channels
-                    ));
+        let row = match self.family.as_str() {
+            "folo" => {
+                if self.spec != 1 {
+                    bad.push(format!("spec {} is not supported for family `folo` (expected 1)", self.spec));
+                }
+                if self.iou_head.is_some()
+                    || self.spd_stem.is_some()
+                    || self.plus.is_some()
+                    || self.fullpad.is_some()
+                    || self.mal_bias_prior.is_some()
+                {
+                    bad.push("v2-only fields (iou_head, spd_stem, plus, fullpad, mal_bias_prior) are not valid for family `folo`".into());
+                }
+                scale_row(&self.scale)
+            }
+            "folo2" => {
+                if self.spec != 2 {
+                    bad.push(format!("spec {} is not supported for family `folo2` (expected 2)", self.spec));
+                }
+                scale_row_v2(&self.scale)
+            }
+            other => {
+                bad.push(format!("family is `{other}`, expected `folo` or `folo2`"));
+                None
+            }
+        };
+        if matches!(self.family.as_str(), "folo" | "folo2") {
+            match row {
+                None => bad.push(format!("unknown scale `{}`", self.scale)),
+                Some((d, w, m)) => {
+                    if self.depth != d || self.width != w || self.max_channels != m {
+                        bad.push(format!(
+                            "scale `{}` requires depth {d}, width {w}, max_channels {m}; got {}, {}, {}",
+                            self.scale, self.depth, self.width, self.max_channels
+                        ));
+                    }
                 }
             }
         }
         if self.num_classes == 0 {
             bad.push("num_classes must be at least 1".into());
         }
-        if self.in_channels != 3 {
-            bad.push(format!("in_channels {} (v1 requires 3)", self.in_channels));
+        if self.is_v2() {
+            if self.in_channels == 0 {
+                bad.push("in_channels must be at least 1".into());
+            }
+            if self.reg_max < 2 {
+                bad.push(format!("reg_max {} (requires >= 2)", self.reg_max));
+            }
+        } else {
+            if self.in_channels != 3 {
+                bad.push(format!("in_channels {} (requires 3)", self.in_channels));
+            }
+            if self.reg_max != 16 {
+                bad.push(format!("reg_max {} (requires 16)", self.reg_max));
+            }
         }
         if self.strides != [8, 16, 32] {
-            bad.push(format!("strides {:?} (v1 requires [8, 16, 32])", self.strides));
-        }
-        if self.reg_max != 16 {
-            bad.push(format!("reg_max {} (v1 requires 16)", self.reg_max));
+            bad.push(format!("strides {:?} (requires [8, 16, 32])", self.strides));
         }
         match self.head.as_str() {
             "o2m" | "o2o" => {}
@@ -234,12 +330,13 @@ pub struct Metadata {
 }
 
 impl Metadata {
-    /// Metadata for a file of `kind` with `folo.arch = "folo-<scale>"`, `F32`, unfused, and this crate's
+    /// Metadata for a file of `kind` with `folo.arch = "<family>-<scale>"`, `F32`, unfused, and this crate's
     /// version. Checks `num_classes == classes.len()`.
     pub fn new(kind: FileKind, config: ModelConfig, classes: Vec<String>, imgsz: u32) -> Result<Self> {
+        let arch = format!("{}-{}", config.family, config.scale);
         let m = Metadata {
             kind,
-            arch: format!("folo-{}", config.scale),
+            arch,
             config,
             classes,
             imgsz,
@@ -417,6 +514,45 @@ mod tests {
         map.insert("folo.format".into(), "2".into());
         assert!(Metadata::from_map(&map).unwrap_err().to_string().contains("not supported"));
         assert!(Metadata::from_map(&BTreeMap::new()).unwrap_err().to_string().contains("import"));
+    }
+
+    #[test]
+    fn v2_config_round_trip_and_v1_rejects_v2_fields() {
+        let v1 = ModelConfig::new("n", 4).unwrap();
+        let v1_json = serde_json::to_string(&v1).unwrap();
+        assert!(
+            !v1_json.contains("iou_head") && !v1_json.contains("spd_stem") && !v1_json.contains("fullpad")
+        );
+        let mut bad_v1 = v1.clone();
+        bad_v1.iou_head = Some(true);
+        assert!(bad_v1.validate().is_err(), "v1 config must reject v2-only fields");
+
+        for scale in ["n", "s", "m", "l", "x"] {
+            let mut v2 = ModelConfig::new_v2(scale, 10).unwrap();
+            assert!(v2.is_v2());
+            assert_eq!(v2.family, "folo2");
+            assert_eq!(v2.spec, 2);
+            v2.head = "o2o".into();
+            v2.iou_head = Some(true);
+            v2.plus = Some(false);
+            v2.spd_stem = Some(true);
+            v2.fullpad = Some(true);
+            v2.mal_bias_prior = Some(true);
+            v2.validate().unwrap();
+            let s = serde_json::to_string(&v2).unwrap();
+            let back: ModelConfig = serde_json::from_str(&s).unwrap();
+            assert_eq!(back, v2);
+            let meta =
+                Metadata::new(FileKind::Weights, v2.clone(), (0..10).map(|i| format!("c{i}")).collect(), 640)
+                    .unwrap();
+            assert_eq!(meta.arch, format!("folo2-{scale}"));
+            let map = meta.to_map();
+            assert_eq!(Metadata::from_map(&map).unwrap(), meta);
+        }
+
+        let mut bad_v2 = ModelConfig::new_v2("n", 4).unwrap();
+        bad_v2.spec = 1;
+        assert!(bad_v2.validate().is_err());
     }
 
     #[test]

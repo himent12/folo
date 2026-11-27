@@ -15,7 +15,7 @@ use crate::loss::distill::{
     DistillConfig, DistillLoss, DistillTargets, TeacherView, distill_loss_fused_with_context,
     distill_loss_with_context, fused_supported, gt_verify_weights_cpu,
 };
-use crate::model::{FoloModel, HeadMode};
+use crate::model::{Detector, HeadMode};
 
 /// The file `distill.teacher` names: a `.folo` file, or the cached file of a published name (`folo weights pull`).
 /// An existing file wins over a published name, as for `--weights`. Errors (`Error::Config`) name the key and say
@@ -61,7 +61,7 @@ fn refuse_own_checkpoint(teacher: &Path, run_dir: &Path) -> Result<()> {
 
 /// A loaded teacher.
 pub(super) struct Teacher {
-    model: FoloModel,
+    model: Detector,
     dtype: DType,
     cfg: DistillConfig,
 }
@@ -73,7 +73,7 @@ impl Teacher {
     /// With a run folder `run_dir`, a teacher that is that run's own `weights/last.folo` or `best.folo` is refused.
     pub(super) fn load(
         cfg: &DistillConfig,
-        student: &FoloModel,
+        student: &Detector,
         device: Device,
         amp: bool,
         run_dir: Option<&Path>,
@@ -85,7 +85,7 @@ impl Teacher {
         let shown = folo_api::json::path(&path);
         let file = ModelFile::open(&path)?;
         let dtype = if amp && !device.is_cpu() { DType::F16 } else { DType::F32 };
-        let model = FoloModel::from_file_for_inference(&file, device, dtype)?;
+        let model = Detector::from_file_for_inference(&file, device, dtype)?;
         let incompatible = |what: &str, t: String, s: String| {
             Err(Error::Config(format!(
                 "the teacher {shown} has {what} {t}, the student {s}: distillation needs a teacher with the student's \
@@ -95,8 +95,8 @@ impl Teacher {
         if model.num_classes() != student.num_classes() {
             return incompatible("nc", model.num_classes().to_string(), student.num_classes().to_string());
         }
-        if model.head.reg_max != student.head.reg_max {
-            return incompatible("reg_max", model.head.reg_max.to_string(), student.head.reg_max.to_string());
+        if model.reg_max() != student.reg_max() {
+            return incompatible("reg_max", model.reg_max().to_string(), student.reg_max().to_string());
         }
         if model.strides() != student.strides() {
             return incompatible(
@@ -136,7 +136,7 @@ impl Teacher {
     /// forward, kept raw where the fused kernel runs ([`fused_supported`]), else turned into [`DistillTargets`].
     pub(super) fn batch(&self, x: &Tensor) -> Result<TeacherBatch> {
         let _g = no_grad();
-        let out = self.model.forward_head(&x.to_dtype(self.dtype)?, HeadMode::O2m)?;
+        let out = self.model.forward_head(&x.to_dtype(self.dtype)?, HeadMode::O2m)?.head;
         if fused_supported(&out.cls_raw, out.reg_max) {
             return Ok(TeacherBatch::Raw {
                 box_raw: out.box_raw,

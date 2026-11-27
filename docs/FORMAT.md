@@ -56,8 +56,8 @@ All values are strings; structured values are JSON encoded into a string.
 |---|---|---|
 | `folo.format` | yes | `"1"`. Readers refuse any other major version with a clear message |
 | `folo.kind` | yes | `"weights"` (inference / transfer) or `"checkpoint"` (resumable training state) |
-| `folo.arch` | yes | family and scale, e.g. `"folo-n"`. Informational; `folo.config` is authoritative |
-| `folo.config` | yes | JSON: the full model config as specified in docs/MODEL.md (`scale`, multipliers, `num_classes`, `reg_max`, head type `"o2m"` or `"o2o"` (the latter adds the `head.o2o.*` tensors of the NMS-free branch, MODEL.md §6.6; every earlier file is `"o2m"` and loads unchanged), ...). Readers validate it against the schema of that version, and `num_classes` must equal `len(folo.classes)` |
+| `folo.arch` | yes | family and scale, e.g. `"folo-n"` or `"folo2-n"`. Informational; `folo.config` is authoritative |
+| `folo.config` | yes | JSON: the full model config as specified in docs/MODEL.md (`family` `"folo"` with `spec: 1` or `"folo2"` with `spec: 2`, `scale`, multipliers, `num_classes`, `reg_max`, head type `"o2m"` or `"o2o"` — the latter adds the `head.o2o.*` tensors of the NMS-free branch, MODEL.md §6.6; every earlier file is `"o2m"` and loads unchanged — plus optional `folo2`-only flags `iou_head`, `spd_stem`, `plus`, `fullpad`, `mal_bias_prior` omitted on `folo` files so v1 JSON stays byte-identical). Readers validate it against the schema of that version, and `num_classes` must equal `len(folo.classes)` |
 | `folo.classes` | yes | JSON array of class names, where the index is the class id |
 | `folo.imgsz` | yes | training image size, e.g. `"640"` |
 | `folo.fused` | no | `"true"` if Conv+BN are fused (an inference-only tensor set) |

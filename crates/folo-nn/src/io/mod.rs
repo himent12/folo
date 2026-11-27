@@ -2,7 +2,8 @@
 //! loading, checkpoints and export.
 //!
 //! - [`safetensors`]: the container, read with docs/FORMAT.md's acceptance rules and written in FOLO's layout.
-//! - `meta.rs`: `__metadata__` ([`Metadata`]), the v1 [`ModelConfig`] and the scale table ([`scale_row`]).
+//! - `meta.rs`: `__metadata__` ([`Metadata`]), [`ModelConfig`] (`folo` v1 and `folo2` v2-Iso), and the scale
+//!   tables ([`scale_row`], [`scale_row_v2`]).
 //! - `file.rs`: [`ModelFile`], an opened file, its namespaces and the strict / partial loading rules
 //!   ([`LoadOptions`], [`LoadReport`]).
 //! - `checkpoint.rs`: the full training state ([`save_checkpoint`], [`checkpoint_contents`]).
@@ -28,6 +29,8 @@ pub use export::{export_module, export_tensors, fuse_bn_tensors, save_weights, w
 pub use file::{
     LoadOptions, LoadReport, ModelFile, Namespace, Purpose, SkipReason, Skipped, Source, is_class_output,
 };
-pub use meta::{FORMAT_VERSION, FileKind, FloatDType, Metadata, Metrics, ModelConfig, scale_row};
+pub use meta::{
+    FORMAT_VERSION, FileKind, FloatDType, Metadata, Metrics, ModelConfig, scale_row, scale_row_v2,
+};
 pub use publish::{TEMP_PREFIX, publish_free, publish_new, temp_path};
 pub use replace::{RenameRetry, rename_over, rename_over_observed, rename_over_with};

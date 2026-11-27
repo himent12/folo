@@ -97,8 +97,9 @@ use folo_nn::{GradScaler, LrSchedule, ModelEma, Module};
 
 use crate::error::Result;
 use crate::loss::LossConfig;
-use crate::model::FoloModel;
-use device::device_not_found;
+use crate::model::v2::FoloV2Model;
+use crate::model::{Detector, FoloModel};
+use device::{device_not_found, place_detector};
 use events::Emitter;
 
 /// Consecutive non-finite batches that fail the run (§8.3).
@@ -231,8 +232,8 @@ pub struct Trainer {
     cfg: TrainConfig,
     data: TrainData,
     device: Device,
-    model: FoloModel,
-    ema: Option<ModelEma<FoloModel>>,
+    model: Detector,
+    ema: Option<ModelEma<Detector>>,
     /// The frozen teacher of a distillation run (`cfg.distill`, §8.9).
     teacher: Option<teacher::Teacher>,
     opt: Box<dyn Optimizer>,
@@ -294,14 +295,37 @@ impl Trainer {
         self.device
     }
 
-    /// The live training model.
+    /// The live training model (v1 `folo-*`; panics on a `folo2-*` run — use [`Trainer::detector`] or
+    /// [`Trainer::model_v2`] for architecture-agnostic / v2 access).
     pub fn model(&self) -> &FoloModel {
+        self.model
+            .as_v1()
+            .expect("Trainer::model() requires a FOLO v1 model; use Trainer::detector() or Trainer::model_v2() for folo2-*")
+    }
+
+    /// The live training detector (`folo-*` or `folo2-*`).
+    pub fn detector(&self) -> &Detector {
         &self.model
     }
 
-    /// The EMA model (eval mode), if the run keeps one.
+    /// The live FOLO v2 training model, if training `folo2-*`.
+    pub fn model_v2(&self) -> Option<&FoloV2Model> {
+        self.model.as_v2()
+    }
+
+    /// The EMA model (eval mode, v1 `folo-*`), if the run keeps one.
     pub fn ema_model(&self) -> Option<&FoloModel> {
+        self.ema.as_ref().and_then(|e| e.module().as_v1())
+    }
+
+    /// The EMA detector (`folo-*` or `folo2-*`, eval mode), if the run keeps one.
+    pub fn ema_detector(&self) -> Option<&Detector> {
         self.ema.as_ref().map(|e| e.module())
+    }
+
+    /// The EMA FOLO v2 model (eval mode), if training `folo2-*` with EMA enabled.
+    pub fn ema_model_v2(&self) -> Option<&FoloV2Model> {
+        self.ema.as_ref().and_then(|e| e.module().as_v2())
     }
 
     /// The optimizer the config resolved to.

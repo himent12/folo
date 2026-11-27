@@ -14,7 +14,7 @@ and [VISION.md](../../docs/VISION.md) is the tour of the implementation.
 | Path | What it holds |
 |---|---|
 | `src/lib.rs` | Crate docs and the re-exports |
-| `src/model/` | `mod.rs` (`FoloModel`: construction, forward, `fuse`, `to_device`; `HeadOutput`), `blocks.rs` (`Bottleneck`, `C3k`, `C3k2`, `Sppf`, `Attention`, `PsaBlock`, `C2Psa`), `head.rs` (the detect head, and the `o2o` branch), `v2/` (FOLO v2-Iso architecture: `config.rs`, `blocks.rs` with `StemV2`/`WsQARepConv3x3`/`FoloBlock`/`HyperContext`/`FullPadGate`, `head.rs` with `LazyAlignHead`/`PeakSuppress` and opt-in `iou_out`, `iou.rs` with `iou_quality_loss` and `fuse_cls_iou_scores`, `mod.rs` with `FoloV2Model`), `io.rs` (`.folo` weight IO), `predict.rs` (decode and `predict_raw`), `lazy.rs` / `lazy_gpu.rs` (candidate-first prediction on the CPU / a GPU), `quant/` (int8 inference: `walk.rs` the zero-alloc quantised graph, `calib.rs` calibration and the stored `Calibration`, `sensitivity.rs` folded-weight SQNR & MAC-budgeted selective-`f32` policy, `pool.rs` reusable C4 activation `ScratchPool`, `cache.rs` FNV-1a boundary/packing caches, `exec.rs` the int8 executor on folo-core's `cpu::q8`, `fake.rs` the fake-quant reference) |
+| `src/model/` | `mod.rs` (`FoloModel`: construction, forward, `fuse`, `to_device`; `HeadOutput`), `detector.rs` (`Detector` / `DetectorOutput`: unified `folo-*` + `folo2-*` dispatch), `blocks.rs` (`Bottleneck`, `C3k`, `C3k2`, `Sppf`, `Attention`, `PsaBlock`, `C2Psa`), `head.rs` (the detect head, and the `o2o` branch), `v2/` (FOLO v2-Iso architecture: `config.rs`, `blocks.rs` with `StemV2`/`WsQARepConv3x3`/`FoloBlock`/`HyperContext`/`FullPadGate`, `head.rs` with `LazyAlignHead`/`PeakSuppress` and opt-in `iou_out`, `iou.rs` with `iou_quality_loss` and `fuse_cls_iou_scores`, `io.rs` `.folo` weight/export/transfer IO, `mod.rs` with `FoloV2Model`), `io.rs` (`.folo` weight IO), `predict.rs` (decode and `predict_raw`), `lazy.rs` / `lazy_gpu.rs` (candidate-first prediction on the CPU / a GPU), `quant/` (int8 inference: `walk.rs` the zero-alloc quantised graph, `calib.rs` calibration and the stored `Calibration`, `sensitivity.rs` folded-weight SQNR & MAC-budgeted selective-`f32` policy, `pool.rs` reusable C4 activation `ScratchPool`, `cache.rs` FNV-1a boundary/packing caches, `exec.rs` the int8 executor on folo-core's `cpu::q8`, `fake.rs` the fake-quant reference) |
 | `src/boxes.rs` | `Xyxy` / `Cxcywh`, letterbox mapping, IoU / GIoU / DIoU / CIoU |
 | `src/decode.rs` | Anchor grids (`make_anchors`) and the DFL decode of raw head outputs (including 2×8 AVX2 `reg_max == 16` fast path `avx2_16`) |
 | `src/assign.rs` | The task-aligned assigner and the DFL target encoding |
@@ -24,9 +24,9 @@ and [VISION.md](../../docs/VISION.md) is the tour of the implementation.
 | `src/metrics.rs` | `Evaluator`: mAP, precision / recall / F1, PR curves, confusion matrix, and wired per-image diagnostics |
 | `src/eval/mod.rs` | Per-image error diagnosis (`ImageDiagnostics`, `diagnose_image`, `worst_images`) wired into `Evaluator` and `EvalReport` |
 | `src/cocoeval.rs` | `CocoEval`: the full pycocotools `COCOeval` (crowd regions, area buckets, AR) |
-| `src/train/` | `mod.rs` (`Trainer`), `config/` (`mod.rs` for `TrainConfig`, `tests.rs`), `setup.rs` (new and resumed runs), `auto_batch/` (`mod.rs` GPU VRAM-budget auto-batch planner `probe_batch_size`/`auto_batch_plan`, `footprint.rs` analytic `FoloModel` memory & conv wgrad scratch estimator), `epoch.rs` (one epoch), `run.rs` (the run loop), `checkpoint.rs`, `writer/` (epoch files off the training thread), `events.rs`, `feed.rs` (batches staged for a GPU), `device.rs`, `teacher.rs` (the distillation teacher), `gauge.rs` (BN-Conv Floor Gauge Normalisation), `tests.rs` |
-| `src/val.rs` | `validate`: a model on a dataset split, scored with `Evaluator` |
-| `src/predict.rs` | `Predictor`: `.folo` weights to detections in image pixels, with a timing breakdown (single, batch, tiled, TTA, and tracked sequences) |
+| `src/train/` | `mod.rs` (`Trainer` for `folo-*` and `folo2-*`), `config/` (`mod.rs` for `TrainConfig`, `tests.rs`), `setup.rs` (new and resumed runs), `auto_batch/` (`mod.rs` GPU VRAM-budget auto-batch planner `probe_batch_size`/`auto_batch_plan`, `footprint.rs` analytic `FoloModel` and `FoloV2Model` memory & conv wgrad scratch estimator), `epoch.rs` (one epoch, including `iou_quality_loss` when `iou_head` is enabled), `run.rs` (the run loop), `checkpoint.rs`, `writer/` (epoch files off the training thread), `events.rs`, `feed.rs` (batches staged for a GPU), `device.rs`, `teacher.rs` (the distillation teacher), `gauge.rs` (BN-Conv Floor Gauge Normalisation), `tests.rs` |
+| `src/val/` | `mod.rs` (`validate`, `validate_v2`, `validate_detector`, `ValConfig` with opt-in `EvalConfig` per-image diagnostics: a model on a dataset split, scored with `Evaluator`), `tests.rs` |
+| `src/predict/` | `mod.rs` (`Predictor` for `folo-*` and `folo2-*`: `.folo` weights to detections in image pixels, with a timing breakdown for single, batch, tiled, TTA, and tracked sequences), `letterbox.rs` (host/device letterbox batching and GPU image uploads) |
 | `src/tile.rs` | SAHI tiled inference (`TileConfig`, `TileRect`, `TileMergeMetric`, `compute_tiles`, `crop_tile`, `merge_tiled_detections`) wired into `Predictor::predict_tiled` |
 | `src/tta.rs` | Test-Time Augmentation (`TtaConfig`, `PredictOptions`, `unflip_xyxy_h`, `merge_tta_detections`) wired into `Predictor::predict_tta`, `predict_batch_tta`, `predict_file_tta`, and `predict_*_with_options` |
 | `src/track/` | ByteTrack multi-object tracking (`mod.rs`: `ByteTracker`, `TrackConfig`, `TrackedDetection`, `SequenceFrame`, `Predictor::predict_sequence`; `kalman.rs`: decoupled 8-state Kalman filter; `assign.rs`: sparse-pruned exact Hungarian IoU matcher) |
@@ -58,11 +58,11 @@ and [VISION.md](../../docs/VISION.md) is the tour of the implementation.
 | §8.3 Step loop | `src/train/epoch.rs` |
 | §8.4 Schedule, §8.5 EMA | folo-nn `src/sched.rs`, `src/ema.rs` |
 | §8.6 Data and augmentation | folo-data `src/augment/`, `src/loader.rs` |
-| §8.7 Validation and checkpoints | `src/val.rs`, `src/train/run.rs`, `src/train/checkpoint.rs`, `src/train/writer/` |
+| §8.7 Validation and checkpoints | `src/val/`, `src/train/run.rs`, `src/train/checkpoint.rs`, `src/train/writer/` |
 | §8.8 Mixed precision | `src/train/epoch.rs`; folo-nn `src/amp.rs` |
 | §8.9 Distillation | `src/loss/distill/`, `src/loss/mod.rs` (`step_loss`), `src/train/teacher.rs`, `src/train/epoch.rs` |
-| §9.1 Fusion | `FoloModel::fuse` in `src/model/mod.rs`; folo-nn `fuse_conv_bn` |
-| §9.2 Letterbox | `src/predict.rs`; folo-data `src/letterbox.rs` |
+| §9.1 Fusion | `FoloModel::fuse` in `src/model/mod.rs`, `FoloV2Model::fuse` in `src/model/v2/mod.rs`; folo-nn `fuse_conv_bn` |
+| §9.2 Letterbox | `src/predict/`; folo-data `src/letterbox.rs` |
 | §9.3 NMS, §9.4 Box fusion | `src/nms/` (`mod.rs`, `kernel.rs`, `topk.rs`), `src/fusion/mod.rs` |
 | §9.5 Candidate-first evaluation | `src/model/lazy.rs`, `src/model/lazy_gpu.rs` |
 | §9.6 int8 inference | `src/model/quant/`, `FoloModel::set_int8`; folo-core `src/cpu/q8/` |
@@ -70,11 +70,11 @@ and [VISION.md](../../docs/VISION.md) is the tour of the implementation.
 
 ## Start here
 
-1. `FoloModel` in `src/model/mod.rs`: the detector, its forward pass and `HeadOutput`.
-2. `Predictor` in `src/predict.rs`: letterbox, forward, decode, NMS, rescale; what `folo predict` runs.
+1. `FoloModel` in `src/model/mod.rs` and `Detector` in `src/model/detector.rs`: the v1 and v2-Iso detectors, their forward pass and `HeadOutput` / `DetectorOutput`.
+2. `Predictor` in `src/predict/mod.rs`: letterbox, forward, decode, NMS, rescale; what `folo predict` runs.
 3. `detection_loss` in `src/loss/mod.rs`: its docs walk through the loss step by step against MODEL.md §7.
 4. `Trainer` in `src/train/mod.rs` (its docs describe a run), then `setup.rs`, `epoch.rs` and `run.rs`.
-5. `Evaluator` in `src/metrics.rs` and `validate` in `src/val.rs`: how a model is scored.
+5. `Evaluator` in `src/metrics.rs` and `validate` / `validate_v2` in `src/val/mod.rs`: how a model is scored.
 6. `export` in `src/export/onnx/mod.rs`: the ONNX graph, op by op.
 
 ## Common changes
@@ -97,7 +97,7 @@ cargo test -p folo-vision --test train       # one integration test binary
 
 | Test | Covers |
 |---|---|
-| `model.rs`, `model_v2.rs`, `onnx_export.rs` | Blocks and the whole model (MODEL.md §10.1, §10.2), the golden tensor names, FOLO v2-Iso blocks/head/fusion/GPU parity, and ONNX export for independent `DynamicAxes` (`batch` / `hw`) and `FoloV2Model` (with `onnxruntime` parity when available) |
+| `model.rs`, `model_v2.rs`, `folo2_e2e.rs`, `onnx_export.rs` | Blocks and the whole model (MODEL.md §10.1, §10.2), the golden tensor names, FOLO v2-Iso blocks/head/fusion/GPU parity, end-to-end `folo2-*` trainer/EMA/resume/export/transfer/`iou_head`/`auto_batch`/diagnostics/`Predictor` (SAHI + TTA + GPU) parity, and ONNX export for independent `DynamicAxes` (`batch` / `hw`) and `FoloV2Model` (with `onnxruntime` parity when available) |
 | `assign_cases.rs`, `loss_cases.rs`, `wave7_train_algos.rs` | The assigner and the loss on hand-checked cases, against an `f64` reference, gradient checks, and Wave-7 MAL / NWD-IoU / CWD / Floor Gauge / BCKD parity |
 | `o2o.rs` | The one-to-one head: assignment, dual loss, `.folo` round trips, the top-k post-process |
 | `nms_reference.rs`, `fusion_reference.rs`, `elc_postproc.rs` | NMS against a naive reference; DFL fusion against `bench/fusion/post.py`; ELC, DFL-consensus, and DFL-repulse post-processing |

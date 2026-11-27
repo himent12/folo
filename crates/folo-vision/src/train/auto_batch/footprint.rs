@@ -1,18 +1,20 @@
-//! Analytic GPU training and validation memory footprint estimator for [`crate::model::FoloModel`].
+//! Analytic GPU training and validation memory footprint estimator for [`crate::model::FoloModel`] and
+//! [`crate::model::v2::FoloV2Model`].
 //!
-//! Walks the exact stage widths, repeats, and head branches of `FoloModel::with_rng` without allocating tensors,
-//! accounting for `f32`/`amp` dtypes (including `F32` autocast attention softmax), `o2m`/`o2o` heads, EMA,
-//! optimizer states (`SGD`, `MuSGD` momentum + Muon conv buffers, `AdamW`), frozen distillation teachers
-//! (weights, retained outputs, and eval/forward-plan intermediates), and `folo-gpu` convolution backward
-//! weight-gradient split-K scratch buffers.
+//! Walks the exact stage widths, repeats, and head branches of `FoloModel::with_rng` / `FoloV2Model::with_rng`
+//! without allocating tensors, accounting for `f32`/`amp` dtypes (including `F32` autocast attention softmax),
+//! `o2m`/`o2o` heads, EMA, optimizer states (`SGD`, `MuSGD` momentum + Muon conv buffers, `AdamW`), frozen
+//! distillation teachers (weights, retained outputs, and eval/forward-plan intermediates), and `folo-gpu`
+//! convolution backward weight-gradient split-K scratch buffers.
 
 use folo_nn::io::ModelConfig;
 use folo_nn::optim::OptimKind;
 use serde::{Deserialize, Serialize};
 
-use super::{AutoBatchRequest, parse_scale};
+use super::{AutoBatchRequest, parse_arch};
 use crate::error::Result;
 use crate::model::Scaling;
+use crate::model::v2::{FoloV2Config, ScalingV2};
 
 /// Pool size-class rounding overhead factor (power-of-2 / 25% buckets in `folo-gpu::pool::size_class`).
 const POOL_OVERHEAD_NUM: u64 = 5;
@@ -74,15 +76,19 @@ pub fn estimate_training_footprint(req: &AutoBatchRequest) -> Result<MemoryFootp
 
 pub(super) fn estimate_footprint_details(req: &AutoBatchRequest) -> Result<FootprintDetails> {
     req.validate()?;
-    let scale = parse_scale(&req.arch)?;
-    let mut mconf = ModelConfig::new(scale, req.num_classes)?;
+    let (is_v2, scale) = parse_arch(&req.arch)?;
+    let mut mconf = if is_v2 {
+        ModelConfig::new_v2(scale, req.num_classes)?
+    } else {
+        ModelConfig::new(scale, req.num_classes)?
+    };
     mconf.head = req.head.as_str().into();
-    let student = analyze_folo_model(&mconf, req.imgsz as usize, req.amp, true);
+    let student = analyze_model(&mconf, req.imgsz as usize, req.amp, true)?;
 
     let params_bytes = student.params.saturating_mul(4);
     let buffers_bytes = student.bn_buffers.saturating_mul(4);
     // `Sgd`: 1× F32 momentum buffer per param.
-    // `MuSgd`: embeds `Sgd` (1× F32 momentum for all params) + 1× F32 Muon buffer for every 2-D/4-D conv weight.
+    // `MuSgd`: embeds `Sgd` (1× F32 momentum for all params) + 1× F32 Muon buffer for every 2-D/4-D conv/linear weight.
     // `AdamW`: 2× F32 moment buffers (m, v) per param.
     let opt_state_bytes = match req.optimizer {
         OptimKind::Sgd => params_bytes,
@@ -104,10 +110,14 @@ pub(super) fn estimate_footprint_details(req: &AutoBatchRequest) -> Result<Footp
         let teacher_elem: u64 = if req.amp { 2 } else { 4 };
         let t_stats = match &req.teacher_arch {
             Some(t_arch) => {
-                let ts = parse_scale(t_arch)?;
-                let mut tconf = ModelConfig::new(ts, req.num_classes)?;
+                let (t_v2, ts) = parse_arch(t_arch)?;
+                let mut tconf = if t_v2 {
+                    ModelConfig::new_v2(ts, req.num_classes)?
+                } else {
+                    ModelConfig::new(ts, req.num_classes)?
+                };
                 tconf.head = req.teacher_head.as_str().into();
-                Some(analyze_folo_model(&tconf, req.imgsz as usize, req.amp, false))
+                Some(analyze_model(&tconf, req.imgsz as usize, req.amp, false)?)
             }
             None => None,
         };
@@ -141,9 +151,13 @@ pub(super) fn estimate_footprint_details(req: &AutoBatchRequest) -> Result<Footp
 
     // Epoch validation (`Trainer::validate_epoch`) runs a temporary `F32` `fused_eval_clone()` while live model,
     // optimizer, EMA, and any teacher remain resident.
-    let mut eval_mconf = ModelConfig::new(scale, req.num_classes)?;
+    let mut eval_mconf = if is_v2 {
+        ModelConfig::new_v2(scale, req.num_classes)?
+    } else {
+        ModelConfig::new(scale, req.num_classes)?
+    };
     eval_mconf.head = "o2m".into();
-    let eval_stats = analyze_folo_model(&eval_mconf, req.imgsz as usize, false, false);
+    let eval_stats = analyze_model(&eval_mconf, req.imgsz as usize, false, false)?;
     let eval_fixed_bytes = fixed_bytes.saturating_add(pool_round(params_bytes));
     let eval_per_sample_bytes =
         pool_round((eval_stats.eval_forward_bytes / 2).max(eval_stats.max_single_tensor));
@@ -556,6 +570,83 @@ impl ModelStats {
         self.conv_bn_act(2 * mid, c, 1, 1, h, w);
     }
 
+    /// Account for a `Linear(cin -> cout, bias=true)` layer on `tokens` rows.
+    fn linear_bias(&mut self, cin: usize, cout: usize, tokens: usize) {
+        let w_params = (cout as u64).saturating_mul(cin as u64);
+        self.conv_weight_params = self.conv_weight_params.saturating_add(w_params);
+        self.max_weight_elems = self.max_weight_elems.max(w_params).max(cout as u64);
+        self.params = self.params.saturating_add(w_params).saturating_add(cout as u64);
+        let elems = (tokens as u64).saturating_mul(cout as u64);
+        let out_bytes = elems.saturating_mul(4); // HyperContext/FullPadGate run Linear in F32
+        self.per_sample_bytes = self.per_sample_bytes.saturating_add(out_bytes.saturating_mul(2));
+        self.eval_forward_bytes = self.eval_forward_bytes.saturating_add(out_bytes);
+        self.record_single(out_bytes);
+    }
+
+    /// Account for one `WsQARepConv3x3(cin -> cout)` at `(h, w)`: 4 multi-branch conv weights (`3×3`, `1×3`,
+    /// `3×1`, `1×1` = `16 * cout * cin`), optional `gamma_id` (`cout` when `cin == cout`), `BN_post`, and
+    /// effective `3×3` conv activations + wgrad scratch.
+    fn ws_qarep_3x3(&mut self, cin: usize, cout: usize, h: usize, w: usize) {
+        let w33 = (cout as u64).saturating_mul(cin as u64).saturating_mul(9);
+        let w_branches = (cout as u64).saturating_mul(cin as u64).saturating_mul(16);
+        let gamma_id = if cin == cout { cout as u64 } else { 0 };
+        let bn_p = (cout as u64).saturating_mul(2);
+        self.conv_weight_params = self.conv_weight_params.saturating_add(w_branches);
+        self.max_weight_elems = self.max_weight_elems.max(w33).max(cout as u64);
+        self.params = self.params.saturating_add(w_branches).saturating_add(gamma_id).saturating_add(bn_p);
+        self.bn_buffers = self.bn_buffers.saturating_add(bn_p);
+        let elems = (cout as u64).saturating_mul(h as u64).saturating_mul(w as u64);
+        let elem = self.elem_bytes();
+        let bytes_per_elem: u64 = if self.amp { 8 } else { 12 };
+        self.per_sample_bytes = self.per_sample_bytes.saturating_add(elems.saturating_mul(bytes_per_elem));
+        self.eval_forward_bytes = self.eval_forward_bytes.saturating_add(elems.saturating_mul(elem));
+        self.record_single(elems.saturating_mul(elem));
+        if self.record_convs {
+            self.convs.push(ConvWgradShape { cin, cout, k: 3, groups: 1, oh: h, ow: w });
+        }
+    }
+
+    /// Account for one FOLO v2 `FoloBlock(c1 -> c2, m, c_mid)` at `(h, w)`.
+    fn folo_block(&mut self, c1: usize, c2: usize, m: usize, c_mid: usize, h: usize, w: usize) {
+        let taps: usize = if m <= 2 { 1 } else { 2 };
+        self.conv_bn_act(c1, 2 * c_mid, 1, 1, h, w);
+        for _ in 0..m {
+            self.ws_qarep_3x3(c_mid, c_mid, h, w);
+        }
+        let cat_c = (2usize + taps).saturating_mul(c_mid);
+        let cat_bytes = (cat_c as u64)
+            .saturating_mul(h as u64)
+            .saturating_mul(w as u64)
+            .saturating_mul(self.elem_bytes());
+        self.per_sample_bytes = self.per_sample_bytes.saturating_add(cat_bytes);
+        self.eval_forward_bytes = self.eval_forward_bytes.saturating_add(cat_bytes);
+        self.record_single(cat_bytes);
+        self.conv_bn_act(cat_c, c2, 1, 1, h, w);
+    }
+
+    /// Account for FOLO v2 `HyperContext(c5, m_edges)` at P5 `(h, w)`.
+    fn hyper_context(&mut self, c5: usize, m_edges: usize, h: usize, w: usize) {
+        let c_g = c5 / 2;
+        self.conv_bn_act(c5, m_edges + c_g, 1, 1, h, w);
+        let tokens = (h as u64).saturating_mul(w as u64);
+        let attn_f32 = (m_edges as u64).saturating_mul(tokens).saturating_mul(4);
+        self.per_sample_bytes = self.per_sample_bytes.saturating_add(attn_f32.saturating_mul(6));
+        self.eval_forward_bytes = self.eval_forward_bytes.saturating_add(attn_f32.saturating_mul(3));
+        self.record_single(attn_f32);
+        self.linear_bias(c_g, c_g, m_edges);
+        self.linear_bias(c_g, c_g, m_edges);
+        self.conv_bn_act(c_g, c5, 1, 1, h, w);
+    }
+
+    /// Account for one FOLO v2 `ClsBranchV2(cin -> c_cls -> nc)` at `(hw, hw)`.
+    fn cls_branch_v2(&mut self, cin: usize, c_cls: usize, nc: usize, hw: usize) {
+        if cin != c_cls {
+            self.conv_bn_act(cin, c_cls, 1, 1, hw, hw);
+        }
+        self.ws_qarep_3x3(c_cls, c_cls, hw, hw);
+        self.conv2d_bias(c_cls, nc, 1, hw, hw);
+    }
+
     fn detect_branch(&mut self, chs: [usize; 3], imgsz: usize, nc: usize, reg_max: usize) {
         let c2 = 16usize.max(chs[0] / 4).max(4 * reg_max);
         let c3 = chs[0].max(nc.min(100));
@@ -574,6 +665,127 @@ impl ModelStats {
             self.conv2d_bias(c3, nc, 1, hw, hw);
         }
     }
+}
+
+fn analyze_model(cfg: &ModelConfig, imgsz: usize, amp: bool, record_convs: bool) -> Result<ModelStats> {
+    if cfg.is_v2() {
+        let v2 = FoloV2Config::from_model_config(cfg)?;
+        Ok(analyze_folo_v2_model(&v2, imgsz, amp, record_convs))
+    } else {
+        Ok(analyze_folo_model(cfg, imgsz, amp, record_convs))
+    }
+}
+
+fn analyze_folo_v2_model(cfg: &FoloV2Config, imgsz: usize, amp: bool, record_convs: bool) -> ModelStats {
+    let s = ScalingV2::of(cfg);
+    let mut st = ModelStats::new(amp, record_convs);
+
+    let in_bytes =
+        (cfg.in_channels as u64).saturating_mul(imgsz as u64).saturating_mul(imgsz as u64).saturating_mul(4);
+    st.per_sample_bytes = st.per_sample_bytes.saturating_add(in_bytes);
+    st.eval_forward_bytes = st.eval_forward_bytes.saturating_add(in_bytes);
+    st.record_single(in_bytes);
+
+    let (h2, h4, h8, h16, h32) = (imgsz / 2, imgsz / 4, imgsz / 8, imgsz / 16, imgsz / 32);
+    let (c0, c1, c3, c4) = (s.ch(64), s.ch(128), s.ch(256), s.ch(512));
+    let (c5, c6, c7, c8) = (s.ch(512), s.ch(512), s.ch(1024), s.ch(1024));
+    let c9 = c8;
+    let (c13, c16, c19, c22) = (s.ch(512), s.ch(256), s.ch(512), s.ch(1024));
+    let c_p2 = c1;
+    let c_g = c9 / 2;
+
+    // BackboneV2
+    if cfg.spd_stem {
+        st.conv_bn_act(4 * cfg.in_channels, c0, 1, 1, h2, h2);
+    } else {
+        st.conv_bn_act(cfg.in_channels, c0, 3, 1, h2, h2);
+    }
+    st.conv_bn_act(c0, c1, 3, 1, h4, h4);
+    for _ in 0..s.stage2_m {
+        st.ws_qarep_3x3(c1, c1, h4, h4);
+    }
+    st.conv_bn_act(c1, c3, 3, 1, h8, h8);
+    st.folo_block(c3, c4, s.bb_m, c3 / 2, h8, h8);
+    st.conv_bn_act(c4, c5, 3, 1, h16, h16);
+    st.folo_block(c5, c6, s.bb_m, c6 / 2, h16, h16);
+    st.conv_bn_act(c6, c7, 3, 1, h32, h32);
+    st.folo_block(c7, c8, s.bb_m, c8 / 2, h32, h32);
+    st.sppf(c8, c9, h32, h32);
+    st.hyper_context(c9, s.hyper_edges, h32, h32);
+
+    // NeckV2
+    let elem = st.elem_bytes();
+    let cat_bytes = |c_sum: usize, h: usize| -> u64 {
+        (c_sum as u64).saturating_mul(h as u64).saturating_mul(h as u64).saturating_mul(elem)
+    };
+    st.record_single(cat_bytes(c9 + c6, h16));
+    st.folo_block(c9 + c6, c13, s.neck_m, c13 / 2, h16, h16);
+    st.conv_bn_act(4 * c1, c_p2, 1, 1, h8, h8); // p2_proj
+    st.record_single(cat_bytes(c13 + c4 + c_p2, h8));
+    st.folo_block(c13 + c4 + c_p2, c16, s.out3_m, c16 / 2, h8, h8);
+    st.conv_bn_act(c16, c16, 3, 1, h16, h16); // down3
+    st.record_single(cat_bytes(c16 + c13, h16));
+    st.folo_block(c16 + c13, c19, s.neck_m, c19 / 2, h16, h16);
+    st.conv_bn_act(c19, c19, 3, 1, h32, h32); // down4
+    st.record_single(cat_bytes(c19 + c9, h32));
+    st.folo_block(c19 + c9, c22, s.out5_m, c22 / 2, h32, h32);
+    if cfg.fullpad {
+        st.linear_bias(c_g, c16, 1);
+        st.linear_bias(c_g, c19, 1);
+    }
+
+    // LazyAlignHead
+    let chs = [c16, c19, c22];
+    let strides = [8usize, 16, 32];
+    for (&cin, &stride) in chs.iter().zip(&strides) {
+        let hw = imgsz / stride;
+        st.ws_qarep_3x3(cin, s.c_box, hw, hw);
+        st.ws_qarep_3x3(s.c_box, s.c_box, hw, hw);
+        st.conv2d_bias(s.c_box, 4 * cfg.reg_max, 1, hw, hw);
+        if cfg.iou_head {
+            st.conv2d_bias(s.c_box, 1, 1, hw, hw);
+        }
+        st.cls_branch_v2(cin, s.c_cls, cfg.num_classes, hw);
+    }
+    if cfg.has_o2o() {
+        let saved_eval = st.eval_forward_bytes;
+        for (&cin, &stride) in chs.iter().zip(&strides) {
+            let hw = imgsz / stride;
+            st.cls_branch_v2(cin, s.c_cls, cfg.num_classes, hw);
+            st.conv2d_bias(s.c_cls, 1, 1, hw, hw); // PeakSuppress::gate
+            st.params = st.params.saturating_add(cfg.num_classes as u64); // PeakSuppress::alpha_raw
+            st.max_weight_elems = st.max_weight_elems.max(cfg.num_classes as u64);
+        }
+        // Under default `o2o_detach == true`, `LazyAlignHead::forward_o2o` re-runs the shared box branch
+        // (`forward_box_only`) on detached features during training: zero extra parameters or eval memory,
+        // but a second set of box-branch autograd activations.
+        let saved_params = st.params;
+        let saved_conv_weights = st.conv_weight_params;
+        let saved_bn_buffers = st.bn_buffers;
+        let saved_convs_len = st.convs.len();
+        for (&cin, &stride) in chs.iter().zip(&strides) {
+            let hw = imgsz / stride;
+            st.ws_qarep_3x3(cin, s.c_box, hw, hw);
+            st.ws_qarep_3x3(s.c_box, s.c_box, hw, hw);
+            st.conv2d_bias(s.c_box, 4 * cfg.reg_max, 1, hw, hw);
+        }
+        st.params = saved_params;
+        st.conv_weight_params = saved_conv_weights;
+        st.bn_buffers = saved_bn_buffers;
+        st.convs.truncate(saved_convs_len);
+        st.eval_forward_bytes = saved_eval;
+    }
+
+    let anchors = total_anchors(imgsz);
+    let box_raw_f32 = (4u64.saturating_mul(cfg.reg_max as u64)).saturating_mul(anchors).saturating_mul(4);
+    let cls_raw_f32 = (cfg.num_classes as u64).saturating_mul(anchors).saturating_mul(4);
+    let head_branches: u64 = if cfg.has_o2o() { 2 } else { 1 };
+    let loss_work =
+        box_raw_f32.saturating_add(cls_raw_f32).saturating_mul(3).saturating_add(anchors.saturating_mul(32));
+    st.per_sample_bytes = st.per_sample_bytes.saturating_add(loss_work.saturating_mul(head_branches));
+    st.record_single(box_raw_f32);
+    st.record_single(cls_raw_f32);
+    st
 }
 
 fn analyze_folo_model(cfg: &ModelConfig, imgsz: usize, amp: bool, record_convs: bool) -> ModelStats {

@@ -540,6 +540,56 @@ pub enum DistillAssignment {
     Device(folo_gpu::detect::Assignment),
 }
 
+impl DistillAssignment {
+    /// Convert to a host [`BatchAssignment`] (zero-copy borrow on CPU; unpacks device foreground slots on GPU).
+    pub(crate) fn as_host<'a>(
+        &'a self,
+        batch: usize,
+        num_anchors: usize,
+        num_classes: usize,
+        targets: &[ImageTargets],
+    ) -> Result<std::borrow::Cow<'a, BatchAssignment>> {
+        match self {
+            DistillAssignment::Host(a) => Ok(std::borrow::Cow::Borrowed(a)),
+            DistillAssignment::Device(asg) => {
+                let (g, k) = (asg.desc.g, asg.desc.k);
+                let picks = asg.picks.to_vec::<u32>()?;
+                let slots = asg.slots.to_vec::<u32>()?;
+                let mut fg: Vec<(u32, u32, u32, f32, Xyxy)> = Vec::new();
+                for s in 0..batch * g * k {
+                    if slots[2 * s + 1] == 1 {
+                        let (i, gi) = (s / (g * k), (s / k) % g);
+                        let a = picks[3 * s];
+                        fg.push((
+                            i as u32,
+                            a,
+                            targets[i].labels[gi],
+                            f32::from_bits(slots[2 * s]),
+                            targets[i].boxes[gi],
+                        ));
+                    }
+                }
+                fg.sort_by_key(|e| (e.0, e.1));
+                let mut out = BatchAssignment {
+                    batch,
+                    num_anchors,
+                    num_classes,
+                    inputs_finite: true,
+                    ..Default::default()
+                };
+                for (i, a, l, t, bx) in fg {
+                    out.image.push(i);
+                    out.anchor.push(a);
+                    out.label.push(l);
+                    out.score.push(t);
+                    out.target.push(bx);
+                }
+                Ok(std::borrow::Cow::Owned(out))
+            }
+        }
+    }
+}
+
 /// [`detection_loss`], also returning the supervised [`DistillAssignment`] when `keep_assignment` is true.
 pub fn detection_loss_for_distill(
     box_raw: &Tensor,

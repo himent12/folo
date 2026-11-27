@@ -85,20 +85,26 @@ impl LoadOptions {
     }
 }
 
-/// docs/MODEL.md §5: the class-dependent output layers `head.cls.{p3,p4,p5}.out.{weight,bias}` (and the
-/// one-to-one branch's `head.o2o.cls.*.out.*`, §6.6).
+/// docs/MODEL.md §5: the class-dependent output layers `head.cls.{p3,p4,p5}.out.{weight,bias}` (v1 and v2),
+/// v1's one-to-one `head.o2o.cls.{p3,p4,p5}.out.{weight,bias}` (§6.6), and v2's one-to-one
+/// `head.o2o.{p3,p4,p5}.cls.out.{weight,bias}` and `head.o2o.{p3,p4,p5}.suppress.alpha_raw` (§11).
 pub fn is_class_output(name: &str) -> bool {
-    let rest = name.strip_prefix("head.o2o.cls.").or_else(|| name.strip_prefix("head.cls."));
-    match rest {
-        Some(r) => {
-            let mut p = r.split('.');
-            matches!(
-                (p.next(), p.next(), p.next(), p.next()),
-                (Some("p3" | "p4" | "p5"), Some("out"), Some("weight" | "bias"), None)
-            )
-        }
-        None => false,
+    if let Some(r) = name.strip_prefix("head.o2o.cls.").or_else(|| name.strip_prefix("head.cls.")) {
+        let mut p = r.split('.');
+        return matches!(
+            (p.next(), p.next(), p.next(), p.next()),
+            (Some("p3" | "p4" | "p5"), Some("out"), Some("weight" | "bias"), None)
+        );
     }
+    if let Some(r) = name.strip_prefix("head.o2o.") {
+        let mut p = r.split('.');
+        return matches!(
+            (p.next(), p.next(), p.next(), p.next(), p.next()),
+            (Some("p3" | "p4" | "p5"), Some("cls"), Some("out"), Some("weight" | "bias"), None)
+                | (Some("p3" | "p4" | "p5"), Some("suppress"), Some("alpha_raw"), None, None)
+        );
+    }
+    false
 }
 
 /// Where the loaded tensors came from.
@@ -471,7 +477,12 @@ mod tests {
         assert_eq!(Namespace::of("emax.w"), Namespace::Model);
         assert!(is_class_output("head.cls.p3.out.weight"));
         assert!(is_class_output("head.o2o.cls.p5.out.bias"));
+        assert!(is_class_output("head.o2o.p3.cls.out.weight"));
+        assert!(is_class_output("head.o2o.p4.cls.out.bias"));
+        assert!(is_class_output("head.o2o.p5.suppress.alpha_raw"));
         assert!(!is_class_output("head.cls.p3.pw1.conv.weight"));
+        assert!(!is_class_output("head.o2o.p3.cls.c1.conv.weight"));
+        assert!(!is_class_output("head.o2o.p3.suppress.gate.weight"));
         assert!(!is_class_output("head.box.p3.out.bias"));
         assert!(!is_class_output("head.cls.p6.out.bias"));
     }

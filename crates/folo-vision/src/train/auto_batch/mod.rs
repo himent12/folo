@@ -42,7 +42,7 @@ const MAX_VAL_BATCH: usize = 4096;
 /// [`probe_batch_size`].
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AutoBatchRequest {
-    /// Detector architecture (`"folo-n"` … `"folo-x"`, or scale letter `"n"` … `"x"`).
+    /// Detector architecture (`"folo-n"` … `"folo-x"`, `"folo2-n"` … `"folo2-x"`, or scale letter `"n"` … `"x"`).
     pub arch: String,
     /// Square training image size (multiple of 32 in `64..=4096`).
     pub imgsz: u32,
@@ -69,7 +69,8 @@ pub struct AutoBatchRequest {
     /// Requested validation batch size (`0` = default `2 * chosen_batch`, clamped against `F32` eval limits).
     #[serde(default)]
     pub val_batch: usize,
-    /// Optional frozen distillation teacher architecture (`"folo-n"` … `"folo-x"` or scale letter `"n"` … `"x"`).
+    /// Optional frozen distillation teacher architecture (`"folo-n"` … `"folo-x"`, `"folo2-n"` … `"folo2-x"`, or
+    /// scale letter `"n"` … `"x"`).
     pub teacher_arch: Option<String>,
     /// Detection head of the frozen distillation teacher (`o2m` by default; `o2o` includes both resident branches).
     #[serde(default)]
@@ -607,14 +608,22 @@ fn buffer_limit_factor(budget: MemoryBudget, over_bytes: u64) -> BatchLimitFacto
     }
 }
 
-pub(super) fn parse_scale(arch: &str) -> Result<&str> {
-    let s = arch.strip_prefix("folo-").unwrap_or(arch);
+pub(super) fn parse_arch(arch: &str) -> Result<(bool, &str)> {
+    let (is_v2, s) = if let Some(rest) = arch.strip_prefix("folo2-") {
+        (true, rest)
+    } else if let Some(rest) = arch.strip_prefix("folo-") {
+        (false, rest)
+    } else {
+        (false, arch)
+    };
     match s {
-        "n" | "s" | "m" | "l" | "x" => Ok(s),
-        _ => {
-            Err(Error::Config(format!("arch `{arch}` is not one of folo-n, folo-s, folo-m, folo-l, folo-x")))
-        }
+        "n" | "s" | "m" | "l" | "x" => Ok((is_v2, s)),
+        _ => Err(Error::Config(format!("arch `{arch}` is not one of folo-n..x or folo2-n..x"))),
     }
+}
+
+pub(super) fn parse_scale(arch: &str) -> Result<&str> {
+    parse_arch(arch).map(|(_, s)| s)
 }
 
 fn fmt_bytes(bytes: u64) -> String {

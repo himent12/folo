@@ -8,6 +8,10 @@ use crate::model::HeadMode;
 /// Focal classification bias prior `ln(0.01 / 0.99) = -4.59512`, coupled strictly to MAL-trained runs.
 pub const MAL_CLS_BIAS_PRIOR: f32 = -4.595_12;
 
+fn default_true() -> bool {
+    true
+}
+
 /// Configuration of a [`super::FoloV2Model`].
 ///
 /// Defaults build the locked `FOLO v2-Iso` architecture:
@@ -32,17 +36,22 @@ pub struct FoloV2Config {
     pub head: HeadMode,
     /// Enable the opt-in separate `iou_out: Conv1×1(c_box → 1)` localization-quality head branch.
     /// Keeps `box.out` strictly `4 * reg_max = 64` channels (`% 16 == 0`).
+    #[serde(default)]
     pub iou_head: bool,
     /// Use lossless `SPD(2×2) + Conv1×1(4·in_channels → c0)` stem (`true`) or standard `Conv3×3 s=2`
     /// stem (`false`, pairing with CPU `u8-stem`).
+    #[serde(default = "default_true")]
     pub spd_stem: bool,
     /// High-capacity `v2-Plus` tier (`+1` `WS-QARepConv3x3` in `stage3/4/5` and `neck.out3` for `n`/`s`).
+    #[serde(default)]
     pub plus: bool,
     /// Enable relocated `FullPAD-Lite` global-context FiLM gates on `P3` and `P4` head inputs only
     /// (applied after `neck.down3`/`neck.down4` taps so the neck stays contiguous int8).
+    #[serde(default = "default_true")]
     pub fullpad: bool,
     /// Initialise `cls.out.bias` to [`MAL_CLS_BIAS_PRIOR`] (`-4.595`, `p0 = 0.01`, for MAL runs) instead
     /// of FOLO v1's per-level `cls_bias_prior` (for plain-BCE runs).
+    #[serde(default)]
     pub mal_bias_prior: bool,
     /// BatchNorm epsilon (default `1e-3`).
     pub bn_eps: f64,
@@ -111,6 +120,61 @@ impl FoloV2Config {
     /// Whether the config builds the dual `o2m + o2o` head.
     pub fn has_o2o(&self) -> bool {
         self.head == HeadMode::O2o
+    }
+
+    /// Convert this v2 config into a serialisable `.folo` [`folo_nn::io::ModelConfig`] (`family: "folo2"`,
+    /// `spec: 2`).
+    pub fn to_model_config(&self) -> Result<folo_nn::io::ModelConfig> {
+        self.validate()?;
+        let mut mc = folo_nn::io::ModelConfig::new_v2(&self.scale, self.num_classes)?;
+        mc.in_channels = self.in_channels;
+        mc.strides = self.strides.to_vec();
+        mc.reg_max = self.reg_max as u32;
+        mc.head = self.head.as_str().into();
+        mc.bn_eps = self.bn_eps;
+        mc.bn_momentum = self.bn_momentum;
+        mc.iou_head = Some(self.iou_head);
+        mc.spd_stem = Some(self.spd_stem);
+        mc.plus = Some(self.plus);
+        mc.fullpad = Some(self.fullpad);
+        mc.mal_bias_prior = Some(self.mal_bias_prior);
+        mc.validate()?;
+        Ok(mc)
+    }
+
+    /// Recover a [`FoloV2Config`] from a `.folo` [`folo_nn::io::ModelConfig`] (`family: "folo2"`).
+    pub fn from_model_config(mc: &folo_nn::io::ModelConfig) -> Result<Self> {
+        mc.validate()?;
+        if !mc.is_v2() {
+            return Err(Error::Metadata(format!("expected folo2 model config, got family `{}`", mc.family)));
+        }
+        let head = match mc.head.as_str() {
+            "o2m" => HeadMode::O2m,
+            "o2o" => HeadMode::O2o,
+            other => return Err(Error::Metadata(format!("unknown head `{other}`"))),
+        };
+        let strides: [u32; 3] = mc
+            .strides
+            .as_slice()
+            .try_into()
+            .map_err(|_| Error::Metadata(format!("expected 3 strides, got {:?}", mc.strides)))?;
+        let cfg = FoloV2Config {
+            scale: mc.scale.clone(),
+            num_classes: mc.num_classes,
+            in_channels: mc.in_channels,
+            reg_max: mc.reg_max as usize,
+            strides,
+            head,
+            iou_head: mc.iou_head.unwrap_or(false),
+            spd_stem: mc.spd_stem.unwrap_or(true),
+            plus: mc.plus.unwrap_or(false),
+            fullpad: mc.fullpad.unwrap_or(true),
+            mal_bias_prior: mc.mal_bias_prior.unwrap_or(false),
+            bn_eps: mc.bn_eps,
+            bn_momentum: mc.bn_momentum,
+        };
+        cfg.validate()?;
+        Ok(cfg)
     }
 
     /// Validate all fields before constructing a model.

@@ -11,6 +11,7 @@
 pub mod blocks;
 pub mod config;
 pub mod head;
+mod io;
 pub mod iou;
 
 use folo_core::rng::Rng;
@@ -284,6 +285,8 @@ impl HeadOutputV2 {
 /// A FOLO v2 detector (`folo2-<scale>`).
 pub struct FoloV2Model {
     config: FoloV2Config,
+    classes: Vec<String>,
+    imgsz: u32,
     mode: Mode,
     fused: bool,
     head_mode: HeadMode,
@@ -357,12 +360,51 @@ impl FoloV2Model {
             i,
         )?;
         let head_mode = config.head;
-        Ok(FoloV2Model { config, mode: Mode::new(), fused: false, head_mode, backbone, neck, head })
+        let classes = (0..config.num_classes).map(|k| format!("class{k}")).collect();
+        Ok(FoloV2Model {
+            config,
+            classes,
+            imgsz: 640,
+            mode: Mode::new(),
+            fused: false,
+            head_mode,
+            backbone,
+            neck,
+            head,
+        })
     }
 
     /// The model configuration.
     pub fn config(&self) -> &FoloV2Config {
         &self.config
+    }
+
+    /// Class names (`folo.classes`), length `num_classes`.
+    pub fn classes(&self) -> &[String] {
+        &self.classes
+    }
+
+    /// Set class names (`folo.classes`); must match `num_classes`.
+    pub fn set_classes(&mut self, classes: Vec<String>) -> Result<()> {
+        if classes.len() != self.config.num_classes {
+            return Err(Error::Invalid(format!(
+                "FoloV2Model::set_classes: expected {} class names, got {}",
+                self.config.num_classes,
+                classes.len()
+            )));
+        }
+        self.classes = classes;
+        Ok(())
+    }
+
+    /// Default training / inference image size (`folo.imgsz`).
+    pub fn imgsz(&self) -> u32 {
+        self.imgsz
+    }
+
+    /// Set default training / inference image size (`folo.imgsz`).
+    pub fn set_imgsz(&mut self, imgsz: u32) {
+        self.imgsz = imgsz;
     }
 
     /// Architecture identifier, e.g. `"folo2-n"`.
@@ -421,6 +463,113 @@ impl FoloV2Model {
         self.head.fuse_()?;
         self.fused = true;
         Ok(())
+    }
+
+    /// Return a detached, eval-mode, fused clone of this model on the same device and dtype without mutating
+    /// `self` (used by `Trainer::validate_epoch` and `FoloV2Model::export` so `WS-QARepConv3x3` multi-branch
+    /// convolutions and BatchNorms are folded cleanly in `F32` before inference or export).
+    pub fn fused_eval_clone(&self) -> Result<Self> {
+        let mut clone = FoloV2Model::new(self.config.clone())?;
+        clone.classes = self.classes.clone();
+        clone.imgsz = self.imgsz;
+        clone.head_mode = self.head_mode;
+        clone.head.o2o_detach = self.head.o2o_detach;
+        if self.fused {
+            clone.fuse()?;
+        }
+        let dev = self.device();
+        let dtype = self.dtype();
+        clone.to_dtype(dtype)?;
+        clone.to_device(dev)?;
+        {
+            let _g = no_grad();
+            let src = self.named_tensors();
+            let dst = clone.named_tensors();
+            if src.len() != dst.len() {
+                return Err(Error::Invalid(format!(
+                    "FoloV2Model::fused_eval_clone: tensor count mismatch ({} vs {})",
+                    src.len(),
+                    dst.len()
+                )));
+            }
+            for (s, d) in src.iter().zip(dst.iter()) {
+                if s.name != d.name {
+                    return Err(Error::Invalid(format!(
+                        "FoloV2Model::fused_eval_clone: tensor name mismatch (`{}` vs `{}`)",
+                        s.name, d.name
+                    )));
+                }
+                if d.tensor.device() != s.tensor.device() {
+                    d.tensor.copy_from(&s.tensor.to_device(d.tensor.device())?)?;
+                } else {
+                    d.tensor.copy_from(&s.tensor)?;
+                }
+            }
+        }
+        if !self.fused {
+            if dtype != DType::F32 {
+                clone.to_dtype(DType::F32)?;
+            }
+            clone.fuse()?;
+            if dtype != DType::F32 {
+                clone.to_dtype(dtype)?;
+            }
+        }
+        clone.eval();
+        for p in clone.parameters() {
+            p.set_requires_grad(false);
+        }
+        Ok(clone)
+    }
+
+    /// Return a detached, eval-mode, fused CPU `F32` clone without mutating `self`.
+    ///
+    /// Used by [`FoloV2Model::export`] so unfused `F16` models fold directly in `F32` without rounding back to
+    /// `F16` and GPU models download each tensor once instead of round-tripping through device memory.
+    pub(crate) fn fused_cpu_f32_clone(&self) -> Result<Self> {
+        let mut clone = FoloV2Model::new(self.config.clone())?;
+        clone.classes = self.classes.clone();
+        clone.imgsz = self.imgsz;
+        clone.head_mode = self.head_mode;
+        clone.head.o2o_detach = self.head.o2o_detach;
+        if self.fused {
+            clone.fuse()?;
+        }
+        {
+            let _g = no_grad();
+            let src = self.named_tensors();
+            let dst = clone.named_tensors();
+            if src.len() != dst.len() {
+                return Err(Error::Invalid(format!(
+                    "FoloV2Model::fused_cpu_f32_clone: tensor count mismatch ({} vs {})",
+                    src.len(),
+                    dst.len()
+                )));
+            }
+            for (s, d) in src.iter().zip(dst.iter()) {
+                if s.name != d.name {
+                    return Err(Error::Invalid(format!(
+                        "FoloV2Model::fused_cpu_f32_clone: tensor name mismatch (`{}` vs `{}`)",
+                        s.name, d.name
+                    )));
+                }
+                let cpu_t = if s.tensor.device().is_cpu() {
+                    s.tensor.clone()
+                } else {
+                    s.tensor.to_device(Device::Cpu)?
+                };
+                let f32_t = if cpu_t.dtype() == DType::F32 { cpu_t } else { cpu_t.to_dtype(DType::F32)? };
+                d.tensor.copy_from(&f32_t)?;
+            }
+        }
+        if !self.fused {
+            clone.fuse()?;
+        }
+        clone.eval();
+        for p in clone.parameters() {
+            p.set_requires_grad(false);
+        }
+        Ok(clone)
     }
 
     /// Device holding the model weights.
