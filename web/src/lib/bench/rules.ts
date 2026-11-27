@@ -84,9 +84,6 @@ export function rankEntries(entries: readonly BenchEntry[]): BenchEntry[] {
   return [...complete, ...partial, ...rest];
 }
 
-/** The benchmark's leader as the server names it (`Bench.best`): the first ranked entry of `rankEntries`. */
-export const leaderOf = (entries: readonly BenchEntry[]) => rankEntries(entries).find(ranked);
-
 /** What is wrong with a benchmark's name, or null. */
 export function benchNameError(name: string): string | null {
   const n = name.trim();

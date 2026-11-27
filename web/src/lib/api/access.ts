@@ -32,6 +32,7 @@ export class Access implements AccessWatch {
   #attempt = 0;
   #timer: ReturnType<typeof setTimeout> | undefined;
   #ctrl: AbortController | null = null;
+  #onBack: (() => void) | null = null;
 
   /** The status the latest check refused Studio with (401, 403), or null: let in, or nothing refused yet. */
   get refusal(): 401 | 403 | null {
@@ -46,9 +47,10 @@ export class Access implements AccessWatch {
   }
 
   /** The server in use changed: forget any refusal; a check still out is cancelled and says nothing; `check` asks the new one. */
-  reset(check: Check | null): void {
+  reset(check: Check | null, onBack?: () => void): void {
     this.#checks++;
     this.#check = check;
+    this.#onBack = onBack ?? null;
     this.#out = false;
     this.#again = false;
     this.#attempt = 0;
@@ -104,6 +106,7 @@ export class Access implements AccessWatch {
       if (this.#refusal.peek() !== null) {
         this.#refusal.set(null);
         this.#back.set(this.#back.peek() + 1);
+        this.#onBack?.();
       }
       return;
     }

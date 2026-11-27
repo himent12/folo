@@ -762,7 +762,7 @@ export class LiveRun {
       load().then(
         (owed) => void (owed && !closed && (syncTimer = setTimeout(() => void (this.#pending() && sync(1)), 1000))),
         (e) => {
-          if (closed) return;
+          if (closed || gone(e)) return;
           this.error = e;
           this.loading = false;
         },

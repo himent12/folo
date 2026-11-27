@@ -77,11 +77,6 @@ export const conditionsText = (n: number) => `${num(n)} ${n === 1 ? 'condition' 
 /** A split's name as a sentence has it: "val" → "validation split". */
 const SPLIT: Record<string, string> = { train: 'training split', val: 'validation split', test: 'test split' };
 
-/** Where a benchmark's images came from, as two facts: the source's name and what it is ("validation split", "labeling job"). */
-export function sourceFacts(b: Pick<Bench, 'source' | 'source_name'>): [string, string] {
-  return [b.source_name, sourceKind(b.source)];
-}
-
 /** "validation split", "labeling job". */
 export function sourceKind(s: BenchSource): string {
   return s.kind === 'dataset' ? (SPLIT[s.split ?? 'val'] ?? `${s.split} split`) : 'labeling job';
@@ -202,9 +197,6 @@ export const noConfidences = (e: Pick<BenchEntry, 'contestant'>) => (e.contestan
 export const calibrationNone = (e: Pick<BenchEntry, 'contestant' | 'scored'>) =>
   e.scored ? 'no detection on the unchanged images reached confidence 0.1' : noConfidences(e);
 export const givesNone = (e: Pick<BenchEntry, 'contestant'>) => (e.contestant?.kind === 'external' ? 'was scored without confidences' : 'gives no confidences');
-
-/** "Model", "Agent", "External": what kind of contestant, in one word. */
-export const KIND: Record<BenchEntry['contestant']['kind'], string> = { model: 'Model', agent: 'Agent', external: 'External' };
 
 /**
  * What an entry was graded on, where it differs from the whole benchmark, one fact each: "48 of 360 images",
@@ -342,9 +334,6 @@ export const FROZEN = 'This benchmark has finished or running entries; its plan 
 
 
 // ---------- reading a result: docs/BENCH.md's "The score", "Definitions" and "Reading it", said for one entry ----------
-
-/** Half a 95% interval's width. */
-export const halfWidth = (ci: readonly [number, number]) => Math.max(0, (ci[1] - ci[0]) / 2);
 
 /**
  * The "± 0.018" of a value whose interval is symmetric about it as printed (three decimals: 0.641 in 0.623–0.659), else

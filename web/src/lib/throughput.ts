@@ -91,11 +91,6 @@ export function timeRange(lo: number, hi: number): string {
   return `${minutes(a, false)} min – ${hours(b)} h`;
 }
 
-/** One rough time ("~18 min", "~1.2 h"), for figures that have no range. */
-export function roughTime(s: number): string {
-  return s < 3600 ? `~${Math.max(1, Math.round(s / 60))} min` : `~${hours(s)} h`;
-}
-
 /** "this GPU" / "this CPU": the device an estimate is for, in a sentence. */
 export const thisDevice = (device: string) => (device === 'cpu' ? 'this CPU' : 'this GPU');
 

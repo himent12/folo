@@ -340,6 +340,7 @@ export class HttpApi implements Api {
     readonly base: string = '',
     readonly reach?: Reachability,
     readonly access?: AccessWatch,
+    readonly onRecover?: (fn: () => void) => () => void,
   ) {}
 
   /** A 401 or 403 to an `/api/` request may be the server no longer letting Studio in (a proxy that stopped sending the
@@ -350,7 +351,7 @@ export class HttpApi implements Api {
 
   /** An event stream whose opening, dropping, and 401/403 refusals also update `reach` and `access`. */
   #stream<M>(url: string, events: readonly (keyof M & string)[], handlers: EventHandlers<M>): () => void {
-    const watch = this.reach || this.access ? { reach: this.reach, access: this.access } : undefined;
+    const watch = this.reach || this.access || this.onRecover ? { reach: this.reach, access: this.access, onRecover: this.onRecover } : undefined;
     return openEventStream(url, events, handlers, undefined, undefined, watch);
   }
 

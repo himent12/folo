@@ -609,4 +609,40 @@ describe('LiveRun ordering', () => {
     expect(live.epochs.map((e) => e.epoch)).toEqual([1, 2]);
     stop();
   });
+
+  it('closes the SSE stream immediately when the initial load returns 404', async () => {
+    const closes = vi.fn();
+    const gone = new ApiError(404, 'run_not_found', 'No run with id run_missing.');
+    const runSpy = vi.fn(() => Promise.reject(gone));
+    hub.api = {
+      ...hub.api,
+      run: runSpy,
+      runMetrics: vi.fn(() => Promise.reject(gone)),
+      runLogs: vi.fn(() => Promise.reject(gone)),
+      runEvents: (_id, h) => {
+        handlers = h;
+        return closes;
+      },
+    } as Api;
+    let live!: LiveRun;
+    const stop = root(() => {
+      live = new LiveRun(() => 'run_missing');
+    });
+    try {
+      flushSync();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(live.error).toBe(gone);
+      expect(live.loading).toBe(false);
+      expect(live.connection).toBe('idle');
+      expect(live.lost).toBeNull();
+      expect(closes).toHaveBeenCalledTimes(1);
+      // Subsequent stream errors or timers must not trigger another fetch.
+      const calls = runSpy.mock.calls.length;
+      handlers.connection?.('reconnecting');
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(runSpy.mock.calls.length).toBe(calls);
+    } finally {
+      stop();
+    }
+  });
 });

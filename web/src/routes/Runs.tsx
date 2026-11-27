@@ -719,8 +719,7 @@ css`
   }
   /* The prerequisite, beside the action it gates: 12 px secondary, one line. */
   .cmp-hint,
-  .tool-hint,
-  .rows-hint {
+  .tool-hint {
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
     color: var(--text-secondary);
@@ -729,7 +728,6 @@ css`
     align-self: center;
     white-space: nowrap;
   }
-  .rows-hint,
   .tool-hint {
     display: none;
   }

@@ -181,8 +181,3 @@ export function escapeText(s: string): string {
 export function escapeAttr(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
 }
-
-/** An attribute value from a JSX string literal (raw source between the quotes) for the template: entities stay. */
-export function rawAttr(raw: string): string {
-  return raw.replace(/"/g, '&quot;');
-}

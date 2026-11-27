@@ -4,7 +4,7 @@
 import { flush } from 'fw';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { prefs } from '$lib/prefs';
-import { rank } from '$lib/shell/commands';
+import { rank } from '$lib/shell/commandPalette/scoring';
 import { themeCommands } from '$lib/shell/themeCommands';
 import { render } from '../../../framework/testing';
 import { parseThemeFile, THEME_FILE_MAX, type ParsedFile } from '$lib/design/themes';

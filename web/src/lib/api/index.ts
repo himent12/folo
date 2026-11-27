@@ -269,8 +269,17 @@ class Hub {
       ok: () => void (attempt === this.#attempt && this.#reach.ok()),
       failed: () => void (attempt === this.#attempt && this.#reach.failed()),
     };
-    const http = new HttpApi(prefs.serverUrl, reach, this.#access);
-    await new Promise<void>((settled) => void this.#reachServer(http, attempt, ctrl.signal, settled));
+    const recover = new Set<() => void>();
+    const onRecover = (fn: () => void) => {
+      recover.add(fn);
+      return () => void recover.delete(fn);
+    };
+    const fireRecover = () => {
+      if (attempt !== this.#attempt) return;
+      for (const fn of [...recover]) fn();
+    };
+    const http = new HttpApi(prefs.serverUrl, reach, this.#access, onRecover);
+    await new Promise<void>((settled) => void this.#reachServer(http, attempt, ctrl.signal, fireRecover, settled));
   }
 
   /**
@@ -278,7 +287,7 @@ class Hub {
    * answer that is not (another program, a 404 page, a sign-in wall, a server that wants a token) is said (`refused`)
    * and asked again.
    */
-  async #reachServer(http: HttpApi, attempt: number, abort: AbortSignal, settled: () => void): Promise<void> {
+  async #reachServer(http: HttpApi, attempt: number, abort: AbortSignal, fireRecover: () => void, settled: () => void): Promise<void> {
     const unreachable = (refused?: string | null) => {
       if (attempt !== this.#attempt) return;
       if (refused !== undefined) this.#refused.set(refused);
@@ -343,9 +352,15 @@ class Hub {
               if (attempt !== this.#attempt) return;
               void this.#learn(http.base, attempt, abort);
               this.#access.recheck(true);
+              if (this.#access.refusal === null) fireRecover();
             },
           );
-          this.#access.reset((s) => accessCheck(http.base, s));
+          this.#access.reset(
+            (s) => accessCheck(http.base, s),
+            () => {
+              if (attempt === this.#attempt && !this.#reach.offline) fireRecover();
+            },
+          );
           this.version = h.version;
           this.features = featuresOf(h);
           this.#serverMock.set(h.mock === true);

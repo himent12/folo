@@ -122,20 +122,6 @@ export function exitBranch(): BranchTransitions {
   return t;
 }
 
-/** Internal: runs `fn` (which creates a branch's content) with `b` as the current branch; `introOk` lets intros play. */
-export function inBranch<T>(b: Branch | null, introOk: boolean, fn: () => T): T {
-  enterBranch(introOk, b !== null);
-  try {
-    return fn();
-  } finally {
-    const t = exitBranch();
-    if (b !== null && t !== null) {
-      if (b.t === null) b.t = t;
-      else b.t.push(...t);
-    }
-  }
-}
-
 /**
  * The top nodes of a branch's value. A fragment's text run (text.ts, `$$run`) counts with what its splits rendered:
  * the run's nodes, and its parts, which are memos the run owns, read for the nodes they hold (never called again).

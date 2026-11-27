@@ -121,6 +121,7 @@ export default function Dataset() {
 
   /** Changes query params (null removes one): `push` adds a history entry, anything else replaces this one. */
   function setQuery(patch: Record<string, string | null>, push = false) {
+    if (router.location.name !== 'dataset' || router.location.params.id !== id.peek()) return;
     const before = router.route.query.toString();
     const q = new URLSearchParams(router.route.query);
     for (const [k, v] of Object.entries(patch)) {
