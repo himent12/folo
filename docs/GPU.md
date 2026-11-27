@@ -135,7 +135,9 @@ bind groups created (the backend benchmark prints them per pass).
 
 **Waiting.** A wait for the GPU (`sync()`, a readback) first polls the device without blocking, for up to 2 ms
 (`ctx.set_wait_spin(d)`, or `FOLO_GPU_WAIT_SPIN_US=n` for contexts created afterwards; 0 blocks at once), and
-only then blocks in the driver. `ctx.work_stats()` counts the waits that ended while polling (`spin_waits`) and
+only then blocks in the driver. Readbacks wait only for their own `wgpu::SubmissionIndex` (`PollType::Wait {
+submission_index, timeout: None }`) and stop spinning as soon as their map callback fires (taking a zero-poll fast
+path if already mapped), so collecting an earlier deferred readback never stalls on newer queued GPU work. `ctx.work_stats()` counts the waits that ended while polling (`spin_waits`) and
 those that blocked (`blocked_waits`: no spin, or the GPU was still busy when it ran out). A blocked thread is woken
 some time after the GPU finishes, and in 46–76% of the synchronised batch-1 forwards on our test machine (an RTX
 4080 SUPER and an i7-14700KF) the thread woke on another logical processor than the one it waited on (often an
@@ -814,8 +816,15 @@ println!("{}", loss.item::<f32>()?);                  // the only wait for the G
   more): about 28 KiB per image instead of the 2.8 MB of a decoded `[A, 4 + nc]` head. Nothing waits on the GPU
   before that readback. `src/tests` has no tests for these two; they are tested against the CPU path in
   `crates/folo-vision/tests/gpu.rs` (letterbox bit for bit, candidates and detections to float rounding).
-- **Readback.** `download` decodes the mapped staging buffer straight into typed host storage
-  (`GpuContext::read_with`), and `Tensor::to_vec` takes that storage without another copy.
+- **Readback (deferred & single-submission batched).** `download` decodes the mapped staging buffer straight into typed host storage
+  (`GpuContext::read_with`), and `Tensor::to_vec` takes that storage without another copy. For pipelined workloads and
+  multi-tensor readbacks, `GpuContext::read_deferred` / `read_batch_deferred` / `read_batch` / `read_batch_async`
+  (returning `Readback` handles) and `folo_gpu::download_deferred` / `download_many_deferred` / `download_many` /
+  `download_many_async` (returning `DeferredDownload` handles) validate all ranges up front, encode all copies (and
+  any strided gathers) into a single command buffer and queue submission, and wait only on that submission's fence so
+  subsequent GPU work can overlap the DMA transfer. Dropping an unfinished `Readback` / `DeferredDownload` unmaps and
+  returns its staging buffer cleanly. `cargo bench -p folo-gpu --bench readback` times batched vs sequential
+  multi-tensor readbacks and pipelined deferred vs synchronous readbacks.
 - **No round trips.** Kernels only encode; nothing waits until a download (`to_vec`, `item`, `to_device(Cpu)`)
   or `folo_core::backend::synchronize(dev)`. Uploads flush the open batch; they do not wait. A YOLOv8n-shaped
   forward at batch 1 is 131 dispatches in one submission; forward + backward is about 2 200 dispatches in 3

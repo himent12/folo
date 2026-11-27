@@ -12,7 +12,7 @@ and FOLO Desktop (`apps/desktop`) for local inference.
 | Path | What it holds |
 |---|---|
 | `src/lib.rs` | Crate doc, module map and re-exports. |
-| `src/context/` | `GpuContext`: `device.rs` (adapter selection, device creation), `memory.rs` (allocation, uploads), `batch.rs` (the open command batch; `kernel` and `dispatch`), `binds.rs` (bind-group cache), `readback.rs`, `wait.rs` (`sync`, device loss), `plan.rs` (frozen dispatch lists, forward plans), `precompile.rs`, `trace.rs`. |
+| `src/context/` | `GpuContext`: `device.rs` (adapter selection, device creation), `memory.rs` (allocation, uploads), `batch.rs` (the open command batch; `kernel` and `dispatch`), `binds.rs` (bind-group cache), `readback.rs` (single, deferred `Readback`, and single-submission batched readbacks), `wait.rs` (`sync`, submission-targeted waits, device loss), `plan.rs` (frozen dispatch lists, forward plans), `precompile.rs`, `trace.rs`. |
 | `src/pool.rs` | The size-class buffer pool (`GpuBuffer`, `PoolStats`). |
 | `src/memory_budget.rs` | Live & peak memory watermarks (`PeakMemory`), `MemoryLimits`, `MemoryUsage`, `MemoryBudget`, `HeadroomEstimate`, and OOM/limit diagnostics. |
 | `src/pipeline.rs` | `KernelDef`, `Spec` (specialisation constants), `Params` (the per-dispatch uniform block), the WGSL `PRELUDE`, `render` and pipeline compilation. |
@@ -26,8 +26,8 @@ and FOLO Desktop (`apps/desktop`) for local inference.
 | `src/distill.rs` | The fused distillation term (class and DFL KL against a teacher, docs/MODEL.md §8.9) on folo-core GPU tensors. |
 | `src/profile.rs` | Per-kernel GPU timings (`FOLO_GPU_PROFILE=1`). |
 | `src/dtype.rs`, `src/error.rs` | Buffer element types; `GpuError`. |
-| `src/tests/` | The GPU tests (unit tests, compiled with `cargo test`; `kernel_list.rs`, `pool.rs` and `pipeline_cache.rs` also have unit tests of their own): `backend/` (the backend against folo-core's CPU backend, by area) and kernel-level files (`gemm.rs`, `conv.rs`, `coop.rs`, `elementwise.rs`, ...) plus runtime tests (`runtime.rs`, `pool.rs`, `binds.rs`, `plan.rs`, `precompile.rs`, `pipeline_cache.rs`). |
-| `benches/` | `gemm.rs`, `conv.rs`, `conv_model.rs`, `elementwise.rs`, `backend.rs`, `pooling.rs`, `norm_softmax.rs`, `vision.rs`. |
+| `src/tests/` | The GPU tests (unit tests, compiled with `cargo test`; `kernel_list.rs`, `pool.rs` and `pipeline_cache.rs` also have unit tests of their own): `backend/` (the backend against folo-core's CPU backend, by area) and kernel-level files (`gemm.rs`, `conv.rs`, `coop.rs`, `elementwise.rs`, ...) plus runtime tests (`runtime.rs`, `readback.rs`, `pool.rs`, `binds.rs`, `plan.rs`, `precompile.rs`, `pipeline_cache.rs`). |
+| `benches/` | `gemm.rs`, `conv.rs`, `conv_model.rs`, `elementwise.rs`, `backend.rs`, `pooling.rs`, `norm_softmax.rs`, `vision.rs`, `readback.rs`. |
 
 There is no `tests/` folder at the crate root and no `build.rs`.
 
@@ -130,7 +130,7 @@ cargo bench -p folo-gpu --bench gemm          # also: conv, conv_model, elementw
 - Benches: `gemm` (GFLOPS, f32 and f16, transposed, batched), `conv` (conv2d at YOLO-typical shapes), `conv_model`
   (folo-n and folo-s forward convs at batch 16), `elementwise` (bandwidth of memory-bound kernels), `backend` (a
   YOLOv8n-shaped network on the GPU backend against the CPU backend), `pooling` (max/avg/adaptive pooling and 2×2
-  upsample backward), `vision` (`letterbox_rgb8` across 640p–4K resolutions in f32 and f16).
+  upsample backward), `vision` (`letterbox_rgb8` across 640p–4K resolutions in f32 and f16), `readback` (single-submission batched multi-tensor readbacks vs sequential, and pipelined deferred readbacks vs synchronous).
 
 ## Further reading
 

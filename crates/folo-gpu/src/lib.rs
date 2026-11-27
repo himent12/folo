@@ -60,12 +60,13 @@ pub mod profile;
 pub mod tensor;
 
 pub use backend::{
-    ForwardPlans, GpuBackend, GpuStorage, Tensors, context_for, dense_buffer, download_async, init,
+    DeferredDownload, ForwardPlans, GpuBackend, GpuStorage, Tensors, context_for, dense_buffer,
+    download_async, download_deferred, download_many, download_many_async, download_many_deferred, init,
     init_async, is_device_lost, poison_uninit, register, tensor_from_buffer,
 };
 pub use context::{
     AdapterSummary, Capabilities, Frozen, GpuContext, GpuOptions, MAX_PLAN_BYTES, MAX_PLAN_BYTES_EACH,
-    MAX_PLANS, Staged, TracedOp, WorkStats, request_tensor_cores,
+    MAX_PLANS, Readback, Staged, TracedOp, WorkStats, request_tensor_cores,
 };
 pub use dtype::DType;
 pub use error::{GpuError, Result};

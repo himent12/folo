@@ -20,6 +20,7 @@ mod pipeline_cache;
 mod plan;
 mod pool;
 mod precompile;
+mod readback;
 mod reduce;
 mod runtime;
 mod sites;

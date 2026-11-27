@@ -34,6 +34,7 @@ use crate::profile::Profiler;
 pub use device::AdapterSummary;
 pub use plan::{Frozen, MAX_PLAN_BYTES, MAX_PLAN_BYTES_EACH, MAX_PLANS};
 pub(crate) use plan::{Plan, PlanOutput};
+pub use readback::Readback;
 
 /// A stable id of a buffer for the bind-group cache (see `context/binds.rs`).
 pub(crate) fn buffer_id(buf: &wgpu::Buffer) -> u64 {

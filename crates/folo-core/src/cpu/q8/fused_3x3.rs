@@ -114,7 +114,7 @@ macro_rules! define_3x3_strip_isa {
             #[target_feature(enable = $feat)]
             #[inline]
             #[allow(clippy::too_many_arguments)]
-            unsafe fn k_loop_s2(
+            unsafe fn k_loop_s2<const VECS: usize>(
                 groups: usize,
                 a: *const i32,
                 slots: [*const u32; 3],
@@ -128,8 +128,8 @@ macro_rules! define_3x3_strip_isa {
                 let (mut c10, mut c11, mut c12) = (z, z, z);
                 let (mut c20, mut c21, mut c22) = (z, z, z);
                 let (mut c30, mut c31, mut c32) = (z, z, z);
-                // SAFETY: caller guarantees `groups * 9 * MR` weights and valid `(ev, od)` extents per slot.
-                // Pointer advances are guarded by `g + 1 < groups` so no pointer steps past the buffer end.
+                // SAFETY: caller guarantees `groups * 9 * MR` weights and valid `(ev, od)` extents per slot
+                // (`col + VECS * 8 <= ev_w`). Pointer advances are guarded by `g + 1 < groups`.
                 unsafe {
                     let mut p0 = slots[0].add(col);
                     let mut p1 = slots[1].add(col);
@@ -140,16 +140,16 @@ macro_rules! define_3x3_strip_isa {
                         for ev in ptrs {
                             let od = ev.add(ev_w);
                             macro_rules! tap {
-                                        ($bp:expr, $aoff:expr) => {
-                                            let bp = ($bp) as *const __m256i;
-                                            let b0 = _mm256_loadu_si256(bp);
-                                            let b1 = _mm256_loadu_si256(bp.add(1));
-                                            let b2 = _mm256_loadu_si256(bp.add(2));
-                                            let wp = ap.add(($aoff) * MR);
-                                            define_3x3_strip_isa!(@dp $dp_mode, b0, b1, b2, wp,
-                                                c00, c01, c02, c10, c11, c12, c20, c21, c22, c30, c31, c32);
-                                        };
-                                    }
+                                ($bp:expr, $aoff:expr) => {
+                                    let bp = ($bp) as *const __m256i;
+                                    let b0 = _mm256_loadu_si256(bp);
+                                    let b1 = if VECS >= 2 { _mm256_loadu_si256(bp.add(1)) } else { z };
+                                    let b2 = if VECS >= 3 { _mm256_loadu_si256(bp.add(2)) } else { z };
+                                    let wp = ap.add(($aoff) * MR);
+                                    define_3x3_strip_isa!(@dp $dp_mode, VECS, b0, b1, b2, wp,
+                                        c00, c01, c02, c10, c11, c12, c20, c21, c22, c30, c31, c32);
+                                };
+                            }
                             tap!(od, 0);
                             tap!(ev, 1);
                             tap!(od.add(1), 2);
@@ -163,24 +163,24 @@ macro_rules! define_3x3_strip_isa {
                     }
                     let out = acc.0.as_mut_ptr() as *mut __m256i;
                     _mm256_store_si256(out, c00);
-                    _mm256_store_si256(out.add(1), c01);
-                    _mm256_store_si256(out.add(2), c02);
+                    if VECS >= 2 { _mm256_store_si256(out.add(1), c01); }
+                    if VECS >= 3 { _mm256_store_si256(out.add(2), c02); }
                     _mm256_store_si256(out.add(3), c10);
-                    _mm256_store_si256(out.add(4), c11);
-                    _mm256_store_si256(out.add(5), c12);
+                    if VECS >= 2 { _mm256_store_si256(out.add(4), c11); }
+                    if VECS >= 3 { _mm256_store_si256(out.add(5), c12); }
                     _mm256_store_si256(out.add(6), c20);
-                    _mm256_store_si256(out.add(7), c21);
-                    _mm256_store_si256(out.add(8), c22);
+                    if VECS >= 2 { _mm256_store_si256(out.add(7), c21); }
+                    if VECS >= 3 { _mm256_store_si256(out.add(8), c22); }
                     _mm256_store_si256(out.add(9), c30);
-                    _mm256_store_si256(out.add(10), c31);
-                    _mm256_store_si256(out.add(11), c32);
+                    if VECS >= 2 { _mm256_store_si256(out.add(10), c31); }
+                    if VECS >= 3 { _mm256_store_si256(out.add(11), c32); }
                 }
             }
 
             #[target_feature(enable = $feat)]
             #[inline]
             #[allow(clippy::too_many_arguments)]
-            unsafe fn k_loop_s1(
+            unsafe fn k_loop_s1<const VECS: usize>(
                 groups: usize,
                 a: *const i32,
                 slots: [*const u32; 3],
@@ -193,7 +193,7 @@ macro_rules! define_3x3_strip_isa {
                 let (mut c10, mut c11, mut c12) = (z, z, z);
                 let (mut c20, mut c21, mut c22) = (z, z, z);
                 let (mut c30, mut c31, mut c32) = (z, z, z);
-                // SAFETY: caller guarantees `groups * 9 * MR` weights and `col + NR + 2 <= slot_w` per group row.
+                // SAFETY: caller guarantees `groups * 9 * MR` weights and `col + VECS * 8 + 2 <= slot_w` per group row.
                 // Pointer advances are guarded by `g + 1 < groups` so no pointer steps past the buffer end.
                 unsafe {
                     let mut p0 = slots[0].add(col);
@@ -203,16 +203,16 @@ macro_rules! define_3x3_strip_isa {
                     for g in 0..groups {
                         for row_ptr in [p0, p1, p2] {
                             macro_rules! tap {
-                                        ($bp:expr, $aoff:expr) => {
-                                            let bp = ($bp) as *const __m256i;
-                                            let b0 = _mm256_loadu_si256(bp);
-                                            let b1 = _mm256_loadu_si256(bp.add(1));
-                                            let b2 = _mm256_loadu_si256(bp.add(2));
-                                            let wp = ap.add(($aoff) * MR);
-                                            define_3x3_strip_isa!(@dp $dp_mode, b0, b1, b2, wp,
-                                                c00, c01, c02, c10, c11, c12, c20, c21, c22, c30, c31, c32);
-                                        };
-                                    }
+                                ($bp:expr, $aoff:expr) => {
+                                    let bp = ($bp) as *const __m256i;
+                                    let b0 = _mm256_loadu_si256(bp);
+                                    let b1 = if VECS >= 2 { _mm256_loadu_si256(bp.add(1)) } else { z };
+                                    let b2 = if VECS >= 3 { _mm256_loadu_si256(bp.add(2)) } else { z };
+                                    let wp = ap.add(($aoff) * MR);
+                                    define_3x3_strip_isa!(@dp $dp_mode, VECS, b0, b1, b2, wp,
+                                        c00, c01, c02, c10, c11, c12, c20, c21, c22, c30, c31, c32);
+                                };
+                            }
                             tap!(row_ptr, 0);
                             tap!(row_ptr.add(1), 1);
                             tap!(row_ptr.add(2), 2);
@@ -226,17 +226,17 @@ macro_rules! define_3x3_strip_isa {
                     }
                     let out = acc.0.as_mut_ptr() as *mut __m256i;
                     _mm256_store_si256(out, c00);
-                    _mm256_store_si256(out.add(1), c01);
-                    _mm256_store_si256(out.add(2), c02);
+                    if VECS >= 2 { _mm256_store_si256(out.add(1), c01); }
+                    if VECS >= 3 { _mm256_store_si256(out.add(2), c02); }
                     _mm256_store_si256(out.add(3), c10);
-                    _mm256_store_si256(out.add(4), c11);
-                    _mm256_store_si256(out.add(5), c12);
+                    if VECS >= 2 { _mm256_store_si256(out.add(4), c11); }
+                    if VECS >= 3 { _mm256_store_si256(out.add(5), c12); }
                     _mm256_store_si256(out.add(6), c20);
-                    _mm256_store_si256(out.add(7), c21);
-                    _mm256_store_si256(out.add(8), c22);
+                    if VECS >= 2 { _mm256_store_si256(out.add(7), c21); }
+                    if VECS >= 3 { _mm256_store_si256(out.add(8), c22); }
                     _mm256_store_si256(out.add(9), c30);
-                    _mm256_store_si256(out.add(10), c31);
-                    _mm256_store_si256(out.add(11), c32);
+                    if VECS >= 2 { _mm256_store_si256(out.add(10), c31); }
+                    if VECS >= 3 { _mm256_store_si256(out.add(11), c32); }
                 }
             }
 
@@ -254,7 +254,8 @@ macro_rules! define_3x3_strip_isa {
                 let (group_stride, ev_w, slot_words, ord, buf) =
                     (r.group_stride, r.ev_w, r.slot_words, r.ord, r.buf);
                 let ohw = p.oh * p.ow;
-                let chunks = p.ow.div_ceil(NR);
+                let full_chunks = p.ow / NR;
+                let tail = p.ow % NR;
                 let ks = p.groups * 9;
                 let res_img_ptr = match &p.res_view {
                     Some(rv) => rv.data[rv.offset + img * rv.img_stride..].as_ptr(),
@@ -291,88 +292,95 @@ macro_rules! define_3x3_strip_isa {
                         let res_plane = if HAS_RES { res_img_ptr.add(g * ohw) } else { std::ptr::null() };
                         let q_plane = if OUT_U8 { q_img_ptr.add(g * ohw) } else { std::ptr::null_mut() };
                         let f_base = if !OUT_U8 { f_img_ptr.add(4 * g * ohw) } else { std::ptr::null_mut() };
-                        for chunk in 0..chunks {
+                        for chunk in 0..full_chunks {
                             let col = chunk * NR;
-                            let cols = NR.min(p.ow - col);
                             if IS_S2 {
-                                k_loop_s2(p.groups, a_panel, slots, group_stride, ev_w, col, &mut acc);
+                                k_loop_s2::<3>(p.groups, a_panel, slots, group_stride, ev_w, col, &mut acc);
                             } else {
-                                k_loop_s1(p.groups, a_panel, slots, group_stride, col, &mut acc);
+                                k_loop_s1::<3>(p.groups, a_panel, slots, group_stride, col, &mut acc);
                             }
-                            let res_ptr = if HAS_RES {
-                                if cols == NR {
-                                    res_plane.add(row_off + col)
-                                } else {
-                                    resw = [0u32; NR];
-                                    std::ptr::copy_nonoverlapping(
-                                        res_plane.add(row_off + col),
-                                        resw.as_mut_ptr(),
-                                        cols,
-                                    );
-                                    resw.as_ptr()
-                                }
-                            } else {
-                                std::ptr::null()
-                            };
+                            let res_ptr = if HAS_RES { res_plane.add(row_off + col) } else { std::ptr::null() };
                             if OUT_U8 {
-                                if cols == NR {
-                                    apply_epi_aligned::<SILU, HAS_RES, true>(
-                                        &acc,
-                                        &corr,
-                                        &scale,
-                                        &bias,
-                                        res_ptr,
-                                        &rs,
-                                        &rz,
-                                        &inv,
-                                        &z01_arr,
-                                        &z23_arr,
-                                        q_plane.add(row_off + col),
-                                        &mut fv,
-                                    );
-                                } else {
-                                    apply_epi_aligned::<SILU, HAS_RES, true>(
-                                        &acc,
-                                        &corr,
-                                        &scale,
-                                        &bias,
-                                        res_ptr,
-                                        &rs,
-                                        &rz,
-                                        &inv,
-                                        &z01_arr,
-                                        &z23_arr,
-                                        qw.as_mut_ptr(),
-                                        &mut fv,
-                                    );
-                                    std::ptr::copy_nonoverlapping(
-                                        qw.as_ptr(),
-                                        q_plane.add(row_off + col),
-                                        cols,
-                                    );
-                                }
+                                apply_epi_aligned::<SILU, HAS_RES, true, 3>(
+                                    &acc, &corr, &scale, &bias, res_ptr, &rs, &rz, &inv,
+                                    &z01_arr, &z23_arr, q_plane.add(row_off + col), &mut fv,
+                                );
                             } else {
-                                apply_epi_aligned::<SILU, HAS_RES, false>(
-                                    &acc,
-                                    &corr,
-                                    &scale,
-                                    &bias,
-                                    res_ptr,
-                                    &rs,
-                                    &rz,
-                                    &inv,
-                                    &z01_arr,
-                                    &z23_arr,
-                                    std::ptr::null_mut(),
-                                    &mut fv,
+                                apply_epi_aligned::<SILU, HAS_RES, false, 3>(
+                                    &acc, &corr, &scale, &bias, res_ptr, &rs, &rz, &inv,
+                                    &z01_arr, &z23_arr, std::ptr::null_mut(), &mut fv,
                                 );
                                 for (rr, row) in fv.iter().enumerate() {
                                     std::ptr::copy_nonoverlapping(
                                         row.as_ptr(),
                                         f_base.add(rr * ohw + row_off + col),
-                                        cols,
+                                        NR,
                                     );
                                 }
+                            }
+                        }
+                        if tail > 0 {
+                            let col = full_chunks * NR;
+                            macro_rules! run_tail {
+                                ($vecs:literal) => {{
+                                    if IS_S2 {
+                                        k_loop_s2::<$vecs>(p.groups, a_panel, slots, group_stride, ev_w, col, &mut acc);
+                                    } else {
+                                        k_loop_s1::<$vecs>(p.groups, a_panel, slots, group_stride, col, &mut acc);
+                                    }
+                                    let res_ptr = if HAS_RES {
+                                        if tail == $vecs * 8 {
+                                            res_plane.add(row_off + col)
+                                        } else {
+                                            resw = [0u32; NR];
+                                            std::ptr::copy_nonoverlapping(
+                                                res_plane.add(row_off + col),
+                                                resw.as_mut_ptr(),
+                                                tail,
+                                            );
+                                            resw.as_ptr()
+                                        }
+                                    } else {
+                                        std::ptr::null()
+                                    };
+                                    if OUT_U8 {
+                                        if tail == $vecs * 8 {
+                                            apply_epi_aligned::<SILU, HAS_RES, true, $vecs>(
+                                                &acc, &corr, &scale, &bias, res_ptr, &rs, &rz, &inv,
+                                                &z01_arr, &z23_arr, q_plane.add(row_off + col), &mut fv,
+                                            );
+                                        } else {
+                                            apply_epi_aligned::<SILU, HAS_RES, true, $vecs>(
+                                                &acc, &corr, &scale, &bias, res_ptr, &rs, &rz, &inv,
+                                                &z01_arr, &z23_arr, qw.as_mut_ptr(), &mut fv,
+                                            );
+                                            std::ptr::copy_nonoverlapping(
+                                                qw.as_ptr(),
+                                                q_plane.add(row_off + col),
+                                                tail,
+                                            );
+                                        }
+                                    } else {
+                                        apply_epi_aligned::<SILU, HAS_RES, false, $vecs>(
+                                            &acc, &corr, &scale, &bias, res_ptr, &rs, &rz, &inv,
+                                            &z01_arr, &z23_arr, std::ptr::null_mut(), &mut fv,
+                                        );
+                                        for (rr, row) in fv.iter().enumerate() {
+                                            std::ptr::copy_nonoverlapping(
+                                                row.as_ptr(),
+                                                f_base.add(rr * ohw + row_off + col),
+                                                tail,
+                                            );
+                                        }
+                                    }
+                                }};
+                            }
+                            if tail <= 8 {
+                                run_tail!(1);
+                            } else if tail <= 16 {
+                                run_tail!(2);
+                            } else {
+                                run_tail!(3);
                             }
                         }
                     }
@@ -398,53 +406,53 @@ macro_rules! define_3x3_strip_isa {
         }
     };
 
-    (@dp avxvnni, $b0:ident, $b1:ident, $b2:ident, $ap:ident,
+    (@dp avxvnni, $vecs:expr, $b0:ident, $b1:ident, $b2:ident, $ap:ident,
         $c00:ident, $c01:ident, $c02:ident,
         $c10:ident, $c11:ident, $c12:ident,
         $c20:ident, $c21:ident, $c22:ident,
         $c30:ident, $c31:ident, $c32:ident) => {
         let w0 = _mm256_set1_epi32(*$ap);
         $c00 = _mm256_dpbusd_avx_epi32($c00, $b0, w0);
-        $c01 = _mm256_dpbusd_avx_epi32($c01, $b1, w0);
-        $c02 = _mm256_dpbusd_avx_epi32($c02, $b2, w0);
+        if $vecs >= 2 { $c01 = _mm256_dpbusd_avx_epi32($c01, $b1, w0); }
+        if $vecs >= 3 { $c02 = _mm256_dpbusd_avx_epi32($c02, $b2, w0); }
         let w1 = _mm256_set1_epi32(*$ap.add(1));
         $c10 = _mm256_dpbusd_avx_epi32($c10, $b0, w1);
-        $c11 = _mm256_dpbusd_avx_epi32($c11, $b1, w1);
-        $c12 = _mm256_dpbusd_avx_epi32($c12, $b2, w1);
+        if $vecs >= 2 { $c11 = _mm256_dpbusd_avx_epi32($c11, $b1, w1); }
+        if $vecs >= 3 { $c12 = _mm256_dpbusd_avx_epi32($c12, $b2, w1); }
         let w2 = _mm256_set1_epi32(*$ap.add(2));
         $c20 = _mm256_dpbusd_avx_epi32($c20, $b0, w2);
-        $c21 = _mm256_dpbusd_avx_epi32($c21, $b1, w2);
-        $c22 = _mm256_dpbusd_avx_epi32($c22, $b2, w2);
+        if $vecs >= 2 { $c21 = _mm256_dpbusd_avx_epi32($c21, $b1, w2); }
+        if $vecs >= 3 { $c22 = _mm256_dpbusd_avx_epi32($c22, $b2, w2); }
         let w3 = _mm256_set1_epi32(*$ap.add(3));
         $c30 = _mm256_dpbusd_avx_epi32($c30, $b0, w3);
-        $c31 = _mm256_dpbusd_avx_epi32($c31, $b1, w3);
-        $c32 = _mm256_dpbusd_avx_epi32($c32, $b2, w3);
+        if $vecs >= 2 { $c31 = _mm256_dpbusd_avx_epi32($c31, $b1, w3); }
+        if $vecs >= 3 { $c32 = _mm256_dpbusd_avx_epi32($c32, $b2, w3); }
     };
 
-    (@dp avx512vnni, $b0:ident, $b1:ident, $b2:ident, $ap:ident,
+    (@dp avx512vnni, $vecs:expr, $b0:ident, $b1:ident, $b2:ident, $ap:ident,
         $c00:ident, $c01:ident, $c02:ident,
         $c10:ident, $c11:ident, $c12:ident,
         $c20:ident, $c21:ident, $c22:ident,
         $c30:ident, $c31:ident, $c32:ident) => {
         let w0 = _mm256_set1_epi32(*$ap);
         $c00 = _mm256_dpbusd_epi32($c00, $b0, w0);
-        $c01 = _mm256_dpbusd_epi32($c01, $b1, w0);
-        $c02 = _mm256_dpbusd_epi32($c02, $b2, w0);
+        if $vecs >= 2 { $c01 = _mm256_dpbusd_epi32($c01, $b1, w0); }
+        if $vecs >= 3 { $c02 = _mm256_dpbusd_epi32($c02, $b2, w0); }
         let w1 = _mm256_set1_epi32(*$ap.add(1));
         $c10 = _mm256_dpbusd_epi32($c10, $b0, w1);
-        $c11 = _mm256_dpbusd_epi32($c11, $b1, w1);
-        $c12 = _mm256_dpbusd_epi32($c12, $b2, w1);
+        if $vecs >= 2 { $c11 = _mm256_dpbusd_epi32($c11, $b1, w1); }
+        if $vecs >= 3 { $c12 = _mm256_dpbusd_epi32($c12, $b2, w1); }
         let w2 = _mm256_set1_epi32(*$ap.add(2));
         $c20 = _mm256_dpbusd_epi32($c20, $b0, w2);
-        $c21 = _mm256_dpbusd_epi32($c21, $b1, w2);
-        $c22 = _mm256_dpbusd_epi32($c22, $b2, w2);
+        if $vecs >= 2 { $c21 = _mm256_dpbusd_epi32($c21, $b1, w2); }
+        if $vecs >= 3 { $c22 = _mm256_dpbusd_epi32($c22, $b2, w2); }
         let w3 = _mm256_set1_epi32(*$ap.add(3));
         $c30 = _mm256_dpbusd_epi32($c30, $b0, w3);
-        $c31 = _mm256_dpbusd_epi32($c31, $b1, w3);
-        $c32 = _mm256_dpbusd_epi32($c32, $b2, w3);
+        if $vecs >= 2 { $c31 = _mm256_dpbusd_epi32($c31, $b1, w3); }
+        if $vecs >= 3 { $c32 = _mm256_dpbusd_epi32($c32, $b2, w3); }
     };
 
-    (@dp avx2, $b0:ident, $b1:ident, $b2:ident, $ap:ident,
+    (@dp avx2, $vecs:expr, $b0:ident, $b1:ident, $b2:ident, $ap:ident,
         $c00:ident, $c01:ident, $c02:ident,
         $c10:ident, $c11:ident, $c12:ident,
         $c20:ident, $c21:ident, $c22:ident,
@@ -469,8 +477,8 @@ macro_rules! define_3x3_strip_isa {
             };
         }
         col_step!($b0, $c00, $c10, $c20, $c30);
-        col_step!($b1, $c01, $c11, $c21, $c31);
-        col_step!($b2, $c02, $c12, $c22, $c32);
+        if $vecs >= 2 { col_step!($b1, $c01, $c11, $c21, $c31); }
+        if $vecs >= 3 { col_step!($b2, $c02, $c12, $c22, $c32); }
     }};
 }
 
@@ -613,17 +621,16 @@ pub(super) unsafe fn try_run_3x3_strip(
     if stride != 1 && stride != 2 {
         return false;
     }
-    let chunks = p.ow.div_ceil(NR);
-    let Some(chunks_nr) = chunks.checked_mul(NR) else { return false };
+    let Some(ow8) = p.ow.checked_next_multiple_of(8) else { return false };
     let (group_stride, ev_w) = if stride == 2 {
-        let ev_w = chunks_nr;
-        let Some(od_w) = chunks_nr.checked_add(1) else { return false };
+        let ev_w = ow8;
+        let Some(od_w) = ow8.checked_add(1) else { return false };
         let Some(ch_stride) = ev_w.checked_add(od_w).and_then(|v| v.checked_next_multiple_of(8)) else {
             return false;
         };
         (ch_stride, ev_w)
     } else {
-        let Some(slot_w) = chunks_nr.checked_add(2).and_then(|v| v.checked_next_multiple_of(8)) else {
+        let Some(slot_w) = ow8.checked_add(2).and_then(|v| v.checked_next_multiple_of(8)) else {
             return false;
         };
         (slot_w, 0)

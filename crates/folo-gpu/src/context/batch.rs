@@ -94,14 +94,14 @@ impl GpuContext {
         }
     }
 
-    pub(super) fn submit(&self, b: &mut Batch) {
+    pub(super) fn submit(&self, b: &mut Batch) -> Option<wgpu::SubmissionIndex> {
         b.pass = None;
         b.last_pipeline = None;
         // Here too, so `flush()` and `sync()` release retired buffers when no dispatch follows.
         if self.inner.retired.load(Ordering::Relaxed) {
             self.sweep_binds(b);
         }
-        let Some(mut enc) = b.encoder.take() else { return };
+        let mut enc = b.encoder.take()?;
         let mut prof = self.profiler();
         let timed = prof.as_ref().and_then(|p| p.resolve(&mut enc));
         let used = if b.cursor == 0 { b.chunk } else { b.chunk + 1 };
@@ -111,7 +111,7 @@ impl GpuContext {
                 self.inner.queue.write_buffer(&c.buf, 0, &c.cpu[..len]);
             }
         }
-        self.inner.queue.submit([enc.finish()]);
+        let idx = self.inner.queue.submit([enc.finish()]);
         self.inner.submissions.fetch_add(1, Ordering::Relaxed);
         if let (Some(p), Some(bytes)) = (prof.as_mut(), timed) {
             // Loss-aware: wgpu panics inside the poll of a lost device, which here would poison the batch lock.
@@ -120,6 +120,7 @@ impl GpuContext {
         b.dispatches = 0;
         b.chunk = 0;
         b.cursor = 0;
+        Some(idx)
     }
 
     /// Compiles (or fetches from the cache) the pipeline for `def` specialised with `spec`.

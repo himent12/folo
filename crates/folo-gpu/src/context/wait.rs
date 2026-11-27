@@ -36,6 +36,64 @@ impl GpuContext {
         polled
     }
 
+    /// Waits for a specific queue submission (and its readback callback `is_ready`) without waiting for newer
+    /// submissions that may have been queued after it.
+    ///
+    /// If `is_ready()` is already true (for example a deferred readback completed while newer GPU work ran),
+    /// returns immediately after checking for device loss without polling the device. Otherwise polls for up to
+    /// [`GpuContext::wait_spin`], stopping as soon as `is_ready()` is true or the queue empties, and then blocks
+    /// only on `submission` (`wgpu::PollType::Wait { submission_index, timeout: None }`). Only resets the batch
+    /// head-submission ramp when the entire queue actually emptied.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) fn wait_submission(
+        &self,
+        submission: Option<&wgpu::SubmissionIndex>,
+        is_ready: impl Fn() -> bool,
+    ) -> Result<()> {
+        if is_ready() {
+            if let Some(why) = self.lost_reason() {
+                return Err(GpuError::DeviceLost(why));
+            }
+            return Ok(());
+        }
+        let (done, queue_empty) = self.spin_until(&is_ready)?;
+        let counter = if done { &self.inner.spin_waits } else { &self.inner.blocked_waits };
+        counter.fetch_add(1, Ordering::Relaxed);
+        let queue_empty = if done {
+            queue_empty
+        } else {
+            let status = self
+                .poll_status(wgpu::PollType::Wait { submission_index: submission.cloned(), timeout: None })?;
+            status.is_queue_empty()
+        };
+        if queue_empty {
+            // The GPU has nothing queued now: submit the head of the next pass early.
+            self.inner.batch.lock().expect("batch lock").limit = FIRST_DISPATCHES_PER_BATCH;
+        }
+        Ok(())
+    }
+
+    /// Polls the device without blocking until `is_ready()` becomes true, the queue empties, or the wait spin
+    /// ([`GpuContext::set_wait_spin`]) expires; returns `(done, queue_empty)`.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn spin_until(&self, is_ready: &impl Fn() -> bool) -> Result<(bool, bool)> {
+        let budget = self.wait_spin();
+        if budget.is_zero() {
+            return Ok((false, false));
+        }
+        let start = std::time::Instant::now();
+        loop {
+            let empty = self.poll_status(wgpu::PollType::Poll)?.is_queue_empty();
+            if is_ready() || empty {
+                return Ok((true, empty));
+            }
+            if start.elapsed() >= budget {
+                return Ok((false, false));
+            }
+            std::hint::spin_loop();
+        }
+    }
+
     /// Polls the device without blocking until the queue is empty or the wait spin ([`GpuContext::set_wait_spin`])
     /// has passed; `true` when the queue emptied. A blocking wait sleeps in the driver and the thread wakes up
     /// later, often on another core; a batch-1 forward waits well under a millisecond, which polling catches as
@@ -45,20 +103,7 @@ impl GpuContext {
         return Ok(false);
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let budget = self.wait_spin();
-            if budget.is_zero() {
-                return Ok(false);
-            }
-            let start = std::time::Instant::now();
-            loop {
-                if self.poll_status(wgpu::PollType::Poll)?.is_queue_empty() {
-                    return Ok(true);
-                }
-                if start.elapsed() >= budget {
-                    return Ok(false);
-                }
-                std::hint::spin_loop();
-            }
+            self.spin_until(&|| false).map(|(done, _)| done)
         }
     }
 
@@ -123,6 +168,13 @@ impl GpuContext {
         match r {
             Ok(()) => Ok(()),
             Err(map_err) => {
+                // On native targets, a map failure can be the first symptom of a device loss whose callback
+                // has not been polled yet (for example `map_async` rejecting synchronously on a destroyed
+                // device before any `Device::poll`). Poll once non-blockingly so `DeviceLost` always wins.
+                #[cfg(not(target_arch = "wasm32"))]
+                if let Err(lost @ GpuError::DeviceLost(_)) = self.poll_checked(wgpu::PollType::Poll) {
+                    return Err(lost);
+                }
                 // Drain any device error captured while submitting/mapping (e.g. an OOM that caused the staging
                 // map to fail) so the failing call sees the real cause instead of leaving it to poison the next
                 // unrelated readback.
