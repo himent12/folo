@@ -4,10 +4,12 @@
 //! - `diag.rs`: `folo val --diagnostics` / `--worst` per-image error diagnosis.
 //! - `export.rs`: `folo export` (`.folo` and ONNX with independent dynamic axes and `folo2-*` support).
 //! - `predict.rs`: `predict`, ByteTrack `--track`, recursive image walking, `--save` path checks and atomic saving.
+//! - `thresholds.rs`: calibrated per-class F1 threshold persistence (`--save-thresholds`) and loading (`--thresholds`).
 
 mod diag;
 mod export;
 mod predict;
+mod thresholds;
 
 pub use export::export;
 pub use predict::predict;
@@ -207,9 +209,26 @@ pub fn val(args: ValArgs, out: Out) -> Result<(), CliError> {
         Some(args.batch),
     )?;
     let diag_settings = diag::check_diag_args(&args)?;
+    thresholds::check_save_thresholds_path(
+        args.save_thresholds.as_deref(),
+        &args.model,
+        args.save_json.as_deref(),
+    )?;
+    let resolved_model = crate::weights::resolve(&args.model)?;
+    thresholds::check_save_thresholds_path(
+        args.save_thresholds.as_deref(),
+        &resolved_model,
+        args.save_json.as_deref(),
+    )?;
     let shape = format!("imgsz {:?} batch {} head {:?}", args.imgsz, args.batch, args.head);
-    let model =
-        open_model("val", &args.model, &args.device, (args.half, args.precision), args.tensor_cores, &shape)?;
+    let model = open_model(
+        "val",
+        &resolved_model,
+        &args.device,
+        (args.half, args.precision),
+        args.tensor_cores,
+        &shape,
+    )?;
     let split = match args.split {
         SplitArg::Train => Split::Train,
         SplitArg::Val => Split::Val,
@@ -280,9 +299,16 @@ pub fn val(args: ValArgs, out: Out) -> Result<(), CliError> {
     if let Some(path) = &args.save_json {
         crate::coco::prepare_results(path)?;
     }
+    if let Some(path) = &args.save_thresholds {
+        thresholds::prepare_save_thresholds(path, &resolved_model, args.save_json.as_deref())?;
+    }
     let r = validate_detector(&model, Arc::new(part.clone()), &cfg).map_err(|e| engine_error("val", e))?;
     let m = val_metrics(&r.report);
+    let cal = r.thresholds();
     let names = model.classes();
+    if let Some(path) = &args.save_thresholds {
+        thresholds::save_thresholds(path, cal, names)?;
+    }
     let name = |c: u32| names.get(c as usize).cloned().unwrap_or_else(|| c.to_string());
     let mut coco = serde_json::Value::Null;
     let mut coco_text = None;
@@ -321,6 +347,7 @@ pub fn val(args: ValArgs, out: Out) -> Result<(), CliError> {
         "precision": m.precision,
         "recall": m.recall,
         "best_f1_conf": m.best_f1_conf,
+        "thresholds": thresholds::thresholds_json(cal, names),
         "per_class": m.per_class.iter().map(|c| json!({
             "class": c.class, "name": name(c.class), "map50": c.map50, "map50_95": c.map50_95,
             "precision": c.precision, "recall": c.recall,
@@ -333,6 +360,9 @@ pub fn val(args: ValArgs, out: Out) -> Result<(), CliError> {
         "seconds": r.seconds,
         "coco": coco,
     });
+    if let Some(path) = &args.save_thresholds {
+        record["thresholds_saved"] = json!(crate::output::record_path(path));
+    }
     if let Some(d) = &diag_out {
         record["diagnostics"] = d.json.clone();
     }
@@ -360,6 +390,9 @@ pub fn val(args: ValArgs, out: Out) -> Result<(), CliError> {
             c.precision,
             c.recall
         ));
+    }
+    for line in thresholds::human_val_lines(cal, names, args.save_thresholds.as_deref()) {
+        out.human(line);
     }
     if let Some(text) = coco_text {
         out.human("COCOeval (pycocotools-exact, original-image boxes):");

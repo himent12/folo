@@ -145,6 +145,8 @@ async fn tools_validate_paging_and_args_before_proxy_access() {
                     tta: false,
                     tta_scales: None,
                     tta_hflip: None,
+                    thresholds_path: None,
+                    per_class_conf: None,
                 },
                 &mut Progress::none(),
             )
@@ -184,6 +186,8 @@ async fn tools_validate_paging_and_args_before_proxy_access() {
                 tta: false,
                 tta_scales: None,
                 tta_hflip: None,
+                thresholds_path: None,
+                per_class_conf: None,
             },
             PredictArgs {
                 model_id: "m_1".into(),
@@ -200,6 +204,8 @@ async fn tools_validate_paging_and_args_before_proxy_access() {
                 tta: false,
                 tta_scales: None,
                 tta_hflip: None,
+                thresholds_path: None,
+                per_class_conf: None,
             },
             PredictArgs {
                 model_id: "m_1".into(),
@@ -216,6 +222,8 @@ async fn tools_validate_paging_and_args_before_proxy_access() {
                 tta: false,
                 tta_scales: None,
                 tta_hflip: None,
+                thresholds_path: None,
+                per_class_conf: None,
             },
             PredictArgs {
                 model_id: "m_1".into(),
@@ -232,6 +240,8 @@ async fn tools_validate_paging_and_args_before_proxy_access() {
                 tta: true,
                 tta_scales: None,
                 tta_hflip: None,
+                thresholds_path: None,
+                per_class_conf: None,
             },
             PredictArgs {
                 model_id: "m_1".into(),
@@ -248,6 +258,8 @@ async fn tools_validate_paging_and_args_before_proxy_access() {
                 tta: false,
                 tta_scales: None,
                 tta_hflip: None,
+                thresholds_path: None,
+                per_class_conf: None,
             },
             PredictArgs {
                 model_id: "m_1".into(),
@@ -264,6 +276,8 @@ async fn tools_validate_paging_and_args_before_proxy_access() {
                 tta: false,
                 tta_scales: Some(vec![1.0]),
                 tta_hflip: None,
+                thresholds_path: None,
+                per_class_conf: None,
             },
         ] {
             let err = backend.inner.predict(args).await.err().unwrap();
@@ -314,6 +328,8 @@ async fn tools_validate_paging_and_args_before_proxy_access() {
                     tta: false,
                     tta_scales: None,
                     tta_hflip: None,
+                    thresholds_path: None,
+                    per_class_conf: None,
                 },
                 &mut Progress::none(),
             )
@@ -444,7 +460,7 @@ async fn proxied_blank_and_dot_resource_ids_match_embedded_not_found() {
 #[tokio::test]
 async fn proxied_predict_gates_and_forwards_tile_and_tta_options() {
     let home = folo_test_support::TestDir::new("mcp-proxy-predict-opts");
-    let mock_store = Arc::new(folo_server::MockStore::new());
+    let mock_store: Arc<dyn Store> = Arc::new(folo_server::MockStore::new());
     let model_id = mock_store.list_models().unwrap()[0].id.clone();
     let ds_id = mock_store.list_datasets().unwrap()[0].id.clone();
     let image_id = mock_store
@@ -488,6 +504,8 @@ async fn proxied_predict_gates_and_forwards_tile_and_tta_options() {
             tta: false,
             tta_scales: None,
             tta_hflip: None,
+            thresholds_path: None,
+            per_class_conf: None,
         })
         .await
         .err()
@@ -514,6 +532,8 @@ async fn proxied_predict_gates_and_forwards_tile_and_tta_options() {
             tta: false,
             tta_scales: None,
             tta_hflip: None,
+            thresholds_path: None,
+            per_class_conf: None,
         })
         .await
         .unwrap();
@@ -537,6 +557,8 @@ async fn proxied_predict_gates_and_forwards_tile_and_tta_options() {
             tta: true,
             tta_scales: Some(vec![200.0]),
             tta_hflip: Some(false),
+            thresholds_path: None,
+            per_class_conf: None,
         })
         .await
         .err()
@@ -563,6 +585,8 @@ async fn proxied_predict_gates_and_forwards_tile_and_tta_options() {
             tta: true,
             tta_scales: Some(vec![1.0]),
             tta_hflip: Some(true),
+            thresholds_path: None,
+            per_class_conf: None,
         })
         .await
         .unwrap();
@@ -586,6 +610,8 @@ async fn proxied_predict_gates_and_forwards_tile_and_tta_options() {
             tta: false,
             tta_scales: None,
             tta_hflip: None,
+            thresholds_path: None,
+            per_class_conf: None,
         })
         .await
         .err()
@@ -608,6 +634,8 @@ async fn proxied_predict_gates_and_forwards_tile_and_tta_options() {
                 tta: true,
                 tta_scales: Some(vec![200.0]),
                 tta_hflip: None,
+                thresholds_path: None,
+                per_class_conf: None,
             },
             &mut Progress::none(),
         )
@@ -648,6 +676,8 @@ async fn proxied_predict_gates_and_forwards_tile_and_tta_options() {
                 tta: false,
                 tta_scales: None,
                 tta_hflip: None,
+                thresholds_path: None,
+                per_class_conf: None,
             },
             &mut Progress::none(),
         )

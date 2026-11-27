@@ -225,7 +225,7 @@ static TOOL_TABLE: [ToolDef; 44] = [
     ToolDef {
         name: "val",
         description: "Evaluates a model on a dataset split: mAP@0.5, mAP@0.5:0.95, precision, recall, per class, \
-                      and optional per-image error diagnostics (`diagnostics` / `worst`). Reports progress.",
+                      calibrated F1 `thresholds`, and optional per-image error diagnostics (`diagnostics` / `worst`). Reports progress.",
         mutating: false,
         input: input::<ValArgs>,
         output: terse_output::<ValToolResult>,
@@ -234,7 +234,7 @@ static TOOL_TABLE: [ToolDef; 44] = [
     ToolDef {
         name: "predict",
         description: "Detects objects in one image (a file path, base64 bytes, or a dataset image), optionally \
-                      with SAHI tiling (`tile`) or Test-Time Augmentation (`tta`). Boxes are pixel xyxy, highest score first.",
+                      with SAHI tiling (`tile`), TTA (`tta`), or calibrated thresholds (`thresholds_path` / `per_class_conf`). Boxes are pixel xyxy, highest score first.",
         mutating: false,
         input: input::<PredictArgs>,
         output: api_output::<PredictResponse>,
@@ -242,8 +242,8 @@ static TOOL_TABLE: [ToolDef; 44] = [
     },
     ToolDef {
         name: "predict_batch",
-        description: "Detects objects in up to 256 images (paths or a glob), optionally with SAHI tiling (`tile`) \
-                      or TTA (`tta`). Returns summaries; the per-image boxes are in the linked folo://predictions/{batch_id} resource. Reports progress.",
+        description: "Detects objects in up to 256 images (paths or a glob), optionally with SAHI tiling (`tile`), \
+                      TTA (`tta`), or calibrated thresholds (`thresholds_path` / `per_class_conf`). Returns summaries; the per-image boxes are in the linked folo://predictions/{batch_id} resource. Reports progress.",
         mutating: false,
         input: input::<PredictBatchArgs>,
         output: output::<PredictBatchResult>,

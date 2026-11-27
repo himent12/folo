@@ -369,6 +369,10 @@ pub fn predict(args: PredictArgs, out: Out) -> Result<(), CliError> {
     check_infer_args("predict", args.conf, args.iou, args.max_det, args.imgsz, bounds::INFER_IMGSZ, None)?;
     let predict_opts = build_predict_options(&args)?;
     let track_cfg = build_track_config(&args)?;
+    let calibration = match &args.thresholds {
+        Some(path) => Some((path.as_path(), super::thresholds::load_thresholds(path)?)),
+        None => None,
+    };
     check_save_dir(args.save.as_deref())?;
     check_save_outside(args.save.as_deref(), &args.sources)?;
     let shape = format!("imgsz {:?} head {:?} tile {:?} tta {}", args.imgsz, args.head, args.tile, args.tta);
@@ -380,18 +384,17 @@ pub fn predict(args: PredictArgs, out: Out) -> Result<(), CliError> {
         args.tensor_cores,
         &shape,
     )?;
+    if let Some((path, cal)) = &calibration {
+        super::thresholds::check_thresholds_for_model(path, cal, model.classes().len())?;
+    }
     let effective_imgsz = args.imgsz.unwrap_or(model.imgsz());
     predict_opts.validate(effective_imgsz).map_err(|e| engine_error("predict", e))?;
     let images = collect_images(&args.sources)?;
     let score_rule: ScoreRule = args.score.into();
     let effective_head = args.head.map(Into::into).unwrap_or_else(|| model.head_mode());
-    let det_conf = match &track_cfg {
-        Some(tc) => track_det_conf(args.conf, tc.low_thresh, score_rule, effective_head),
-        None => args.conf,
-    };
     let cfg = PredictConfig {
         imgsz: effective_imgsz,
-        conf: det_conf,
+        conf: args.conf,
         iou: args.iou,
         max_det: args.max_det as usize,
         rect: true,
@@ -400,7 +403,23 @@ pub fn predict(args: PredictArgs, out: Out) -> Result<(), CliError> {
         fusion_iou: args.fusion_iou,
         score: score_rule,
     };
-    let predictor = Predictor::from_detector(model, cfg).map_err(|e| engine_error("predict", e))?;
+    let mut predictor = Predictor::from_detector(model, cfg).map_err(|e| engine_error("predict", e))?;
+    if let Some((_, cal)) = &calibration {
+        predictor = predictor.with_calibrated_thresholds(cal).map_err(|e| engine_error("predict", e))?;
+    }
+    if let Some(tc) = &track_cfg {
+        let mut pcfg = predictor.config().clone();
+        pcfg.conf = track_det_conf(pcfg.conf, tc.low_thresh, score_rule, effective_head);
+        predictor.set_config(pcfg).map_err(|e| engine_error("predict", e))?;
+        if let Some(map) = predictor.per_class_conf() {
+            let lowered: std::collections::BTreeMap<u32, f32> = map
+                .iter()
+                .map(|(&cls, &v)| (cls, track_det_conf(v, tc.low_thresh, score_rule, effective_head)))
+                .collect();
+            predictor.set_per_class_conf(Some(lowered)).map_err(|e| engine_error("predict", e))?;
+            predictor.set_conf_inclusive(false);
+        }
+    }
     let mut tracker = match &track_cfg {
         Some(tc) => Some(ByteTracker::new(tc.clone()).map_err(|e| engine_error("predict", e))?),
         None => None,
@@ -546,11 +565,25 @@ pub fn predict(args: PredictArgs, out: Out) -> Result<(), CliError> {
         done_record["tracked"] = json!(true);
         done_record["unique_tracks"] = json!(unique_tracks.len());
     }
+    if let Some((path, cal)) = &calibration {
+        done_record["thresholds"] = super::thresholds::predict_thresholds_json(path, cal);
+    }
     out.record(&done_record);
     let track_note =
         if tracker.is_some() { format!(", {} unique track(s)", unique_tracks.len()) } else { String::new() };
+    let thresh_note = calibration.as_ref().map_or(String::new(), |(_, cal)| {
+        if cal.is_empty() {
+            "; thresholds file empty (default conf)".into()
+        } else {
+            format!(
+                "; calibrated thresholds ({} classes, global {:.3})",
+                cal.per_class.len(),
+                cal.global.best_conf
+            )
+        }
+    });
     out.human(format!(
-        "{} images, {boxes} boxes{track_note}; mean {:.1} ms (pre {:.1}, inference {:.1}, post {:.1}{}){}",
+        "{} images, {boxes} boxes{track_note}; mean {:.1} ms (pre {:.1}, inference {:.1}, post {:.1}{}){thresh_note}{}",
         done,
         sum[3] / n,
         sum[0] / n,

@@ -9,8 +9,8 @@ use folo_api::{ExportSpec, Model, OnnxSwitches, ValRequest};
 use folo_server::store::{
     DEFAULT_TTA_SCALES, DEFAULT_VAL_DIAG_BG_IOU, DEFAULT_VAL_DIAG_CONF, DEFAULT_VAL_DIAG_TP_IOU,
     DEFAULT_VAL_DIAG_WORST, DynamicAxes, MAX_VAL_DIAG_WORST, PredictInput, PredictOptions, PredictSource,
-    TileConfig, TtaConfig, ValDiagConfig, ValDiagnostics, check_export_axes, check_predict_options,
-    check_predict_workload, check_val_diag_config,
+    ThresholdCalibration, TileConfig, TtaConfig, ValDiagConfig, ValDiagnostics, check_export_axes,
+    check_per_class_conf, check_predict_options, check_predict_workload, check_val_diag_config,
 };
 use rmcp::model::{ContentBlock, Resource};
 use serde_json::json;
@@ -30,6 +30,8 @@ use crate::types::*;
 
 /// Largest image accepted by `predict` (as for `POST /api/predict`).
 const MAX_IMAGE_BYTES: u64 = 64 * 1024 * 1024;
+/// Largest calibrated thresholds JSON file accepted by `predict` / `predict_batch`.
+const MAX_THRESHOLDS_BYTES: u64 = 4 * 1024 * 1024;
 /// At most this many `predict_batch` failures are listed inline.
 const MAX_FAILURES: usize = 50;
 
@@ -99,7 +101,10 @@ impl Inner {
             conf: a.conf,
             iou: a.iou,
         };
-        let (r, diagnostics) = self.blocking(move |s| s.val_with_diagnostics(req, diag)).await?;
+        let out_val = self.blocking(move |s| s.val_extended(req, diag)).await?;
+        let r = out_val.report;
+        let diagnostics = out_val.diagnostics;
+        let thresholds = out_val.thresholds;
         progress.report(1.0, Some(1.0), true).await;
         // The dataset's name when the server reports it (older servers send only the id).
         let dataset = match &r.dataset_name {
@@ -117,11 +122,24 @@ impl Inner {
             r.val.precision,
             r.val.recall
         );
-        let mut result = ValToolResult { report: r, diagnostics: diagnostics.map(val_diagnostics_out) };
-        while json_len(&result) > MAX_RESULT_BYTES {
-            if result.diagnostics.as_mut().and_then(|d| d.worst_images.pop()).is_none() {
-                break;
-            }
+        let mut result = ValToolResult {
+            report: r,
+            diagnostics: diagnostics.map(val_diagnostics_out),
+            thresholds: thresholds.map(threshold_calibration_out),
+        };
+        let thresholds_omitted = fit_val_result(&mut result);
+        if thresholds_omitted {
+            summary.push_str(
+                "; calibrated thresholds omitted to stay under 32 KB (use `folo val --save-thresholds` to export full per-class thresholds)",
+            );
+        } else if let Some(t) = &result.thresholds
+            && !t.per_class.is_empty()
+        {
+            summary.push_str(&format!(
+                "; macro-F1 {:.3} ({} calibrated classes)",
+                t.macro_f1,
+                t.per_class.len()
+            ));
         }
         if let Some(d) = &result.diagnostics {
             summary.push_str(&format!(
@@ -130,6 +148,45 @@ impl Inner {
             ));
         }
         out(&result, summary)
+    }
+
+    async fn resolve_predict_thresholds(
+        &self,
+        default_conf: f32,
+        thresholds_path: Option<String>,
+        per_class_conf: Option<BTreeMap<u32, f32>>,
+    ) -> Result<(f32, Option<BTreeMap<u32, f32>>, bool), Error> {
+        match (thresholds_path, per_class_conf) {
+            (Some(_), Some(_)) => {
+                Err(invalid_arguments("give either thresholds_path or per_class_conf, not both"))
+            }
+            (Some(p), None) => {
+                if p.trim().is_empty() {
+                    return Err(invalid_arguments("thresholds_path must not be empty"));
+                }
+                let paths = self.paths.clone();
+                let cal = tokio::task::spawn_blocking(move || match paths.resolve_for_batch(&p)? {
+                    BatchPath::Ready(resolved) => read_thresholds(&resolved),
+                    BatchPath::Missing(err) => Err(err),
+                })
+                .await
+                .map_err(join)??;
+                if cal.is_empty() {
+                    Ok((default_conf, None, false))
+                } else {
+                    Ok((cal.global.best_conf, Some(cal.per_class_map()), true))
+                }
+            }
+            (None, Some(map)) => {
+                check_per_class_conf(&map, None).map_err(|e| invalid_arguments(e.body.message))?;
+                if map.is_empty() {
+                    Ok((default_conf, None, false))
+                } else {
+                    Ok((default_conf, Some(map), true))
+                }
+            }
+            (None, None) => Ok((default_conf, None, false)),
+        }
     }
 
     pub(super) async fn predict(&self, a: PredictArgs) -> Result<Output, Error> {
@@ -150,6 +207,8 @@ impl Inner {
             a.tta_hflip,
             a.max_det as usize,
         )?;
+        let (eff_conf, per_class_conf, conf_inclusive) =
+            self.resolve_predict_thresholds(a.conf, a.thresholds_path, a.per_class_conf).await?;
         // The file an `image_path` names, for a decode error (the server only sees the uploaded bytes).
         let mut file = None;
         let source = match (a.image_path, a.image_base64, a.dataset_id, a.image_id) {
@@ -187,10 +246,12 @@ impl Inner {
         let input = PredictInput {
             model_id: a.model_id,
             source,
-            conf: a.conf,
+            conf: eff_conf,
             iou: a.iou,
             max_det: a.max_det,
             options,
+            per_class_conf,
+            conf_inclusive,
         };
         let mut r = self.blocking(move |s| s.predict(input)).await.map_err(|mut e| {
             if let Some(f) = &file
@@ -235,6 +296,8 @@ impl Inner {
             a.tta_hflip,
             folo_api::default_max_det() as usize,
         )?;
+        let (eff_conf, per_class_conf, conf_inclusive) =
+            self.resolve_predict_thresholds(a.conf, a.thresholds_path, a.per_class_conf).await?;
         // Validate input source shape and bounds before hitting the store or proxy server.
         let batch_input = match (a.paths, a.glob) {
             (Some(paths), None) => {
@@ -251,6 +314,10 @@ impl Inner {
         };
         let model_id = a.model_id.clone();
         let model = self.blocking(move |s| s.get_model(&model_id)).await?;
+        if let Some(map) = &per_class_conf {
+            check_per_class_conf(map, Some(model.classes.len()))
+                .map_err(|e| invalid_arguments(e.body.message))?;
+        }
         check_predict_workload(&options, model.imgsz, None).map_err(|e| {
             let mut err = invalid_arguments(e.body.message);
             if let Some(h) = e.body.hint {
@@ -290,8 +357,9 @@ impl Inner {
             let res = match entry {
                 BatchPath::Ready(path) => {
                     let model_id = a.model_id.clone();
-                    let (conf, iou) = (a.conf, a.iou);
+                    let (conf, iou) = (eff_conf, a.iou);
                     let options = options.clone();
+                    let per_class_conf = per_class_conf.clone();
                     self.blocking(move |s| {
                         let bytes = read_image(&path)?;
                         s.predict(PredictInput {
@@ -301,6 +369,8 @@ impl Inner {
                             iou,
                             max_det: folo_api::default_max_det(),
                             options,
+                            per_class_conf,
+                            conf_inclusive,
                         })
                     })
                     .await
@@ -318,9 +388,9 @@ impl Inner {
                         json!({ "path": shown, "image": r.image, "boxes": r.boxes, "timing": r.timing }),
                     );
                 }
-                // `not_implemented` (older server without `predict_options`) applies to the whole batch; per-image
-                // `invalid_config` (e.g. an oversized image exceeding the tile grid budget) is recorded in `failed`
-                // so valid images before and after it are preserved.
+                // `not_implemented` (older server without `predict_options` or `threshold_calibration`) applies to
+                // the whole batch; per-image `invalid_config` (e.g. an oversized image exceeding the tile grid
+                // budget) is recorded in `failed` so valid images before and after it are preserved.
                 Err(e) if e.body.code == "not_implemented" => {
                     return Err(e);
                 }
@@ -403,6 +473,88 @@ impl Inner {
         let r = self.blocking(move |s| s.export_model_with_axes(&a.model_id, spec, axes)).await?;
         out(&r, format!("wrote {} ({} bytes)", r.path, r.bytes))
     }
+}
+
+fn threshold_calibration_out(c: ThresholdCalibration) -> ThresholdCalibrationOut {
+    ThresholdCalibrationOut {
+        global: OperatingPointOut {
+            best_conf: c.global.best_conf,
+            best_f1: c.global.best_f1,
+            precision: c.global.precision,
+            recall: c.global.recall,
+        },
+        per_class: c
+            .per_class
+            .into_iter()
+            .map(|p| ClassThresholdOut {
+                class: p.class,
+                best_conf: p.best_conf,
+                best_f1: p.best_f1,
+                precision: p.precision,
+                recall: p.recall,
+                truths: p.truths,
+                preds: p.preds,
+            })
+            .collect(),
+        macro_f1: c.macro_f1,
+    }
+}
+
+/// Fits `result` within [`MAX_RESULT_BYTES`]: first tries trimming `diagnostics.worst_images` while keeping the
+/// full `thresholds` calibration; if even without `worst_images` the payload still exceeds the budget, omits
+/// `thresholds` whole (never returning a silently truncated partial calibration), restores `worst_images`, and
+/// trims only as many `worst_images` as needed for the remaining budget. Returns `true` when `thresholds` was
+/// omitted.
+fn fit_val_result(result: &mut ValToolResult) -> bool {
+    if json_len(result) <= MAX_RESULT_BYTES {
+        return false;
+    }
+    let saved_worst = result.diagnostics.as_ref().map(|d| d.worst_images.clone());
+    while json_len(result) > MAX_RESULT_BYTES {
+        if result.diagnostics.as_mut().and_then(|d| d.worst_images.pop()).is_none() {
+            break;
+        }
+    }
+    if json_len(result) <= MAX_RESULT_BYTES {
+        return false;
+    }
+    let omitted = result.thresholds.take().is_some();
+    if omitted && let Some(worst) = saved_worst {
+        if let Some(d) = result.diagnostics.as_mut() {
+            d.worst_images = worst;
+        }
+        while json_len(result) > MAX_RESULT_BYTES {
+            if result.diagnostics.as_mut().and_then(|d| d.worst_images.pop()).is_none() {
+                break;
+            }
+        }
+    }
+    omitted
+}
+
+/// Reads and validates a `ThresholdCalibration` JSON file saved by `folo val --save-thresholds`.
+fn read_thresholds(path: &Path) -> Result<ThresholdCalibration, Error> {
+    let shown = folo_api::json::path(path);
+    let meta = std::fs::metadata(path).map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => {
+            Error::new(http::StatusCode::NOT_FOUND, "path_not_found", format!("{shown} does not exist"))
+        }
+        _ => Error::internal(format!("reading {shown}: {e}")),
+    })?;
+    if !meta.is_file() {
+        return Err(invalid_arguments(format!("{shown} is not a file")));
+    }
+    if meta.len() > MAX_THRESHOLDS_BYTES {
+        return Err(invalid_arguments(format!(
+            "{shown} is too large ({} bytes, max {MAX_THRESHOLDS_BYTES})",
+            meta.len()
+        )));
+    }
+    let bytes = std::fs::read(path).map_err(|e| Error::internal(format!("reading {shown}: {e}")))?;
+    let cal: ThresholdCalibration = serde_json::from_slice(&bytes)
+        .map_err(|e| invalid_arguments(format!("{shown} is not valid ThresholdCalibration JSON: {e}")))?;
+    cal.validate().map_err(|e| invalid_arguments(format!("{shown}: {e}")))?;
+    Ok(cal)
 }
 
 fn val_diagnostics_out(d: ValDiagnostics) -> ValDiagnosticsOut {
@@ -547,3 +699,6 @@ pub(super) fn decode_image_base64(b64: &str, max: u64) -> Result<Vec<u8>, Error>
 #[cfg(test)]
 #[path = "models_tests.rs"]
 mod tests;
+#[cfg(test)]
+#[path = "models_thresholds_tests.rs"]
+mod thresholds_tests;

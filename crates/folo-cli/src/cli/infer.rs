@@ -272,6 +272,9 @@ pub struct ValArgs {
     /// Write the detections as a COCO results file (the input of pycocotools' loadRes; COCO datasets only).
     #[arg(long, value_name = "FILE")]
     pub save_json: Option<PathBuf>,
+    /// Save calibrated global and per-class F1 confidence thresholds to this JSON file (for `folo predict --thresholds`).
+    #[arg(long, value_name = "FILE")]
+    pub save_thresholds: Option<PathBuf>,
     /// Compute per-image error diagnosis (TP, FP, FN, localization, class confusion, duplicates, background FP,
     /// per-image F1, mean TP IoU) and list the worst-performing failing images (adds a `diagnostics` object).
     #[arg(long)]
@@ -302,6 +305,10 @@ pub struct PredictArgs {
     /// Confidence threshold [0..=1].
     #[arg(long, default_value_t = 0.25)]
     pub conf: f32,
+    /// Apply calibrated per-class F1 confidence thresholds from a JSON file written by `folo val --save-thresholds`.
+    /// Mutually exclusive with --conf.
+    #[arg(long, value_name = "FILE", conflicts_with = "conf")]
+    pub thresholds: Option<PathBuf>,
     /// NMS IoU threshold [0..=1].
     #[arg(long, default_value_t = 0.7)]
     pub iou: f32,

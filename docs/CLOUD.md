@@ -111,19 +111,20 @@ stopped run shows exactly where it stopped):
   cannot be downloaded: nothing is rented then), `cloud_sync_failed`, `cloud_instance_lost`.
 - **Preemption and automatic resume.** When a provisioned instance (`provisions: true`) is preempted or unexpectedly
   disappears mid-training (the worker stops answering while the provider reports `stopped` or `gone` for `lost_grace`,
-  the worker restarts and answers `run_not_found`, or the instance vanishes before final weights are collected after
-  completion) and an incomplete synced checkpoint (`weights/last.folo`) is on disk, FOLO automatically recovers
-  instead of failing the run: it releases the dead instance, folds its cost into `Run.cloud.cost_usd`, rolls local
-  `metrics.jsonl` and `Run` progress back to the synced checkpoint epoch, logs the preemption and retry attempt
-  (`attempt N/3`), transitions `Run.cloud.phase` back to `provisioning`, waits briefly (`preemption_backoff`, default
-  10 s), launches a replacement worker under the run's remaining `max_hours` deadline, and continues training from
-  `weights/last.folo`. Up to 3 automatic recoveries (`max_preemption_retries`) are attempted per run (persisted in
-  `runs/<id>/cloud.json` across restarts). Automatic resume never runs after a manual termination
-  (`DELETE /api/cloud/instances/{id}` / `folo cloud terminate`), a user stop request (`POST /api/runs/{id}/stop` — a
-  stop requested during recovery backoff cancels recovery immediately and ends the run `stopped` without launching a
-  replacement), an expired `max_hours` deadline, on `remote` servers, or before any checkpoint has been synced. Once
-  the retry budget is exhausted, the run fails with `cloud_instance_lost` and keeps `weights/last.folo` on disk so it
-  can still be resumed manually.
+  the worker restarts and answers `run_not_found`, a replacement worker vanishes while syncing or starting the run, or
+  the instance vanishes before final weights are collected after completion) and an incomplete synced checkpoint
+  (`weights/last.folo`) is on disk, FOLO automatically recovers instead of failing the run: it releases the dead
+  instance, folds its cost into `Run.cloud.cost_usd`, rolls local `metrics.jsonl` and `Run` progress back to the synced
+  checkpoint epoch, logs the preemption and retry attempt (`attempt N/3`), transitions `Run.cloud.phase` back to
+  `provisioning`, waits with bounded exponential backoff (`preemption_backoff`, default `10 s`, scaling `1× / 2× / 4×`
+  across retries), launches a replacement worker under the run's remaining `max_hours` deadline, and continues training
+  from `weights/last.folo`. Up to 3 automatic recoveries (`max_preemption_retries`) are attempted per run (persisted in
+  `runs/<id>/cloud.json` across restarts; a server crash during preemption recovery backoff resumes automatically on
+  restart). Automatic resume never runs after a manual termination (`DELETE /api/cloud/instances/{id}` / `folo cloud
+  terminate`), a user stop request (`POST /api/runs/{id}/stop` — a stop requested during recovery backoff cancels
+  recovery immediately and ends the run `stopped` without launching a replacement), an expired `max_hours` deadline, on
+  `remote` servers, or before any checkpoint has been synced. Once the retry budget is exhausted, the run fails with
+  `cloud_instance_lost` and keeps `weights/last.folo` on disk so it can still be resumed manually.
 - **Resuming.** `POST /api/runs` with `resume_run_id` resumes a stopped or failed cloud run on a new instance of
   its `compute` (which may change, like `device`), with a new `Run.cloud`: the copied `weights/last.folo` is
   uploaded and the worker continues it (`checkpoint`, docs/API.md), so the step numbers go on. With `"compute":

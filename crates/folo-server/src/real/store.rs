@@ -607,6 +607,9 @@ impl Store for RealStore {
 
     fn predict(&self, input: PredictInput) -> Result<PredictResponse> {
         crate::store::check_predict_options(&input.options)?;
+        if let Some(map) = &input.per_class_conf {
+            crate::store::check_per_class_conf(map, None)?;
+        }
         let _gpu = self.idle.using();
         let path = match &input.source {
             PredictSource::Dataset { dataset_id, image_id } => {
@@ -616,6 +619,9 @@ impl Store for RealStore {
             PredictSource::Upload(_) => None,
         };
         let m = self.model(&input.model_id)?;
+        if let Some(map) = &input.per_class_conf {
+            crate::store::check_per_class_conf(map, Some(m.model.classes.len()))?;
+        }
         crate::store::check_predict_workload(&input.options, m.model.imgsz, None)?;
         let device = engine::resolve(&self.device)?;
         _gpu.on(device);
@@ -670,6 +676,10 @@ impl Store for RealStore {
             ..PredictConfig::default()
         };
         p.set_config(cfg).map_err(engine_error)?;
+        // Always overwrite per-class threshold state on the cached predictor so calibrated thresholds never leak
+        // into a subsequent uncalibrated request.
+        p.set_per_class_conf(input.per_class_conf).map_err(engine_error)?;
+        p.set_conf_inclusive(input.conf_inclusive);
         crate::store::check_predict_workload(&options, p.imgsz(), Some((decoded.width, decoded.height)))?;
         let mut pred = p.predict_with_options(&decoded, &options).map_err(engine_error)?;
         // A model's first successful prediction includes warm-up; rejected requests never flip `warm`.
@@ -714,7 +724,7 @@ impl Store for RealStore {
     }
 
     fn val(&self, req: ValRequest) -> Result<ValReport> {
-        self.val_with_diagnostics(req, None).map(|(r, _)| r)
+        self.val_extended(req, None).map(|v| v.report)
     }
 
     fn val_with_diagnostics(
@@ -722,6 +732,14 @@ impl Store for RealStore {
         req: ValRequest,
         diag: Option<crate::store::ValDiagConfig>,
     ) -> Result<(ValReport, Option<crate::store::ValDiagnostics>)> {
+        self.val_extended(req, diag).map(|v| (v.report, v.diagnostics))
+    }
+
+    fn val_extended(
+        &self,
+        req: ValRequest,
+        diag: Option<crate::store::ValDiagConfig>,
+    ) -> Result<crate::store::ValExtended> {
         // Validate numeric parameters upfront (matching MockStore::val) before looking up models,
         // re-indexing datasets, or initialising a GPU context.
         crate::models::check_val_params(req.imgsz, req.conf, req.iou)?;
@@ -736,7 +754,7 @@ impl Store for RealStore {
         let device = engine::resolve(&self.device)?;
         _gpu.on(device);
         let (ds, p) = (self.dataset_ref(&e), self.precision);
-        crate::models::val_with_diagnostics(&m, &ds, req.split, req.imgsz, req.conf, req.iou, device, p, diag)
+        crate::models::val_extended(&m, &ds, req.split, req.imgsz, req.conf, req.iou, device, p, diag)
     }
 
     fn labeler(&self) -> Result<&Labeler> {

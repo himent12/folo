@@ -24,7 +24,7 @@ server from the `folo mcp` flags, `folo describe` includes the tool schemas, `fo
 | `src/resources.rs` | `folo://` URIs (`FoloUri`), the resource listing and templates, JSON snapshots |
 | `src/render.rs` | `folo://runs/{id}/samples/{epoch}`: an epoch's validation samples as one annotated JPEG grid |
 | `src/prompts.rs` | The prompts `train_on_folder`, `label_folder` and `diagnose_run` |
-| `src/proxy.rs`, `src/proxy_tests.rs` | `HttpStore`: the `Store` of `--server`, forwarding the request / response calls to a running `folo serve` through `folo_client::Client`; `subscribe` answers `not_implemented` |
+| `src/proxy.rs`, `src/proxy_wire.rs`, `src/proxy_tests.rs` | `HttpStore`: the `Store` of `--server`, forwarding the request / response calls to a running `folo serve` through `folo_client::Client` (`proxy_wire.rs` holds multipart encoding and older-server header probing); `subscribe` answers `not_implemented` |
 | `src/paths.rs` | `PathPolicy`: relative input paths resolve against `--data-dir`; with `--confine`, canonical paths must stay inside it (its tests are `paths_tests.rs`) |
 | `src/confine.rs` | `--confine` for datasets: a read guard on every file the dataset reader opens, and the report before a tool reads a dataset (its tests are `confine_tests.rs`) |
 | `src/errors.rs` | Tool errors: folo-server's error type, plus `invalid_arguments`, `read_only` and `not_implemented` |
@@ -44,7 +44,7 @@ One `ToolDef` per tool in `TOOLS` (`src/tools/mod.rs`), dispatched by name in `s
 | `datasets.rs` | `list_datasets`, `get_dataset` (error-bucket-first issue collection), `list_dataset_issues`, `list_dataset_images`, `register_dataset`, `create_synthetic_dataset`; all three paged list handlers validate paging upfront before store access |
 | `curate.rs` | `audit_dataset` (exact + perceptual dHash leakage), `merge_datasets`, `filter_dataset` |
 | `dataset_export.rs` | `dataset_export` (COCO Detection JSON export with split selection, `copy`/`link`/`reference` image modes, `--confine`, and `--mock`/remote guards) |
-| `models.rs`, `models_tests.rs` | `list_models`, `val`, `predict`, `predict_batch`, `export`, plus upfront validation and proxy option-forwarding tests |
+| `models.rs`, `models_tests.rs`, `models_thresholds_tests.rs` | `list_models`, `val`, `predict`, `predict_batch`, `export`, plus upfront validation, option-forwarding, and calibrated threshold tests |
 | `runs.rs` | `train` (and resume), `run_status`, `list_runs`, `stop_run`, `reorder_run`, `compare_runs` |
 | `cloud.rs` | `cloud_connections`, `cloud_offers`, `cloud_instances`, `cloud_terminate` |
 | `label.rs` | The ten labeling tools on `crate::label::Labels`: path handling, `--confine` of a job's images (and the refusals through a server), MCP hints, the `view_label_image` image content |

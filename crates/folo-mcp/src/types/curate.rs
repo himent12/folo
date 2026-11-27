@@ -54,13 +54,44 @@ pub struct ValDiagnosticsOut {
     pub worst_images: Vec<ImageDiagnosticsOut>,
 }
 
-/// `val` tool result: [`ValReport`] plus optional per-image `diagnostics`.
+/// Calibrated global F1 operating point returned by `val`.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct OperatingPointOut {
+    pub best_conf: f32,
+    pub best_f1: f32,
+    pub precision: f32,
+    pub recall: f32,
+}
+
+/// Calibrated per-class F1 operating point returned by `val`.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct ClassThresholdOut {
+    pub class: u32,
+    pub best_conf: f32,
+    pub best_f1: f32,
+    pub precision: f32,
+    pub recall: f32,
+    pub truths: u64,
+    pub preds: u64,
+}
+
+/// Calibrated global and per-class F1 thresholds returned by `val`.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct ThresholdCalibrationOut {
+    pub global: OperatingPointOut,
+    pub per_class: Vec<ClassThresholdOut>,
+    pub macro_f1: f32,
+}
+
+/// `val` tool result: [`ValReport`] plus optional per-image `diagnostics` and calibrated `thresholds`.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ValToolResult {
     #[serde(flatten)]
     pub report: ValReport,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub diagnostics: Option<ValDiagnosticsOut>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thresholds: Option<ThresholdCalibrationOut>,
 }
 
 /// Class-name normalization mode for `merge_datasets` and `filter_dataset`.

@@ -91,6 +91,8 @@ impl Drop for Live {
 pub(super) struct Gates {
     /// Uploads wait while set.
     pub(super) uploads: AtomicBool,
+    /// Upload requests that waited at `uploads` so far.
+    pub(super) uploads_held: AtomicU32,
     /// `/api/system` answers like a FOLO from before cloud workers.
     pub(super) old: AtomicBool,
     /// Nothing answers yet, as a provider's proxy does for an instance whose worker has not started: `404`.
@@ -161,8 +163,11 @@ async fn gate(State(g): State<Arc<Gates>>, req: Request, next: Next) -> Response
             return (StatusCode::BAD_GATEWAY, "proxy: no route to the instance").into_response();
         }
     }
-    while path.starts_with("/api/uploads") && g.uploads.load(Ordering::SeqCst) {
-        tokio::time::sleep(Duration::from_millis(10)).await;
+    if path.starts_with("/api/uploads") && g.uploads.load(Ordering::SeqCst) {
+        g.uploads_held.fetch_add(1, Ordering::SeqCst);
+        while g.uploads.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
     if path == "/api/system" && g.old.load(Ordering::SeqCst) {
         let system = json!({ "cpu": { "name": "c", "threads": 1, "util": 0.0 },

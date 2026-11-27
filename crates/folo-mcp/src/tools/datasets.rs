@@ -673,6 +673,8 @@ mod tests {
                 tta: false,
                 tta_scales: None,
                 tta_hflip: None,
+                thresholds_path: None,
+                per_class_conf: None,
             })
             .await
             .err()

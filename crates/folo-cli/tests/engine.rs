@@ -18,6 +18,8 @@ mod s12_features;
 mod s13_features;
 #[path = "engine/s14_folo2.rs"]
 mod s14_folo2;
+#[path = "engine/s15_thresholds.rs"]
+mod s15_thresholds;
 #[path = "engine/score.rs"]
 mod score;
 #[path = "engine/weights.rs"]

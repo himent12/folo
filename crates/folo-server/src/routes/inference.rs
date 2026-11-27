@@ -1,5 +1,7 @@
 //! `/api/predict`: predictions from an upload or a dataset image.
 
+use std::collections::BTreeMap;
+
 use axum::Json;
 use axum::extract::{FromRequest, Multipart, Request, State};
 use axum::http::{StatusCode, header};
@@ -9,7 +11,8 @@ use folo_api::PredictRequest;
 use crate::AppState;
 use crate::error::{ApiJson, Error, Result};
 use crate::store::{
-    PredictInput, PredictOptions, PredictSource, TileConfig, TtaConfig, check_predict_options,
+    PredictInput, PredictOptions, PredictSource, TileConfig, TtaConfig, check_per_class_conf,
+    check_predict_options,
 };
 
 use super::blocking;
@@ -24,6 +27,10 @@ struct PredictJsonBody {
     tile: Option<serde_json::Value>,
     #[serde(default)]
     tta: Option<TtaConfig>,
+    #[serde(default)]
+    per_class_conf: Option<BTreeMap<u32, f32>>,
+    #[serde(default)]
+    conf_inclusive: bool,
 }
 
 /// Deserializes an optional `tile` JSON value into [`TileConfig`], inheriting `default_max_det` when the payload
@@ -48,6 +55,8 @@ async fn parse_multipart(mut mp: Multipart) -> Result<PredictInput> {
     let (mut conf, mut iou, mut max_det) =
         (folo_api::default_conf(), folo_api::default_iou(), folo_api::default_max_det());
     let (mut tile_raw, mut tta): (Option<serde_json::Value>, Option<TtaConfig>) = (None, None);
+    let mut per_class_conf: Option<BTreeMap<u32, f32>> = None;
+    let mut conf_inclusive = false;
     while let Some(field) = mp.next_field().await.map_err(|e| Error::multipart("multipart", e))? {
         let name = field.name().unwrap_or("").to_string();
         if name == "image" {
@@ -69,6 +78,13 @@ async fn parse_multipart(mut mp: Multipart) -> Result<PredictInput> {
             "tta" if !text.is_empty() => {
                 tta = Some(serde_json::from_str(&text).map_err(|e| field_err("tta", e))?);
             }
+            "per_class_conf" if !text.is_empty() => {
+                per_class_conf =
+                    Some(serde_json::from_str(&text).map_err(|e| field_err("per_class_conf", e))?);
+            }
+            "conf_inclusive" if !text.is_empty() => {
+                conf_inclusive = text.parse().map_err(|e| field_err("conf_inclusive", e))?;
+            }
             _ => {}
         }
     }
@@ -76,7 +92,16 @@ async fn parse_multipart(mut mp: Multipart) -> Result<PredictInput> {
         model_id.filter(|m| !m.is_empty()).ok_or_else(|| field_err("model_id", "missing or empty"))?;
     let source = resolve_predict_source(image, dataset_id, image_id)?;
     let tile = parse_tile_value(tile_raw, max_det)?;
-    Ok(PredictInput { model_id, source, conf, iou, max_det, options: PredictOptions { tta, tile } })
+    Ok(PredictInput {
+        model_id,
+        source,
+        conf,
+        iou,
+        max_det,
+        options: PredictOptions { tta, tile },
+        per_class_conf,
+        conf_inclusive,
+    })
 }
 
 /// Validates and selects the single image source of a `POST /api/predict` request (multipart or JSON).
@@ -124,6 +149,8 @@ fn parse_json_predict(body: PredictJsonBody) -> Result<PredictInput> {
         iou: r.iou,
         max_det: r.max_det,
         options: PredictOptions { tta: body.tta, tile },
+        per_class_conf: body.per_class_conf,
+        conf_inclusive: body.conf_inclusive,
     })
 }
 
@@ -136,6 +163,9 @@ fn check_thresholds(p: &PredictInput) -> Result<()> {
     }
     if p.max_det == 0 {
         return Err(field_err("max_det", "must be at least 1"));
+    }
+    if let Some(map) = &p.per_class_conf {
+        check_per_class_conf(map, None)?;
     }
     check_predict_options(&p.options)?;
     Ok(())
@@ -216,6 +246,8 @@ mod tests {
                 },
                 tile: None,
                 tta: None,
+                per_class_conf: None,
+                conf_inclusive: false,
             };
             let err = parse_json_predict(req).unwrap_err();
             assert_eq!(
@@ -237,9 +269,20 @@ mod tests {
             },
             tile: None,
             tta: None,
+            per_class_conf: Some(BTreeMap::from([(0, 0.35), (1, 0.6)])),
+            conf_inclusive: true,
         })
         .unwrap();
         assert_eq!(padded.model_id, " m_1 ");
+        assert_eq!(padded.per_class_conf, Some(BTreeMap::from([(0, 0.35), (1, 0.6)])));
+        assert!(padded.conf_inclusive);
+        check_thresholds(&padded).unwrap();
+
+        // Out-of-range per_class_conf is rejected with 400 invalid_body.
+        let mut bad = padded.clone();
+        bad.per_class_conf = Some(BTreeMap::from([(0, 1.5)]));
+        let err = check_thresholds(&bad).unwrap_err();
+        assert_eq!((err.status, err.body.code.as_str()), (StatusCode::BAD_REQUEST, "invalid_body"));
         assert!(matches!(
             padded.source,
             PredictSource::Dataset { dataset_id, image_id } if dataset_id == " ds_1 " && image_id == " 0 "
