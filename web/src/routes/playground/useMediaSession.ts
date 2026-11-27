@@ -557,6 +557,8 @@ export function useMediaSession(input: UseMediaSessionInput) {
       void captureAndEmit(false);
     } else {
       tracker.reset();
+      fps.set(0);
+      latencyMs.set(0);
       void el?.play().catch(() => {});
       scheduleNextLiveTick();
     }
@@ -577,6 +579,7 @@ export function useMediaSession(input: UseMediaSessionInput) {
       if (!preserveTracks) {
         lastEmittedVideoTime = null;
         videoFrameCount = 0;
+        lastFrameMeta.set(null);
         input.onTrackReset?.();
       }
       if (!autoDetect.peek()) frameSynced.set(false);
@@ -606,11 +609,14 @@ export function useMediaSession(input: UseMediaSessionInput) {
         pendingForwardStep = false;
         lastEmittedVideoTime = null;
         videoFrameCount = 0;
+        lastFrameMeta.set(null);
         input.onTrackReset?.();
         el.currentTime = 0;
         currentTime.set(0);
       }
       tracker.reset();
+      fps.set(0);
+      latencyMs.set(0);
       if (!autoDetect.peek()) frameSynced.set(false);
       void el.play().catch(() => {});
     } else {
@@ -678,6 +684,7 @@ export function useMediaSession(input: UseMediaSessionInput) {
       if (!wasForwardStep) {
         lastEmittedVideoTime = null;
         videoFrameCount = 0;
+        lastFrameMeta.set(null);
         input.onTrackReset?.();
       }
       seeking.set(false);

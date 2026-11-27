@@ -76,6 +76,8 @@ export default function BenchCompare() {
     highlight,
     res,
     loaded,
+    canCompare,
+    exportReady,
     failedResult,
     caveats,
     nameOf,
@@ -195,10 +197,12 @@ export default function BenchCompare() {
 
   const exportConditions = () => condRows.peek().map((r) => ({ key: r.key, name: nameOf(r.key), values: r.values }));
   function exportComparison(format: 'csv' | 'json') {
+    if (!exportReady.peek()) return;
     const msg = runCompareDownload(format, bench(), shown.peek(), rows.peek(), old.peek(), best, caveats.peek(), res.peek(), exportConditions(), labelOf);
     if (msg) announce(msg);
   }
   async function copyComparisonMarkdown() {
+    if (!exportReady.peek()) return;
     const msg = await runCompareCopyMarkdown(bench(), shown.peek(), rows.peek(), old.peek(), best, caveats.peek(), exportConditions(), labelOf);
     if (!msg || !alive) return;
     copiedMd.set(true);
@@ -316,7 +320,7 @@ export default function BenchCompare() {
           </ul>
         </Callout>
       ) : null}{' '}
-      <SideBySide shown={shown.get()} rows={rows.get()} old={old.get()} labelOf={labelOf} best={best} makeBaseline={setBaseline} keyMark={key} onCopyMarkdown={() => void copyComparisonMarkdown()} onDownloadCsv={() => exportComparison('csv')} copiedMd={copiedMd.get()} />{' '}
+      <SideBySide shown={shown.get()} rows={rows.get()} old={old.get()} labelOf={labelOf} best={best} makeBaseline={setBaseline} keyMark={key} onCopyMarkdown={() => void copyComparisonMarkdown()} onDownloadCsv={() => exportComparison('csv')} copiedMd={copiedMd.get()} exportDisabled={!exportReady.get()} />{' '}
       <Panel title="mAP50-95 with 95% intervals" meta="unchanged images">
         {ivDomain.get() ? (
           <>
@@ -541,8 +545,8 @@ export default function BenchCompare() {
       )}
       actions={() => (
         <>
-          {shown.get().length >= 2 ? (
-            <Menu icon={Download} text={phone.current ? undefined : 'Export'} label="Export comparison" items={exportItems} />
+          {canCompare.get() ? (
+            <Menu icon={Download} text={phone.current ? undefined : 'Export'} label="Export comparison" disabled={!exportReady.get()} items={exportItems} />
           ) : null}
           {!phone.current ? (
             <Button icon={ArrowLeft} href={href(`/benchmarks/${bench()?.id}`)}>
@@ -607,7 +611,7 @@ export default function BenchCompare() {
             : `Waiting for ${pending.get().length} entries (${pending.get().map((e) => e.name).join(', ')}) to finish — they will join automatically.`}
         </p>
       ) : null}{' '}
-      {shown.get().length < 2 ? (
+      {!canCompare.get() ? (
         <section class="state">
           <EmptyState
             icon={GitCompare}

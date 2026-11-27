@@ -116,12 +116,20 @@ describe('Playground media helpers', () => {
     }
   });
 
-  it('tracks rolling FPS and smoothed inference latency', () => {
+  it('tracks rolling FPS and smoothed inference latency without inflating the first frame', () => {
     const tracker = createFpsTracker(4);
     expect(tracker.snapshot()).toEqual({ fps: 0, latencyMs: 0 });
-    // First frame estimates FPS from latency.
-    expect(tracker.record(50, 1000)).toEqual({ fps: 20, latencyMs: 50 });
-    // Subsequent frames measure wall-clock throughput over the rolling window.
+    // First frame has no inter-frame interval yet: records latency without fabricating FPS from 1000 / latencyMs.
+    expect(tracker.record(6, 1000)).toEqual({ fps: 0, latencyMs: 6 });
+    // Second frame 50 ms later measures actual 20 FPS cadence (not 166.7 FPS from 6 ms inference latency).
+    expect(tracker.record(6, 1050)).toEqual({ fps: 20, latencyMs: 6 });
+    // Identical timestamps have zero elapsed span -> fps stays 0.
+    tracker.reset();
+    expect(tracker.record(6, 1000)).toEqual({ fps: 0, latencyMs: 6 });
+    expect(tracker.record(6, 1000)).toEqual({ fps: 0, latencyMs: 6 });
+    // Multi-frame rolling window averages latency and measures wall-clock throughput.
+    tracker.reset();
+    expect(tracker.record(50, 1000)).toEqual({ fps: 0, latencyMs: 50 });
     expect(tracker.record(40, 1100)).toEqual({ fps: 10, latencyMs: 45 });
     expect(tracker.record(60, 1200)).toEqual({ fps: 10, latencyMs: 50 });
     tracker.reset();

@@ -178,6 +178,10 @@ export function compareState() {
 
   const res = computed(() => shown.get().map((e) => results.get(e.id)));
   const loaded = computed(() => shown.get().length > 0 && res.get().every((r) => !!r));
+  /** True when at least two finished entries are compared (boolean memo keeps header Menu & SideBySide mounted across entry adds/polls). */
+  const canCompare = computed(() => shown.get().length >= 2);
+  /** True once at least two entries are shown and all detailed results + condition names have settled. */
+  const exportReady = computed(() => !!bench() && canCompare.get() && loaded.get() && !catalog.loading);
   /** An entry whose result could not be loaded: said with a retry, never skeletons forever. */
   const failedResult = computed(() =>
     shown
@@ -325,6 +329,8 @@ export function compareState() {
     highlight,
     res,
     loaded,
+    canCompare,
+    exportReady,
     failedResult,
     caveats,
     nameOf,

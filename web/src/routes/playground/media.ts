@@ -240,8 +240,6 @@ export function createFpsTracker(windowSize = 10): FpsTracker {
     if (stamps.length >= 2) {
       const span = stamps[stamps.length - 1]! - stamps[0]!;
       fps = span > 0 ? ((stamps.length - 1) * 1000) / span : 0;
-    } else if (avgLatency > 0) {
-      fps = 1000 / avgLatency;
     }
     return {
       fps: Math.round(fps * 10) / 10,
