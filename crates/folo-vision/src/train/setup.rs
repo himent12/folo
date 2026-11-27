@@ -77,7 +77,7 @@ impl Trainer {
         let weights = opts.weights.clone();
         // Stored with the run (`folo.train`), so a resume resolves `auto` as this run started (§8.2, rule 5).
         let cfg = TrainConfig { transfer: weights.is_some(), ..cfg };
-        let mut t = Self::build(cfg, data, opts)?;
+        let mut t = Self::build(cfg, data, opts, false)?;
         t.warnings = schedule_warnings(&t.cfg, &t.sched, t.data.train.len(), weights.is_none());
         if let Some(w) = weights {
             let file = ModelFile::open(&w)?;
@@ -167,7 +167,7 @@ impl Trainer {
                 data.classes
             )));
         }
-        let mut t = Self::build(cfg, data, opts)?;
+        let mut t = Self::build(cfg, data, opts, true)?;
         let ema = t.ema.as_mut().map(|e| e as &mut dyn EmaState);
         let r = file.resume(&t.model, t.opt.as_mut(), ema, Some(t.data.classes.clone()))?;
         let (want, got) = (t.sched.contract(), r.schedule.contract());
@@ -235,7 +235,7 @@ impl Trainer {
         Ok(t)
     }
 
-    fn build(cfg: TrainConfig, data: TrainData, opts: TrainOptions) -> Result<Self> {
+    fn build(mut cfg: TrainConfig, data: TrainData, opts: TrainOptions, is_resume: bool) -> Result<Self> {
         cfg.validate()?;
         let n_train = data.train.len();
         let nc = data.classes.len();
@@ -275,6 +275,45 @@ impl Trainer {
         if cfg.amp {
             amp_support(device)?;
         }
+
+        // Wired GPU auto-batch sizing (opt-in on new runs; resumed runs keep their checkpointed batch/schedule).
+        let auto_batch_plan = if !is_resume && cfg.auto_batch {
+            if let Some(ctx) = folo_gpu::context_for(device) {
+                let teacher_arch = cfg.distill.as_ref().and_then(|d| {
+                    let path = super::resolve_teacher(&d.teacher).ok()?;
+                    let file = ModelFile::open(&path).ok()?;
+                    Some(file.metadata().arch.clone())
+                });
+                let req = super::AutoBatchRequest::from_train_config(&cfg, nc, n_train, teacher_arch, None)?;
+                let plan = super::auto_batch_plan(&req, &ctx.memory_budget())?;
+                if !plan.fits {
+                    return Err(Error::Config(format!(
+                        "auto_batch: cannot fit training on {device}: {}; enable --amp, lower --imgsz, or choose a \
+                         smaller model scale",
+                        plan.summary_line()
+                    )));
+                }
+                if plan.needs_reclaim {
+                    let _ = ctx.release_memory();
+                }
+                cfg.batch = plan.chosen_batch;
+                cfg.nbs = plan.nominal_batch;
+                pending_logs.push((LogLevel::Info, plan.summary_line()));
+                Some(plan)
+            } else {
+                pending_logs.push((
+                    LogLevel::Info,
+                    format!(
+                        "auto_batch enabled, but training on {device} (no folo-gpu VRAM budget); keeping batch {}",
+                        cfg.batch
+                    ),
+                ));
+                None
+            }
+        } else {
+            None
+        };
+
         let resolved = cfg.resolve_optimizer(n_train, nc);
         // The kernels an earlier run of this kind used compile on every core while the model and loader are built.
         crate::precompile::precompile(
@@ -477,6 +516,7 @@ impl Trainer {
             prefetched: None,
             pending_write: None,
             after_epoch: opts.after_epoch,
+            auto_batch_plan,
         })
     }
 }

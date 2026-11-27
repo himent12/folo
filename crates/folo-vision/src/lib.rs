@@ -66,5 +66,8 @@ pub use nms::{Detection, NmsConfig, NmsKind};
 pub use predict::{Precision, PredictConfig, Prediction, Predictor, PreparedBatch, Timing};
 pub use tile::{TileConfig, TileMergeMetric, TileRect};
 pub use track::{ByteTracker, SequenceFrame, TrackConfig, TrackedDetection};
-pub use train::{TrainConfig, TrainData, TrainOptions, Trainer};
+pub use train::{
+    AutoBatchPlan, AutoBatchRequest, BatchLimitFactor, TrainConfig, TrainData, TrainOptions, Trainer,
+    auto_batch_plan, probe_batch_size,
+};
 pub use tta::{PredictOptions, TtaConfig};

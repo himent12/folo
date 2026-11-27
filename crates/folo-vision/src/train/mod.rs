@@ -47,6 +47,7 @@
 //! [`detection_loss`]: crate::loss::detection_loss
 //! [`dual_loss`]: crate::loss::dual_loss
 
+pub mod auto_batch;
 mod checkpoint;
 mod config;
 mod device;
@@ -60,6 +61,12 @@ mod teacher;
 #[cfg(test)]
 mod tests;
 mod writer;
+
+pub use auto_batch::{
+    AutoBatchPlan, AutoBatchRequest, BatchLimitFactor, DEFAULT_AUTO_BATCH_UTILIZATION, HeadroomSummary,
+    MAX_AUTO_BATCH, MAX_AUTO_BATCH_UTILIZATION, MIN_AUTO_BATCH_UTILIZATION, MemoryFootprint, auto_batch_plan,
+    estimate_training_footprint, probe_batch_size,
+};
 
 pub use config::{
     MuSgdConfig, OptimizerChoice, ResolvedOptim, TrainConfig, default_workers, f32_decimal, resolve_device,
@@ -268,6 +275,8 @@ pub struct Trainer {
     pending_write: Option<writer::PendingWrite>,
     /// [`TrainOptions::after_epoch`].
     after_epoch: Option<Box<dyn EpochHook>>,
+    /// Diagnostic report produced when [`TrainConfig::auto_batch`] sized the batch on a GPU.
+    auto_batch_plan: Option<AutoBatchPlan>,
 }
 
 /// A started epoch's batches: the loader's, staged by the feeder thread on a folo-gpu device.
@@ -370,10 +379,15 @@ impl Trainer {
         self.stop.load(Ordering::Relaxed)
     }
 
+    /// The GPU auto-batch sizing plan, when [`TrainConfig::auto_batch`] ran on a GPU.
+    pub fn auto_batch_plan(&self) -> Option<&AutoBatchPlan> {
+        self.auto_batch_plan.as_ref()
+    }
+
     /// The `config.json` of the run: the resolved config plus the derived numbers.
     pub fn run_config(&self) -> serde_json::Value {
         let c = self.sched.contract();
-        serde_json::json!({
+        let mut obj = serde_json::json!({
             "train": self.cfg,
             "arch": self.model.arch(),
             "classes": self.data.classes,
@@ -396,6 +410,10 @@ impl Trainer {
             "close_mosaic_epochs": self.cfg.augment.close_mosaic_epochs(self.cfg.epochs),
             "warnings": self.warnings,
             "resolved": self.resolved_train(),
-        })
+        });
+        if let (Some(plan), Some(map)) = (&self.auto_batch_plan, obj.as_object_mut()) {
+            map.insert("auto_batch".into(), serde_json::json!(plan));
+        }
+        obj
     }
 }

@@ -158,6 +158,14 @@ pub struct TrainConfig {
     /// Number of initial epochs (`0..freeze_backbone_epochs`) during which `backbone.*` weights and BatchNorm
     /// running statistics stay frozen (default `0` = train the whole model from epoch 1).
     pub freeze_backbone_epochs: u32,
+    /// Opt-in GPU auto-batch sizing (`false` by default): before placing the model on a GPU in [`super::Trainer::new`],
+    /// probes VRAM headroom and per-buffer limits via `folo-gpu`'s `MemoryBudget`, picks a safe physical micro-batch
+    /// up to `max(batch, nbs)`, and pairs it with gradient accumulation so effective batch size and LR schedule stay
+    /// consistent without OOM. Ignored on CPU and on checkpoint resume.
+    pub auto_batch: bool,
+    /// Target fraction of dedicated VRAM for [`TrainConfig::auto_batch`] (default `0.80`, valid in `0.25..=0.95`;
+    /// `1.0 - auto_batch_target` is reserved as safety headroom).
+    pub auto_batch_target: f64,
 }
 
 /// `musgd.*` (docs/MODEL.md §8.2): `p −= muon · lr · O`, the SGD half of a conv weight at `sgd · lr`, the
@@ -242,6 +250,8 @@ impl Default for TrainConfig {
             cls_lr_close_scale: 1.0,
             backbone_lr_scale: 1.0,
             freeze_backbone_epochs: 0,
+            auto_batch: false,
+            auto_batch_target: super::DEFAULT_AUTO_BATCH_UTILIZATION,
         }
     }
 }
@@ -457,6 +467,17 @@ impl TrainConfig {
             return bad(format!(
                 "backbone_lr_scale must be a finite number > 0, got {}",
                 self.backbone_lr_scale
+            ));
+        }
+        if !(self.auto_batch_target.is_finite()
+            && (super::MIN_AUTO_BATCH_UTILIZATION..=super::MAX_AUTO_BATCH_UTILIZATION)
+                .contains(&self.auto_batch_target))
+        {
+            return bad(format!(
+                "auto_batch_target must be a finite number in {}..={}, got {}",
+                super::MIN_AUTO_BATCH_UTILIZATION,
+                super::MAX_AUTO_BATCH_UTILIZATION,
+                self.auto_batch_target
             ));
         }
         if let Some(d) = &self.distill {
