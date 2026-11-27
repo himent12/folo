@@ -57,3 +57,7 @@ harness = false
 [[bench]]
 name = "norm_softmax"
 harness = false
+
+[[bench]]
+name = "vision"
+harness = false

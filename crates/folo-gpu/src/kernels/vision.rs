@@ -11,11 +11,118 @@ use crate::kernels::gemm::check_dtype;
 use crate::pipeline::{Access, KernelDef, Params, Source, Spec};
 use crate::pool::GpuBuffer;
 
+static LETTERBOX_PREFILTER: KernelDef = KernelDef {
+    name: "letterbox_prefilter",
+    storage: &[Access::Read, Access::ReadWrite],
+    source: Source::Static(include_str!("../shaders/letterbox_prefilter.wgsl")),
+};
 static LETTERBOX: KernelDef = KernelDef {
     name: "letterbox",
     storage: &[Access::Read, Access::Read, Access::ReadWrite],
-    source: Source::Static(include_str!("../shaders/letterbox.wgsl")),
+    source: Source::Generated(gen_letterbox),
 };
+
+const LETTERBOX_MAIN_SCALAR: &str = r#"
+@group(0) @binding(1) var<storage, read> SRC: array<u32>;
+@group(0) @binding(2) var<storage, read> TAPS: array<u32>;
+@group(0) @binding(3) var<storage, read_write> Y: array<T>;
+
+@compute @workgroup_size(256)
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,
+        @builtin(local_invocation_index) lid: u32) {
+    let ow = pu(0u);
+    let oh = pu(1u);
+    let i = linear_id(wid, nwg, lid, 256u);
+    if (i >= ow * oh) { return; }
+    let x = i % ow;
+    let y = i / ow;
+    let plane = ow * oh;
+    let base = pu(12u) + i;
+    let scale = pf(11u);
+    let px = pu(4u);
+    let py = pu(5u);
+    let rw = pu(6u);
+    let rh = pu(7u);
+    if (x < px || x >= px + rw || y < py || y >= py + rh) {
+        let v = T(f32(pu(10u)) * scale);
+        Y[base] = v;
+        Y[base + plane] = v;
+        Y[base + 2u * plane] = v;
+        return;
+    }
+    let dx = x - px;
+    let dy = y - py;
+    let tx = pu(13u);
+    let ty = tx + 3u * rw;
+    let ya = TAPS[ty + dy];
+    let yb = TAPS[ty + rh + dy];
+    let wy = TAPS[ty + 2u * rh + dy];
+    let v = sample_bilinear(dx, rw, tx, ya, yb, wy, 2048u - wy);
+    Y[base] = T(f32(v.x) * scale);
+    Y[base + plane] = T(f32(v.y) * scale);
+    Y[base + 2u * plane] = T(f32(v.z) * scale);
+}
+"#;
+
+const LETTERBOX_MAIN_VEC4: &str = r#"
+@group(0) @binding(1) var<storage, read> SRC: array<u32>;
+@group(0) @binding(2) var<storage, read> TAPS: array<u32>;
+@group(0) @binding(3) var<storage, read_write> Y: array<vec4<T>>;
+
+fn sample_lane(x: u32, px: u32, rw: u32, tx: u32, ya: u32, yb: u32, wy: u32, iwy: u32, pad_v: f32, scale: f32) -> vec3<f32> {
+    if (x < px || x >= px + rw) {
+        return vec3<f32>(pad_v);
+    }
+    let v = sample_bilinear(x - px, rw, tx, ya, yb, wy, iwy);
+    return vec3<f32>(v) * scale;
+}
+
+@compute @workgroup_size(256)
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,
+        @builtin(local_invocation_index) lid: u32) {
+    let ow4 = pu(0u) >> 2u;
+    let oh = pu(1u);
+    let plane4 = ow4 * oh;
+    let i = linear_id(wid, nwg, lid, 256u);
+    if (i >= plane4) { return; }
+    let x4 = i % ow4;
+    let y = i / ow4;
+    let x0 = x4 << 2u;
+    let base4 = pu(12u) + i;
+    let scale = pf(11u);
+    let pad_v = f32(pu(10u)) * scale;
+    let px = pu(4u);
+    let py = pu(5u);
+    let rw = pu(6u);
+    let rh = pu(7u);
+    if (y < py || y >= py + rh || x0 + 4u <= px || x0 >= px + rw) {
+        let pv = vec4<T>(T(pad_v));
+        Y[base4] = pv;
+        Y[base4 + plane4] = pv;
+        Y[base4 + 2u * plane4] = pv;
+        return;
+    }
+    let dy = y - py;
+    let tx = pu(13u);
+    let ty = tx + 3u * rw;
+    let ya = TAPS[ty + dy];
+    let yb = TAPS[ty + rh + dy];
+    let wy = TAPS[ty + 2u * rh + dy];
+    let iwy = 2048u - wy;
+    let c0 = sample_lane(x0, px, rw, tx, ya, yb, wy, iwy, pad_v, scale);
+    let c1 = sample_lane(x0 + 1u, px, rw, tx, ya, yb, wy, iwy, pad_v, scale);
+    let c2 = sample_lane(x0 + 2u, px, rw, tx, ya, yb, wy, iwy, pad_v, scale);
+    let c3 = sample_lane(x0 + 3u, px, rw, tx, ya, yb, wy, iwy, pad_v, scale);
+    Y[base4] = vec4<T>(vec4<f32>(c0.x, c1.x, c2.x, c3.x));
+    Y[base4 + plane4] = vec4<T>(vec4<f32>(c0.y, c1.y, c2.y, c3.y));
+    Y[base4 + 2u * plane4] = vec4<T>(vec4<f32>(c0.z, c1.z, c2.z, c3.z));
+}
+"#;
+
+fn gen_letterbox(spec: &Spec) -> String {
+    let main = if spec.get_bool("VEC4") { LETTERBOX_MAIN_VEC4 } else { LETTERBOX_MAIN_SCALAR };
+    format!("{main}{}", include_str!("../shaders/letterbox.wgsl"))
+}
 static DETECT: KernelDef = KernelDef {
     name: "detect",
     storage: &[Access::Read, Access::Read, Access::Read, Access::ReadWrite],
@@ -262,13 +369,54 @@ pub fn letterbox_rgb8(
     check_buf(src, src_end.div_ceil(4), DType::F32, "letterbox source")?;
     check_buf(taps, taps_words, DType::F32, "letterbox taps")?;
     check_buf(y, out_end, dtype, "letterbox output")?;
-    let k =
-        ctx.kernel(&LETTERBOX, Spec::new().bool("PREFILTER", fx > 1 || fy > 1).f16(dtype == DType::F16))?;
+    let prefilter = fx > 1 || fy > 1;
+    let pw = sw.div_ceil(fx);
+    let ph = sh.div_ceil(fy);
+    let pn = pw.checked_mul(ph);
+    // Run the 2-pass box prefilter when blocks have >= 4 source pixels (so avoiding 4-corner recomputation
+    // outweighs the extra dispatch and packed intermediate traffic), when 2-pass computes fewer cells than
+    // 4 * rw * rh, and when the compact packed-u32 intermediate fits within the storage binding limit.
+    let use_two_pass = prefilter
+        && fx.saturating_mul(fy) >= 4
+        && pn.is_some_and(|cells| {
+            cells <= u32::MAX as usize
+                && (cells as u64).saturating_mul(4) <= ctx.caps().max_storage_buffer_binding_size
+                && rw.saturating_mul(rh).saturating_mul(4) > cells
+        });
+    let pre_buf = if use_two_pass {
+        let cells = pn.expect("checked above");
+        let buf = ctx.alloc((cells as u64) * 4)?;
+        let kp = ctx.kernel(&LETTERBOX_PREFILTER, Spec::new())?;
+        let pp = Params::new().uz(cells)?.uz(pw)?.uz(sw)?.uz(sh)?.uz(fx)?.uz(fy)?.uz(d.src_offset)?;
+        ctx.dispatch(&kp, &[src, buf.raw()], &pp, ctx.grid_1d(cells as u64, 256)?)?;
+        Some(buf)
+    } else {
+        None
+    };
+    // Use 4-pixel-per-thread coalesced `vec4<T>` stores when reading aligned packed-u32 prefiltered pixels or
+    // same-size non-prefiltered frames (low register pressure); fractional resizes on raw RGB bytes keep 1
+    // pixel per thread so unaligned `rgb_at` loads maximize occupancy.
+    let vec4 = ow.is_multiple_of(4)
+        && d.out_offset.is_multiple_of(4)
+        && (use_two_pass || (!prefilter && rw == sw && rh == sh));
+    let (sample_src, sample_w, sample_h, sample_src_off) = match &pre_buf {
+        Some(buf) => (buf.raw(), pw, ph, 0usize),
+        None => (src, sw, sh, d.src_offset),
+    };
+    let k = ctx.kernel(
+        &LETTERBOX,
+        Spec::new()
+            .bool("PREFILTER", prefilter && !use_two_pass)
+            .bool("PACKED_SRC", use_two_pass)
+            .bool("VEC4", vec4)
+            .f16(dtype == DType::F16),
+    )?;
+    let (out_off_param, threads) = if vec4 { (d.out_offset / 4, n / 4) } else { (d.out_offset, n) };
     let p = Params::new()
         .uz(ow)?
         .uz(oh)?
-        .uz(sw)?
-        .uz(sh)?
+        .uz(sample_w)?
+        .uz(sample_h)?
         .uz(d.pad[0])?
         .uz(d.pad[1])?
         .uz(rw)?
@@ -277,10 +425,10 @@ pub fn letterbox_rgb8(
         .uz(fy)?
         .u(d.pad_value as u32)
         .f(d.scale)
-        .uz(d.out_offset)?
+        .uz(out_off_param)?
         .uz(d.taps)?
-        .uz(d.src_offset)?;
-    ctx.dispatch(&k, &[src, taps, y], &p, ctx.grid_1d(n as u64, 256)?)
+        .uz(sample_src_off)?;
+    ctx.dispatch(&k, &[sample_src, taps, y], &p, ctx.grid_1d(threads as u64, 256)?)
 }
 
 /// Whether the shader can sum and round an `fx x fy` prefilter block in u32: `255 · n + n / 2` for
@@ -478,7 +626,8 @@ pub fn upload_rgb8_hwc_to_chw_norm(
 }
 
 /// This module's kernels, for the precompile registry (`kernels::find_def`).
-pub(crate) static DEFS: &[&KernelDef] = &[&LETTERBOX, &DETECT, &U8_SCALE, &RGB8_CHW_NORM];
+pub(crate) static DEFS: &[&KernelDef] =
+    &[&LETTERBOX_PREFILTER, &LETTERBOX, &DETECT, &U8_SCALE, &RGB8_CHW_NORM];
 
 #[cfg(test)]
 mod tests {

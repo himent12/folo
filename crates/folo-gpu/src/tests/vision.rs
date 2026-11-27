@@ -358,6 +358,224 @@ fn letterbox_prefilter_specialized_and_plain_parity() {
 }
 
 #[test]
+fn letterbox_two_pass_prefilter_vec4_f16_offsets_and_dispatch_paths() {
+    let _shared = gpu!();
+    let ctx = crate::GpuContext::new().unwrap();
+    let scale = 1.0 / 255.0;
+    let mut rng = Rng::new(0x1e77_eb0c_5130);
+    let mut dtypes = vec![DType::F32];
+    if ctx.caps().shader_f16 {
+        dtypes.push(DType::F16);
+    }
+
+    // (sw, sh, fx, fy, rw, rh, ow, oh, px, py, src_off, out_off, identity_taps, expect_two_pass)
+    // Covers:
+    // - 2-pass prefilter + VEC4 with partial tail blocks, partial-edge 4-px pad spans (px=1/3), all 4 byte phases
+    // - 2-pass prefilter + scalar (odd ow / odd out_off)
+    // - 1-pass prefilter fallback (fx*fy < 4 and tiny 1x1 resized output)
+    // - No-prefilter VEC4 identity (wx=0, wy=0) and non-zero taps, plus fractional scalar
+    let cases = [
+        (
+            23usize, 19usize, 3usize, 2usize, 8usize, 6usize, 12usize, 8usize, 1usize, 1usize, 0usize,
+            0usize, false, true,
+        ),
+        (29, 23, 6, 5, 7, 5, 12, 8, 3, 2, 1, 4, false, true),
+        (23, 19, 3, 2, 8, 6, 12, 8, 2, 1, 2, 8, false, true),
+        (23, 19, 3, 2, 8, 6, 12, 8, 0, 0, 3, 0, false, true),
+        (23, 19, 3, 2, 7, 5, 11, 7, 1, 1, 1, 3, false, true), // 2-pass + scalar (odd ow & out_off)
+        (18, 12, 2, 1, 8, 6, 12, 8, 2, 1, 2, 4, false, false), // fx*fy == 2 -> 1-pass fallback
+        (20, 20, 2, 2, 1, 1, 8, 4, 2, 1, 0, 0, false, false), // 4*rw*rh <= pw*ph -> 1-pass fallback
+        (12, 8, 1, 1, 12, 8, 12, 8, 0, 0, 3, 4, true, false), // same-size identity VEC4 (wx=0, wy=0)
+        (12, 8, 1, 1, 12, 8, 16, 10, 1, 1, 1, 8, false, false), // same-size non-zero taps VEC4 + partial edge
+        (15, 11, 1, 1, 10, 7, 12, 8, 1, 0, 2, 4, false, false), // fractional no-prefilter scalar
+    ];
+
+    let cpu_letterbox = |src: &[u8],
+                         sw: usize,
+                         sh: usize,
+                         fx: usize,
+                         fy: usize,
+                         ow: usize,
+                         oh: usize,
+                         px: usize,
+                         py: usize,
+                         rw: usize,
+                         rh: usize,
+                         pad_value: u8,
+                         x0: &[u32],
+                         x1: &[u32],
+                         wx: &[u32],
+                         y0: &[u32],
+                         y1: &[u32],
+                         wy: &[u32],
+                         dtype: DType|
+     -> Vec<f32> {
+        let sample_px = |gx: usize, gy: usize| -> [u32; 3] {
+            if fx == 1 && fy == 1 {
+                let off = (gy * sw + gx) * 3;
+                return [src[off] as u32, src[off + 1] as u32, src[off + 2] as u32];
+            }
+            let bx0 = gx * fx;
+            let bx1 = (bx0 + fx).min(sw);
+            let by0 = gy * fy;
+            let by1 = (by0 + fy).min(sh);
+            let mut s = [0u32; 3];
+            for y in by0..by1 {
+                for x in bx0..bx1 {
+                    let off = (y * sw + x) * 3;
+                    for c in 0..3 {
+                        s[c] += src[off + c] as u32;
+                    }
+                }
+            }
+            let n = ((bx1 - bx0) * (by1 - by0)) as u32;
+            [(s[0] + n / 2) / n, (s[1] + n / 2) / n, (s[2] + n / 2) / n]
+        };
+        let plane = ow * oh;
+        let mut want = vec![0.0f32; 3 * plane];
+        for y in 0..oh {
+            for x in 0..ow {
+                let idx = y * ow + x;
+                if x < px || x >= px + rw || y < py || y >= py + rh {
+                    let v = pad_value as f32 * scale;
+                    let v = if dtype == DType::F16 { half::f16::from_f32(v).to_f32() } else { v };
+                    want[idx] = v;
+                    want[idx + plane] = v;
+                    want[idx + 2 * plane] = v;
+                } else {
+                    let (dx, dy) = (x - px, y - py);
+                    let p00 = sample_px(x0[dx] as usize, y0[dy] as usize);
+                    let p10 = sample_px(x1[dx] as usize, y0[dy] as usize);
+                    let p01 = sample_px(x0[dx] as usize, y1[dy] as usize);
+                    let p11 = sample_px(x1[dx] as usize, y1[dy] as usize);
+                    let (iwx, iwy) = (2048 - wx[dx], 2048 - wy[dy]);
+                    for c in 0..3 {
+                        let t = p00[c] * iwx + p10[c] * wx[dx];
+                        let u = p01[c] * iwx + p11[c] * wx[dx];
+                        let v = ((t * iwy + u * wy[dy] + (1 << 21)) >> 22) as f32 * scale;
+                        want[idx + c * plane] =
+                            if dtype == DType::F16 { half::f16::from_f32(v).to_f32() } else { v };
+                    }
+                }
+            }
+        }
+        want
+    };
+
+    for dtype in dtypes {
+        let sentinel = match dtype {
+            DType::F32 => -19.25f32,
+            DType::F16 => half::f16::from_f32(-19.25).to_f32(),
+        };
+        for &(sw, sh, fx, fy, rw, rh, ow, oh, px, py, src_off, out_off, identity_taps, expect_two_pass) in
+            &cases
+        {
+            let src_len = sw * sh * 3;
+            let mut src_padded = vec![0u8; src_off + src_len + 5];
+            for b in &mut src_padded {
+                *b = (rng.next_u64() & 0xff) as u8;
+            }
+            let src_buf = ctx.upload(&src_padded).unwrap();
+            let pw = sw.div_ceil(fx);
+            let ph = sh.div_ceil(fy);
+            let (x0, x1, wx, y0, y1, wy) = if identity_taps {
+                (
+                    (0..rw as u32).collect::<Vec<_>>(),
+                    (0..rw as u32).map(|i| (i + 1).min(pw as u32 - 1)).collect::<Vec<_>>(),
+                    vec![0u32; rw],
+                    (0..rh as u32).collect::<Vec<_>>(),
+                    (0..rh as u32).map(|i| (i + 1).min(ph as u32 - 1)).collect::<Vec<_>>(),
+                    vec![0u32; rh],
+                )
+            } else {
+                let x0: Vec<u32> = (0..rw).map(|x| ((x * pw) / rw).min(pw - 1) as u32).collect();
+                let x1: Vec<u32> = x0.iter().map(|&a| (a + 1).min(pw as u32 - 1)).collect();
+                // Mix wy == 0 and non-zero wy / wx values to exercise both branches of sample_bilinear.
+                let wx: Vec<u32> =
+                    (0..rw).map(|x| if x % 3 == 0 { 0 } else { ((x * 733 + 17) % 2049) as u32 }).collect();
+                let y0: Vec<u32> = (0..rh).map(|y| ((y * ph) / rh).min(ph - 1) as u32).collect();
+                let y1: Vec<u32> = y0.iter().map(|&a| (a + 1).min(ph as u32 - 1)).collect();
+                let wy: Vec<u32> =
+                    (0..rh).map(|y| if y % 2 == 0 { 0 } else { ((y * 911 + 31) % 2049) as u32 }).collect();
+                (x0, x1, wx, y0, y1, wy)
+            };
+            let mut taps: Vec<u32> = Vec::with_capacity(3 * (rw + rh));
+            taps.extend(&x0);
+            taps.extend(&x1);
+            taps.extend(&wx);
+            taps.extend(&y0);
+            taps.extend(&y1);
+            taps.extend(&wy);
+            let taps_buf = ctx.upload(bytemuck::cast_slice(&taps)).unwrap();
+            let pad_value = 114u8;
+            let out_elems = 3 * ow * oh;
+            let total_out = out_off + out_elems + 6;
+            let init_f32 = vec![sentinel; total_out];
+            let out_buf = match dtype {
+                DType::F32 => ctx.upload(bytemuck::cast_slice(&init_f32)).unwrap(),
+                DType::F16 => {
+                    let h16: Vec<u16> = init_f32.iter().map(|&x| half::f16::from_f32(x).to_bits()).collect();
+                    ctx.upload(bytemuck::cast_slice(&h16)).unwrap()
+                }
+            };
+            let desc = LetterboxDesc {
+                out: [ow, oh],
+                src: [sw, sh],
+                src_offset: src_off,
+                pad: [px, py],
+                resized: [rw, rh],
+                prefilter: [fx, fy],
+                pad_value,
+                scale,
+                out_offset: out_off,
+                taps: 0,
+            };
+            ctx.trace_begin();
+            letterbox_rgb8(&ctx, src_buf.raw(), taps_buf.raw(), out_buf.raw(), &desc, dtype).unwrap();
+            let tr = ctx.trace_end();
+            let names: Vec<&str> = tr.iter().map(|o| o.name).collect();
+            let want_names: &[&str] =
+                if expect_two_pass { &["letterbox_prefilter", "letterbox"] } else { &["letterbox"] };
+            assert_eq!(names, want_names, "dispatch trace {dtype:?} {sw}x{sh} fx={fx} fy={fy}");
+
+            let got = read_out(&ctx, out_buf.raw(), total_out, dtype);
+            let want = cpu_letterbox(
+                &src_padded[src_off..src_off + src_len],
+                sw,
+                sh,
+                fx,
+                fy,
+                ow,
+                oh,
+                px,
+                py,
+                rw,
+                rh,
+                pad_value,
+                &x0,
+                &x1,
+                &wx,
+                &y0,
+                &y1,
+                &wy,
+                dtype,
+            );
+            assert_vision_parity(
+                &got[out_off..out_off + out_elems],
+                &want,
+                dtype,
+                &format!(
+                    "letterbox {dtype:?} {sw}x{sh} -> {ow}x{oh} fx={fx} fy={fy} src={src_off} out={out_off}"
+                ),
+            );
+            assert!(got[..out_off].iter().all(|&v| v == sentinel), "prefix slack clobbered");
+            assert!(got[out_off + out_elems..].iter().all(|&v| v == sentinel), "suffix slack clobbered");
+        }
+    }
+    assert!(ctx.kernels_without_registry().is_empty());
+}
+
+#[test]
 fn strided_cast_u8_to_float_vec4_and_odd_exact() {
     let ctx = gpu!();
     let bytes: Vec<u8> = (0u8..=255).collect();

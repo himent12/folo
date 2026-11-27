@@ -109,6 +109,12 @@ fn main() {
             });
             let traffic = (planes * h * w) as f64 * eb + (planes * oh * ow) as f64 * (eb + 8.0);
             report(&format!("{label} {dt:?}"), s, traffic);
+            let sb = time(&ctx, || {
+                pool_grad::max_pool2d_backward(&ctx, b.raw(), idx.raw(), a.raw(), (planes, h, w), &win, dt)
+                    .unwrap();
+            });
+            let bw_label = label.replacen("max_idx", "max_bwd", 1);
+            report(&format!("{bw_label} {dt:?}"), sb, traffic);
         }
     }
 

@@ -7,14 +7,21 @@
 //! average pooling runs in f32. Windows have no dilation; padding is at most half the kernel, so every window
 //! holds at least one real element.
 
-use super::pooling::TILED_MAX_K;
+mod max_tiled;
+
+use super::pooling::{PLANE_VEC4_SMALL_CAP, TILED_MAX_K, is_same_vec4_k, plane_vec4_plan};
 use super::reduce::{self, ReduceOp};
 use super::{check_buf, prod};
 use crate::DType;
 use crate::context::GpuContext;
 use crate::error::{GpuError, Result, shape_err};
 use crate::kernels::gemm::check_dtype;
-use crate::pipeline::{Access, KernelDef, Params, Source, Spec, SpecVal};
+use crate::pipeline::{Access, KernelDef, Params, Source, Spec};
+pub(crate) use max_tiled::pool_tiled_fits;
+use max_tiled::{
+    POOL_BW_IDX_TILED_SRC, POOL_IDX_TILED_SRC, gen_pool_bw_idx_plane_vec4, gen_pool_bw_idx_tiled_vec4,
+    gen_pool_idx_plane_vec4, gen_pool_idx_tiled_vec4,
+};
 
 /// Pooling window: kernel, stride and padding per axis `(h, w)`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -58,187 +65,6 @@ fn last_out(i: u32, s: u32, p: u32, n: u32) -> i32 { return min(i32((i + p) / s)
 // Adaptive windows (PyTorch's rule): output o covers [o*in/out, ceil((o+1)*in/out)).
 fn astart(o: u32, inp: u32, outp: u32) -> u32 { return (o * inp) / outp; }
 fn aend(o: u32, inp: u32, outp: u32) -> u32 { return ((o + 1u) * inp + outp - 1u) / outp; }
-"#;
-
-/// Shared-memory separable `16×16` tiled stride-1 `max_pool2d_indices`: bit-exact row-major tie-breaking
-/// (leftmost column, topmost row) and first-NaN preservation.
-/// Spec: `MODE = 0`, `TILED = true`, `KH` (`2..=7`), `KW` (`2..=7`), `f16` (optional).
-/// Params: 0 = total_tiles, 1 = H, 2 = W, 3 = OH, 4 = OW, 5 = -inf, 6 = PH (i32), 7 = PW (i32),
-/// 8 = tiles_x, 9 = tiles_y.
-const POOL_IDX_TILED_SRC: &str = r#"
-@group(0) @binding(1) var<storage, read> X: array<T>;
-@group(0) @binding(2) var<storage, read_write> Y: array<T>;
-@group(0) @binding(3) var<storage, read_write> YI: array<u32>;
-
-const LOAD_H: u32 = 16u + KH - 1u;
-const LOAD_W: u32 = 16u + KW - 1u;
-const LOAD_N: u32 = LOAD_H * LOAD_W;
-const H_N: u32 = LOAD_H * 16u;
-
-var<workgroup> sh_in: array<f32, LOAD_N>;
-var<workgroup> sh_in_i: array<i32, LOAD_N>;
-var<workgroup> sh_h: array<f32, H_N>;
-var<workgroup> sh_h_i: array<i32, H_N>;
-
-fn isnan1(v: f32) -> bool { return (bitcast<u32>(v) & 0x7fffffffu) > 0x7f800000u; }
-
-@compute @workgroup_size(16, 16)
-fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,
-        @builtin(local_invocation_id) lid: vec3<u32>) {
-    let tile_id = wid.y * nwg.x + wid.x;
-    let valid = tile_id < pu(0u);
-    let h = pu(1u); let w = pu(2u); let oh = pu(3u); let ow = pu(4u);
-    let neg_inf = pf(5u);
-    let ph = i32(pu(6u)); let pw = i32(pu(7u));
-    let tiles_x = pu(8u); let tiles_y = pu(9u);
-    let tx = tile_id % tiles_x;
-    let tmp = tile_id / tiles_x;
-    let ty = tmp % tiles_y;
-    let p = tmp / tiles_y;
-    let tx0 = tx * 16u;
-    let ty0 = ty * 16u;
-    let base = p * h * w;
-    let tid = lid.y * 16u + lid.x;
-
-    if (valid) {
-        for (var idx = tid; idx < LOAD_N; idx += 256u) {
-            let ly = idx / LOAD_W;
-            let lx = idx % LOAD_W;
-            let iy = i32(ty0 + ly) - ph;
-            let ix = i32(tx0 + lx) - pw;
-            if (iy >= 0 && iy < i32(h) && ix >= 0 && ix < i32(w)) {
-                let at = iy * i32(w) + ix;
-                sh_in[idx] = f32(X[base + u32(at)]);
-                sh_in_i[idx] = at;
-            } else {
-                sh_in[idx] = neg_inf;
-                sh_in_i[idx] = -1;
-            }
-        }
-    }
-    workgroupBarrier();
-
-    if (valid) {
-        for (var idx = tid; idx < H_N; idx += 256u) {
-            let ly = idx / 16u;
-            let lx = idx % 16u;
-            let row = ly * LOAD_W + lx;
-            var best = sh_in[row];
-            var bi = sh_in_i[row];
-            var has_nan = bi >= 0 && isnan1(best);
-            for (var kx = 1u; kx < KW; kx++) {
-                let vi = sh_in_i[row + kx];
-                if (vi < 0) { continue; }
-                let v = sh_in[row + kx];
-                if (bi < 0 || (!has_nan && (isnan1(v) || v > best))) {
-                    best = v;
-                    bi = vi;
-                    has_nan = isnan1(v);
-                }
-            }
-            sh_h[idx] = best;
-            sh_h_i[idx] = bi;
-        }
-    }
-    workgroupBarrier();
-
-    if (!valid) { return; }
-    let ox = tx0 + lid.x;
-    let oy = ty0 + lid.y;
-    if (oy < oh && ox < ow) {
-        let col = lid.y * 16u + lid.x;
-        var best = sh_h[col];
-        var bi = sh_h_i[col];
-        var has_nan = bi >= 0 && isnan1(best);
-        for (var ky = 1u; ky < KH; ky++) {
-            let off = (lid.y + ky) * 16u + lid.x;
-            let vi = sh_h_i[off];
-            if (vi < 0) { continue; }
-            let v = sh_h[off];
-            if (bi < 0 || (!has_nan && (isnan1(v) || v > best))) {
-                best = v;
-                bi = vi;
-                has_nan = isnan1(v);
-            }
-        }
-        let out_i = (p * oh + oy) * ow + ox;
-        Y[out_i] = T(best);
-        YI[2u * out_i] = u32(max(bi, 0));
-        YI[2u * out_i + 1u] = 0u;
-    }
-}
-"#;
-
-/// Shared-memory `16×16` tiled stride-1 `max_pool2d_backward`: loads the `(16 + KH - 1) × (16 + KW - 1)`
-/// output-gradient and argmax-index halo once per workgroup and accumulates in exact row-major `(oy, ox)` order.
-/// Spec: `MODE = 1`, `TILED = true`, `KH` (`2..=7`), `KW` (`2..=7`), `f16` (optional).
-/// Params: 0 = total_tiles, 1 = H, 2 = W, 3 = OH, 4 = OW, 5 = PH (i32), 6 = PW (i32), 7 = tiles_x, 8 = tiles_y.
-const POOL_BW_IDX_TILED_SRC: &str = r#"
-@group(0) @binding(1) var<storage, read> X: array<T>;
-@group(0) @binding(2) var<storage, read> IDX: array<u32>;
-@group(0) @binding(3) var<storage, read_write> Y: array<T>;
-
-const LOAD_H: u32 = 16u + KH - 1u;
-const LOAD_W: u32 = 16u + KW - 1u;
-const LOAD_N: u32 = LOAD_H * LOAD_W;
-
-var<workgroup> sh_idx: array<u32, LOAD_N>;
-var<workgroup> sh_g: array<f32, LOAD_N>;
-
-@compute @workgroup_size(16, 16)
-fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,
-        @builtin(local_invocation_id) lid: vec3<u32>) {
-    let tile_id = wid.y * nwg.x + wid.x;
-    let valid = tile_id < pu(0u);
-    let h = pu(1u); let w = pu(2u); let oh = pu(3u); let ow = pu(4u);
-    let ph = i32(pu(5u)); let pw = i32(pu(6u));
-    let tiles_x = pu(7u); let tiles_y = pu(8u);
-    let tx = tile_id % tiles_x;
-    let tmp = tile_id / tiles_x;
-    let ty = tmp % tiles_y;
-    let p = tmp / tiles_y;
-    let tx0 = tx * 16u;
-    let ty0 = ty * 16u;
-    let gbase = p * oh * ow;
-    let tid = lid.y * 16u + lid.x;
-    let oy_base = i32(ty0) + ph - i32(KH - 1u);
-    let ox_base = i32(tx0) + pw - i32(KW - 1u);
-
-    if (valid) {
-        for (var idx = tid; idx < LOAD_N; idx += 256u) {
-            let ly = idx / LOAD_W;
-            let lx = idx % LOAD_W;
-            let oy = oy_base + i32(ly);
-            let ox = ox_base + i32(lx);
-            if (oy >= 0 && oy < i32(oh) && ox >= 0 && ox < i32(ow)) {
-                let o = gbase + u32(oy) * ow + u32(ox);
-                sh_idx[idx] = IDX[2u * o];
-                sh_g[idx] = f32(X[o]);
-            } else {
-                sh_idx[idx] = 0xffffffffu;
-                sh_g[idx] = 0.0;
-            }
-        }
-    }
-    workgroupBarrier();
-
-    if (!valid) { return; }
-    let ix = tx0 + lid.x;
-    let iy = ty0 + lid.y;
-    if (iy < h && ix < w) {
-        let own = iy * w + ix;
-        var acc = 0.0;
-        for (var dy = 0u; dy < KH; dy++) {
-            let row = (lid.y + dy) * LOAD_W + lid.x;
-            for (var dx = 0u; dx < KW; dx++) {
-                if (sh_idx[row + dx] == own) {
-                    acc += sh_g[row + dx];
-                }
-            }
-        }
-        Y[(p * h + iy) * w + ix] = T(acc);
-    }
-}
 "#;
 
 /// Vectorized 2×2 stride-2 reduction shared by `upsample_nearest2d_backward(2, 2)` (`scale = 1.0`) and
@@ -319,27 +145,28 @@ fn gen_adaptive_gap_bwd(spec: &Spec) -> String {
     }
 }
 
-/// Bounds check for precompiling `"pool"`, `"pool_idx"`, and `"pool_bw_idx"` from a kernel list
-/// (`kernels/bounds.rs`).
-pub(crate) fn pool_tiled_fits(name: &str, spec: &Spec) -> bool {
-    if !spec.get_bool("TILED") {
-        return true;
-    }
-    let expected_mode = match name {
-        "pool_idx" => 0,
-        "pool_bw_idx" => 1,
-        _ => return false,
-    };
-    matches!(spec.get("MODE"), Some(SpecVal::U32(m)) if m == expected_mode)
-        && matches!(spec.get("KH"), Some(SpecVal::U32(k)) if (2..=TILED_MAX_K).contains(&(k as usize)))
-        && matches!(spec.get("KW"), Some(SpecVal::U32(k)) if (2..=TILED_MAX_K).contains(&(k as usize)))
-}
-
 /// Spec: MODE (0 max forward, 1 max backward, 2 avg forward, 3 avg backward, 4 adaptive forward, 5 adaptive
 /// backward, 6 upsample backward). Params: 0 = threads, 1 = H, 2 = W, 3 = OH, 4 = OW, 5 = KH, 6 = KW, 7 = SH,
 /// 8 = SW, 9 = PH, 10 = PW, 11 = -inf. Upsampling uses KH / KW as the scale factors.
 fn gen_pool(spec: &Spec) -> String {
     let mode = spec.get_u32("MODE", 0);
+    if spec.get_bool("PLANE_VEC4") {
+        let (kh, kw) = (spec.get_u32("KH", 5), spec.get_u32("KW", 5));
+        let cap = spec.get_u32("PLANE_CAP", PLANE_VEC4_SMALL_CAP as u32);
+        match mode {
+            0 => return gen_pool_idx_plane_vec4(kh, kw, cap),
+            1 => return gen_pool_bw_idx_plane_vec4(kh, kw, cap),
+            _ => {}
+        }
+    }
+    if spec.get_bool("TILED_VEC4") {
+        let (kh, kw) = (spec.get_u32("KH", 5), spec.get_u32("KW", 5));
+        match mode {
+            0 => return gen_pool_idx_tiled_vec4(kh, kw),
+            1 => return gen_pool_bw_idx_tiled_vec4(kh, kw),
+            _ => {}
+        }
+    }
     if spec.get_bool("TILED") {
         match mode {
             0 => return POOL_IDX_TILED_SRC.into(),
@@ -565,6 +392,23 @@ fn tile_grid_16(
     Some((total_tiles, tiles_x, tiles_y, grid))
 }
 
+/// Computes the `8×16` `vec4` tile grid (`32×16` pixels per 128-thread workgroup) for `planes × h × w4`.
+fn tile_grid_vec4(
+    ctx: &GpuContext,
+    planes: usize,
+    h: usize,
+    w4: usize,
+) -> Option<(usize, usize, usize, [u32; 3])> {
+    let (tiles_x, tiles_y) = (w4.div_ceil(8), h.div_ceil(16));
+    let total_tiles = prod(&[planes, tiles_y, tiles_x]).ok()?;
+    if total_tiles > u32::MAX as usize {
+        return None;
+    }
+    let threads = (total_tiles as u64).checked_mul(128)?;
+    let grid = ctx.grid_1d(threads, 128).ok()?;
+    Some((total_tiles, tiles_x, tiles_y, grid))
+}
+
 /// Max pooling of `planes` dense `h × w` planes of `dtype` (f32 or f16) into `y`, with the flat in-plane index
 /// `h * W + w` of each chosen element written as `i64` to `indices` (first maximum in window order wins; NaN
 /// wins). Returns `(OH, OW)`.
@@ -595,6 +439,53 @@ pub fn max_pool2d_indices(
         return Err(GpuError::Limit("max_pool2d: plane size exceeds i32 indexing".into()));
     }
     let half = dtype == DType::F16;
+    if win.stride == (1, 1)
+        && is_same_vec4_k(win.kernel.0)
+        && is_same_vec4_k(win.kernel.1)
+        && oh == h
+        && ow == w
+        && w.is_multiple_of(4)
+        && h <= i32::MAX as usize - 64
+        && w <= i32::MAX as usize - 64
+    {
+        let w4 = w / 4;
+        let hw4 = h * w4;
+        if let Some((cap, wg)) = plane_vec4_plan(ctx, hw4, 48)
+            && planes <= u32::MAX as usize
+            && let Some(threads) = (planes as u64).checked_mul(wg as u64)
+            && let Ok(grid) = ctx.grid_1d(threads, wg)
+        {
+            let spec = Spec::new()
+                .u32("MODE", 0)
+                .bool("PLANE_VEC4", true)
+                .u32("PLANE_CAP", cap)
+                .u32("KH", win.kernel.0 as u32)
+                .u32("KW", win.kernel.1 as u32)
+                .f16(half);
+            let k = ctx.kernel(&POOL_IDX, spec)?;
+            let p = Params::new().uz(planes)?.uz(h)?.uz(w4)?.uz(hw4)?.f(f32::NEG_INFINITY);
+            ctx.dispatch(&k, &[x, y, indices], &p, grid)?;
+            return Ok((oh, ow));
+        }
+        if let Some((total_tiles, tiles_x, tiles_y, grid)) = tile_grid_vec4(ctx, planes, h, w4) {
+            let spec = Spec::new()
+                .u32("MODE", 0)
+                .bool("TILED_VEC4", true)
+                .u32("KH", win.kernel.0 as u32)
+                .u32("KW", win.kernel.1 as u32)
+                .f16(half);
+            let k = ctx.kernel(&POOL_IDX, spec)?;
+            let p = Params::new()
+                .uz(total_tiles)?
+                .uz(h)?
+                .uz(w4)?
+                .f(f32::NEG_INFINITY)
+                .uz(tiles_x)?
+                .uz(tiles_y)?;
+            ctx.dispatch(&k, &[x, y, indices], &p, grid)?;
+            return Ok((oh, ow));
+        }
+    }
     if win.stride == (1, 1)
         && (2..=TILED_MAX_K).contains(&win.kernel.0)
         && (2..=TILED_MAX_K).contains(&win.kernel.1)
@@ -656,6 +547,45 @@ pub fn max_pool2d_backward(
         return Err(GpuError::Limit("max_pool2d_backward: plane size exceeds i32 indexing".into()));
     }
     let half = dtype == DType::F16;
+    if win.stride == (1, 1)
+        && is_same_vec4_k(win.kernel.0)
+        && is_same_vec4_k(win.kernel.1)
+        && oh == h
+        && ow == w
+        && w.is_multiple_of(4)
+        && h <= i32::MAX as usize - 64
+        && w <= i32::MAX as usize - 64
+    {
+        let w4 = w / 4;
+        let hw4 = h * w4;
+        if let Some((cap, wg)) = plane_vec4_plan(ctx, hw4, 32)
+            && planes <= u32::MAX as usize
+            && let Some(threads) = (planes as u64).checked_mul(wg as u64)
+            && let Ok(grid) = ctx.grid_1d(threads, wg)
+        {
+            let spec = Spec::new()
+                .u32("MODE", 1)
+                .bool("PLANE_VEC4", true)
+                .u32("PLANE_CAP", cap)
+                .u32("KH", win.kernel.0 as u32)
+                .u32("KW", win.kernel.1 as u32)
+                .f16(half);
+            let k = ctx.kernel(&POOL_BW_IDX, spec)?;
+            let p = Params::new().uz(planes)?.uz(h)?.uz(w4)?.uz(hw4)?;
+            return ctx.dispatch(&k, &[g, indices, gx], &p, grid);
+        }
+        if let Some((total_tiles, tiles_x, tiles_y, grid)) = tile_grid_vec4(ctx, planes, h, w4) {
+            let spec = Spec::new()
+                .u32("MODE", 1)
+                .bool("TILED_VEC4", true)
+                .u32("KH", win.kernel.0 as u32)
+                .u32("KW", win.kernel.1 as u32)
+                .f16(half);
+            let k = ctx.kernel(&POOL_BW_IDX, spec)?;
+            let p = Params::new().uz(total_tiles)?.uz(h)?.uz(w4)?.uz(tiles_x)?.uz(tiles_y)?;
+            return ctx.dispatch(&k, &[g, indices, gx], &p, grid);
+        }
+    }
     if win.stride == (1, 1)
         && (2..=TILED_MAX_K).contains(&win.kernel.0)
         && (2..=TILED_MAX_K).contains(&win.kernel.1)
