@@ -162,10 +162,10 @@ pub fn render_annotated_compare_png(
     let meta_px = 11.0 * text_scale as f32;
 
     // Give narrow images a readable minimum pane width so headers keep model identity and metrics.
-    let min_pane_w = 240 * scale;
+    let min_pane_w = 240u32.saturating_mul(scale);
     let pane_w = w.max(min_pane_w);
-    let pad = (10 * scale).min(pane_w / 8);
-    let avail_w = pane_w.saturating_sub(pad * 2);
+    let pad = 10u32.saturating_mul(scale).min(pane_w / 8);
+    let avail_w = pane_w.saturating_sub(pad.saturating_mul(2));
 
     let single_a = caption_a.single_line();
     let single_b = caption_b.single_line();
@@ -173,11 +173,13 @@ pub fn render_annotated_compare_png(
         && text_out.measure(&single_b, title_px, text_scale, true).0 <= avail_w as f32;
 
     let head_h = if fits_one_line {
-        (28 * scale).max(text_out.line_height(title_px, text_scale) + 12 * scale)
+        28u32
+            .saturating_mul(scale)
+            .max(text_out.line_height(title_px, text_scale).saturating_add(12u32.saturating_mul(scale)))
     } else {
         let l1 = text_out.line_height(title_px, text_scale);
         let l2 = text_out.line_height(meta_px, text_scale);
-        (46 * scale).max(l1 + l2 + 16 * scale)
+        46u32.saturating_mul(scale).max(l1.saturating_add(l2).saturating_add(16u32.saturating_mul(scale)))
     };
 
     let total_w = pane_w.saturating_mul(2).saturating_add(gap);
@@ -512,44 +514,66 @@ mod tests {
         assert!(decoded_cmp.height() > 120);
     }
 
+    fn test_native_text_system() -> Arc<TextSystem> {
+        let app = folo_ui::HeadlessApp::new(folo_ui::HeadlessOptions {
+            text: folo_ui::TextBackend::Native,
+            ..Default::default()
+        });
+        let ts = app.read(|cx| cx.text_system().clone());
+        let fonts = crate::FONTS.iter().map(|f| std::borrow::Cow::Borrowed(*f)).collect();
+        ts.add_fonts(fonts).expect("load bundled Geist fonts");
+        ts
+    }
+
     #[test]
     fn narrow_compare_png_pads_panes_and_uses_two_line_headers() {
+        let ts = test_native_text_system();
         let palette = ExportPalette::from_theme(&Theme::new(Mode::Dark));
         let narrow = RgbaImage::from_pixel(64, 480, image::Rgba([24, 32, 48, 255]));
         let cap_a =
             ComparePaneCaption { title: "A · shapes-hard-s-best".into(), meta: "2 dets · 12.0 ms".into() };
         let cap_b =
             ComparePaneCaption { title: "B · shapes-hard-n-best".into(), meta: "1 det · 8.5 ms".into() };
-        let cmp_bytes =
-            render_annotated_compare_png(&narrow, &cap_a, &[], &cap_b, &[], true, true, &palette, None)
-                .unwrap();
-        let decoded = image::load_from_memory(&cmp_bytes).unwrap().to_rgba8();
-        assert!(
-            decoded.width() >= 480,
-            "narrow 64x480 compare PNG should widen panes to fit model identity + metrics, got {}",
-            decoded.width()
-        );
-        assert!(
-            decoded.height() >= 480 + 46,
-            "narrow compare PNG should expand to a two-line header, got height {}",
-            decoded.height()
-        );
-        let head_h = decoded.height() - 480;
-        let row2_top = (head_h * 52) / 100;
-        let left_meta_px = (0..240)
-            .flat_map(|x| (row2_top..head_h).map(move |y| (x, y)))
-            .filter(|&(x, y)| decoded.get_pixel(x, y).0 != palette.header_bg)
-            .count();
-        assert!(left_meta_px > 20, "expected second header line to render metrics, got {left_meta_px} px");
+        for backend in [None, Some(&ts)] {
+            let cmp_bytes = render_annotated_compare_png(
+                &narrow,
+                &cap_a,
+                &[],
+                &cap_b,
+                &[],
+                true,
+                true,
+                &palette,
+                backend,
+            )
+            .unwrap();
+            let decoded = image::load_from_memory(&cmp_bytes).unwrap().to_rgba8();
+            assert!(
+                decoded.width() >= 480,
+                "narrow 64x480 compare PNG should widen panes to fit model identity + metrics, got {}",
+                decoded.width()
+            );
+            assert!(
+                decoded.height() >= 480 + 46,
+                "narrow compare PNG should expand to a two-line header, got height {}",
+                decoded.height()
+            );
+            let head_h = decoded.height() - 480;
+            let row2_top = (head_h * 52) / 100;
+            let left_meta_px = (0..240)
+                .flat_map(|x| (row2_top..head_h).map(move |y| (x, y)))
+                .filter(|&(x, y)| decoded.get_pixel(x, y).0 != palette.header_bg)
+                .count();
+            assert!(
+                left_meta_px > 20,
+                "expected second header line to render metrics, got {left_meta_px} px"
+            );
+        }
     }
 
     #[test]
-    fn unicode_labels_and_captions_render_distinct_glyphs_via_text_system() {
-        let app = folo_ui::HeadlessApp::new(folo_ui::HeadlessOptions {
-            text: folo_ui::TextBackend::Native,
-            ..Default::default()
-        });
-        let ts = app.read(|cx| cx.text_system().clone());
+    fn unicode_and_multiline_labels_and_captions_render_cleanly_via_text_system() {
+        let ts = test_native_text_system();
         let palette = ExportPalette::from_theme(&Theme::new(Mode::Dark));
         let base = RgbaImage::from_pixel(220, 120, image::Rgba([24, 32, 48, 255]));
         let mk = |name: &str| {
@@ -568,6 +592,73 @@ mod tests {
         let single_q = image::load_from_memory(&single_q_png).unwrap().to_rgba8();
         assert_ne!(cafe, qmark, "accented Unicode label 'café' must not degrade to 'caf?'");
         assert_ne!(cjk, single_q, "CJK Unicode label '丸' must not degrade to '?'");
+
+        // Compare captions with Unicode model names must also render distinct header glyphs.
+        let cap_cafe =
+            ComparePaneCaption { title: "A · café-model".into(), meta: "1 det · 4.0 ms".into() };
+        let cap_q = ComparePaneCaption { title: "A · caf?-model".into(), meta: "1 det · 4.0 ms".into() };
+        let cap_b = ComparePaneCaption { title: "B · 丸-v2".into(), meta: "1 det · 3.0 ms".into() };
+        let cmp_cafe = image::load_from_memory(
+            &render_annotated_compare_png(
+                &base,
+                &cap_cafe,
+                &mk("café"),
+                &cap_b,
+                &mk("丸"),
+                true,
+                true,
+                &palette,
+                Some(&ts),
+            )
+            .unwrap(),
+        )
+        .unwrap()
+        .to_rgba8();
+        let cmp_q = image::load_from_memory(
+            &render_annotated_compare_png(
+                &base,
+                &cap_q,
+                &mk("café"),
+                &cap_b,
+                &mk("丸"),
+                true,
+                true,
+                &palette,
+                Some(&ts),
+            )
+            .unwrap(),
+        )
+        .unwrap()
+        .to_rgba8();
+        assert_ne!(cmp_cafe, cmp_q, "Unicode Compare caption 'café-model' must not degrade to 'caf?-model'");
+
+        // Embedded CR/LF in class labels and Compare captions must be normalized without panicking.
+        let nl_single = render_annotated_single_png(
+            &base,
+            &mk("traffic\nlight\r\nextra"),
+            true,
+            true,
+            &palette,
+            Some(&ts),
+        )
+        .unwrap();
+        assert_eq!(image::load_from_memory(&nl_single).unwrap().to_rgba8().dimensions(), (220, 120));
+        let cap_nl_a =
+            ComparePaneCaption { title: "A · model\nline2".into(), meta: "1 det\r\n· 2.0 ms".into() };
+        let cap_nl_b = ComparePaneCaption { title: "B · model\rB".into(), meta: "0 dets".into() };
+        let nl_cmp = render_annotated_compare_png(
+            &base,
+            &cap_nl_a,
+            &mk("sign\nstop"),
+            &cap_nl_b,
+            &[],
+            true,
+            true,
+            &palette,
+            Some(&ts),
+        )
+        .unwrap();
+        assert!(image::load_from_memory(&nl_cmp).unwrap().to_rgba8().width() >= 480);
     }
 
     #[test]

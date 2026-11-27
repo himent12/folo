@@ -4,6 +4,7 @@
 //! class and model names (accented Latin, CJK, symbols, emoji) render crisply, with a compact
 //! 5×7 bitmap fallback when no `TextSystem` is supplied in pure unit tests.
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use folo_ui::{
@@ -76,6 +77,35 @@ pub(super) fn fill_rect_clipped(
     }
 }
 
+/// Normalizes CR/LF breaks into single spaces so `WindowTextSystem::shape_line`'s single-line
+/// contract is never violated by class or model names containing embedded newlines.
+fn single_line_text(text: &str) -> Cow<'_, str> {
+    if !text.contains(['\n', '\r']) {
+        return Cow::Borrowed(text);
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut prev_cr = false;
+    for ch in text.chars() {
+        match ch {
+            '\r' => {
+                out.push(' ');
+                prev_cr = true;
+            }
+            '\n' => {
+                if !prev_cr {
+                    out.push(' ');
+                }
+                prev_cr = false;
+            }
+            other => {
+                out.push(other);
+                prev_cr = false;
+            }
+        }
+    }
+    Cow::Owned(out)
+}
+
 /// Text rasterizer for exported PNGs: shapes and rasterizes arbitrary Unicode text through
 /// `folo-ui`'s `TextSystem` when available, falling back to the 5×7 ASCII bitmap font otherwise.
 pub(super) struct ExportText {
@@ -116,23 +146,24 @@ impl ExportText {
     }
 
     pub(super) fn measure(&self, text: &str, font_px: f32, fallback_scale: u32, medium: bool) -> (f32, f32) {
-        if text.is_empty() {
+        let clean = single_line_text(text);
+        if clean.is_empty() {
             return (0.0, self.line_height(font_px, fallback_scale) as f32);
         }
         if let Some(wts) = &self.wts {
             let run = TextRun {
-                len: text.len(),
+                len: clean.len(),
                 font: Self::font_for(medium),
                 color: white(),
                 background_color: None,
                 underline: None,
                 strikethrough: None,
             };
-            let shaped = wts.shape_line(SharedString::from(text.to_string()), px(font_px), &[run], None);
+            let shaped = wts.shape_line(SharedString::from(clean.into_owned()), px(font_px), &[run], None);
             let h = (f32::from(shaped.ascent) + f32::from(shaped.descent)).max(font_px);
             return (f32::from(shaped.width).max(0.0), h);
         }
-        (text_width_px(text, fallback_scale) as f32, (7 * fallback_scale) as f32)
+        (text_width_px(&clean, fallback_scale) as f32, (7 * fallback_scale) as f32)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -150,16 +181,17 @@ impl ExportText {
         color: [u8; 4],
         clip: RectI,
     ) {
-        if text.is_empty() || max_width == 0 || box_h <= 0 {
+        let clean = single_line_text(text);
+        if clean.is_empty() || max_width == 0 || box_h <= 0 {
             return;
         }
         let Some(wts) = &self.wts else {
             let ty = box_y + ((box_h - (7 * fallback_scale) as i64) / 2).max(0);
-            draw_text_clipped_5x7(img, text, x, ty, max_width, fallback_scale, color, clip);
+            draw_text_clipped_5x7(img, &clean, x, ty, max_width, fallback_scale, color, clip);
             return;
         };
 
-        let fitted = self.truncate_to_width(wts, text, max_width as f32, font_px, medium);
+        let fitted = self.truncate_to_width(wts, &clean, max_width as f32, font_px, medium);
         if fitted.is_empty() {
             return;
         }

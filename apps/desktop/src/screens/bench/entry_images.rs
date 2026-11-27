@@ -387,7 +387,9 @@ impl FoloApp {
             .filter(|((sb, se), _)| sb == &b.id && se == &e.id)
             .map(|(_, h)| *h);
         let grid_height_cell = self.bench.entry_grid_height.clone();
-        let grid_body = div()
+        // Wrap both the optional inline preview and the tile grid so filtering that closes a
+        // selected preview still measures and preserves the full section height below the filter bar.
+        let results_body = div()
             .relative()
             .when_some(grid_min_h, |d, h| d.min_h(px(h)))
             .child(
@@ -400,6 +402,7 @@ impl FoloApp {
                 .left_0()
                 .size_full(),
             )
+            .children(inspector)
             .children(empty_filter)
             .when(!tiles.is_empty(), |d| {
                 d.child(div().p(px(16.)).flex().flex_wrap().gap(px(12.)).children(tiles))
@@ -408,8 +411,7 @@ impl FoloApp {
             .child(header)
             .children(retry_anchor)
             .child(filter_bar)
-            .children(inspector)
-            .child(grid_body)
+            .child(results_body)
             .child(footer)
             .into_any_element()
     }
@@ -459,16 +461,10 @@ impl FoloApp {
                             let slack_below = (max_scroll - scroll_depth).max(0.0);
                             let prev_h = this.bench.entry_grid_height.get();
                             let floor = (prev_h - slack_below).max(0.0);
-                            if floor > 1.0 {
-                                let key = (bid.clone(), eid.clone());
-                                let prev_floor = this
-                                    .bench
-                                    .entry_grid_min_h
-                                    .as_ref()
-                                    .filter(|(k, _)| k == &key)
-                                    .map_or(0.0, |(_, h)| *h);
-                                this.bench.entry_grid_min_h = Some((key, prev_floor.max(floor)));
-                            }
+                            this.bench.entry_grid_min_h =
+                                (floor > 1.0).then(|| ((bid.clone(), eid.clone()), floor));
+                        } else {
+                            this.bench.entry_grid_min_h = None;
                         }
                     }
                     this.bench.entry_image_filter = filter;

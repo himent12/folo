@@ -353,6 +353,8 @@ pub struct CompareSideExport<'a> {
 }
 
 /// Formats Compare A/B predictions and delta summary as pretty-printed JSON.
+/// Each side includes its `cold` warm-up flag, and `comparison` carries `cold_a`/`cold_b`
+/// with `speedup_ratio: null` whenever either side was a cold start.
 #[allow(clippy::too_many_arguments)]
 pub fn compare_detections_json(
     image: &str,

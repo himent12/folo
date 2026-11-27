@@ -547,4 +547,89 @@ fn bench_filter_switch_at_bottom_keeps_scroll_offset_anchored() {
         (scroll_after - scroll_before).abs() < 2.0,
         "page_scroll must stay anchored on filter shrink (before={scroll_before}, after={scroll_after})"
     );
+
+    // Scrolling back to top and switching to another non-All filter clears the temporary spacer.
+    drive(&mut app, window, |this, w, cx| {
+        this.page_scroll.set_offset(point(px(0.), px(0.)));
+        this.focus_key("eimg-filter-fn", w, cx);
+        cx.notify();
+    });
+    app.frame(window.into());
+    app.simulate_input(
+        window.into(),
+        folo_ui::PlatformInput::KeyDown(folo_ui::KeyDownEvent {
+            keystroke: folo_ui::Keystroke::parse("enter").unwrap(),
+            is_held: false,
+        }),
+    );
+    app.frame(window.into());
+    drive(&mut app, window, |this, _, _| {
+        assert_eq!(this.bench.entry_image_filter, EntryImageFilter::MissedGt);
+        assert!(
+            this.bench.entry_grid_min_h.is_none(),
+            "switching filters at scroll top must clear temporary grid min_h"
+        );
+    });
+
+    // Open an inline preview that does NOT match `FalsePositives`, scroll to the bottom, and
+    // activate `FalsePositives` (closing the preview): page_scroll must stay anchored without jumping.
+    let (eid, preview_scroll_before) = drive(&mut app, window, |this, w, cx| {
+        this.bench.entry_image_filter = EntryImageFilter::All;
+        let eid = match &this.route {
+            Route::BenchEntry(_, e) => e.clone(),
+            _ => unreachable!("on BenchEntry"),
+        };
+        let non_fp_img = this
+            .bench
+            .entry_images
+            .get(&(bid.into(), eid.clone()))
+            .and_then(|x| x.page.ready())
+            .unwrap()
+            .images
+            .iter()
+            .find(|im| {
+                !crate::screens::bench::entry_image_matches_filter(im, EntryImageFilter::FalsePositives)
+            })
+            .expect("entry should have an image without false positives")
+            .image
+            .id
+            .clone();
+        this.bench.selected_entry_image = Some((bid.into(), eid.clone(), non_fp_img));
+        this.focus_key("eimg-filter-fp", w, cx);
+        cx.notify();
+        (eid, 0.0f32)
+    });
+    let _ = preview_scroll_before;
+    app.frame(window.into());
+    let preview_scroll_before = drive(&mut app, window, |this, w, cx| {
+        let max_y = this.page_scroll.max_offset().height;
+        this.page_scroll.set_offset(point(px(0.), -max_y));
+        this.focus_key("eimg-filter-fp", w, cx);
+        cx.notify();
+        f32::from(-max_y)
+    });
+    app.frame(window.into());
+    app.simulate_input(
+        window.into(),
+        folo_ui::PlatformInput::KeyDown(folo_ui::KeyDownEvent {
+            keystroke: folo_ui::Keystroke::parse("enter").unwrap(),
+            is_held: false,
+        }),
+    );
+    app.frame(window.into());
+    app.frame(window.into());
+    drive(&mut app, window, |this, w, cx| {
+        assert_eq!(this.bench.entry_image_filter, EntryImageFilter::FalsePositives);
+        assert!(this.bench.selected_entry_image.is_none(), "excluded preview should be closed");
+        let scroll_after_preview = f32::from(this.page_scroll.offset().y);
+        assert!(
+            (scroll_after_preview - preview_scroll_before).abs() < 2.0,
+            "closing an open preview on filter switch must not jump scroll (before={preview_scroll_before}, after={scroll_after_preview})"
+        );
+        // Navigating away clears the temporary spacer so returning never leaves a stale blank void.
+        this.navigate(Route::Bench(bid.into()), w, cx);
+        assert!(this.bench.entry_grid_min_h.is_none(), "leaving entry must clear entry_grid_min_h");
+        this.navigate(Route::BenchEntry(bid.into(), eid), w, cx);
+        assert!(this.bench.entry_grid_min_h.is_none());
+    });
 }

@@ -360,7 +360,9 @@ impl FoloApp {
             if summary.cold_b == Some(true) { format!("{v:.1} ms (cold)") } else { format!("{v:.1} ms") }
         });
         let lat_cmp = format_latency_comparison(summary);
-        let lat_cmp_color = if summary.cold_a == Some(true) || summary.cold_b == Some(true) {
+        let lat_cmp_color = if summary.latency_delta_ms.is_some()
+            && (summary.cold_a == Some(true) || summary.cold_b == Some(true))
+        {
             t.warning_text
         } else {
             t.text_secondary

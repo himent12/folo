@@ -410,39 +410,18 @@ impl FoloApp {
                         cx.listener(|this, _, _, _| this.play_drag = None),
                     )
                     .on_mouse_move(cx.listener(move |this, ev: &MouseMoveEvent, _, cx| {
-                        if let Some((from, pan0)) = this.play_drag {
+                        if let Some(drag) = this.play_drag {
                             if ev.pressed_button == Some(folo_ui::MouseButton::Left) {
                                 if this.play_zoom > 1.0 {
-                                    let raw = (
-                                        pan0.0 + f32::from(ev.position.x - from.x),
-                                        pan0.1 + f32::from(ev.position.y - from.y),
+                                    let (next_pan, next_drag) = super::stage::clamp_and_rebase_drag(
+                                        drag,
+                                        ev.position,
+                                        bounds_cell.get(),
+                                        dims,
+                                        this.play_zoom,
                                     );
-                                    let next = match bounds_cell.get() {
-                                        Some(b) => crate::viz::clamp_pan(
-                                            b,
-                                            dims.0,
-                                            dims.1,
-                                            Fit::Contain,
-                                            this.play_zoom,
-                                            raw,
-                                        ),
-                                        None => raw,
-                                    };
-                                    this.play_pan = next;
-                                    // Rebase any clamped axis so reversing a held drag past the edge moves immediately.
-                                    let clamped_x = (next.0 - raw.0).abs() > 1e-4;
-                                    let clamped_y = (next.1 - raw.1).abs() > 1e-4;
-                                    if clamped_x || clamped_y {
-                                        let next_from = folo_ui::point(
-                                            if clamped_x { ev.position.x } else { from.x },
-                                            if clamped_y { ev.position.y } else { from.y },
-                                        );
-                                        let next_pan0 = (
-                                            if clamped_x { next.0 } else { pan0.0 },
-                                            if clamped_y { next.1 } else { pan0.1 },
-                                        );
-                                        this.play_drag = Some((next_from, next_pan0));
-                                    }
+                                    this.play_pan = next_pan;
+                                    this.play_drag = Some(next_drag);
                                     cx.notify();
                                     return;
                                 }
