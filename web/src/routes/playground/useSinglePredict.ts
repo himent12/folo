@@ -21,7 +21,7 @@ export interface SinglePredictInput {
   runOn: Signal<RunOn>;
   localWeights: Signal<Map<string, File>>;
   retryTick: Signal<number>;
-  restored: (model: string, s: Source, runOn: string) => boolean;
+  restored: (model: string, s: Source, runOn: string, infKey?: string) => boolean;
   /** Optional one-shot reuse check (e.g. after swapping Model A and Model B in Compare mode). */
   consumeReuse?: (model: string, s: Source, runOn: RunOn) => boolean;
   pred: Signal<Prediction | null>;
@@ -81,7 +81,7 @@ export function useSinglePredict(o: SinglePredictInput): () => boolean {
     const explicitRetry = retry !== lastRetry;
     lastRetry = retry;
     if (batchRunning) return;
-    if (!id || !s || (infKey === 'standard' && untrack(() => o.restored(id, s, on))) || untrack(() => !!o.consumeReuse?.(id, s, on))) {
+    if (!id || !s || untrack(() => o.restored(id, s, on, infKey) || !!o.consumeReuse?.(id, s, on))) {
       untrack(() => {
         const curPred = o.pred.peek();
         if (s && curPred) {

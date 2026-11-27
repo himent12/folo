@@ -84,7 +84,14 @@ export default function Playground() {
   const engine = new BrowserEngine();
   onCleanup(() => engine.dispose());
   const { webgpu, browserOff, runOnNote, serverPredictOptions } = useWasmAvailability(runOn);
-  const inf = useInferenceOptions({ runOn, engine, browserOff: () => browserOff.get(), serverPredictOptions: () => serverPredictOptions.get() });
+  let getCompareRunOn: () => RunOn | null = () => null;
+  const inf = useInferenceOptions({
+    runOn,
+    compareRunOn: () => getCompareRunOn(),
+    engine,
+    browserOff: () => browserOff.get(),
+    serverPredictOptions: () => serverPredictOptions.get(),
+  });
 
   let weightsInput!: HTMLInputElement;
   const where = computed(() => whereLabel(pred.get()));
@@ -241,6 +248,7 @@ export default function Playground() {
   });
   clearCompare = cmp.clearResults;
   getModelBId = () => cmp.modelBId.peek();
+  getCompareRunOn = () => (cmp.compare.get() ? cmp.runOnB.get() : null);
 
   const mediaSession = useMediaSession({
     onFrame: (f) => setLiveFrame(f.blob, f.name, f.width, f.height, mediaSession.mode.peek() === 'webcam' ? 'webcam' : 'video'),
@@ -274,6 +282,7 @@ export default function Playground() {
     pred,
     predMatchesSource: () => predMatchesSourceFn(),
     runOn: runOn as Signal<string>,
+    inference: { config: () => inf.config.get(), restore: inf.restore },
     conf,
     iou,
     maxDet,

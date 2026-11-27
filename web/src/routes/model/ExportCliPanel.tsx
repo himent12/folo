@@ -4,7 +4,7 @@
  * `folo predict` quick snippets (Standard, SAHI `--tile`, `--tta`, ByteTrack `--track`).
  */
 import ChevronRight from '$icons/chevron-right';
-import { computed, css, signal } from 'fw';
+import { computed, css, effect, For, signal } from 'fw';
 import type { ExportFormat, Model } from '$lib/api/types';
 import CommandLine from '$lib/ui/CommandLine';
 import Segmented from '$lib/ui/Segmented';
@@ -23,9 +23,8 @@ export interface ExportCliPanelProps {
   decode: boolean;
   half: boolean;
   axes: OnnxDynamicAxes;
-  /** When false (older server without `export_dynamic_axes`), the CLI panel still lets users pick any dynamic axis for copy-ready CLI export. */
+  /** True on servers without `export_dynamic_axes`: shows a CLI-only axis picker that never alters server export switches. */
   showAxesPicker: boolean;
-  onAxes: (next: OnnxDynamicAxes) => void;
 }
 
 const AXES_SEG = ONNX_AXES_OPTIONS.map((o) => ({ value: o.value, label: o.label }));
@@ -34,18 +33,20 @@ const PREDICT_SEG = PREDICT_SNIPPET_OPTIONS.map((o) => ({ value: o.value, label:
 export default function ExportCliPanel(props: ExportCliPanelProps) {
   const open = signal(false);
   const predictMode = signal<PredictSnippetMode>('sahi');
+  /** Local CLI-only dynamic axis override when the server does not expose split dynamic axes. */
+  const cliAxes = signal<OnnxDynamicAxes>(props.axes);
+  effect(() => {
+    cliAxes.set(props.axes);
+  });
 
-  const axesValue = {
-    get: () => props.axes,
-    set: (v: OnnxDynamicAxes) => props.onAxes(v),
-  };
+  const activeAxes = computed<OnnxDynamicAxes>(() => (props.showAxesPicker ? cliAxes.get() : props.axes));
 
   const exportCmd = computed(() =>
     buildExportCli(props.model, {
       format: props.format,
       decode: props.decode,
       half: props.half,
-      axes: props.axes,
+      axes: activeAxes.get(),
     }),
   );
   const predictCmd = computed(() => buildPredictCli(props.model, predictMode.get()));
@@ -72,7 +73,7 @@ export default function ExportCliPanel(props: ExportCliPanelProps) {
             <div class="cli-head">
               <span class="cli-label">Export</span>
               {props.format === 'onnx' && props.showAxesPicker ? (
-                <Segmented label="CLI dynamic ONNX axes" size="sm" bind:value={axesValue} options={AXES_SEG} />
+                <Segmented label="CLI dynamic ONNX axes" size="sm" bind:value={cliAxes} options={AXES_SEG} />
               ) : null}
             </div>
             <CommandLine
@@ -92,7 +93,11 @@ export default function ExportCliPanel(props: ExportCliPanelProps) {
               label="Predict CLI command"
               copied="Run this command to run inference with this model."
             />
-            <p class="cli-hint">{predictDesc.get()}</p>
+            <p class="cli-hint">
+              <For each={predictDesc.get().split('`')} key={(_, i) => i}>
+                {(part, i) => <>{i() % 2 ? <span class="mono">{part()}</span> : part()}</>}
+              </For>
+            </p>
           </div>
 
           {placeholder.get() ? (

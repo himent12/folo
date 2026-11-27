@@ -39,6 +39,7 @@ afterEach(() => {
   target = undefined;
   session.set(null);
   hub.features = null;
+  hub.serverMock = null;
   resetWasmProbe();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
@@ -198,8 +199,9 @@ describe('Playground Inference Options UI & live server wiring', () => {
       overlap_x: 0.2,
       overlap_y: 0.2,
       full_image: true,
-      max_det: 1000,
+      max_det: 30_000,
     });
+    expect(seen[1]?.max_det).toBe(30_000);
     await until(() => target!.querySelector('section[aria-labelledby="pg-timing"]')?.textContent?.includes('SAHI 640px'), 'SAHI timing mode');
 
     // Change tile size to 512 -> re-runs with 512px tiles.
@@ -208,14 +210,14 @@ describe('Playground Inference Options UI & live server wiring', () => {
     await until(() => seen.length === 3, '512px SAHI prediction call');
     expect(seen[2]?.tile?.tile_width).toBe(512);
 
-    // Switch to TTA -> sends real `tta` payload with merge_iou clamped to 0.7 instead of loose FETCH iou=1.
+    // Switch to TTA -> sends real `tta` payload with merge_iou clamped to 0.7 and full pre-merge budget (30,000).
     btnOf(modeGroup, 'TTA').click();
     await until(() => seen.length === 4, 'TTA prediction call');
     expect(seen[3]?.tta).toEqual({
       hflip: true,
       scales: [0.83, 1.0, 1.17],
       merge_iou: 0.7,
-      max_det: 1000,
+      max_det: 30_000,
     });
     await until(() => target!.querySelector('section[aria-labelledby="pg-timing"]')?.textContent?.includes('TTA 3× + flip'), 'TTA timing mode');
 
@@ -266,6 +268,113 @@ describe('Playground Inference Options UI & live server wiring', () => {
     const tta = buttons.find((b) => b.textContent?.trim() === 'TTA')!;
     expect(sahi.disabled).toBe(true);
     expect(tta.disabled).toBe(true);
-    expect(target.querySelector('.inf-note')?.textContent).toMatch(/predict_options|does not support SAHI/i);
+    const note = target.querySelector('.inf-note')!;
+    expect(note.textContent).toMatch(/predict_options|does not support SAHI/i);
+    expect(modeGroup.getAttribute('aria-describedby')).toContain(note.id);
+  });
+
+  it('disables SAHI and TTA on folo serve --mock (hub.serverMock) and treats hub.features as authoritative over stale system()', async () => {
+    const api = makeLiveApi(['run_cli', 'predict_options']);
+    hub.api = api;
+    hub.features = ['run_cli', 'predict_options'];
+    hub.serverMock = true;
+    hub.mode = 'live';
+
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    router.route = parse('#/playground?model=m_hard_s');
+    mounted = render(() => <Playground />, target);
+
+    await until(() => target!.querySelector('.model-pick'), 'model picker');
+    target.querySelector<HTMLButtonElement>('[data-inference-options] button.inf-toggle')!.click();
+    flushSync();
+
+    const modeGroup = await until(() => target!.querySelector('[role="radiogroup"][aria-label="Inference mode"]'), 'mode selector');
+    const getBtn = (label: string) => [...modeGroup.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === label)!;
+    // HTTP mock server (`folo serve --mock`) must not advertise synthetic predictions as SAHI/TTA.
+    expect(getBtn('SAHI').disabled).toBe(true);
+    expect(getBtn('TTA').disabled).toBe(true);
+
+    // Real server whose fresh `/api/health` (`hub.features`) omits `predict_options` must override cached `/api/system`.
+    hub.serverMock = false;
+    hub.features = ['run_cli'];
+    flushSync();
+    expect(getBtn('SAHI').disabled).toBe(true);
+    expect(getBtn('TTA').disabled).toBe(true);
+  });
+
+  it('preserves SAHI mode across keepSession navigation without misattributing it to Standard', async () => {
+    const api = makeLiveApi(['run_cli', 'predict_options']);
+    const seen: PredictOptions[] = [];
+    const origPredict = api.predict.bind(api);
+    api.predict = vi.fn(async (input, opts) => {
+      seen.push(opts);
+      return origPredict(input, opts);
+    });
+    hub.api = api;
+    hub.features = ['run_cli', 'predict_options'];
+    hub.mode = 'live';
+
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    router.route = parse('#/playground?model=m_hard_s');
+    mounted = render(() => <Playground />, target);
+
+    (await until(() => target!.querySelector<HTMLButtonElement>('button.sample'), 'sample')).click();
+    await until(() => seen.length === 1, 'initial standard run');
+
+    target.querySelector<HTMLButtonElement>('[data-inference-options] button.inf-toggle')!.click();
+    flushSync();
+    const modeGroup = await until(() => target!.querySelector('[role="radiogroup"][aria-label="Inference mode"]'), 'mode selector');
+    [...modeGroup.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === 'SAHI')!.click();
+    await until(() => seen.length === 2, 'SAHI run');
+    // Wait until the SAHI prediction actually resolves (Timing section reflects completed pred.inference).
+    await until(() => target!.querySelector('section[aria-labelledby="pg-timing"]')?.textContent?.includes('SAHI 640px'), 'SAHI result settled');
+
+    // Leave Playground and come back with the same model: session restores SAHI mode AND reuses the SAHI result (no extra fetch).
+    mounted.unmount();
+    target.remove();
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    router.route = parse('#/playground?model=m_hard_s');
+    mounted = render(() => <Playground />, target);
+
+    await until(() => target!.querySelector('.model-pick select'), 'restored model picker');
+    await until(() => target!.querySelector('#pg-panel tbody tr'), 'restored SAHI detections');
+    expect(target.querySelector('[data-inference-options] .inf-badge')?.textContent).toBe('SAHI 640px');
+    expect(seen).toHaveLength(2);
+
+    // Switching back to Standard actually runs Standard inference (never wedged on the restored SAHI result).
+    target.querySelector<HTMLButtonElement>('[data-inference-options] button.inf-toggle')!.click();
+    flushSync();
+    const modeGroup2 = await until(() => target!.querySelector('[role="radiogroup"][aria-label="Inference mode"]'), 'mode selector 2');
+    [...modeGroup2.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === 'Standard')!.click();
+    await until(() => seen.length === 3, 'standard re-run after restore');
+    expect(seen[2]?.tile).toBeUndefined();
+    expect(seen[2]?.tta).toBeUndefined();
+    await until(() => session.get()?.pred !== null, 'standard result saved to session');
+
+    // If the server later drops `predict_options` between visits, returning must NOT reuse the cached SAHI result under Standard.
+    const cur = session.get();
+    expect(cur?.pred).not.toBeNull();
+    mounted.unmount();
+    target.remove();
+    // Save a SAHI session, then reconnect to an older server without `predict_options`.
+    session.set({
+      ...cur!,
+      inference: { mode: 'sahi', tile: { tileSize: 640, overlap: 0.2, fullImage: true }, tta: { hflip: true, scales: [0.83, 1, 1.17] } },
+      pred: {
+        ...cur!.pred!,
+        inference: { mode: 'sahi', tile_size: 640, overlap: 0.2, full_image: true },
+      },
+    });
+    hub.features = ['run_cli'];
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    router.route = parse('#/playground?model=m_hard_s');
+    mounted = render(() => <Playground />, target);
+    await until(() => seen.length === 4, 're-run as standard when server lacks predict_options');
+    expect(seen[3]?.tile).toBeUndefined();
+    expect(seen[3]?.tta).toBeUndefined();
   });
 });

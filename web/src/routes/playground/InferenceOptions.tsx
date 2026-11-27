@@ -4,7 +4,7 @@
  * when the active backend or WASM bundle does not support a mode.
  */
 import ChevronRight from '$icons/chevron-right';
-import { computed, css, signal } from 'fw';
+import { computed, createUniqueId, css, signal } from 'fw';
 import { TILE_OVERLAP_OPTIONS, TILE_SIZE_OPTIONS, type InferenceMode, type TtaScalePreset } from '$lib/inference/browser';
 import Segmented from '$lib/ui/Segmented';
 import Switch from '$lib/ui/Switch';
@@ -25,6 +25,7 @@ const TTA_SCALE_SEG: { value: TtaScalePreset; label: string }[] = [
 
 export default function InferenceOptions(props: InferenceOptionsProps) {
   const open = signal(false);
+  const noteId = `inf-note-${createUniqueId()}`;
 
   const modeValue = {
     get: () => props.ctrl.displayMode.get(),
@@ -76,7 +77,13 @@ export default function InferenceOptions(props: InferenceOptionsProps) {
         <div class="inf-body">
           <div class="inf-row">
             <span class="inf-label">Mode</span>
-            <Segmented label="Inference mode" size="sm" bind:value={modeValue} options={modeOptions.get()} />
+            <Segmented
+              label="Inference mode"
+              size="sm"
+              describedby={availNote.get() ? noteId : undefined}
+              bind:value={modeValue}
+              options={modeOptions.get()}
+            />
           </div>
           {props.ctrl.displayMode.get() === 'sahi' ? (
             <div class="inf-group" role="group" aria-label="SAHI tiled inference options">
@@ -107,7 +114,11 @@ export default function InferenceOptions(props: InferenceOptionsProps) {
               />
             </div>
           ) : null}
-          {availNote.get() ? <p class="inf-note">{availNote.get()}</p> : null}
+          {availNote.get() ? (
+            <p class="inf-note" id={noteId}>
+              {availNote.get()}
+            </p>
+          ) : null}
         </div>
       ) : null}
     </div>

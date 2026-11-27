@@ -30,6 +30,8 @@ export interface InferenceAvailability {
 
 export interface UseInferenceOptionsInput {
   runOn: Signal<RunOn>;
+  /** Optional Model B backend while Compare A/B is active so heterogeneous A/B backends stay honest. */
+  compareRunOn?: () => RunOn | null;
   engine: BrowserEngine;
   browserOff: () => string | null;
   serverPredictOptions: () => boolean;
@@ -97,7 +99,7 @@ export function useInferenceOptions(input: UseInferenceOptionsInput) {
     const caps = input.engine.capabilities;
     return resolveInferenceAvailability({
       runOn: on,
-      isMock: hub.api.mock,
+      isMock: hub.api.mock || hub.serverMock === true,
       browserOff: !!input.browserOff(),
       serverPredictOptions: input.serverPredictOptions(),
       wasmTiled: caps.tiled,
@@ -105,7 +107,24 @@ export function useInferenceOptions(input: UseInferenceOptionsInput) {
     });
   }
 
-  const availability = computed(() => availabilityFor(input.runOn.get()));
+  const availability = computed<InferenceAvailability>(() => {
+    const a = availabilityFor(input.runOn.get());
+    const onB = input.compareRunOn?.() ?? null;
+    if (!onB || onB === input.runOn.get()) return a;
+    const b = availabilityFor(onB);
+    const sahi = a.sahi || b.sahi;
+    const tta = a.tta || b.tta;
+    const sahiReason = sahi ? null : (a.sahiReason ?? b.sahiReason);
+    const ttaReason = tta ? null : (a.ttaReason ?? b.ttaReason);
+    let note: string | null = null;
+    if (!sahi && !tta) {
+      note = a.note ?? b.note;
+    } else if (a.sahi !== b.sahi || a.tta !== b.tta) {
+      const limited = !a.sahi || !a.tta ? 'Model A' : 'Model B';
+      note = `${limited}'s backend does not support this mode and will run Standard.`;
+    }
+    return { sahi, tta, sahiReason, ttaReason, note };
+  });
 
   /** Effective config sent for `on`: degrades cleanly to `standard` whenever the chosen mode is unavailable on `on`. */
   function effectiveFor(on: RunOn): InferenceConfig {
@@ -120,16 +139,36 @@ export function useInferenceOptions(input: UseInferenceOptionsInput) {
   const effective = computed(() => effectiveFor(input.runOn.get()));
   const effectiveKey = computed(() => inferenceConfigKey(effective.get()));
   const effectiveMeta = computed(() => inferenceMetaOf(effective.get()));
-  const badge = computed(() => inferenceShortTag(effectiveMeta.get()));
+  const badge = computed(() => {
+    const onB = input.compareRunOn?.() ?? null;
+    const meta = effectiveMeta.get() ?? (onB ? inferenceMetaOf(effectiveFor(onB)) : undefined);
+    return inferenceShortTag(meta);
+  });
 
-  /** Active mode shown in the segmented selector (reads `standard` if the user's mode is unsupported on this backend). */
-  const displayMode = computed<InferenceMode>(() => effective.get().mode);
+  /** Active mode shown in the segmented selector (reads `standard` if unsupported on every active backend). */
+  const displayMode = computed<InferenceMode>(() => {
+    const cfg = config.get();
+    if (cfg.mode === 'standard') return 'standard';
+    const avail = availability.get();
+    if (cfg.mode === 'sahi' && !avail.sahi) return 'standard';
+    if (cfg.mode === 'tta' && !avail.tta) return 'standard';
+    return cfg.mode;
+  });
 
   function setMode(next: InferenceMode) {
     const avail = availability.peek();
     if (next === 'sahi' && !avail.sahi) return;
     if (next === 'tta' && !avail.tta) return;
     mode.set(next);
+  }
+
+  function restore(saved: InferenceConfig) {
+    mode.set(saved.mode);
+    tileSize.set(saved.tile.tileSize);
+    overlap.set(saved.tile.overlap);
+    fullImage.set(saved.tile.fullImage);
+    hflip.set(saved.tta.hflip);
+    scalePreset.set(ttaScalePreset(saved.tta.scales));
   }
 
   function reset() {
@@ -158,6 +197,7 @@ export function useInferenceOptions(input: UseInferenceOptionsInput) {
     availabilityFor,
     effectiveFor,
     setMode,
+    restore,
     reset,
   };
 }

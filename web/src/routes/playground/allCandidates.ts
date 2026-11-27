@@ -2,7 +2,13 @@
 import { computed, effect, signal, type Signal } from 'fw';
 import { hub } from '$lib/api/index';
 import type { Prediction } from '$lib/api/types';
-import type { BrowserEngine, InferenceConfig } from '$lib/inference/browser';
+import {
+  DEFAULT_INFERENCE_CONFIG,
+  inferenceConfigKey,
+  inferenceMetaKey,
+  type BrowserEngine,
+  type InferenceConfig,
+} from '$lib/inference/browser';
 import { errorDetail, toast } from '$lib/ui/toast';
 import { ALL, ask, candidateFloor, noServerWeights, type RunOn } from './predict';
 import type { Source } from './source';
@@ -90,7 +96,8 @@ export function askAllWhenCut(o: {
     if (!explicitRetry && completionFailed.has(p)) return;
     completionFailed.delete(p);
     const file = o.file(id);
-    const inference = o.inference?.();
+    const inference = o.inference ? o.inference() : DEFAULT_INFERENCE_CONFIG;
+    if (inferenceMetaKey(p.inference) !== inferenceConfigKey(inference)) return;
     const ctrl = new AbortController();
     ask({ api: hub.api, engine: o.engine, model: id, source: s, on, file, options: ALL, inference, signal: ctrl.signal }).then(
       (all) => {

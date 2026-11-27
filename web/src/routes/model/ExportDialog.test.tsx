@@ -578,6 +578,51 @@ describe('ExportDialog: dynamic ONNX axes & CLI commands', () => {
       dynamic_hw: false,
       half: false,
     });
+    expect(target.ownerDocument.querySelector('dialog .note')?.textContent).toMatch(/Split dynamic-axis ONNX exports/);
+    expect(target.ownerDocument.querySelector('dialog .note')?.textContent).not.toMatch(/cannot download ONNX files yet/);
+  });
+
+  it('keeps CLI-only dynamic axis preview independent of server export switches when export_dynamic_axes is absent', async () => {
+    const api = new HttpApi('http://folo.test');
+    vi.spyOn(api, 'system').mockResolvedValue({ ...SYS, features: ['export_onnx_switches', 'weights_onnx'] });
+    const get = vi.spyOn(api, 'onnxFile').mockResolvedValue(new File([new Uint8Array(1024)], 'shapes-n-best.onnx'));
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+    vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:x');
+    hub.api = api;
+    c = mount(ExportDialog, {
+      target,
+      props: { model: { ...model, path: 'D:/folo/models/shapes-n-best.folo' }, open: true },
+    });
+    flushSync();
+
+    target.ownerDocument.querySelector<HTMLInputElement>('input[value="onnx"]')!.click();
+    const dynBox = await until(
+      () => {
+        const boxes = target.ownerDocument.querySelectorAll<HTMLInputElement>('dialog [role="group"] input[type="checkbox"]');
+        return boxes.length === 3 && !boxes[1]!.disabled ? boxes[1]! : null;
+      },
+      'dynamic checkbox ready',
+    );
+    expect(dynBox.checked).toBe(false);
+
+    // Open CLI commands and pick Batch (--dynamic-batch): only the CLI preview changes; server switch stays static.
+    target.ownerDocument.querySelector<HTMLButtonElement>('[data-export-cli] button.cli-toggle')!.click();
+    flushSync();
+    const cliAxes = await until(
+      () => target.ownerDocument.querySelector('[role="radiogroup"][aria-label="CLI dynamic ONNX axes"]'),
+      'CLI dynamic axes picker',
+    );
+    [...cliAxes.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === 'Batch')!.click();
+    flushSync();
+
+    const exportPre = target.ownerDocument.querySelector('pre[aria-label="Export CLI command"]')!;
+    expect(exportPre.textContent).toBe('folo export --model D:/folo/models/shapes-n-best.folo --format onnx --dynamic-batch');
+    expect(dynBox.checked).toBe(false);
+
+    // Download still sends dynamic: false (never silently promoted to dynamic=true by CLI preview).
+    button('Download shapes-n-best.onnx')!.click();
+    await until(() => button('Done'), 'finished download');
+    expect(get).toHaveBeenCalledWith('m_x', { decode: false, dynamic: false, half: false });
   });
 
   it('shows copy-ready export and predict CLI snippets matching selected ONNX options', async () => {

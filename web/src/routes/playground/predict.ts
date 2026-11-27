@@ -63,12 +63,17 @@ export function ask(r: {
 }): Promise<Prediction> {
   const { api, model, source: s, on, options, inference, signal } = r;
   const input: PredictInput = s.kind === 'file' ? { kind: 'file', file: s.file } : { kind: 'dataset', dataset_id: s.ds.id, image_id: s.img.id };
+  // SAHI and TTA apply `max_det` per tile/view BEFORE cross-tile/cross-view fusion, so a 1,000 cap can drop valid
+  // boxes even when the merged output has < 1,000 boxes. Use the full candidate budget (`ALL.max_det`) on enhanced
+  // runs; fusion merges overlapping duplicates before returning, keeping the payload small and avoiding silent truncation.
+  const enhanced = inference?.mode === 'sahi' || inference?.mode === 'tta';
+  const effectiveMaxDet = enhanced ? Math.max(options.max_det, ALL.max_det) : options.max_det;
   if (on === 'server') {
-    const opts: PredictOptions = { model_id: model, ...options };
+    const opts: PredictOptions = { model_id: model, ...options, max_det: effectiveMaxDet };
     if (inference?.mode === 'sahi') {
-      opts.tile = toServerTilePayload(inference.tile, options.max_det);
+      opts.tile = toServerTilePayload(inference.tile, effectiveMaxDet);
     } else if (inference?.mode === 'tta') {
-      opts.tta = toServerTtaPayload(inference.tta, options.max_det, options.iou);
+      opts.tta = toServerTtaPayload(inference.tta, effectiveMaxDet, options.iou);
     }
     const meta = inferenceMetaOf(inference);
     return api.predict(input, opts, signal).then((p) => (meta ? { ...p, inference: meta } : p));
@@ -85,7 +90,7 @@ export function ask(r: {
       backend: on,
       image: () => imageBlob(s, signal),
       imageKey: sourceImageKey(s),
-      options: { conf: options.conf, iou: options.iou, maxDet: options.max_det },
+      options: { conf: options.conf, iou: options.iou, maxDet: effectiveMaxDet },
       inference,
       signal,
     });

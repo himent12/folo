@@ -478,10 +478,17 @@ export default function ExportDialog(props: ExportDialogProps) {
             </div>
           </div>
           {done.get() === 'onnx' ? (
-            <p class="note">
-              Studio cannot download ONNX files yet: the file stays on the machine running <span class="mono">folo serve</span>. Copy it from there, or
-              run <span class="mono">folo export --format onnx</span> where you need it.
-            </p>
+            onnxDirect.get() ? (
+              <p class="note">
+                Split dynamic-axis ONNX exports (<span class="mono">--dynamic-batch</span> / <span class="mono">--dynamic-hw</span>) stay on the machine
+                running <span class="mono">folo serve</span>. Pick Static or Full dynamic for direct browser download.
+              </p>
+            ) : (
+              <p class="note">
+                Studio cannot download ONNX files yet: the file stays on the machine running <span class="mono">folo serve</span>. Copy it from there, or
+                run <span class="mono">folo export --format onnx</span> where you need it.
+              </p>
+            )
           ) : null}
         </div>
       ) : (
@@ -521,7 +528,13 @@ export default function ExportDialog(props: ExportDialogProps) {
                             </span>
                             <span class="opt-text">
                               <span class="sw-name">{o().label}</span>
-                              <span class="opt-desc">{o().desc}</span>
+                              <span class="opt-desc">
+                                {o().key === 'dynamic' && dynamicAxesOk.get() && axes.get() === 'batch'
+                                  ? 'Symbolic batch only, fixed height and width.'
+                                  : o().key === 'dynamic' && dynamicAxesOk.get() && axes.get() === 'hw'
+                                    ? 'Fixed batch 1, symbolic height and width in multiples of 32.'
+                                    : o().desc}
+                              </span>
                             </span>
                           </label>
                         )}
@@ -549,7 +562,6 @@ export default function ExportDialog(props: ExportDialogProps) {
               half={switches.get().half}
               axes={axes.get()}
               showAxesPicker={!dynamicAxesOk.get()}
-              onAxes={setAxes}
             />
           ) : null}
           {demo.get() && phase.get() !== 'running' ? (
