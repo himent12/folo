@@ -19,6 +19,7 @@ pub const DEFAULT_DHASH_THRESHOLD: u32 = 6;
 
 /// Options controlling [`audit_dataset_with`] / [`LoadedDataset::audit_with`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AuditOptions {
     /// Decode images and compute 64-bit perceptual difference hashes (`dHash`) to catch near-duplicates
     /// (recompressed, resized, or lightly cropped images) within and across splits.
@@ -91,25 +92,31 @@ pub struct SplitLeakage {
     pub images: Vec<AuditImageRef>,
 }
 
-/// A group of two or more perceptually similar images (recompressed, resized, or lightly cropped) containing at
-/// least two distinct files by byte content.
+/// A single-linkage connected component of two or more perceptually similar images (recompressed, resized, or
+/// lightly cropped) containing at least two distinct files by byte content.
+///
+/// Because grouping is transitive under [`AuditOptions::max_hamming_distance`], `max_distance` across the full
+/// component can exceed the pairwise edge threshold.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NearDuplicateGroup {
     /// 64-bit `dHash` of the first image in the group (16 lowercase hex characters).
     pub dhash: String,
-    /// Maximum pairwise Hamming distance (`0..=64`) across images in this group.
+    /// Exact maximum pairwise Hamming distance (`0..=64`) across all images in this component.
     pub max_distance: u32,
     /// Matching images in deterministic split and dataset order.
     pub images: Vec<PerceptualImageRef>,
 }
 
-/// Perceptually similar images appearing in more than one split (for example a recompressed or resized `train`
-/// image leaking into `val`).
+/// A perceptual near-duplicate component that spans two or more distinct splits (for example a recompressed or
+/// resized `train` image leaking into `val`).
+///
+/// Grouping is transitive (single-linkage under [`AuditOptions::max_hamming_distance`]), so `splits` lists every
+/// split participating in the connected component.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NearDuplicateLeakage {
     /// 64-bit `dHash` of the first image in the group (16 lowercase hex characters).
     pub dhash: String,
-    /// Maximum pairwise Hamming distance (`0..=64`) across images in this group.
+    /// Exact maximum pairwise Hamming distance (`0..=64`) across all images in this component.
     pub max_distance: u32,
     /// Distinct splits sharing these near-duplicate images, in split order (`train`, `val`, `test`).
     pub splits: Vec<Split>,
@@ -177,12 +184,13 @@ impl AuditReport {
         !self.near_duplicate_leakage.is_empty()
     }
 
-    /// True if any exact or perceptual duplicate images appear in more than one split.
+    /// True if any exact duplicate group or perceptual near-duplicate component spans two or more splits.
     pub fn has_split_leakage(&self) -> bool {
         !self.split_leakage.is_empty() || !self.near_duplicate_leakage.is_empty()
     }
 
-    /// True if any exact or perceptual duplicate images appear in both `train` and `val`.
+    /// True if any exact duplicate group or perceptual near-duplicate component includes both `train` and `val`
+    /// (for perceptual groups, membership is transitive across the connected component).
     pub fn has_train_val_leakage(&self) -> bool {
         self.split_leakage.iter().any(|l| l.splits.contains(&Split::Train) && l.splits.contains(&Split::Val))
             || self
@@ -202,14 +210,20 @@ impl AuditReport {
 
 /// Computes the 64-bit horizontal gradient difference hash (`dHash`) of an RGB [`Image`].
 ///
-/// Reduces the image to a `9x8` BT.601 luminance (`77*R + 150*G + 29*B`) grid via exact area averaging across
-/// `[gx/9, (gx+1)/9) x [gy/8, (gy+1)/8)` tiles (falling back to bilinear resize when `width < 9` or `height < 8`),
-/// and sets bit `y * 8 + x` when column `x`'s mean luminance strictly exceeds column `x + 1`'s (compared with
-/// exact integer cross-multiplication). Returns `0` for empty (`0`-dimension) images.
+/// Reduces the image to a `9x8` BT.601 luminance (`77*R + 150*G + 29*B`) grid by averaging integer-aligned
+/// pixel tiles `[gx * w / 9, (gx + 1) * w / 9) x [gy * h / 8, (gy + 1) * h / 8)` (falling back to bilinear
+/// resize when `width < 9` or `height < 8`), and sets bit `y * 8 + x` when column `x`'s mean luminance strictly
+/// exceeds column `x + 1`'s (compared with exact integer cross-multiplication). Returns `0` for empty
+/// (`0`-dimension) images.
+///
+/// # Panics
+/// Panics if `image.width > 0 && image.height > 0` and `image.data` has fewer than `width * height * 3` bytes
+/// (or if `width * height * 3` overflows `usize` / `isize::MAX`).
 pub fn dhash_image(image: &Image) -> u64 {
     if image.width == 0 || image.height == 0 {
         return 0;
     }
+    crate::simd::assert_image_data(image);
     let w = image.width as usize;
     let h = image.height as usize;
     let mut hash = 0u64;
@@ -489,11 +503,18 @@ impl Dsu {
     }
 }
 
-/// Connects unique hashes within `threshold` Hamming distance using exact pigeonhole multi-index hashing for
-/// large sets with small thresholds (`threshold <= 7`), or direct pairwise scan otherwise.
+/// Connects unique hashes within `threshold` Hamming distance using O(m) fast path at `threshold >= 64`, exact
+/// pigeonhole multi-index hashing for large sets with small thresholds (`threshold <= 7`), or direct pairwise
+/// scan otherwise.
 fn connect_hashes(hashes: &[u64], threshold: u32, dsu: &mut Dsu) {
     let m = hashes.len();
     if m < 2 || threshold == 0 {
+        return;
+    }
+    if threshold >= 64 {
+        for u in 1..m {
+            dsu.union(0, u);
+        }
         return;
     }
     if m <= 2048 || threshold > 7 {
@@ -529,13 +550,53 @@ fn connect_hashes(hashes: &[u64], threshold: u32, dsu: &mut Dsu) {
                 let u = idxs[i];
                 let hu = hashes[u];
                 for &v in &idxs[i + 1..] {
-                    if dsu.find(u) != dsu.find(v) && hamming_distance(hu, hashes[v]) <= threshold {
+                    if hamming_distance(hu, hashes[v]) <= threshold {
                         dsu.union(u, v);
                     }
                 }
             }
         }
     }
+}
+
+/// Computes the exact maximum pairwise Hamming distance across a slice of distinct 64-bit hashes, stopping early
+/// once the theoretical upper bound `64` is reached.
+fn exact_max_hamming(hashes: &[u64]) -> u32 {
+    if hashes.len() < 2 {
+        return 0;
+    }
+    if hashes.len() <= 1024 {
+        let mut best = 0u32;
+        for (i, &ha) in hashes.iter().enumerate() {
+            for &hb in &hashes[i + 1..] {
+                let d = hamming_distance(ha, hb);
+                if d > best {
+                    best = d;
+                    if best == 64 {
+                        return 64;
+                    }
+                }
+            }
+        }
+        return best;
+    }
+    (0..hashes.len())
+        .into_par_iter()
+        .map(|i| {
+            let ha = hashes[i];
+            let mut local = 0u32;
+            for &hb in &hashes[i + 1..] {
+                let d = hamming_distance(ha, hb);
+                if d > local {
+                    local = d;
+                    if local == 64 {
+                        break;
+                    }
+                }
+            }
+            local
+        })
+        .reduce(|| 0u32, u32::max)
 }
 
 /// Clusters `entries` by `dHash` within `threshold` Hamming distance, excluding groups whose members are all
@@ -603,26 +664,8 @@ fn cluster_perceptual(
             continue;
         }
 
-        // Compute maximum pairwise Hamming distance across distinct hashes in the component.
-        let mut max_distance = 0u32;
-        if hashes.len() > 1 {
-            // Deduplicate hashes (already unique per node) and compute diameter.
-            let sample = if hashes.len() <= 512 { &hashes[..] } else { &hashes[..512] };
-            for i in 0..sample.len() {
-                for &hb in &sample[i + 1..] {
-                    let d = hamming_distance(sample[i], hb);
-                    if d > max_distance {
-                        max_distance = d;
-                    }
-                }
-            }
-            if hashes.len() > 512 {
-                let rep = hashes[0];
-                for &h in &hashes[512..] {
-                    max_distance = max_distance.max(hamming_distance(rep, h));
-                }
-            }
-        }
+        // Exact maximum pairwise Hamming distance across distinct hashes in the component.
+        let max_distance = exact_max_hamming(&hashes);
 
         let rep_dhash = format!("{:016x}", entries[member_idxs[0]].dhash);
         let images: Vec<PerceptualImageRef> = member_idxs
@@ -830,5 +873,33 @@ mod tests {
             };
             assert_eq!(canon(&mut dsu_mih), canon(&mut dsu_bf), "mismatch at threshold {threshold}");
         }
+
+        // Small image (< 9x8) exercises the bilinear fallback path cleanly.
+        let tiny = Image::new(4, 3, [120, 80, 40]);
+        assert_eq!(dhash_image(&tiny), 0);
+        let mut tiny_grad = Image::new(5, 4, [0, 0, 0]);
+        for y in 0..4 {
+            for x in 0..5 {
+                let v = (255 - x * 50) as u8;
+                tiny_grad.set_pixel(x, y, [v, v, v]);
+            }
+        }
+        assert_eq!(dhash_image(&tiny_grad), u64::MAX);
+
+        // Exact diameter beyond 512 unique hashes (including complementary pair at index 512).
+        let mut big: Vec<u64> = (0..512u64).collect();
+        big.push(!511u64);
+        assert_eq!(exact_max_hamming(&big), 64);
+
+        // AuditOptions deserializes with #[serde(default)] when max_hamming_distance is omitted.
+        let opts: AuditOptions = serde_json::from_str(r#"{"perceptual": true}"#).unwrap();
+        assert_eq!(opts, AuditOptions::perceptual(DEFAULT_DHASH_THRESHOLD));
+    }
+
+    #[test]
+    #[should_panic(expected = "image buffer")]
+    fn dhash_image_panics_on_truncated_buffer() {
+        let bad = Image { width: 9, height: 8, data: Vec::new() };
+        let _ = dhash_image(&bad);
     }
 }

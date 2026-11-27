@@ -27,7 +27,7 @@ the determinism rules.
 | `src/audit.rs` | `LoadedDataset::audit()` / `audit_dataset` / `audit_dataset_with`: streaming 128-bit content-hash duplicate and cross-split (`train`↔`val`/`test`) leakage audit plus optional 64-bit `dHash` perceptual near-duplicate detection (`dhash_image`, `dhash_file`, `hamming_distance`) |
 | `src/check.rs` | `folo dataset check`: one `CheckIssue` per problem (including cross-split leakage and VOC diagnostics) |
 | `src/convert.rs` | `convert::convert`: writes an opened dataset as YOLO, COCO, or Pascal VOC (CLI `folo dataset convert` targets YOLO / COCO) |
-| `src/curate.rs` | `merge_datasets`, `write_merged`, `merge_paths`, `remap_classes`, `filter_dataset`, `write_filtered`: multi-dataset merging (YOLO / COCO / VOC -> YOLO) with class unification/remapping and collision-safe filenames, plus subset filtering |
+| `src/curate/` | `mod.rs` (`remap_classes`, `filter_dataset`, `write_filtered`) and `merge.rs` (`merge_datasets`, `write_merged`, `merge_paths`): multi-dataset merging (YOLO / COCO / VOC -> YOLO) with class unification/remapping and collision-safe exclusive writes, plus subset filtering |
 | `src/split.rs` | `split_dataset`, `split_indices`, `write_split`: seeded multi-label stratified `train`/`val`/`test` splitting |
 | `src/unfinished.rs` | The `.folo-unfinished` marker: `claim`, every writer's first step, makes it in an empty folder; readers refuse it |
 | `src/pack.rs` | A dataset as one tar stream in the canonical YOLO layout, for another FOLO server |

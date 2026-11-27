@@ -183,11 +183,11 @@ rebuilds its dataset indexes then). Nothing installs one by default; `folo mcp
 - `curate::filter_dataset(&loaded, &FilterConfig)` / `LoadedDataset::filter` (and `write_filtered`) carves clean
   subsets by class whitelist/blacklist, split selection, normalised box area, pixel box/image dimensions (probing
   headers when `verify_images` was off), and optional empty-image dropping.
-- `curate::merge_datasets(&[&a, &b, ...], &MergeConfig)`, `write_merged`, and `merge_paths` combine two or more
+- `curate::merge_datasets(&[&a, &b, ...], &MergeConfig)`, `write_merged`, and `merge_paths` combine one or more
   datasets (any mix of YOLO, COCO, and Pascal VOC) into a unified YOLO dataset (`data.yaml` + split dirs) with
   automatic class-name unification, explicit class remap/drop mapping, split preservation / pooling / stratified
-  re-splitting (`MergeSplitPolicy`), and deterministic case-insensitive filename collision resolution
-  (`CollisionPolicy::PrefixOnCollision` or `AlwaysPrefix`).
+  re-splitting (`MergeSplitPolicy`), and deterministic case-insensitive filename collision resolution with exclusive
+  file creation (`CollisionPolicy::PrefixOnCollision` or `AlwaysPrefix`).
 - `LoadedDataset::split_stratified(&cfg)` / `split::split_dataset(&loaded, &cfg)` (plus `split_indices` for any
   `Dataset` and `write_split` to materialise on disk) performs seeded iterative multi-label stratification across
   `train` / `val` / optional `test`, processing rarest classes first with relative-deficit scoring so rare classes and
@@ -204,7 +204,7 @@ rebuilds its dataset indexes then). Nothing installs one by default; `folo mcp
   as unfinished first, whatever it holds.
 
 ### Unfinished datasets
-Every writer (`synthetic::write_yolo`, `convert::convert`, the server's sample sets) starts with
+Every writer (`synthetic::write_yolo`, `convert::convert`, `curate::write_merged`, the server's sample sets) starts with
 `unfinished::claim(dir)`: it creates `dir` when missing, then a `.folo-unfinished` file in it with `create_new`, then,
 holding that file, checks that nothing else is in the folder; the writer removes the file as its last step
 (`Claim::finish`), so a write stopped part way (killed, Ctrl+C, a crash) leaves it. The claim fails with a

@@ -377,4 +377,127 @@ fn perceptual_dhash_audit_catches_recompressed_resized_and_cropped_split_leakage
     let with_corrupt = ds.audit_with(&AuditOptions::perceptual(6));
     assert_eq!(with_corrupt.unreadable.len(), 1);
     assert!(with_corrupt.unreadable[0].path.ends_with("s4_unique.png"));
+
+    // AuditReport deserializes cleanly from legacy JSON without near_duplicate_* fields.
+    let mut legacy = serde_json::to_value(&exact_only).unwrap();
+    legacy.as_object_mut().unwrap().remove("near_duplicate_groups");
+    legacy.as_object_mut().unwrap().remove("near_duplicate_leakage");
+    let roundtrip: folo_data::AuditReport = serde_json::from_value(legacy).unwrap();
+    assert!(roundtrip.near_duplicate_groups.is_empty());
+    assert!(roundtrip.near_duplicate_leakage.is_empty());
+}
+
+#[test]
+fn curation_edge_cases_empty_names_tiny_boxes_probe_and_validation() {
+    let t = TempDir::new("curate-edges");
+
+    // 1. Unmapped empty / whitespace-only class name errors cleanly instead of silently dropping boxes.
+    let empty_cls = t.join("empty_cls");
+    write(&empty_cls.join("data.yaml"), "train: images/train\nnames: [\"\", \"car\"]\n");
+    write_png(&empty_cls.join("images/train/a.png"), 32, 32, [10, 20, 30]);
+    write(&empty_cls.join("labels/train/a.txt"), "0 0.5 0.5 0.4 0.4\n1 0.5 0.5 0.2 0.2\n");
+    let ds_empty = open(&empty_cls).unwrap();
+    assert!(ds_empty.remap_classes(&RemapConfig::default()).is_err());
+
+    // Explicitly remapping "" to "unknown" succeeds cleanly.
+    let mut fix_map = HashMap::new();
+    fix_map.insert("".into(), Some("unknown".into()));
+    let fixed = ds_empty.remap_classes(&RemapConfig { map: fix_map, ..Default::default() }).unwrap();
+    assert_eq!(fixed.classes, vec!["unknown", "car"]);
+    assert_eq!(fixed.train.boxes(0).len(), 2);
+
+    // 2. Remapping two classes with identical coordinates onto one target class deduplicates cleanly.
+    let dup_box = t.join("dup_box");
+    write(&dup_box.join("data.yaml"), "train: images/train\nnames: [car, truck]\n");
+    write_png(&dup_box.join("images/train/a.png"), 32, 32, [10, 20, 30]);
+    write(&dup_box.join("labels/train/a.txt"), "0 0.5 0.5 0.4 0.4\n1 0.5 0.5 0.4 0.4\n");
+    let mut merge_cls = HashMap::new();
+    merge_cls.insert("car".into(), Some("vehicle".into()));
+    merge_cls.insert("truck".into(), Some("vehicle".into()));
+    let deduped =
+        open(&dup_box).unwrap().remap_classes(&RemapConfig { map: merge_cls, ..Default::default() }).unwrap();
+    assert_eq!(deduped.train.boxes(0).len(), 1);
+
+    // 3. Tiny valid box (w = 4e-7) round-trips through write_merged without truncating to 0.000000.
+    let tiny = t.join("tiny_box");
+    write(&tiny.join("data.yaml"), "train: images/train\nnames: [dot]\n");
+    write_png(&tiny.join("images/train/d.png"), 32, 32, [50, 60, 70]);
+    write(&tiny.join("labels/train/d.txt"), "0 0.5 0.5 0.0000004 0.0000004\n");
+    let ds_tiny = open(&tiny).unwrap();
+    assert_eq!(ds_tiny.train.boxes(0).len(), 1);
+    let tiny_out = t.join("tiny_out");
+    let rep = write_merged(&[&ds_tiny], &tiny_out, &MergeConfig::default()).unwrap();
+    assert_eq!(rep.boxes, 1);
+    let reopened = open(&tiny_out).unwrap();
+    assert_eq!(reopened.train.boxes(0).len(), 1);
+    assert!(reopened.train.boxes(0)[0].w > 0.0);
+
+    // 4. Non-finite / negative box rejected before claiming output directory.
+    let mut bad_ds = ds_tiny.clone();
+    let mut bad_entry = bad_ds.train.entries()[0].clone();
+    bad_entry.boxes = vec![folo_data::BBox::new(0, f32::NAN, 0.5, 0.2, 0.2)];
+    bad_ds.train = folo_data::FileDataset::new(Split::Train, vec!["dot".into()], vec![bad_entry]);
+    let bad_out = t.join("bad_out");
+    assert!(write_merged(&[&bad_ds], &bad_out, &MergeConfig::default()).is_err());
+    assert!(!bad_out.exists(), "output dir must not be created on box validation error");
+
+    // 5. Filter rejects inverted/negative-dimension boxes under area & pixel bounds, and skips probing
+    //    missing images whose boxes were already filtered out by class whitelist when no image dim bound is set.
+    let mut neg_entry = ds_tiny.train.entries()[0].clone();
+    neg_entry.boxes = vec![
+        folo_data::BBox::new(0, 0.5, 0.5, -0.5, -0.5), // (-0.5)*(-0.5) = +0.25 must STILL be rejected
+        folo_data::BBox::new(0, 0.5, 0.5, -0.5, 0.5),
+    ];
+    let mut neg_ds = ds_tiny.clone();
+    neg_ds.train = folo_data::FileDataset::new(Split::Train, vec!["dot".into()], vec![neg_entry]);
+    let filtered_neg = neg_ds
+        .filter(&FilterConfig {
+            max_box_area: Some(0.5),
+            max_box_width_px: Some(100.0),
+            ..Default::default()
+        })
+        .unwrap();
+    assert!(filtered_neg.train.boxes(0).is_empty());
+
+    // 6. `probe_image_sizes: true` probes real disk dimensions on an unverified COCO dataset with stale metadata.
+    let stale_coco = t.join("stale_coco");
+    write_png(&stale_coco.join("images/train/a.png"), 40, 40, [10, 20, 30]);
+    write(
+        &stale_coco.join("annotations/instances_train.json"),
+        r#"{
+            "images": [{"id": 1, "file_name": "a.png", "width": 1280, "height": 720}],
+            "annotations": [
+                {"id": 1, "image_id": 1, "category_id": 1, "bbox": [100, 100, 200, 200], "area": 40000, "iscrowd": 0}
+            ],
+            "categories": [{"id": 1, "name": "obj"}]
+        }"#,
+    );
+    let unverified_coco =
+        open_with(&stale_coco, &OpenOptions { format: Format::Coco, verify_images: false }).unwrap();
+    let probed = unverified_coco
+        .filter(&FilterConfig { min_image_width: Some(1000), probe_image_sizes: true, ..Default::default() })
+        .unwrap();
+    assert_eq!(probed.train.len(), 0, "40px actual image must not pass min_image_width=1000 when probed");
+
+    // 7. Invalid prefix fails up front in merge_datasets and merge_paths (before opening disk paths).
+    assert!(
+        merge_datasets(
+            &[&ds_tiny],
+            &MergeConfig { source_prefixes: vec!["---".into()], ..Default::default() }
+        )
+        .is_err()
+    );
+    assert!(
+        merge_paths(
+            &[t.join("nonexistent_dataset")],
+            &t.join("never_created"),
+            &MergeConfig { source_prefixes: vec!["---".into()], ..Default::default() }
+        )
+        .is_err()
+    );
+
+    // 8. write_merged refuses non-empty output directory cleanly.
+    let non_empty = t.join("non_empty");
+    write(&non_empty.join("existing.txt"), "keep");
+    assert!(write_merged(&[&ds_tiny], &non_empty, &MergeConfig::default()).is_err());
 }
