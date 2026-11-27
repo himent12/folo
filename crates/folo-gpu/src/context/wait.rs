@@ -197,7 +197,15 @@ impl GpuContext {
         self.inner.errors.lock().expect("error lock").push(msg.into());
     }
 
+    /// Drains any queued wgpu errors, serialized under the batch lock (`batch -> errors` lock order) so a
+    /// concurrent `read_batch_deferred` submit-and-drain section always observes its own submission error.
     pub(super) fn take_error(&self) -> Result<()> {
+        let _b = self.inner.batch.lock().expect("batch lock");
+        self.take_error_locked()
+    }
+
+    /// [`GpuContext::take_error`] for callers that already hold `self.inner.batch`.
+    pub(super) fn take_error_locked(&self) -> Result<()> {
         let mut errs = self.inner.errors.lock().expect("error lock");
         if errs.is_empty() {
             return Ok(());

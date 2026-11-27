@@ -149,6 +149,30 @@ fn read_batch_validation_is_atomic() {
             "valid readback must not consume bad submission's error"
         );
         assert!(matches!(bad_res, Err(GpuError::Wgpu(_))), "destroyed buffer read must fail: {bad_res:?}");
+
+        // Concurrent `sync()` must likewise never consume a failed readback's submission error.
+        let destroyed2 = ctx.wgpu_device().create_buffer(&wgpu::BufferDescriptor {
+            label: Some("destroyed copy src sync"),
+            size: 64,
+            usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        destroyed2.destroy();
+        let ctx_s = ctx.clone();
+        let barrier_s = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let b_s = barrier_s.clone();
+        let t_s = std::thread::spawn(move || {
+            b_s.wait();
+            ctx_s.read_deferred(&destroyed2, 0, 64).and_then(|r| r.into_vec())
+        });
+        barrier_s.wait();
+        let sync_res = ctx.sync();
+        let bad_sync_res = t_s.join().unwrap();
+        assert!(sync_res.is_ok(), "concurrent sync must not steal bad readback's error: {sync_res:?}");
+        assert!(
+            matches!(bad_sync_res, Err(GpuError::Wgpu(_))),
+            "destroyed buffer read with concurrent sync must fail: {bad_sync_res:?}"
+        );
     }
 }
 

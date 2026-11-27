@@ -116,7 +116,7 @@ impl GpuContext {
                 enc.copy_buffer_to_buffer(buf, offset, staging.raw(), 0, *len4);
             }
             let submission = self.submit(&mut b);
-            (submission, self.take_error())
+            (submission, self.take_error_locked())
         };
         if let Err(e) = submit_err {
             for (_, mut staging, _, _) in prepared.into_iter().flatten() {
@@ -353,13 +353,7 @@ impl PendingRead {
             .map_err(|e| GpuError::Map(e.to_string()));
         let ctx = self.ctx.clone();
         drop(self);
-        // Serialize error draining with `read_batch_deferred`'s submit-and-drain critical section (`batch` ->
-        // `errors` lock order) so a concurrent failed submission keeps its own error.
-        let err = {
-            let _b = ctx.inner.batch.lock().expect("batch lock");
-            ctx.take_error()
-        };
-        err?;
+        ctx.take_error()?;
         out
     }
 }
