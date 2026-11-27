@@ -415,4 +415,198 @@ describe('LiveRun ordering', () => {
     expect(live.run?.model_id).toBe('m_new');
     stop();
   });
+
+  it('does not re-fetch an already-completed run on stream open or initial terminal status (#309)', async () => {
+    const doneSnap: Run = { ...snapshot, status: 'completed', epoch: 2, epochs: 2, step: 4, best: { epoch: 2, map50_95: 0.3 } };
+    const ep = (epoch: number) => ({ epoch, train_loss: { box: 1, cls: 1, dfl: 1, total: 3 }, val: { map50: 0.5, map50_95: 0.3, precision: 0.5, recall: 0.5, per_class: [] }, lr: 0.01, seconds: 1 });
+    const runSpy = vi.fn(async () => doneSnap);
+    const metricsSpy = vi.fn(async () => ({ steps: [step(1), step(2)], epochs: [ep(1), ep(2)] as never }));
+    const logsSpy = vi.fn(async () => ({ lines: [] }));
+    hub.api = { ...hub.api, run: runSpy, runMetrics: metricsSpy, runLogs: logsSpy } as Api;
+    let live!: LiveRun;
+    const stop = root(() => {
+      live = new LiveRun(() => 'run_7d1e');
+    });
+    flushSync();
+    await vi.advanceTimersByTimeAsync(0);
+    // Initial load settled the completed run; SSE opening and sending its initial `completed` status must not refetch.
+    handlers.connection?.('open');
+    handlers.status?.({ status: 'completed', error: null });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(live.run?.status).toBe('completed');
+    expect(runSpy).toHaveBeenCalledTimes(1);
+    expect(metricsSpy).toHaveBeenCalledTimes(1);
+    expect(logsSpy).toHaveBeenCalledTimes(1);
+    stop();
+  });
+
+  it('does not cascade stale-generation syncs when a completed run opens while initial load is in flight (#309)', async () => {
+    const doneSnap: Run = { ...snapshot, status: 'completed', epoch: 2, epochs: 2, step: 4, best: { epoch: 2, map50_95: 0.3 } };
+    const ep = (epoch: number) => ({ epoch, train_loss: { box: 1, cls: 1, dfl: 1, total: 3 }, val: { map50: 0.5, map50_95: 0.3, precision: 0.5, recall: 0.5, per_class: [] }, lr: 0.01, seconds: 1 });
+    const first = deferred<RunMetrics>();
+    const second = deferred<RunMetrics>();
+    let calls = 0;
+    const runSpy = vi.fn(async () => doneSnap);
+    const metricsSpy = vi.fn(() => {
+      calls++;
+      if (calls === 1) return first.promise;
+      if (calls === 2) return second.promise;
+      return Promise.resolve({ steps: [step(1), step(2)], epochs: [ep(1), ep(2)] as never });
+    });
+    const logsSpy = vi.fn(async () => ({ lines: [] }));
+    hub.api = { ...hub.api, run: runSpy, runMetrics: metricsSpy, runLogs: logsSpy } as Api;
+    let live!: LiveRun;
+    const stop = root(() => {
+      live = new LiveRun(() => 'run_7d1e');
+    });
+    flushSync();
+    // Stream opens and immediately sends its initial `completed` status before the first load resolves.
+    handlers.connection?.('open');
+    handlers.status?.({ status: 'completed', error: null });
+    first.resolve({ steps: [step(1), step(2)], epochs: [ep(1), ep(2)] as never });
+    second.resolve({ steps: [step(1), step(2)], epochs: [ep(1), ep(2)] as never });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(live.run?.status).toBe('completed');
+    expect(runSpy).toHaveBeenCalledTimes(2);
+    expect(metricsSpy).toHaveBeenCalledTimes(2);
+    expect(logsSpy).toHaveBeenCalledTimes(2);
+    stop();
+  });
+
+  it('shares the terminal snapshot request with sync when an active run finishes (#309)', async () => {
+    const ep = (epoch: number) => ({ epoch, train_loss: { box: 1, cls: 1, dfl: 1, total: 3 }, val: { map50: 0.5, map50_95: 0.3, precision: 0.5, recall: 0.5, per_class: [] }, lr: 0.01, seconds: 1 });
+    let ended = false;
+    const runSpy = vi.fn(async () => ({
+      ...snapshot,
+      status: ended ? ('completed' as const) : ('running' as const),
+      epoch: 2,
+      epochs: 2,
+      best: { epoch: 2, map50_95: 0.3 },
+      model_id: ended ? 'm_final' : null,
+    }));
+    const metricsSpy = vi.fn(async () => ({ steps: ended ? [step(1), step(2), step(3)] : [step(1), step(2)], epochs: [ep(1), ep(2)] as never }));
+    const logsSpy = vi.fn(async () => ({ lines: [] }));
+    hub.api = { ...hub.api, run: runSpy, runMetrics: metricsSpy, runLogs: logsSpy } as Api;
+    let live!: LiveRun;
+    const stop = root(() => {
+      live = new LiveRun(() => 'run_7d1e');
+    });
+    flushSync();
+    await vi.advanceTimersByTimeAsync(0);
+    handlers.connection?.('open');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(runSpy).toHaveBeenCalledTimes(2);
+    handlers.step?.(step(3));
+    ended = true;
+    handlers.status?.({ status: 'completed', error: null });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(live.run?.status).toBe('completed');
+    expect(live.run?.model_id).toBe('m_final');
+    expect(live.steps.map((s) => s.step)).toEqual([1, 2, 3]);
+    // Terminal event issues a single sync load (1 /run, 1 /metrics, 1 /logs) — no duplicate snapshot() call.
+    expect(runSpy).toHaveBeenCalledTimes(3);
+    expect(metricsSpy).toHaveBeenCalledTimes(3);
+    expect(logsSpy).toHaveBeenCalledTimes(3);
+    stop();
+  });
+
+  it('still resyncs when a stopped run completes before SSE delivers status (#309 review)', async () => {
+    const ep = (epoch: number) => ({ epoch, train_loss: { box: 1, cls: 1, dfl: 1, total: 3 }, val: { map50: 0.5, map50_95: 0.3, precision: 0.5, recall: 0.5, per_class: [] }, lr: 0.01, seconds: 1 });
+    let completed = false;
+    const runSpy = vi.fn(async () => ({
+      ...snapshot,
+      status: completed ? ('completed' as const) : ('stopped' as const),
+      epoch: completed ? 2 : 1,
+      epochs: 2,
+      best: { epoch: completed ? 2 : 1, map50_95: 0.3 },
+      model_id: completed ? 'm_resumed' : null,
+    }));
+    const metricsSpy = vi.fn(async () => ({ steps: completed ? [step(1), step(2)] : [step(1)], epochs: completed ? ([ep(1), ep(2)] as never) : ([ep(1)] as never) }));
+    const logsSpy = vi.fn(async () => ({ lines: [] }));
+    hub.api = { ...hub.api, run: runSpy, runMetrics: metricsSpy, runLogs: logsSpy } as Api;
+    let live!: LiveRun;
+    const stop = root(() => {
+      live = new LiveRun(() => 'run_7d1e');
+    });
+    flushSync();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(live.run?.status).toBe('stopped');
+    expect(live.run?.model_id).toBeNull();
+    // Run resumed and finished on the server before SSE delivered its initial status.
+    completed = true;
+    handlers.status?.({ status: 'completed', error: null });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(live.run?.status).toBe('completed');
+    expect(live.run?.model_id).toBe('m_resumed');
+    expect(live.epochs.map((e) => e.epoch)).toEqual([1, 2]);
+    stop();
+  });
+
+  it('still applies a completed run snapshot when /metrics rejects before terminal status arrives (#309 review)', async () => {
+    const doneSnap: Run = { ...snapshot, status: 'completed', epoch: 2, epochs: 2, best: { epoch: 2, map50_95: 0.3 }, model_id: 'm_done' };
+    hub.api = {
+      ...hub.api,
+      run: vi.fn(async () => doneSnap),
+      runMetrics: vi.fn(async () => {
+        throw new Error('metrics unavailable');
+      }),
+      runLogs: vi.fn(async () => ({ lines: [] })),
+    } as Api;
+    let live!: LiveRun;
+    const stop = root(() => {
+      live = new LiveRun(() => 'run_7d1e');
+    });
+    flushSync();
+    handlers.connection?.('open');
+    // Both initial and post-open loads reject on /metrics before the terminal status event arrives.
+    await vi.advanceTimersByTimeAsync(0);
+    expect(live.run).toBeUndefined();
+    handlers.status?.({ status: 'completed', error: null });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(live.run?.status).toBe('completed');
+    expect(live.run?.model_id).toBe('m_done');
+    stop();
+  });
+
+  it('falls back to a full terminal sync when an in-flight post-open snapshot resolves as running (#309 review)', async () => {
+    const ep = (epoch: number) => ({ epoch, train_loss: { box: 1, cls: 1, dfl: 1, total: 3 }, val: { map50: 0.5, map50_95: 0.3, precision: 0.5, recall: 0.5, per_class: [] }, lr: 0.01, seconds: 1 });
+    const firstSnap = deferred<Run>();
+    const openSnap = deferred<Run>();
+    const firstMetrics = deferred<RunMetrics>();
+    const openMetrics = deferred<RunMetrics>();
+    let runCalls = 0;
+    let metricsCalls = 0;
+    const runningSnap: Run = { ...snapshot, status: 'running', epoch: 1, epochs: 2, best: { epoch: 1, map50_95: 0.2 }, model_id: null };
+    const finalSnap: Run = { ...snapshot, status: 'completed', epoch: 2, epochs: 2, best: { epoch: 2, map50_95: 0.4 }, model_id: 'm_final' };
+    const runSpy = vi.fn(() => {
+      runCalls++;
+      if (runCalls === 1) return firstSnap.promise;
+      if (runCalls === 2) return openSnap.promise;
+      return Promise.resolve(finalSnap);
+    });
+    const metricsSpy = vi.fn(() => {
+      metricsCalls++;
+      if (metricsCalls === 1) return firstMetrics.promise;
+      if (metricsCalls === 2) return openMetrics.promise;
+      return Promise.resolve({ steps: [step(1), step(2)], epochs: [ep(1), ep(2)] as never });
+    });
+    hub.api = { ...hub.api, run: runSpy, runMetrics: metricsSpy, runLogs: vi.fn(async () => ({ lines: [] })) } as Api;
+    let live!: LiveRun;
+    const stop = root(() => {
+      live = new LiveRun(() => 'run_7d1e');
+    });
+    flushSync();
+    handlers.connection?.('open');
+    // Terminal status arrives while the post-open load is still in flight; its snapshot predated completion.
+    handlers.status?.({ status: 'completed', error: null });
+    firstSnap.resolve(runningSnap);
+    openSnap.resolve(runningSnap);
+    firstMetrics.resolve({ steps: [step(1)], epochs: [ep(1)] as never });
+    openMetrics.resolve({ steps: [step(1)], epochs: [ep(1)] as never });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(live.run?.status).toBe('completed');
+    expect(live.run?.model_id).toBe('m_final');
+    expect(live.epochs.map((e) => e.epoch)).toEqual([1, 2]);
+    stop();
+  });
 });

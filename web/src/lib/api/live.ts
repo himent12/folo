@@ -391,7 +391,9 @@ export class LiveRun {
       let loadIssued = 0;
       let loadApplied = 0;
       let logsApplied = 0;
-      const load = async (): Promise<boolean> => {
+      let sawActive = false;
+      let postOpenSnap: Promise<{ run: Run; claim: () => boolean }> | null = null;
+      const load = async (opts?: { onSnap?: (snap: { run: Run; claim: () => boolean }) => void; trackPostOpen?: boolean }): Promise<boolean> => {
         const seq = this.#statusSeq;
         const queueSeq = this.#queueSeq;
         const cloudSeq = this.#cloudSeq;
@@ -425,11 +427,16 @@ export class LiveRun {
           );
         }
         let snap: { run: Run; claim: () => boolean }, metrics: RunMetrics;
+        const snapP = snapshot();
+        if (opts?.onSnap) snapP.then(opts.onSnap, () => {});
+        if (opts?.trackPostOpen) postOpenSnap = snapP;
         try {
-          [snap, metrics] = await Promise.all([snapshot(), api.runMetrics(runId, view.signal)]);
+          [snap, metrics] = await Promise.all([snapP, api.runMetrics(runId, view.signal)]);
         } catch (e) {
           if (my !== loadIssued) return false;
           throw e;
+        } finally {
+          if (postOpenSnap === snapP) postOpenSnap = null;
         }
         if (closed || my < loadApplied) return false;
         // Requested before a resume rewound the view (or before its replay ended): it may hold the interrupted
@@ -442,6 +449,7 @@ export class LiveRun {
         // Answered short of an ended snapshot `SHORT_ANSWERS` times in a row, the history is all there is: final too.
         const answered = metrics.epochs[metrics.epochs.length - 1]?.epoch ?? 0;
         const ended = !ACTIVE.includes(snap.run.status);
+        if (!ended) sawActive = true;
         this.#short.set((n) => (ended && heldResults(snap.run, answered, 0).pending ? n + 1 : 0));
         const final = ended && !heldResults(snap.run, answered, this.#short.get()).pending;
         this.#absorb(snap.claim() ? snap.run : (this.run ?? snap.run), metrics.steps, metrics.epochs, seq, queueSeq, cloudSeq, final);
@@ -513,14 +521,14 @@ export class LiveRun {
         );
       };
 
-      const sync = (attempt = 0) => {
+      const sync = (attempt = 0, opts?: { onSnap?: (snap: { run: Run; claim: () => boolean }) => void; trackPostOpen?: boolean }) => {
         clearTimeout(syncTimer);
         // `owed`: only if, by then, the epochs are still on their way (a load in between may have settled it).
         const later = (owed = false) => {
           clearTimeout(syncTimer);
           syncTimer = setTimeout(() => void ((!owed || this.#pending()) && sync(attempt + 1)), Math.min(15_000, 1000 * 2 ** attempt));
         };
-        load().then(
+        load(opts).then(
           // The server says the run validated epochs this history did not hold yet (read before they landed): again.
           (owed) => void (owed && !closed && later(true)),
           (e) => {
@@ -541,8 +549,13 @@ export class LiveRun {
         connection: (s) => {
           if (closed) return;
           // EventSource construction does not mean the subscription is live: events emitted between our first
-          // history load and the stream opening would be lost, so load (and merge) again once it opens.
-          if (s === 'open' && this.connection === 'idle') sync();
+          // history load and the stream opening would be lost, so load (and merge) again once it opens — unless an
+          // already-completed (non-resumable) run's final history has settled.
+          const cur = this.#run.peek();
+          const settledCompleted = !sawActive && !this.#replay && cur?.status === 'completed' && !untrack(() => this.#pending()) && loadApplied > 0;
+          if (s === 'open' && this.#connection.peek() === 'idle' && !settledCompleted) {
+            sync(0, { trackPostOpen: true });
+          }
           this.connection = s;
           if (s === 'reconnecting') check();
           if (s === 'open') {
@@ -563,10 +576,15 @@ export class LiveRun {
         },
         status: ({ status, error, steps_per_epoch, epochs }) => {
           if (closed) return;
+          const prev = this.#run.peek();
           this.#heard = Date.now();
           this.lost = null;
           this.#statusSeq++;
           this.#lastStatus = { status, error };
+          if (ACTIVE.includes(status)) {
+            sawActive = true;
+            postOpenSnap = null;
+          }
           // Finished → active again: the run was resumed (here or elsewhere).
           if (this.run && !ACTIVE.includes(this.run.status) && ACTIVE.includes(status)) {
             this.#rewind();
@@ -592,27 +610,55 @@ export class LiveRun {
             );
           }
           if (!ACTIVE.includes(status)) {
-            // The run ended: the server's final history settles it. Requests issued before may hold a partial
-            // history (or, during a replay, the interrupted attempt), even when a snapshot already said it ended
-            // (/run and /metrics are read independently): invalidate them and fetch the final one, every time.
-            this.#replay = null;
-            this.#gen++;
-            // The epochs the stream delivered are published with the end, not a frame later.
-            this.#publish();
-            sync();
-            // Terminal: refresh the snapshot for finished time, best and model id (even if history is still loading).
-            const seq = this.#statusSeq;
-            const gen = this.#gen;
-            const cloudSeq = this.#cloudSeq;
-            snapshot().then((snap) => {
+            const applySnap = (seq: number, gen: number, cloudSeq: number) => (snap: { run: Run; claim: () => boolean }) => {
               if (closed || seq !== this.#statusSeq || gen !== this.#gen || !snap.claim()) return;
               this.#pendingStep = null;
               this.run = this.#clouded(keepStepsPerEpoch(snap.run, this.run), cloudSeq);
-            }, () => {});
+            };
+            const terminalSync = () => {
+              // The run ended: the server's final history settles it. Requests issued before may hold a partial
+              // history (or, during a replay, the interrupted attempt), even when a snapshot already said it ended
+              // (/run and /metrics are read independently): invalidate them and fetch the final one, every time.
+              this.#replay = null;
+              this.#gen++;
+              // The epochs the stream delivered are published with the end, not a frame later.
+              this.#publish();
+              // Terminal: refresh the snapshot for finished time, best and model id (even if history is still loading),
+              // reusing the single `snapshot()` request issued by `sync()`.
+              sync(0, { onSnap: applySnap(this.#statusSeq, this.#gen, this.#cloudSeq) });
+            };
+            if (!sawActive && !this.#replay && status === 'completed' && prev?.status === 'completed' && prev.error === error && !untrack(() => this.#pending()) && loadApplied > 0) {
+              postOpenSnap = null;
+              return;
+            }
+            if (status === 'completed' && !sawActive && !this.#replay && postOpenSnap) {
+              // The stream's initial `completed` status arrived while the post-open load is still in flight: reuse its
+              // snapshot once it proves the run was already completed, or fall back to a full terminal sync if it
+              // predated completion or failed.
+              const inFlight = postOpenSnap;
+              postOpenSnap = null;
+              const seq = this.#statusSeq;
+              const gen = this.#gen;
+              const cloudSeq = this.#cloudSeq;
+              inFlight.then(
+                (snap) => {
+                  if (closed || seq !== this.#statusSeq || gen !== this.#gen) return;
+                  if (snap.run.status === 'completed' && snap.run.error === error) applySnap(seq, gen, cloudSeq)(snap);
+                  else terminalSync();
+                },
+                () => {
+                  if (!closed && seq === this.#statusSeq && gen === this.#gen) terminalSync();
+                },
+              );
+              return;
+            }
+            terminalSync();
           }
         },
         step: (s) => {
           if (closed) return;
+          sawActive = true;
+          postOpenSnap = null;
           this.#heard = Date.now();
           this.lost = null;
           const last = this.steps[this.steps.length - 1];
@@ -659,6 +705,8 @@ export class LiveRun {
         },
         epoch: (e) => {
           if (closed) return;
+          sawActive = true;
+          postOpenSnap = null;
           this.#heard = Date.now();
           const last = this.epochs[this.epochs.length - 1];
           if (this.#replay) {
@@ -707,7 +755,7 @@ export class LiveRun {
         },
         reconnect: () => {
           // The stream replays nothing: refetch history and merge it with what arrived meanwhile.
-          if (!closed) sync();
+          if (!closed) sync(0, { trackPostOpen: !sawActive && !this.#replay });
         },
       });
 

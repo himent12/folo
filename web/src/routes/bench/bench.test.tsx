@@ -259,6 +259,7 @@ describe('Add entry', () => {
   it('starts an agent entry with the defaults', async () => {
     const { onstarted } = await dialog('agent');
     expect(document.querySelector<HTMLInputElement>('input[id$="-aimages"]')!.value).toBe('48');
+    expect(document.querySelector('.lead-note')?.textContent).toMatch(/draws boxes with confidences.*calibration is measured/);
     send();
     await settle();
     expect(onstarted).toHaveBeenCalledWith(expect.objectContaining({ images: 48, conditions: false, scored: false }));

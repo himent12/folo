@@ -13,7 +13,7 @@ import type { Dataset, Model, Prediction, Run } from '$lib/api/types';
 import { betterModel, modelChoices, scoreContext } from '$lib/scoreSummary';
 import { media } from '$lib/design/tokens';
 import { filterDetections } from '$lib/detect/nms';
-import { BrowserEngine, hasWebGpu, NO_WASM, probeWasm, servedBy, wasmFromSystem, type Backend } from '$lib/inference/browser';
+import { BrowserEngine, hasWebGpu, NO_WASM, probeWasm, servedBy, wasmFromFeatures, wasmFromSystem, type Backend } from '$lib/inference/browser';
 import { sentence } from '$lib/format';
 import { isOom } from '$lib/oom';
 import { href, router } from '$lib/router';
@@ -313,9 +313,16 @@ export default function Playground() {
   // comes back online: an unknown answer (offline) is never kept (lib/inference `probeWasm`).
   const probed = signal<boolean | null>(null);
   /** The server's word on its own build counts for this page only when it served it (the demo's server always does). */
-  const fromServer = computed(() => wasmFromSystem(system.data, hub.api.mock || servedBy(hub.serverUrl)));
+  const servedHere = computed(() => hub.api.mock || servedBy(hub.serverUrl));
+  const fromServer = computed(
+    () =>
+      wasmFromSystem(system.data, servedHere.get()) ??
+      (hub.api.mock ? null : wasmFromFeatures(hub.features, servedHere.get())),
+  );
   effect(() => {
-    if (hub.api.mock || fromServer.get() !== null) return;
+    if (hub.mode === 'connecting' || hub.api.mock || fromServer.get() !== null) return;
+    // Same-origin server whose `/api/health` lacked `features` (older server): wait for `/api/system` before probing.
+    if (servedHere.get() && system.loading) return;
     let live = true;
     const ask = () => void probeWasm().then((v) => live && probed.set(v));
     ask();

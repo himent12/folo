@@ -4,7 +4,7 @@
  * dot's size follows how many detections the bin holds, a bin of under 5% of them is hollow, and their counts stand
  * as bars under the plot, so a thin bin never looks as sure as a full one. The `[0, 0.1)` bin is always empty
  * (detections enter from 0.1), so the axis starts at 0.1. The ECE, and one sentence that reads the chart. Without
- * confidences: what that means and why agents have none.
+ * confidences (or when none reaches 0.1): what that means and why this entry was not calibrated.
  */
 import { computed, css, MediaQuery, signal } from 'fw';
 import type { Bench, BenchEntry, BenchResult } from '$lib/api/types';

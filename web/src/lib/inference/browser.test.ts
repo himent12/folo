@@ -8,6 +8,7 @@ import {
   resetWasmProbe,
   servedBy,
   toImageData,
+  wasmFromFeatures,
   wasmFromSystem,
   type Backend,
   type Detector,
@@ -432,6 +433,10 @@ describe('is the in-browser runtime in this build (DOGFOOD-3 S5)', () => {
     expect(wasmFromSystem(final, true)).toBe(false);
     expect(wasmFromSystem(final, false)).toBeNull();
     expect(wasmFromSystem({ features: ['queue_control'] } as SystemInfo, true)).toBeNull();
+    expect(wasmFromFeatures(['web_wasm'], true)).toBe(true);
+    expect(wasmFromFeatures(['run_cli'], true)).toBe(false);
+    expect(wasmFromFeatures(['run_cli'], false)).toBeNull();
+    expect(wasmFromFeatures(null, true)).toBeNull();
   });
 
   it('knows when the server serves this page', () => {
