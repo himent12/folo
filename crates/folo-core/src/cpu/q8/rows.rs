@@ -164,11 +164,27 @@ pub(super) fn image_rows(xs: &[C4<'_>], img: usize, h: usize, w: usize, cv: &QCo
         .and_then(|v| v.checked_add(NR + SLACK))
         .expect("q8::conv: padded copy size overflow");
     let mut buf = words(buf_len);
-    let mut srcs = Vec::with_capacity(groups);
-    for x in xs {
-        let base = x.offset + img * x.img_stride;
-        srcs.extend((0..x.c / 4).map(|g| &x.data[base + g * hw..base + (g + 1) * hw]));
-    }
+    const STACK_GROUPS: usize = 128;
+    let mut srcs_stack: [&[u32]; STACK_GROUPS] = [&[]; STACK_GROUPS];
+    let mut srcs_heap = Vec::new();
+    let srcs: &[&[u32]] = if groups <= STACK_GROUPS {
+        let mut gi = 0;
+        for x in xs {
+            let base = x.offset + img * x.img_stride;
+            for g in 0..x.c / 4 {
+                srcs_stack[gi] = &x.data[base + g * hw..base + (g + 1) * hw];
+                gi += 1;
+            }
+        }
+        &srcs_stack[..groups]
+    } else {
+        srcs_heap.reserve(groups);
+        for x in xs {
+            let base = x.offset + img * x.img_stride;
+            srcs_heap.extend((0..x.c / 4).map(|g| &x.data[base + g * hw..base + (g + 1) * hw]));
+        }
+        &srcs_heap
+    };
     let zero_word = |g: usize| {
         u32::from_le_bytes([cv.zeros[4 * g], cv.zeros[4 * g + 1], cv.zeros[4 * g + 2], cv.zeros[4 * g + 3]])
     };

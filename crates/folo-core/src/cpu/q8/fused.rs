@@ -16,9 +16,9 @@
 use std::arch::x86_64::*;
 
 pub(super) use super::fused_epi::{
-    AlignedTile, AlignedTileF32, BMode, FusedIsa, MultiPartTask, PartSlice, SinglePartTask, active_isa,
-    apply_epi_aligned, finish_col8, read_u8_noncontiguous, write_f32_noncontiguous, write_u8_noncontiguous,
-    zero_pairs,
+    AlignedTile, AlignedTileF32, BMode, FusedIsa, MAX_INLINE_1X1_PARTS, MultiPartTask, PartSlice,
+    SinglePartTask, active_isa, apply_epi_aligned, finish_col8, read_u8_noncontiguous,
+    write_f32_noncontiguous, write_u8_noncontiguous, zero_pairs,
 };
 use super::kernel::{MR, NR};
 
@@ -89,17 +89,125 @@ macro_rules! define_fused_isa {
                 let (mut c20, mut c21, mut c22) = (z, z, z);
                 let (mut c30, mut c31, mut c32) = (z, z, z);
                 // SAFETY: caller guarantees `ks` planes of stride `hw` with `col + NR` readable words in each
-                // plane (within `ks * hw + SLACK`). Indexing `p * hw + col` keeps every pointer strictly in bounds.
+                // plane (within `ks * hw + SLACK`). Pointer stays strictly within `0..ks * hw + col + NR`.
                 unsafe {
-                    for p in 0..ks {
-                        let bp = base.add(p * hw + col);
-                        let b0 = _mm256_loadu_si256(bp as *const __m256i);
-                        let b1 = _mm256_loadu_si256(bp.add(8) as *const __m256i);
-                        let b2 = _mm256_loadu_si256(bp.add(16) as *const __m256i);
-                        let ap = a.add(p * MR);
-                        define_fused_isa!(@dp $dp_mode, b0, b1, b2, ap,
-                            c00, c01, c02, c10, c11, c12, c20, c21, c22, c30, c31, c32);
+                    if ks > 0 {
+                        let mut bp = base.add(col);
+                        let mut ap = a;
+                        for p in 0..ks {
+                            let b0 = _mm256_loadu_si256(bp as *const __m256i);
+                            let b1 = _mm256_loadu_si256(bp.add(8) as *const __m256i);
+                            let b2 = _mm256_loadu_si256(bp.add(16) as *const __m256i);
+                            define_fused_isa!(@dp $dp_mode, b0, b1, b2, ap,
+                                c00, c01, c02, c10, c11, c12, c20, c21, c22, c30, c31, c32);
+                            if p + 1 < ks {
+                                bp = bp.add(hw);
+                                ap = ap.add(MR);
+                            }
+                        }
                     }
+                    let out = acc.0.as_mut_ptr() as *mut __m256i;
+                    _mm256_store_si256(out, c00);
+                    _mm256_store_si256(out.add(1), c01);
+                    _mm256_store_si256(out.add(2), c02);
+                    _mm256_store_si256(out.add(3), c10);
+                    _mm256_store_si256(out.add(4), c11);
+                    _mm256_store_si256(out.add(5), c12);
+                    _mm256_store_si256(out.add(6), c20);
+                    _mm256_store_si256(out.add(7), c21);
+                    _mm256_store_si256(out.add(8), c22);
+                    _mm256_store_si256(out.add(9), c30);
+                    _mm256_store_si256(out.add(10), c31);
+                    _mm256_store_si256(out.add(11), c32);
+                }
+            }
+
+            #[target_feature(enable = $feat)]
+            #[inline]
+            unsafe fn k_loop_1x1_parts(
+                parts: &[(*const u32, usize)],
+                hw: usize,
+                a: *const i32,
+                col: usize,
+                acc: &mut AlignedTile,
+            ) {
+                let z = _mm256_setzero_si256();
+                let (mut c00, mut c01, mut c02) = (z, z, z);
+                let (mut c10, mut c11, mut c12) = (z, z, z);
+                let (mut c20, mut c21, mut c22) = (z, z, z);
+                let (mut c30, mut c31, mut c32) = (z, z, z);
+                // SAFETY: caller guarantees each part `(base, g_cnt)` has `g_cnt` planes of stride `hw` with
+                // `col + NR` readable words, and `a` holds `sum(g_cnt) * MR` words.
+                unsafe {
+                    let mut ap = a;
+                    for &(base, g_cnt) in parts {
+                        if g_cnt == 0 {
+                            continue;
+                        }
+                        let mut bp = base.add(col);
+                        for p in 0..g_cnt {
+                            let b0 = _mm256_loadu_si256(bp as *const __m256i);
+                            let b1 = _mm256_loadu_si256(bp.add(8) as *const __m256i);
+                            let b2 = _mm256_loadu_si256(bp.add(16) as *const __m256i);
+                            define_fused_isa!(@dp $dp_mode, b0, b1, b2, ap,
+                                c00, c01, c02, c10, c11, c12, c20, c21, c22, c30, c31, c32);
+                            ap = ap.add(MR);
+                            if p + 1 < g_cnt {
+                                bp = bp.add(hw);
+                            }
+                        }
+                    }
+                    let out = acc.0.as_mut_ptr() as *mut __m256i;
+                    _mm256_store_si256(out, c00);
+                    _mm256_store_si256(out.add(1), c01);
+                    _mm256_store_si256(out.add(2), c02);
+                    _mm256_store_si256(out.add(3), c10);
+                    _mm256_store_si256(out.add(4), c11);
+                    _mm256_store_si256(out.add(5), c12);
+                    _mm256_store_si256(out.add(6), c20);
+                    _mm256_store_si256(out.add(7), c21);
+                    _mm256_store_si256(out.add(8), c22);
+                    _mm256_store_si256(out.add(9), c30);
+                    _mm256_store_si256(out.add(10), c31);
+                    _mm256_store_si256(out.add(11), c32);
+                }
+            }
+
+            #[target_feature(enable = $feat)]
+            #[inline]
+            unsafe fn k_loop_stem9(
+                a: *const i32,
+                row_ptrs: &[*const u32; 9],
+                col: usize,
+                acc: &mut AlignedTile,
+            ) {
+                let z = _mm256_setzero_si256();
+                let (mut c00, mut c01, mut c02) = (z, z, z);
+                let (mut c10, mut c11, mut c12) = (z, z, z);
+                let (mut c20, mut c21, mut c22) = (z, z, z);
+                let (mut c30, mut c31, mut c32) = (z, z, z);
+                // SAFETY: caller guarantees `9 * MR` weights and `col + NR` readable words per tap strip.
+                unsafe {
+                    macro_rules! tap {
+                        ($idx:expr) => {
+                            let bp = row_ptrs[$idx].add(col) as *const __m256i;
+                            let b0 = _mm256_loadu_si256(bp);
+                            let b1 = _mm256_loadu_si256(bp.add(1));
+                            let b2 = _mm256_loadu_si256(bp.add(2));
+                            let ap = a.add(($idx) * MR);
+                            define_fused_isa!(@dp $dp_mode, b0, b1, b2, ap,
+                                c00, c01, c02, c10, c11, c12, c20, c21, c22, c30, c31, c32);
+                        };
+                    }
+                    tap!(0);
+                    tap!(1);
+                    tap!(2);
+                    tap!(3);
+                    tap!(4);
+                    tap!(5);
+                    tap!(6);
+                    tap!(7);
+                    tap!(8);
                     let out = acc.0.as_mut_ptr() as *mut __m256i;
                     _mm256_store_si256(out, c00);
                     _mm256_store_si256(out.add(1), c01);
@@ -159,6 +267,9 @@ macro_rules! define_fused_isa {
                                 match t.b_mode {
                                     BMode::Pointwise1x1 { base, hw } => {
                                         k_loop_1x1(ks, a_panel, base, hw, col, &mut acc);
+                                    }
+                                    BMode::Pointwise1x1Parts { parts, hw } => {
+                                        k_loop_1x1_parts(parts, hw, a_panel, col, &mut acc);
                                     }
                                     BMode::Rows => {
                                         k_loop_rows(ks, a_panel, t.rows.as_ptr(), col, &mut acc);
@@ -279,13 +390,24 @@ macro_rules! define_fused_isa {
                                     _mm256_store_ps(tfp.add(i * 8), zf);
                                 }
                                 for part in t.parts {
-                                    k_loop_rows(
-                                        part.ks,
-                                        part.a.as_ptr().add(g * part.ks * MR),
-                                        t.rows.as_ptr().add(part.row_offset),
-                                        col,
-                                        &mut acc,
-                                    );
+                                    if t.pointwise_hw > 0 {
+                                        k_loop_1x1(
+                                            part.ks,
+                                            part.a.as_ptr().add(g * part.ks * MR),
+                                            part.b_base,
+                                            t.pointwise_hw,
+                                            col,
+                                            &mut acc,
+                                        );
+                                    } else {
+                                        k_loop_rows(
+                                            part.ks,
+                                            part.a.as_ptr().add(g * part.ks * MR),
+                                            t.rows.as_ptr().add(part.row_offset),
+                                            col,
+                                            &mut acc,
+                                        );
+                                    }
                                     for r in 0..MR {
                                         let vc = _mm256_set1_epi32(part.corr[4 * g + r]);
                                         let vs = _mm256_set1_ps(part.scale[4 * g + r]);
@@ -423,7 +545,7 @@ macro_rules! define_fused_isa {
                         for chunk in 0..chunks {
                             let col = chunk * NR;
                             let cols = NR.min(ow - col);
-                            k_loop_rows(9, panel, row_ptrs.as_ptr(), col, &mut acc);
+                            k_loop_stem9(panel, row_ptrs, col, &mut acc);
                             if OUT_U8 {
                                 if cols == NR {
                                     apply_epi_aligned::<SILU, false, true>(
@@ -539,19 +661,12 @@ macro_rules! define_fused_isa {
         $c00:ident, $c01:ident, $c02:ident,
         $c10:ident, $c11:ident, $c12:ident,
         $c20:ident, $c21:ident, $c22:ident,
-        $c30:ident, $c31:ident, $c32:ident) => {
-        #[inline(always)]
-        fn split_w(w: i32) -> (i32, i32) {
-            let b = w.to_le_bytes();
-            let ev = (b[0] as i8 as i16 as u16 as u32) | ((b[2] as i8 as i16 as u16 as u32) << 16);
-            let od = (b[1] as i8 as i16 as u16 as u32) | ((b[3] as i8 as i16 as u16 as u32) << 16);
-            (ev as i32, od as i32)
-        }
+        $c30:ident, $c31:ident, $c32:ident) => {{
         let m_ff = _mm256_set1_epi16(0x00FF);
-        let (w0e, w0o) = split_w(*$ap);
-        let (w1e, w1o) = split_w(*$ap.add(1));
-        let (w2e, w2o) = split_w(*$ap.add(2));
-        let (w3e, w3o) = split_w(*$ap.add(3));
+        let (w0e, w0o) = split_w_avx2(*$ap);
+        let (w1e, w1o) = split_w_avx2(*$ap.add(1));
+        let (w2e, w2o) = split_w_avx2(*$ap.add(2));
+        let (w3e, w3o) = split_w_avx2(*$ap.add(3));
         macro_rules! col_step {
             ($b:expr, $r0:ident, $r1:ident, $r2:ident, $r3:ident) => {
                 let b_ev = _mm256_and_si256($b, m_ff);
@@ -569,7 +684,15 @@ macro_rules! define_fused_isa {
         col_step!($b0, $c00, $c10, $c20, $c30);
         col_step!($b1, $c01, $c11, $c21, $c31);
         col_step!($b2, $c02, $c12, $c22, $c32);
-    };
+    }};
+}
+
+#[inline(always)]
+fn split_w_avx2(w: i32) -> (i32, i32) {
+    let b = w.to_le_bytes();
+    let ev = (b[0] as i8 as i16 as u16 as u32) | ((b[2] as i8 as i16 as u16 as u32) << 16);
+    let od = (b[1] as i8 as i16 as u16 as u32) | ((b[3] as i8 as i16 as u16 as u32) << 16);
+    (ev as i32, od as i32)
 }
 
 define_fused_isa!(mod vnni_impl, feature = "avx2,fma,avxvnni", dp_mode = avxvnni);

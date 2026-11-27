@@ -46,8 +46,10 @@ const RECIP_MAGIC: u32 = 0x7EF3_11C3;
 /// `silu_q8(-0.0) == -0.0`, `silu_q8(+∞) == +∞`, NaN stays NaN).
 #[inline]
 pub fn silu_q8(x: f32) -> f32 {
-    let x = maxps(-88.0, x);
-    let u = minps(maxps(x * NEG_LOG2_E, -124.0), 124.0);
+    // Clamping `x >= -85.0` bounds `x * (-log2(e)) <= 122.63 < 124.0` automatically, eliminating an upper clamp
+    // on `u` while keeping `|silu(-85)| ≈ 1.03e-35 << 2.5e-7`.
+    let x = maxps(-85.0, x);
+    let u = maxps(x * NEG_LOG2_E, -124.0);
     let z = u + MAGIC_EXP;
     let n = z - MAGIC_EXP;
     let f = u - n;
@@ -74,11 +76,8 @@ pub fn silu_q8(x: f32) -> f32 {
 #[inline]
 pub(crate) fn silu_q8_avx2(x: std::arch::x86_64::__m256) -> std::arch::x86_64::__m256 {
     use std::arch::x86_64::*;
-    let x = _mm256_max_ps(_mm256_set1_ps(-88.0), x);
-    let u = _mm256_min_ps(
-        _mm256_max_ps(_mm256_mul_ps(x, _mm256_set1_ps(NEG_LOG2_E)), _mm256_set1_ps(-124.0)),
-        _mm256_set1_ps(124.0),
-    );
+    let x = _mm256_max_ps(_mm256_set1_ps(-85.0), x);
+    let u = _mm256_max_ps(_mm256_mul_ps(x, _mm256_set1_ps(NEG_LOG2_E)), _mm256_set1_ps(-124.0));
     let magic = _mm256_set1_ps(MAGIC_EXP);
     let z = _mm256_add_ps(u, magic);
     let n = _mm256_sub_ps(z, magic);
@@ -111,14 +110,13 @@ pub(crate) fn silu_q8_avx2(x: std::arch::x86_64::__m256) -> std::arch::x86_64::_
 #[inline]
 pub(crate) fn silu_q8_avx2_x2(x: [std::arch::x86_64::__m256; 2]) -> [std::arch::x86_64::__m256; 2] {
     use std::arch::x86_64::*;
-    let min_x = _mm256_set1_ps(-88.0);
+    let min_x = _mm256_set1_ps(-85.0);
     let x0 = _mm256_max_ps(min_x, x[0]);
     let x1 = _mm256_max_ps(min_x, x[1]);
     let nlog2e = _mm256_set1_ps(NEG_LOG2_E);
     let u_lo = _mm256_set1_ps(-124.0);
-    let u_hi = _mm256_set1_ps(124.0);
-    let u0 = _mm256_min_ps(_mm256_max_ps(_mm256_mul_ps(x0, nlog2e), u_lo), u_hi);
-    let u1 = _mm256_min_ps(_mm256_max_ps(_mm256_mul_ps(x1, nlog2e), u_lo), u_hi);
+    let u0 = _mm256_max_ps(_mm256_mul_ps(x0, nlog2e), u_lo);
+    let u1 = _mm256_max_ps(_mm256_mul_ps(x1, nlog2e), u_lo);
     let magic = _mm256_set1_ps(MAGIC_EXP);
     let z0 = _mm256_add_ps(u0, magic);
     let z1 = _mm256_add_ps(u1, magic);

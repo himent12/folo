@@ -269,6 +269,12 @@ pub enum QOut<'a> {
 
 /// An output pointer shared by tasks that write disjoint elements.
 pub(super) struct OutPtr<T>(pub(super) *mut T);
+impl<T> Clone for OutPtr<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<T> Copy for OutPtr<T> {}
 // SAFETY: tasks write disjoint elements (each owns its tiles).
 unsafe impl<T> Sync for OutPtr<T> {}
 // SAFETY: as above.
@@ -511,43 +517,84 @@ fn conv_inner(
     if n == 0 || ohw == 0 || og == 0 {
         return;
     }
-    let rows: Vec<Rows> = (0..n).map(|i| image_rows(xs, i, h, w, cv)).collect();
-    let chunks = rows[0].n.div_ceil(NR);
+    let single_part = cv.parts.len() == 1;
+    #[cfg(target_arch = "x86_64")]
+    let fused_isa = super::fused::active_isa();
+    #[cfg(target_arch = "x86_64")]
+    if let Some(isa) = fused_isa
+        && single_part
+        && cv.k == 3
+        && cv.pad == 1
+        && ((cv.stride == 2
+            && !(cv.o.saturating_mul(cv.c).saturating_mul(9) > (512 << 10)
+                && cv.c.saturating_mul(h.saturating_mul(w)) <= SPLIT_CHANNELS_MAX))
+            || (cv.stride == 1
+                && oh >= 8
+                && cv.c.saturating_mul(oh.saturating_mul(ow.saturating_add(2))) > SPLIT_CHANNELS_MAX))
+    {
+        let p0 = &cv.parts[0];
+        let params = super::fused_3x3::Conv3x3Params {
+            xs,
+            n,
+            h,
+            w,
+            oh,
+            ow,
+            groups: cv.c / 4,
+            og,
+            zeros: &cv.zeros,
+            a: &p0.a,
+            corr: &p0.corr,
+            scale: &p0.scale,
+            bias: &cv.bias,
+            silu: cv.silu,
+            is_u8,
+            group_out,
+            group_res,
+            res_view,
+            qptr,
+            fptr,
+        };
+        // SAFETY: `isa` matches `active_isa()`; every slice and buffer extent was validated above.
+        if unsafe { super::fused_3x3::try_run_3x3_strip(isa, &params, cv.stride, task_macs()) } {
+            return;
+        }
+    }
+    #[cfg(target_arch = "x86_64")]
+    let direct_1x1_single = fused_isa.is_some()
+        && single_part
+        && cv.pointwise()
+        && xs.len() <= super::fused::MAX_INLINE_1X1_PARTS;
+    #[cfg(target_arch = "x86_64")]
+    let direct_1x1_multi = fused_isa.is_some()
+        && !single_part
+        && cv.pointwise()
+        && xs.len() == cv.parts.len()
+        && xs.iter().zip(&cv.parts).all(|(x, p)| x.c / 4 == p.ks);
+    #[cfg(target_arch = "x86_64")]
+    let skip_image_rows = direct_1x1_single || direct_1x1_multi;
+    #[cfg(not(target_arch = "x86_64"))]
+    let skip_image_rows = false;
+    let rows_storage: Vec<Rows> =
+        if skip_image_rows { Vec::new() } else { (0..n).map(|i| image_rows(xs, i, h, w, cv)).collect() };
+    let r_n_total = if skip_image_rows { h * w } else { rows_storage[0].n };
+    let chunks = r_n_total.div_ceil(NR);
     let (ch_blk, og_blk) = plan(
         n,
         chunks,
         og,
         MR * NR * cv.ks * 4,
-        cv.c * rows[0].n,
+        cv.c * r_n_total,
         (rayon::current_num_threads(), task_macs()),
     );
     let (cbs, obs) = (chunks.div_ceil(ch_blk), og.div_ceil(og_blk));
     let kern = kernel();
-    let single_part = cv.parts.len() == 1;
-    #[cfg(target_arch = "x86_64")]
-    let fused_isa = super::fused::active_isa();
-    #[cfg(target_arch = "x86_64")]
-    let part_slices: Vec<super::fused::PartSlice<'_>> = if !single_part && fused_isa.is_some() {
-        cv.parts
-            .iter()
-            .map(|p| super::fused::PartSlice {
-                ks: p.ks,
-                row_offset: p.row_offset,
-                a: &p.a,
-                corr: &p.corr,
-                scale: &p.scale,
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
     let zero_corr = [0i32; MR];
     let unit_scale = [1.0f32; MR];
     let tasks = n * cbs * obs;
     let run_task = |t: usize| {
         let (img, rest) = (t / (cbs * obs), t % (cbs * obs));
         let (cb, ob) = (rest / obs, rest % obs);
-        let r = &rows[img];
         let cb_start = cb * ch_blk;
         let cb_end = ((cb + 1) * ch_blk).min(chunks);
         let ob_start = ob * og_blk;
@@ -560,13 +607,28 @@ fn conv_inner(
             };
             let q_img_ptr = if is_u8 { qptr.at(img * og * ohw) } else { std::ptr::null_mut() };
             let f_img_ptr = if !is_u8 { fptr.at(img * cv.o * ohw) } else { std::ptr::null_mut() };
+            let (r_rows, r_n, r_wq): (&[*const u32], usize, usize) = if skip_image_rows {
+                (&[], h * w, w)
+            } else {
+                let r = &rows_storage[img];
+                (&r.rows, r.n, r.wq)
+            };
             if single_part {
                 let p0 = &cv.parts[0];
-                let b_mode = if cv.pointwise() && xs.len() == 1 {
-                    let x0 = &xs[0];
-                    super::fused::BMode::Pointwise1x1 {
-                        base: x0.data[x0.offset + img * x0.img_stride..].as_ptr(),
-                        hw: h * w,
+                let mut inline_parts =
+                    [(std::ptr::null::<u32>(), 0usize); super::fused::MAX_INLINE_1X1_PARTS];
+                let b_mode = if direct_1x1_single {
+                    if xs.len() == 1 {
+                        let x0 = &xs[0];
+                        super::fused::BMode::Pointwise1x1 {
+                            base: x0.data[x0.offset + img * x0.img_stride..].as_ptr(),
+                            hw: h * w,
+                        }
+                    } else {
+                        for (i, x) in xs.iter().enumerate() {
+                            inline_parts[i] = (x.data[x.offset + img * x.img_stride..].as_ptr(), x.c / 4);
+                        }
+                        super::fused::BMode::Pointwise1x1Parts { parts: &inline_parts[..xs.len()], hw: h * w }
                     }
                 } else {
                     super::fused::BMode::Rows
@@ -577,10 +639,10 @@ fn conv_inner(
                     corr: &p0.corr,
                     scale: &p0.scale,
                     bias: &cv.bias,
-                    rows: &r.rows,
+                    rows: r_rows,
                     b_mode,
-                    r_n: r.n,
-                    wq: r.wq,
+                    r_n,
+                    wq: r_wq,
                     oh,
                     ow,
                     silu: cv.silu,
@@ -598,12 +660,61 @@ fn conv_inner(
                 // SAFETY: `isa` matches `active_isa()`; every slice and disjoint task range was validated above.
                 unsafe { super::fused::run_single_part(isa, &task) };
             } else {
+                const INLINE_PARTS: usize = 8;
+                let mut stack_parts: [std::mem::MaybeUninit<super::fused::PartSlice<'_>>; INLINE_PARTS] =
+                    [const { std::mem::MaybeUninit::uninit() }; INLINE_PARTS];
+                let heap_parts: Vec<super::fused::PartSlice<'_>>;
+                let part_slices: &[super::fused::PartSlice<'_>] = if cv.parts.len() <= INLINE_PARTS {
+                    for (i, p) in cv.parts.iter().enumerate() {
+                        stack_parts[i].write(super::fused::PartSlice {
+                            ks: p.ks,
+                            row_offset: p.row_offset,
+                            a: &p.a,
+                            corr: &p.corr,
+                            scale: &p.scale,
+                            b_base: if direct_1x1_multi {
+                                let x = &xs[i];
+                                x.data[x.offset + img * x.img_stride..].as_ptr()
+                            } else {
+                                std::ptr::null()
+                            },
+                        });
+                    }
+                    // SAFETY: elements `0..cv.parts.len()` were just initialized above.
+                    unsafe {
+                        std::slice::from_raw_parts(
+                            stack_parts.as_ptr() as *const super::fused::PartSlice<'_>,
+                            cv.parts.len(),
+                        )
+                    }
+                } else {
+                    heap_parts = cv
+                        .parts
+                        .iter()
+                        .enumerate()
+                        .map(|(i, p)| super::fused::PartSlice {
+                            ks: p.ks,
+                            row_offset: p.row_offset,
+                            a: &p.a,
+                            corr: &p.corr,
+                            scale: &p.scale,
+                            b_base: if direct_1x1_multi {
+                                let x = &xs[i];
+                                x.data[x.offset + img * x.img_stride..].as_ptr()
+                            } else {
+                                std::ptr::null()
+                            },
+                        })
+                        .collect();
+                    &heap_parts
+                };
                 let task = super::fused::MultiPartTask {
-                    parts: &part_slices,
+                    parts: part_slices,
                     bias: &cv.bias,
-                    rows: &r.rows,
-                    r_n: r.n,
-                    wq: r.wq,
+                    rows: r_rows,
+                    pointwise_hw: if direct_1x1_multi { h * w } else { 0 },
+                    r_n,
+                    wq: r_wq,
                     oh,
                     ow,
                     silu: cv.silu,
@@ -623,6 +734,7 @@ fn conv_inner(
             }
             return;
         }
+        let r = &rows_storage[img];
         let mut acc: Tile = [[0; NR]; MR];
         let mut resw = [0u32; NR];
         let mut qw = [0u32; NR];
@@ -778,7 +890,7 @@ fn conv_inner(
     } else {
         crate::cpu::par_for(tasks, &run_task);
     }
-    for r in rows {
+    for r in rows_storage {
         recycle(r.buf);
     }
 }
