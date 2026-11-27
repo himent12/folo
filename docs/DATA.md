@@ -175,9 +175,9 @@ rebuilds its dataset indexes then). Nothing installs one by default; `folo mcp
   `LoadedDataset::audit_with(&AuditOptions::perceptual(max_hamming_distance))` / `audit::audit_dataset_with` adds
   64-bit difference-hash (`dHash`) perceptual near-duplicate detection (`dhash_image`, `dhash_bytes`, `dhash_file`,
   `hamming_distance`) using anti-aliased `9x8` BT.601 luminance gradients, exact pigeonhole multi-index hashing, and
-  decode deduplication across byte-identical copies, populating `near_duplicate_groups`, `near_duplicate_leakage`, and
-  `near_duplicate_image_count()` so recompressed, resized, brightened, EXIF-rotated, or lightly cropped cross-split
-  leaks are caught alongside exact byte duplicates.
+  per-run reuse of already-decoded hashes across byte-identical copies, populating `near_duplicate_groups`,
+  `near_duplicate_leakage`, and `near_duplicate_image_count()` so recompressed, resized, brightened, EXIF-rotated,
+  or lightly cropped cross-split leaks are caught alongside exact byte duplicates.
 - `curate::remap_classes(&loaded, &RemapConfig)` / `LoadedDataset::remap_classes` renames, unifies, or drops classes
   with `ClassNormalize::Exact` or `ClassNormalize::CaseAndWhitespace`, compacting surviving class ids to `0..n` and
   optionally dropping images left empty.

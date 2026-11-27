@@ -200,6 +200,20 @@ fn export_voc_zero_based_coords_split_filtering_determinism_and_no_classes_txt()
     // Without `classes.txt`, only used classes from exported splits are discovered in sorted order.
     assert_eq!(reopened.classes, vec!["A<B>", "bird's \"nest\"", "cat & dog"]);
     assert_eq!(reopened.stats().boxes, 4);
+    // Map original class IDs to the rediscovered sorted order and verify exact box parity.
+    let remap = |b: &BBox| -> BBox {
+        let name = &yolo.classes[b.class as usize];
+        let new_cls = reopened.classes.iter().position(|c| c == name).unwrap() as u32;
+        BBox::new(new_cls, b.cx, b.cy, b.w, b.h)
+    };
+    for split in [Split::Train, Split::Test] {
+        let mut orig_entries: Vec<_> = yolo.split(split).entries().iter().collect();
+        orig_entries.sort_by_key(|e| e.image.to_string_lossy().replace('\\', "/"));
+        for (o, b) in orig_entries.iter().zip(reopened.split(split).entries()) {
+            let expected: Vec<BBox> = o.boxes.iter().map(remap).collect();
+            assert_boxes_close(&expected, &b.boxes, 1e-4);
+        }
+    }
 }
 
 #[test]
@@ -224,14 +238,22 @@ fn export_voc_rejects_invalid_inputs_before_writing() {
     write(&occupied.join("keep.txt"), "hi");
     assert!(export_voc(&ds, &occupied, &VocExportOptions::default()).is_err());
 
-    // 3. Invalid XML 1.0 control char or untrimmed / multiline class name fails before creating `out`.
-    for bad_name in ["", " lead", "line1\nline2", "bad\x01char"] {
+    // 3. Invalid XML 1.0 control char, leading BOM, or untrimmed / multiline class name fails before creating `out`.
+    for bad_name in ["", " lead", "line1\nline2", "bad\x01char", "\u{feff}dog"] {
         let mut bad_ds = ds.clone();
         bad_ds.classes = vec![bad_name.into()];
         let out_bad = t.join("bad-class");
         assert!(export_voc(&bad_ds, &out_bad, &VocExportOptions::default()).is_err());
         assert!(!out_bad.exists(), "must not create dir for bad class {bad_name:?}");
     }
+
+    // 3b. Duplicate class names fail before creating `out`, reporting both source IDs.
+    let mut dup_cls_ds = ds.clone();
+    dup_cls_ds.classes = vec!["car".into(), "car".into()];
+    let out_dup_cls = t.join("dup-classes");
+    let err = export_voc(&dup_cls_ds, &out_dup_cls, &VocExportOptions::default()).unwrap_err().to_string();
+    assert!(err.contains("#0") && err.contains("#1"), "{err}");
+    assert!(!out_dup_cls.exists(), "must not create dir for duplicate class names");
 
     // 4. Invalid `<folder>` value fails before creating `out`.
     for bad_folder in ["", " padded", "a\nb", "bad\x07dir"] {
@@ -255,6 +277,41 @@ fn export_voc_rejects_invalid_inputs_before_writing() {
     let out_nan = t.join("bad-nan");
     assert!(export_voc(&bad_box_ds, &out_nan, &VocExportOptions::default()).is_err());
     assert!(!out_nan.exists());
+}
+
+#[test]
+fn export_voc_handles_long_colliding_stems_and_leading_bom_filename() {
+    let t = TempDir::new("voc-long-bom");
+    let src = t.join("yolo");
+    write(&src.join("data.yaml"), "train: images/train\nval: images/val\nnames: [car]\n");
+
+    // Long stem colliding across splits (kept under Windows MAX_PATH) + a BOM-prefixed filename in train.
+    let long_stem = "a".repeat(120);
+    let bom_name = "\u{feff}frame.png";
+    write_png(&src.join(format!("images/train/{long_stem}.png")), 32, 32, [20, 40, 60]);
+    write(&src.join(format!("labels/train/{long_stem}.txt")), "0 0.5 0.5 0.5 0.5\n");
+    write_png(&src.join(format!("images/train/{bom_name}")), 32, 32, [60, 40, 20]);
+    write(&src.join("labels/train/\u{feff}frame.txt"), "0 0.5 0.5 0.25 0.25\n");
+    write_png(&src.join(format!("images/val/{long_stem}.png")), 32, 32, [80, 90, 100]);
+    write(&src.join(format!("labels/val/{long_stem}.txt")), "0 0.5 0.5 0.5 0.5\n");
+
+    let ds = open(&src).unwrap();
+    assert_eq!(ds.split_sizes(), [2, 1, 0]);
+    let out = t.join("voc-out");
+    let rep = export_voc(&ds, &out, &VocExportOptions::default()).unwrap();
+    assert_eq!(rep.splits, [2, 1, 0]);
+    assert_eq!(rep.boxes, 3);
+
+    // Every exported stem fits comfortably under 255 bytes and contains no leading BOM, and all 3 images reopen.
+    let train_txt = std::fs::read_to_string(out.join("ImageSets/Main/train.txt")).unwrap();
+    assert!(!train_txt.starts_with('\u{feff}'), "train.txt must not start with BOM");
+    for line in train_txt.lines() {
+        assert!(line.len() <= 210, "stem too long: {}", line.len());
+    }
+    let reopened = open(&out).unwrap();
+    assert_eq!(reopened.split_sizes(), [2, 1, 0]);
+    assert_eq!(reopened.stats().boxes, 3);
+    assert!(reopened.report.issues.is_empty(), "{:?}", reopened.report.issues);
 }
 
 #[test]

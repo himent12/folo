@@ -249,17 +249,16 @@ pub(super) fn should_fallback_from_link(e: &std::io::Error) -> bool {
         || (cfg!(windows) && matches!(e.raw_os_error(), Some(1 | 17 | 50 | 1142)))
 }
 
-/// Writes `path` atomically via a unique sibling temporary file and rename, cleaning up only the temporary file
-/// created by this call if writing, flushing, or renaming fails.
+/// Writes `path` atomically via a short unique sibling temporary file and rename, cleaning up only the temporary
+/// file created by this call if writing, flushing, or renaming fails.
 pub(super) fn write_file_atomic(
     path: &Path,
     write_fn: impl FnOnce(&mut BufWriter<std::fs::File>) -> Result<()>,
 ) -> Result<()> {
     let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
-    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("export.tmp");
     let pid = std::process::id();
     let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
-    let tmp = parent.join(format!(".{name}.{pid}-{seq}.tmp"));
+    let tmp = parent.join(format!(".folo-tmp.{pid}-{seq}.tmp"));
 
     // Acquire the temporary file before enabling cleanup so a pre-existing file is never removed on `AlreadyExists`.
     let file = std::fs::OpenOptions::new()

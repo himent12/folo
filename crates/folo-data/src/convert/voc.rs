@@ -13,10 +13,14 @@ use crate::error::{DataError, Result};
 use crate::image::probe_size;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::io::{ErrorKind, Write as _};
 use std::path::{Path, PathBuf};
+
+/// Maximum UTF-8 byte length of a sanitized VOC stem before collision suffixes (`_<n>`) and extension
+/// (`.xml`/`.<ext>`), leaving headroom under the 255-byte filesystem component limit.
+const MAX_VOC_STEM_BYTES: usize = 200;
 
 use super::{
     copy, deterministic_entries, image_extension, mkdir, resolve_link_source, select_splits,
@@ -240,16 +244,24 @@ struct ReservedVoc {
 }
 
 fn validate_voc_inputs(ds: &LoadedDataset, splits: &[Split], opts: &VocExportOptions) -> Result<()> {
+    let mut seen_classes: HashMap<&str, usize> = HashMap::with_capacity(ds.classes.len());
     for (i, c) in ds.classes.iter().enumerate() {
         if c.trim().is_empty()
             || c.trim() != c
+            || c.starts_with('\u{feff}')
             || c.contains(['\n', '\r'])
             || !c.chars().all(|ch| valid_xml_char(ch as u32).is_some())
         {
             return Err(DataError::Config(format!(
-                "cannot export class #{i} ({c:?}) to Pascal VOC: class names must be non-empty, trimmed, single-line, valid XML 1.0 text"
+                "cannot export class #{i} ({c:?}) to Pascal VOC: class names must be non-empty, trimmed, single-line, BOM-free, valid XML 1.0 text"
             )));
         }
+        if let Some(&first) = seen_classes.get(c.as_str()) {
+            return Err(DataError::Config(format!(
+                "cannot export duplicate class name {c:?} (class #{first} and class #{i}) to Pascal VOC: distinct class IDs would collapse"
+            )));
+        }
+        seen_classes.insert(c.as_str(), i);
     }
     if let Some(folder) = opts.folder.as_deref()
         && (folder.trim().is_empty()
@@ -264,16 +276,16 @@ fn validate_voc_inputs(ds: &LoadedDataset, splits: &[Split], opts: &VocExportOpt
     validate_common_entries(ds, splits)
 }
 
-/// Sanitizes a source image path into a whitespace-free, `#`-free, dot-free, valid XML 1.0 VOC stem and a safe
-/// image extension so `ImageSets/Main/*.txt` IDs and `<filename>` tags round-trip cleanly across FOLO and
-/// external Pascal VOC tools.
+/// Sanitizes a source image path into a whitespace-free, `#`-free, dot-free, BOM-free, bounded-length,
+/// valid XML 1.0 VOC stem and a safe image extension so `ImageSets/Main/*.txt` IDs and `<filename>` tags
+/// round-trip cleanly across FOLO and external Pascal VOC tools.
 fn sanitize_voc_stem_and_ext(p: &Path) -> (String, String) {
     let raw_stem = p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
     let mut stem: String = raw_stem
         .chars()
         .map(|c| {
             if c.is_whitespace()
-                || matches!(c, '.' | '/' | '\\' | ':' | '\0')
+                || matches!(c, '.' | '/' | '\\' | ':' | '\0' | '\u{feff}')
                 || c.is_control()
                 || valid_xml_char(c as u32).is_none()
             {
@@ -286,7 +298,14 @@ fn sanitize_voc_stem_and_ext(p: &Path) -> (String, String) {
     while stem.starts_with('#') {
         stem.replace_range(..1, "_");
     }
-    if stem.is_empty() || stem == "." || stem == ".." || stem.chars().all(|c| c == '.') {
+    if stem.len() > MAX_VOC_STEM_BYTES {
+        let mut end = MAX_VOC_STEM_BYTES;
+        while end > 0 && !stem.is_char_boundary(end) {
+            end -= 1;
+        }
+        stem.truncate(end);
+    }
+    if stem.is_empty() {
         stem = "image".into();
     }
     let raw_ext = image_extension(p);
@@ -421,7 +440,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn voc_name_sanitizer_handles_spaces_dots_hashes_and_collisions() {
+    fn voc_name_sanitizer_handles_spaces_dots_hashes_bom_long_stems_and_collisions() {
+        let long_ascii = format!("g/{}.png", "a".repeat(251));
+        let long_utf8 = format!("h/{}.png", "é".repeat(120));
         let paths = [
             Path::new("a/street scene.png"),
             Path::new("b/street scene.jpg"),
@@ -429,6 +450,10 @@ mod tests {
             Path::new("d/#1.png"),
             Path::new("e/.."),
             Path::new("f/a&b'c.png"),
+            Path::new("i/\u{feff}frame.png"),
+            Path::new(long_ascii.as_str()),
+            Path::new(long_ascii.as_str()),
+            Path::new(long_utf8.as_str()),
         ];
         let mut taken = HashSet::new();
         let got: Vec<(String, String)> = paths
@@ -440,16 +465,22 @@ mod tests {
             })
             .collect();
         assert_eq!(
-            got,
-            vec![
+            &got[..7],
+            &[
                 ("street_scene".into(), "street_scene.png".into()),
                 ("street_scene_1".into(), "street_scene_1.jpg".into()),
                 ("frame_jpg".into(), "frame_jpg.png".into()),
                 ("_1".into(), "_1.png".into()),
                 ("image".into(), "image.jpg".into()),
                 ("a&b'c".into(), "a&b'c.png".into()),
+                ("_frame".into(), "_frame.png".into()),
             ]
         );
+        assert_eq!(got[7].0.len(), MAX_VOC_STEM_BYTES);
+        assert_eq!(got[8].0.len(), MAX_VOC_STEM_BYTES + 2); // `_1` collision suffix
+        assert!(got[8].1.len() <= 255);
+        assert!(got[9].0.len() <= MAX_VOC_STEM_BYTES);
+        assert!(got[9].1.len() <= 255);
     }
 
     #[test]

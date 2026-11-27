@@ -523,12 +523,14 @@ fn normalize_zero(v: f64) -> f64 {
 }
 
 fn to_one_based_int_span(lo: f32, hi: f32, max_dim: i64) -> (i64, i64) {
-    if hi - lo >= 1.0 {
-        let min_i = (lo.round() as i64 + 1).clamp(1, max_dim);
-        let max_i = (hi.round() as i64).clamp(min_i, max_dim);
+    let (lo64, hi64) = (f64::from(lo), f64::from(hi));
+    if hi64 - lo64 >= 1.0 {
+        let min_i = (lo64.round() as i64).saturating_add(1).clamp(1, max_dim);
+        let max_i = (hi64.round() as i64).clamp(min_i, max_dim);
         (min_i, max_i)
     } else {
-        let p = ((0.5 * (lo + hi)).floor() as i64 + 1).clamp(1, max_dim);
+        let mid = lo64 + 0.5 * (hi64 - lo64);
+        let p = (mid.floor() as i64).saturating_add(1).clamp(1, max_dim);
         (p, p)
     }
 }

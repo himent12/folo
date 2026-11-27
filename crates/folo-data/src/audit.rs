@@ -336,8 +336,9 @@ pub fn audit_dataset_with(dataset: &LoadedDataset, opts: &AuditOptions) -> Audit
             len: u64,
             dhash: std::result::Result<u64, String>,
         }
-        // Cache successful dHashes by exact `(digest, len)` so byte-identical copies skip redundant decodes
-        // (decode errors are never cached so every unreadable file keeps its own path in the error message).
+        // Cache successful dHashes by exact `(digest, len)` so byte-identical copies reuse a previously decoded
+        // dHash without re-decoding (simultaneous first misses may decode independently; decode errors are never
+        // cached so every unreadable file keeps its own path in the error message).
         let decoded_cache: std::sync::Mutex<HashMap<(u128, u64), u64>> =
             std::sync::Mutex::new(HashMap::new());
         let scanned: Vec<std::result::Result<ScannedFile, String>> = entries
