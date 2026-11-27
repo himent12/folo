@@ -37,6 +37,8 @@ export interface CompareControllerInput {
   dropLocalB: (id: string, f: File, e: unknown) => void;
   badFileB: Signal<{ name: string; why: string | null } | null>;
   engine: BrowserEngine;
+  /** True while streaming live video/webcam frames (skips secondary full-candidate re-fetches). */
+  isLiveStream?: () => boolean;
 }
 
 export function createCompareController(input: CompareControllerInput) {
@@ -254,7 +256,7 @@ export function createCompareController(input: CompareControllerInput) {
     source: () => (compare.get() ? input.source.get() : null),
     runOn: () => runOnB.get(),
     file: () => activeFileB.peek(),
-    busy: () => predictingB.get(),
+    busy: () => predictingB.get() || !!input.isLiveStream?.(),
     engine: input.engine,
     weightsMissing: () => weightsMissingB.set(true),
   });

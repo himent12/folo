@@ -220,6 +220,20 @@ export const benchScenes = [
       await page.mouse.move(0, 0);
     },
   })),
+  {
+    name: 'bench-entry-error-explorer',
+    path: '/benchmarks/bn_3c90/entries/be_f101',
+    fullPage: false,
+    keepScroll: true,
+    viewports: ['desktop', 'mobile'],
+    setup: async (page) => {
+      await until(page, '#images .tile img');
+      await page.evaluate(() => document.getElementById('images')?.scrollIntoView({ block: 'start' }));
+      await page.locator('[role="radiogroup"][aria-label="Filter images by error"] [role="radio"]').nth(1).click();
+      await page.clock.runFor(500);
+      await page.mouse.move(0, 0);
+    },
+  },
   // Photos of every shape (Pond fish was made from people's phone photos): the gallery's tiles in one shape, each photo
   // whole on its well with its boxes; the large view of a portrait one and of a panorama.
   {

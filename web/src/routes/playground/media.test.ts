@@ -1,0 +1,129 @@
+import { describe, expect, it, vi } from 'vitest';
+import {
+  clampMediaTime,
+  createFpsTracker,
+  createFrameThrottle,
+  DEFAULT_FRAME_STEP_SEC,
+  describeCameraError,
+  formatMediaTime,
+  frameIndexAt,
+  isVideoFile,
+  stepFrameTime,
+  stopMediaStream,
+  totalFramesFor,
+  videoFrameName,
+} from './media';
+
+describe('Playground media helpers', () => {
+  it('detects local video files by MIME type or extension', () => {
+    expect(isVideoFile({ name: 'clip.mp4', type: 'video/mp4' })).toBe(true);
+    expect(isVideoFile({ name: 'clip.webm', type: '' })).toBe(true);
+    expect(isVideoFile({ name: 'clip.MOV', type: '' })).toBe(true);
+    expect(isVideoFile({ name: 'photo.jpg', type: 'image/jpeg' })).toBe(false);
+    expect(isVideoFile({ name: 'weights.folo', type: '' })).toBe(false);
+  });
+
+  it('clamps, steps, and formats timestamps and frame indices deterministically', () => {
+    expect(clampMediaTime(-2, 10)).toBe(0);
+    expect(clampMediaTime(15, 10)).toBe(10);
+    expect(clampMediaTime(NaN, 10)).toBe(0);
+    expect(clampMediaTime(3, NaN)).toBe(0);
+
+    const next = stepFrameTime(1.0, 1, 10, DEFAULT_FRAME_STEP_SEC);
+    expect(next).toBeCloseTo(1.033, 3);
+    expect(stepFrameTime(0.01, -1, 10, DEFAULT_FRAME_STEP_SEC)).toBe(0);
+    expect(stepFrameTime(9.99, 1, 10, DEFAULT_FRAME_STEP_SEC)).toBe(10);
+
+    expect(formatMediaTime(0)).toBe('0:00.0');
+    expect(formatMediaTime(65.34)).toBe('1:05.3');
+    expect(formatMediaTime(-5)).toBe('0:00.0');
+    expect(formatMediaTime(NaN)).toBe('0:00.0');
+
+    expect(frameIndexAt(0, 0.1)).toBe(1);
+    expect(frameIndexAt(0.25, 0.1)).toBe(3);
+    expect(totalFramesFor(3, 0.1)).toBe(30);
+    expect(totalFramesFor(0)).toBe(0);
+
+    expect(videoFrameName('traffic.mp4', 4.25)).toBe('traffic@4.25s.jpg');
+    expect(videoFrameName('clip', -1)).toBe('clip@0.00s.jpg');
+  });
+
+  it('coalesces rapid scrub events and enforces single-flight frame dispatch without stale queues', () => {
+    vi.useFakeTimers();
+    try {
+      let now = 1000;
+      const fired: number[] = [];
+      const throttle = createFrameThrottle({
+        minIntervalMs: 120,
+        now: () => now,
+        onTrigger: () => {
+          fired.push(now);
+          throttle.beginFlight();
+        },
+      });
+
+      // First scrub triggers immediately.
+      throttle.schedule(false);
+      expect(fired).toEqual([1000]);
+      expect(throttle.inFlight()).toBe(true);
+
+      // Ten rapid scrubs while inference is in flight collapse into ONE pending trailing trigger.
+      for (let i = 0; i < 10; i++) {
+        now += 10;
+        throttle.schedule(false);
+      }
+      expect(fired).toEqual([1000]);
+
+      // Inference settles at 1050ms (< 120ms since 1000ms): schedules trailing timer for remaining 70ms.
+      now = 1050;
+      throttle.endFlight();
+      expect(fired).toEqual([1000]);
+
+      now = 1120;
+      vi.advanceTimersByTime(70);
+      expect(fired).toEqual([1000, 1120]);
+
+      // Cancel clears flight and any pending work cleanly.
+      throttle.schedule(false);
+      throttle.cancel();
+      expect(throttle.inFlight()).toBe(false);
+      now = 1500;
+      vi.advanceTimersByTime(500);
+      expect(fired).toEqual([1000, 1120]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('tracks rolling FPS and smoothed inference latency', () => {
+    const tracker = createFpsTracker(4);
+    expect(tracker.snapshot()).toEqual({ fps: 0, latencyMs: 0 });
+    // First frame estimates FPS from latency.
+    expect(tracker.record(50, 1000)).toEqual({ fps: 20, latencyMs: 50 });
+    // Subsequent frames measure wall-clock throughput over the rolling window.
+    expect(tracker.record(40, 1100)).toEqual({ fps: 10, latencyMs: 45 });
+    expect(tracker.record(60, 1200)).toEqual({ fps: 10, latencyMs: 50 });
+    tracker.reset();
+    expect(tracker.snapshot()).toEqual({ fps: 0, latencyMs: 0 });
+  });
+
+  it('stops every MediaStream track safely and maps camera errors cleanly', () => {
+    const stopA = vi.fn();
+    const stopB = vi.fn(() => {
+      throw new Error('already ended');
+    });
+    const stream = { getTracks: () => [{ stop: stopA }, { stop: stopB }] } as unknown as MediaStream;
+    stopMediaStream(stream);
+    expect(stopA).toHaveBeenCalledTimes(1);
+    expect(stopB).toHaveBeenCalledTimes(1);
+    expect(() => stopMediaStream(null)).not.toThrow();
+
+    expect(describeCameraError(null)).toContain('unavailable');
+    const denied = Object.assign(new Error('denied'), { name: 'NotAllowedError' });
+    expect(describeCameraError(denied)).toContain('permission was denied');
+    const missing = Object.assign(new Error('none'), { name: 'NotFoundError' });
+    expect(describeCameraError(missing)).toContain('No camera was found');
+    const busy = Object.assign(new Error('in use'), { name: 'NotReadableError' });
+    expect(describeCameraError(busy)).toContain('already in use');
+  });
+});

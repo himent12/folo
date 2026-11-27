@@ -188,7 +188,7 @@ describe('Playground: Compare A/B and Export', () => {
     await until(() => target.querySelector('.ab-sum .delta') !== null, 'delta restored after Retry B');
   });
 
-  it('stops a pending camera MediaStream if the capture dialog closes before getUserMedia resolves', async () => {
+  it('stops a pending camera MediaStream if Stop camera is clicked before getUserMedia resolves', async () => {
     const stop = vi.fn();
     let resolveStream!: (s: MediaStream) => void;
     const pending = new Promise<MediaStream>((r) => (resolveStream = r));
@@ -207,23 +207,17 @@ describe('Playground: Compare A/B and Export', () => {
       router.route = parse('#/playground');
       handle = render(() => <Playground />, target);
 
-      const captureBtn = await until(
-        () => [...target.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('Video / camera')),
-        'capture button',
+      const camBtn = await until(
+        () => [...target.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('Live camera')),
+        'live camera button',
       );
-      captureBtn.click();
+      camBtn.click();
       flushSync();
-      const dlg = await until(() => target.querySelector('dialog[open]'), 'capture dialog');
-      const camTab = [...dlg.querySelectorAll<HTMLButtonElement>('[role="radio"]')].find((b) => b.textContent?.trim() === 'Camera')!;
-      camTab.click();
-      flushSync();
-      const startBtn = [...dlg.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('Start camera'))!;
-      startBtn.click();
-      flushSync();
+      const bar = await until(() => target.querySelector('[data-media-bar="webcam"]'), 'webcam bar');
 
-      // Close dialog while getUserMedia is still pending.
-      const cancelBtn = [...dlg.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === 'Cancel')!;
-      cancelBtn.click();
+      // Stop camera while getUserMedia is still pending.
+      const stopBtn = [...bar.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('Stop camera'))!;
+      stopBtn.click();
       flushSync();
 
       // Resolving the stale getUserMedia call must immediately stop every track.
@@ -235,7 +229,7 @@ describe('Playground: Compare A/B and Export', () => {
     }
   });
 
-  it('opens the Video / camera frame capture dialog cleanly on the empty Playground', async () => {
+  it('degrades gracefully inline when Live camera is clicked without getUserMedia support', async () => {
     const api = new MockApi('normal', 0);
     hub.api = api;
     hub.mode = 'mock';
@@ -245,20 +239,15 @@ describe('Playground: Compare A/B and Export', () => {
     router.route = parse('#/playground');
     handle = render(() => <Playground />, target);
 
-    const captureBtn = await until(
-      () => [...target.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('Video / camera')),
-      'capture button',
+    const camBtn = await until(
+      () => [...target.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('Live camera')),
+      'live camera button',
     );
-    captureBtn.click();
+    camBtn.click();
     flushSync();
 
-    const dlg = await until(() => target.querySelector('dialog[open]'), 'capture dialog');
-    expect(dlg.textContent).toContain('Capture frame');
-    // Switching to Camera tab degrades gracefully in happy-dom (no getUserMedia).
-    const camTab = [...dlg.querySelectorAll<HTMLButtonElement>('[role="radio"]')].find((b) => b.textContent?.trim() === 'Camera')!;
-    camTab.click();
-    flushSync();
-    expect(dlg.textContent).toContain('Camera capture is unavailable');
+    const alert = await until(() => target.querySelector('[data-live-media="webcam"] [role="alert"]'), 'inline camera error');
+    expect(alert.textContent).toContain('Camera access is unavailable');
   });
 
   it('hides a B-only class without affecting unrelated classes in Model A', async () => {

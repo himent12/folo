@@ -1,13 +1,15 @@
-// Image source lifecycle for Playground: URL resolution, retries, file intake, drag-and-drop (including routing
-// dropped video files to the frame capture dialog), clipboard paste, and object-URL cleanup.
+// Image, video, and webcam source lifecycle for Playground: URL resolution, retries, file intake,
+// drag-and-drop (routing local video files into the inline frame scrubber), clipboard paste, live
+// frame updates without wiping hidden classes/zoom, and object-URL cleanup.
 import { effect, onCleanup, signal, untrack, type Signal } from 'fw';
 import { hub } from '$lib/api/index';
 import type { BrowserEngine } from '$lib/inference/browser';
 import { toast } from '$lib/ui/toast';
 import { droppedImages, takeImage } from './intake';
+import { isVideoFile } from './media';
 import type { Source } from './source';
 
-export type Seg = 'file' | 'dataset' | 'webcam';
+export type Seg = 'file' | 'dataset' | 'video' | 'webcam';
 
 export interface UseSourceInput {
   engine: BrowserEngine;
@@ -15,6 +17,9 @@ export interface UseSourceInput {
   onResetState: () => void;
   onClearExtra: () => void;
   onDropVideo: (file: File) => void;
+  onOpenVideo: () => void;
+  onStartWebcam: () => void;
+  onSwitchAwayFromMedia: () => void;
   openFilePicker: () => void;
   pickerOpen: Signal<boolean>;
 }
@@ -66,6 +71,7 @@ export function usePlaygroundSource(input: UseSourceInput) {
   function setSource(s: Source) {
     decodeSeq++;
     toast.clear('image');
+    input.onSwitchAwayFromMedia();
     const old = source.peek();
     if (old?.kind === 'file') URL.revokeObjectURL(old.url);
     input.engine.clearImageCache();
@@ -75,7 +81,26 @@ export function usePlaygroundSource(input: UseSourceInput) {
     input.onResetState();
   }
 
+  /**
+   * Updates Playground's active frame from a local video or live webcam without resetting hidden classes,
+   * Compare A/B zoom, or flashing previous detections away while the next frame runs.
+   */
+  function setLiveFrame(blob: Blob, name: string, width: number, height: number, segKind: 'video' | 'webcam') {
+    decodeSeq++;
+    toast.clear('image');
+    const old = source.peek();
+    if (old?.kind === 'file') URL.revokeObjectURL(old.url);
+    input.engine.clearImageCache();
+    source.set({ kind: 'file', file: blob, name, url: URL.createObjectURL(blob), width, height });
+    imageRetry.set(0);
+    seg.set(segKind);
+  }
+
   async function setFile(file: File | Blob, name = file instanceof File ? file.name : 'pasted image') {
+    if (file instanceof File && isVideoFile(file)) {
+      input.onDropVideo(file);
+      return;
+    }
     const live = choose();
     const t = await takeImage(file, name);
     if (!live()) return;
@@ -89,6 +114,7 @@ export function usePlaygroundSource(input: UseSourceInput) {
   function clear() {
     decodeSeq++;
     toast.clear('image');
+    input.onSwitchAwayFromMedia();
     const old = source.peek();
     if (old?.kind === 'file') URL.revokeObjectURL(old.url);
     input.engine.clearImageCache();
@@ -106,10 +132,20 @@ export function usePlaygroundSource(input: UseSourceInput) {
     if (old?.kind === 'file') URL.revokeObjectURL(old.url);
   });
 
-  function onSeg(v: Seg) {
-    if (v === 'file') input.openFilePicker();
-    else if (v === 'dataset') input.pickerOpen.set(true);
-    seg.set(source.peek()?.kind ?? 'file');
+  function onSeg(v: Seg, activeMedia: 'none' | 'video' | 'webcam' = 'none') {
+    if (v === 'file') {
+      input.openFilePicker();
+      seg.set(activeMedia !== 'none' ? activeMedia : (source.peek()?.kind ?? 'file'));
+    } else if (v === 'dataset') {
+      input.pickerOpen.set(true);
+      seg.set(activeMedia !== 'none' ? activeMedia : (source.peek()?.kind ?? 'file'));
+    } else if (v === 'video') {
+      input.onOpenVideo();
+      seg.set(activeMedia !== 'none' ? activeMedia : (source.peek()?.kind ?? 'file'));
+    } else if (v === 'webcam') {
+      seg.set('webcam');
+      input.onStartWebcam();
+    }
   }
 
   function onpaste(e: ClipboardEvent) {
@@ -125,7 +161,7 @@ export function usePlaygroundSource(input: UseSourceInput) {
     e.preventDefault();
     dragging.set(false);
     const allFiles = [...(e.dataTransfer?.files ?? [])];
-    const videoFile = allFiles.find((f) => f.type.startsWith('video/') || /\.(mp4|webm|mov|ogv)$/i.test(f.name));
+    const videoFile = allFiles.find((f) => isVideoFile(f));
     if (videoFile && !allFiles.some((f) => f.type.startsWith('image/'))) {
       input.onDropVideo(videoFile);
       return;
@@ -159,6 +195,7 @@ export function usePlaygroundSource(input: UseSourceInput) {
     retryImage,
     choose,
     setSource,
+    setLiveFrame,
     setFile,
     clear,
     onSeg,

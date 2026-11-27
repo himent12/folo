@@ -9,6 +9,8 @@ import ChevronDown from '$icons/chevron-down';
 import ImageIcon from '$icons/image';
 import ImageOff from '$icons/image-off';
 import Images from '$icons/images';
+import Play from '$icons/play';
+import Scan from '$icons/scan';
 import Upload from '$icons/upload';
 import X from '$icons/x';
 import { bindable, css, Show, type Signal } from 'fw';
@@ -32,7 +34,7 @@ import Swatch from './Swatch';
 import ZoomStage from './ZoomStage';
 
 type Det = Prediction['boxes'][number];
-type Seg = 'file' | 'dataset' | 'webcam';
+type Seg = 'file' | 'dataset' | 'video' | 'webcam';
 
 export interface ImagePanelProps {
   notice: 'file' | 'error' | null;
@@ -112,13 +114,27 @@ export interface ImagePanelProps {
   compareStage?: (() => JSX.Element) | null;
   /** Compact comparison summary shown in the desktop viewer header when Compare mode is active. */
   compareFacts?: { countA: number | null; countB: number | null; deltaText: string | null } | null;
-  /** Opens the local video frame / camera capture dialog. */
-  onCapture?: () => void;
+  /** True on phone viewports so the 4-source toolbar switches to icon-only segments without overflowing. */
+  phone?: boolean;
+  /** True when a local video file or live webcam session is active (even before the first frame decodes). */
+  mediaActive?: boolean;
+  /** Label shown in the viewer header while a media session is initializing or showing an inline error. */
+  mediaLabel?: string;
+  /** Live canvas stage replacing the static image viewer during webcam streaming, video playback, or media error. */
+  liveStage?: (() => JSX.Element) | null;
+  /** Inline video scrubber or live webcam status bar rendered directly beneath the stage. */
+  mediaBar?: (() => JSX.Element) | null;
+  /** Opens the local video file picker. */
+  onOpenVideo?: () => void;
+  /** Starts live webcam detection mode. */
+  onStartWebcam?: () => void;
 }
 
 const SOURCES: { value: Seg; label: string; icon: typeof ImageIcon }[] = [
   { value: 'file', label: 'Image', icon: ImageIcon },
   { value: 'dataset', label: 'Dataset', icon: Images },
+  { value: 'video', label: 'Video', icon: Play },
+  { value: 'webcam', label: 'Camera', icon: Scan },
 ];
 
 export default function ImagePanel(props: ImagePanelProps) {
@@ -165,14 +181,16 @@ export default function ImagePanel(props: ImagePanelProps) {
     />
   );
 
+  const hasStageContent = () => !!props.source || !!props.mediaActive;
+
   return (
-    <div class="viewer" class:loaded={!!props.source} ondragover={props.ondragover} ondragleave={props.ondragleave} ondrop={props.ondrop}>
+    <div class="viewer" class:loaded={hasStageContent()} ondragover={props.ondragover} ondragleave={props.ondragleave} ondrop={props.ondrop}>
       <Panel pad="none">
         <div class="vbar">
           <span class="seg">
-            <Segmented label="Image source" size="sm" bind:value={seg} onchange={props.onSeg} options={SOURCES} />
+            <Segmented label="Image source" size="sm" iconOnly={props.phone || !!props.source} bind:value={seg} onchange={props.onSeg} options={SOURCES} />
           </span>
-          {props.runOnNote && !props.source ? (
+          {props.runOnNote && !hasStageContent() ? (
             <span class="vbar-note" aria-hidden="true">
               {props.runOnNote}
             </span>
@@ -240,20 +258,40 @@ export default function ImagePanel(props: ImagePanelProps) {
               </Button>
               <Button size="sm" variant="ghost" class="clear" icon={X} aria-label="Clear image" onclick={props.clear} />
             </>
+          ) : props.mediaActive ? (
+            <>
+              {props.mediaLabel ? (
+                <span class="src-name mono truncate" title={props.mediaLabel}>
+                  {props.mediaLabel}
+                </span>
+              ) : null}
+              <span class="vbar-gap"></span>
+              <Button size="sm" variant="ghost" class="clear" icon={X} aria-label="Close media" onclick={props.clear} />
+            </>
           ) : null}
         </div>
         {noticeStrip()}
-        <div class="stage" class:empty={!props.source} class:compare={!!props.compareStage} style={{ '--ar': props.dims ? `${props.dims.width} / ${props.dims.height}` : undefined }}>
-          {!props.source ? (
+        <div class="stage" class:empty={!hasStageContent()} class:compare={!!props.compareStage} style={{ '--ar': props.dims ? `${props.dims.width} / ${props.dims.height}` : undefined }}>
+          {!hasStageContent() ? (
             <DropZone
               dragging={props.dragging}
               samples={props.samples}
               onbrowse={() => props.browse()}
               onpick={() => pickerOpen.set(true)}
-              oncapture={props.onCapture}
+              onvideo={props.onOpenVideo}
+              oncamera={props.onStartWebcam}
               onsample={(ds, img) => props.setSource({ kind: 'dataset', ds, img })}
             />
-          ) : props.dims ? (
+          ) : props.liveStage ? (
+            <>
+              {props.liveStage}
+              {props.dragging ? (
+                <div class="drop-hint">
+                  <span>Drop to replace</span>
+                </div>
+              ) : null}
+            </>
+          ) : props.source && props.dims ? (
             <>
               {props.imageError ? (
                 <div class="image-failed" role="status">
@@ -314,6 +352,7 @@ export default function ImagePanel(props: ImagePanelProps) {
             </>
           ) : null}
         </div>
+        {props.mediaBar ? props.mediaBar() : null}
         {/* Phones: the threshold tuned most sits right under the image; the rest is one tap away below it. Tablets:
             Confidence and Overlap side by side (Confidence alone for end-to-end o2o models), the less-used settings one tap away. */}
         {props.source ? (

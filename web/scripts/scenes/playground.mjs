@@ -157,6 +157,19 @@ export const playgroundScenes = [
     },
   },
   {
+    name: 'playground-webcam-fallback',
+    path: '/playground?model=m_hard_s',
+    fullPage: false,
+    viewports: ['desktop', 'mobile'],
+    setup: async (page) => {
+      await until(page, 'button:has-text("Live camera")');
+      await page.locator('button:has-text("Live camera")').click();
+      await until(page, '[data-live-media="webcam"] [role="alert"]');
+      await page.clock.runFor(400);
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
     name: 'playground-picker',
     path: '/playground',
     fullPage: false,

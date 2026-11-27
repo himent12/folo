@@ -27,6 +27,8 @@ export interface SinglePredictInput {
   conf: Signal<number>;
   engine: BrowserEngine;
   dropLocal: (id: string, f: File, e: unknown) => void;
+  /** True while streaming live video/webcam frames (skips secondary full-candidate re-fetches). */
+  isLiveStream?: () => boolean;
 }
 
 export function useSinglePredict(o: SinglePredictInput): () => boolean {
@@ -108,7 +110,7 @@ export function useSinglePredict(o: SinglePredictInput): () => boolean {
     source: () => o.source.get(),
     runOn: () => o.runOn.get(),
     file: () => activeFile.peek(),
-    busy: () => o.predicting.get(),
+    busy: () => o.predicting.get() || !!o.isLiveStream?.(),
     engine: o.engine,
     weightsMissing: () => o.weightsMissing.set(true),
   });
