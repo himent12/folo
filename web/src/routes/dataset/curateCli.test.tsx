@@ -167,9 +167,15 @@ describe('buildDatasetCurateCli', () => {
     expect(buildDatasetCurateCli({ ...BASE_DATASET, path: 'D:\\' }, 'export').command).toBe(
       'folo dataset export D:/ --out <out_dir> --format coco --images copy',
     );
-    // Literal `--%` is PowerShell's stop-parsing token; prefix with `./` so it passes as a plain path.
+    // Literal `--%` is PowerShell's stop-parsing token; prefix with `./` so it passes as a plain path across all modes.
     expect(buildDatasetCurateCli({ ...BASE_DATASET, path: '--%' }, 'export').command).toBe(
       'folo dataset export ./--% --out <out_dir> --format coco --images copy',
+    );
+    expect(buildDatasetCurateCli({ ...BASE_DATASET, path: 'D:\\my datasets\\fasteners\\' }, 'convert').command).toBe(
+      "folo dataset convert 'D:\\my datasets\\fasteners' <out_dir>/fasteners-coco --to coco",
+    );
+    expect(buildDatasetCurateCli({ ...BASE_DATASET, path: '--%' }, 'merge').command).toBe(
+      'folo dataset merge ./--% <other_dataset> --out <out_dir>/fasteners-merged --splits stratified --val 0.2',
     );
   });
 });

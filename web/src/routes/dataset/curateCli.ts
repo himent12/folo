@@ -190,7 +190,8 @@ export function buildDatasetCurateCli(
     const to = opts.targetFormat ?? defaultConvertTarget(dataset.format);
     const out = suggestedOut(dataset, to);
     const flags = [`--to ${to}`];
-    const args = hasRealPath && path.startsWith('-') ? [...flags, '--', quoted(path), out] : [quoted(path), out, ...flags];
+    const norm = hasRealPath ? normalizeCliPath(path) : path;
+    const args = hasRealPath && norm.startsWith('-') ? [...flags, '--', quoted(norm), out] : [hasRealPath ? quoted(norm) : norm, out, ...flags];
     const formatNames: Record<ConvertTargetFormat, string> = {
       yolo: 'YOLO (data.yaml + labels/*.txt)',
       coco: 'COCO (annotations/instances_<split>.json)',
@@ -233,7 +234,11 @@ export function buildDatasetCurateCli(
   // merge
   const out = suggestedOut(dataset, 'merged');
   const flags = [`--out ${out}`, '--splits stratified', '--val 0.2'];
-  const inputs = hasRealPath && path.startsWith('-') ? [...flags, '--', quoted(path), '<other_dataset>'] : [quoted(path), '<other_dataset>', ...flags];
+  const norm = hasRealPath ? normalizeCliPath(path) : path;
+  const inputs =
+    hasRealPath && norm.startsWith('-')
+      ? [...flags, '--', quoted(norm), '<other_dataset>']
+      : [hasRealPath ? quoted(norm) : norm, '<other_dataset>', ...flags];
   return {
     mode,
     label: 'Merge',

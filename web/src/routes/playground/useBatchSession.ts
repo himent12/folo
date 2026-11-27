@@ -121,6 +121,35 @@ export function useBatchSession(o: UseBatchSessionInput) {
       .get()
       .reduce((n, entry) => n + ((entry.item.status === 'done' && entry.item.pred) || entry.item.status === 'error' ? 1 : 0), 0),
   );
+  const hasRefreshable = computed(() => {
+    const f = filter.get();
+    const on = o.runOn.get();
+    return items
+      .get()
+      .some((it) => it.status === 'done' && it.pred && needsCandidateRefresh(it.pred, f.conf, f.perClassConf, on) !== null);
+  });
+  const canRunAll = computed(() => {
+    const s = summary.get();
+    if (s.done < s.total) return true;
+    const id = o.modelId();
+    if (!id) return false;
+    const on = o.runOn.get();
+    const infKey = inferenceConfigKey(currentInference());
+    const prec: BrowserPrecision = on !== 'server' && o.precision ? o.precision() : 'auto';
+    const key = batchPredKey(id, on, infKey, prec);
+    const f = filter.get();
+    return items.get().some((it) => {
+      if (it.status !== 'done' || !it.pred || it.predKey !== key) return true;
+      const plan = needsCandidateRefresh(it.pred, f.conf, f.perClassConf, on);
+      if (!plan) return false;
+      if (plan.useAll && !needsPerClassFloorRefresh(it.pred, f.conf, f.perClassConf) && hasCompletionFailed(it.pred)) return false;
+      return true;
+    });
+  });
+  const canExport = computed(() => exportableCount.get() > 0 || (qaFilter.get().kind !== 'all' && hasRefreshable.get()));
+  const canExportSummary = computed(
+    () => summaryExportableCount.get() > 0 || (qaFilter.get().kind !== 'all' && hasRefreshable.get()),
+  );
 
   const activeLocalFile = computed(() => {
     const on = o.runOn.get();
@@ -646,7 +675,12 @@ export function useBatchSession(o: UseBatchSessionInput) {
           : filterBatchItems(all, snap.qaFilter, snap.filter, snap.hidden).map((e) => e.item);
       const provisionalFilter =
         snap.qaFilter.kind !== 'all' &&
-        all.some((it) => it.status === 'done' && isPredictionCutAt(it.pred, snap.filter.conf, snap.filter.perClassConf));
+        all.some(
+          (it) =>
+            it.status === 'done' &&
+            (isPredictionCutAt(it.pred, snap.filter.conf, snap.filter.perClassConf) ||
+              needsPerClassFloorRefresh(it.pred, snap.filter.conf, snap.filter.perClassConf)),
+        );
       return {
         items: exportItems,
         modelId: snap.modelId,
@@ -663,6 +697,24 @@ export function useBatchSession(o: UseBatchSessionInput) {
 
     const doExport = () => {
       const input = buildInput();
+      const missingFloor = items
+        .peek()
+        .some((it) => it.status === 'done' && needsPerClassFloorRefresh(it.pred, snap.filter.conf, snap.filter.perClassConf));
+      if (snap.qaFilter.kind !== 'all' && input.items.length === 0) {
+        toast.info(
+          input.provisionalFilter ? 'Could not refresh lower thresholds' : 'Nothing to export',
+          input.provisionalFilter
+            ? 'No images match the cached candidates, and refreshing lower-threshold candidates failed.'
+            : 'No images match this filter after refreshing candidates.',
+        );
+        return;
+      }
+      if (missingFloor) {
+        toast.info(
+          'Exported with higher threshold floor',
+          'Some images could not refresh lower thresholds; detections below their fetched floor may be missing.',
+        );
+      }
       if (kind === 'json') return exportBatchJson(input);
       if (kind === 'summary-csv') return exportBatchSummaryCsv(input);
       return exportBatchCsv(input);
@@ -804,6 +856,9 @@ export function useBatchSession(o: UseBatchSessionInput) {
     visibleEntries,
     exportableCount,
     summaryExportableCount,
+    canRunAll,
+    canExport,
+    canExportSummary,
     classes: o.classes,
     loadFiles,
     selectIndex,

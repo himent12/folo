@@ -291,13 +291,15 @@ export function isDetectorLoadError(e: unknown): boolean {
   return typeof e === 'object' && e !== null && detectorLoadErrors.has(e);
 }
 
+/** Module-wide prediction metadata maps so restored Playground sessions keep INT8/fallback info across remounts. */
+const predInfoMap = new WeakMap<Prediction, DetectorInfo>();
+const predPrecMap = new WeakMap<Prediction, BrowserPrecision>();
+const predInfoVersion = signal(0);
+
 export class BrowserEngine {
   #phase = signal<Phase>('idle');
   #info = signal<DetectorInfo | null>(null);
   #capabilities = signal<BrowserCapabilities>({ tiled: null, tta: null, tracker: null });
-  #predInfo = new WeakMap<Prediction, DetectorInfo>();
-  #predPrec = new WeakMap<Prediction, BrowserPrecision>();
-  #infoVersion = signal(0);
   /** What the engine is doing for the latest request. */
   get phase(): Phase {
     return this.#phase.get();
@@ -319,24 +321,24 @@ export class BrowserEngine {
 
   /** Returns the `DetectorInfo` captured when `pred` was produced in this browser, or `null`. */
   infoFor(pred: Prediction | null | undefined): DetectorInfo | null {
-    void this.#infoVersion.get();
-    return pred ? (this.#predInfo.get(pred) ?? null) : null;
+    void predInfoVersion.get();
+    return pred ? (predInfoMap.get(pred) ?? null) : null;
   }
 
   /** Returns the requested `BrowserPrecision` that produced `pred`, or `null`. */
   precisionFor(pred: Prediction | null | undefined): BrowserPrecision | null {
-    void this.#infoVersion.get();
-    return pred ? (this.#predPrec.get(pred) ?? null) : null;
+    void predInfoVersion.get();
+    return pred ? (predPrecMap.get(pred) ?? null) : null;
   }
 
   /** Copies prediction-bound `DetectorInfo` & requested precision onto a candidate-upgraded copy of `from`. */
   copyPredictionInfo(from: Prediction | null | undefined, to: Prediction): void {
     if (!from) return;
-    const info = this.#predInfo.get(from);
-    if (info) this.#predInfo.set(to, info);
-    const prec = this.#predPrec.get(from);
-    if (prec) this.#predPrec.set(to, prec);
-    if (info || prec) this.#infoVersion.set((v) => v + 1);
+    const info = predInfoMap.get(from);
+    if (info) predInfoMap.set(to, info);
+    const prec = predPrecMap.get(from);
+    if (prec) predPrecMap.set(to, prec);
+    if (info || prec) predInfoVersion.set((v) => v + 1);
   }
 
   #detectors = new Map<string, Entry>();
@@ -458,9 +460,9 @@ export class BrowserEngine {
       if (reqSeq === this.#requestSeq) this.info = detInfo;
       const meta = inferenceMetaOf(req.inference);
       const out = meta ? { ...p, inference: meta } : { ...p };
-      this.#predInfo.set(out, detInfo);
-      this.#predPrec.set(out, normalizeBrowserPrecision(req.precision));
-      this.#infoVersion.set((v) => v + 1);
+      predInfoMap.set(out, detInfo);
+      predPrecMap.set(out, normalizeBrowserPrecision(req.precision));
+      predInfoVersion.set((v) => v + 1);
       return out;
     } finally {
       entry.users--;

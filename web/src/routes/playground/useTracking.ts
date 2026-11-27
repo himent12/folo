@@ -39,12 +39,12 @@ export function useTracking(input: UseTrackingInput) {
   const loadError = signal<string | null>(null);
   const activeCount = signal(0);
   const trails = signal<TrackTrail[]>([]);
-  const trackedFrame = signal<{ pred: Prediction; frameKey: string | null; pccKey: string; boxes: PredictBox[] } | null>(null);
+  const trackedFrame = signal<{ pred: Prediction; frameKey: string | null; threshKey: string; boxes: PredictBox[] } | null>(null);
   const trackerReadyTick = signal(0);
 
   let tracker: Tracker | null = null;
   let trackerConf: number | null = null;
-  let trackerPccKey = '';
+  let trackerThreshKey = '';
   let trackerSeq = 0;
   let alive = true;
   let lastProcessedPred: Prediction | null = null;
@@ -193,15 +193,15 @@ export function useTracking(input: UseTrackingInput) {
     const c = input.conf();
     const pcc = input.perClassConf?.();
     const eff = effectiveMinConf(c, pcc);
-    const pccKey = perClassConfKey(pcc);
+    const threshKey = `${c}|${perClassConfKey(pcc)}`;
     if (!on || mode === 'none') return;
     untrack(() => {
       const confChanged = tracker && trackerConf !== null && Math.abs(trackerConf - eff) > 1e-4;
-      const overridesChanged = tracker && pccKey !== trackerPccKey;
-      trackerPccKey = pccKey;
+      const threshChanged = tracker && threshKey !== trackerThreshKey;
+      trackerThreshKey = threshKey;
       if (confChanged) {
         clearOutputs();
-      } else if (overridesChanged && tracker) {
+      } else if (threshChanged && tracker) {
         reset(null);
         trackerReadyTick.set((t) => t + 1);
       }
@@ -234,13 +234,13 @@ export function useTracking(input: UseTrackingInput) {
         fk === lastProcessedFrameKey &&
         cur &&
         cur.frameKey === fk &&
-        cur.pccKey === trackerPccKey &&
+        cur.threshKey === trackerThreshKey &&
         cur.pred.model_id === p.model_id &&
         (cur.pred.backend ?? 'server') === (p.backend ?? 'server')
       ) {
         // Same physical frame & model/backend (e.g. candidate completion or repeat Detect frame): keep existing tracked boxes without advancing ByteTrack.
         lastProcessedPred = p;
-        trackedFrame.set({ pred: p, frameKey: fk, pccKey: cur.pccKey, boxes: cur.boxes });
+        trackedFrame.set({ pred: p, frameKey: fk, threshKey: cur.threshKey, boxes: cur.boxes });
         return;
       }
       lastProcessedPred = p;
@@ -252,15 +252,15 @@ export function useTracking(input: UseTrackingInput) {
       const maxDet = input.maxDet();
       const o2o = input.o2o();
       const cls = input.classes();
-      // Preserve ByteTrack's two-stage low-confidence occlusion recovery while preventing boxes below a class's
-      // raised per-class threshold from spawning new tracks or matching in stage 1.
+      // Gate per-class eligibility BEFORE NMS and `maxDet` so boxes rejected by a raised override never consume
+      // a `maxDet` slot ahead of valid lower-threshold classes, while keeping stage-2 low-confidence recovery.
       const low = Math.min(0.1, eff);
-      const nmsCandidates = filterDetections(p.boxes, { conf: low, iou: o2o ? 1 : iou, maxDet });
-      const candidates = nmsCandidates.filter((b) => {
+      const eligible = p.boxes.filter((b) => {
         const t = thresholdForClass(b.class, c, pcc);
         if (b.score >= t) return true;
         return b.score >= Math.min(0.1, t) && b.score < eff && activeTrackedClasses.has(b.class);
       });
+      const candidates = filterDetections(eligible, { conf: low, iou: o2o ? 1 : iou, maxDet });
       const tracked = tracker.update(candidates);
       for (const t of tracked) activeTrackedClasses.add(t.class);
       const boxes: PredictBox[] = tracked.map((t) => ({
@@ -273,7 +273,7 @@ export function useTracking(input: UseTrackingInput) {
         y2: t.y2,
         track_id: t.track_id,
       }));
-      trackedFrame.set({ pred: p, frameKey: fk, pccKey: perClassConfKey(pcc), boxes });
+      trackedFrame.set({ pred: p, frameKey: fk, threshKey: `${c}|${perClassConfKey(pcc)}`, boxes });
       trails.set(trailHistory.update(tracked));
       activeCount.set(tracked.length);
     });
@@ -285,12 +285,12 @@ export function useTracking(input: UseTrackingInput) {
     freeTracker();
   });
 
-  /** Returns tracked boxes matching `p` when tracking is active for that frame and threshold map, else null. */
+  /** Returns tracked boxes matching `p` when tracking is active for that frame and threshold config, else null. */
   function boxesFor(p: Prediction | null): PredictBox[] | null {
     if (!enabled.get() || !p) return null;
     const frame = trackedFrame.get();
-    const curPccKey = perClassConfKey(input.perClassConf?.());
-    return frame && frame.pred === p && frame.pccKey === curPccKey ? frame.boxes : null;
+    const curThreshKey = `${input.conf()}|${perClassConfKey(input.perClassConf?.())}`;
+    return frame && frame.pred === p && frame.threshKey === curThreshKey ? frame.boxes : null;
   }
 
   return {

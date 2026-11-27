@@ -615,13 +615,19 @@ describe('BrowserEngine', () => {
     expect(e.info?.precision).toBe('f32');
     expect(e.info?.precisionFallback).toContain('runs on the CPU');
 
-    // Per-prediction info survives subsequent predictions on other backends/models (Compare A/B).
+    // Per-prediction info survives subsequent predictions on other backends/models (Compare A/B) AND across new BrowserEngine instances (restored sessions).
     expect(e.infoFor(pInt8)?.precision).toBe('int8');
     expect(e.infoFor(pInt8)?.precisionFallback).toBeNull();
     expect(e.precisionFor(pInt8)).toBe('auto');
     expect(e.infoFor(pWebgpuFallback)?.precision).toBe('f32');
     expect(e.infoFor(pWebgpuFallback)?.precisionFallback).toContain('runs on the CPU');
     expect(e.precisionFor(pWebgpuFallback)).toBe('int8');
+
+    const freshEngine = new BrowserEngine(async () => mod, pixels);
+    expect(freshEngine.infoFor(pInt8)?.precision).toBe('int8');
+    expect(freshEngine.infoFor(pWebgpuFallback)?.precisionFallback).toContain('runs on the CPU');
+    expect(freshEngine.precisionFor(pWebgpuFallback)).toBe('int8');
+    freshEngine.dispose();
 
     // copyPredictionInfo preserves per-prediction metadata across candidate-completion clones.
     const cloned = { ...pInt8 };

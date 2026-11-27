@@ -293,19 +293,32 @@ describe('Playground per-class candidate floors, tracking, session restore & bro
     ]);
     await batch.runAll();
     expect(predictConfs).toEqual([0.01, 0.01]);
+    expect(batch.canRunAll.get()).toBe(false);
     expect(batch.items.peek().every((i) => i.pred?.boxes.length === 0)).toBe(true);
 
+    // Filtering to With detections has 0 matches at 0.01, so export is disabled until a lower threshold makes items refreshable.
+    batch.setQaFilter({ kind: 'with-detections' });
+    flushSync();
+    expect(batch.canExport.get()).toBe(false);
+    expect(batch.canExportSummary.get()).toBe(false);
+
+    // Lowering class 0 override below 0.01 re-enables both Run All (Refresh all) and QA Export!
     perClassConf.set({ 0: 0.005 });
     flushSync();
+    expect(batch.canRunAll.get()).toBe(true);
+    expect(batch.canExport.get()).toBe(true);
+    expect(batch.canExportSummary.get()).toBe(true);
+
     await batch.runAll();
     expect(predictConfs).toHaveLength(4);
     expect(predictConfs[2]).toBeLessThan(0.005);
+    expect(batch.canRunAll.get()).toBe(false);
     expect(batch.items.peek().every((i) => i.pred?.boxes.length === 1)).toBe(true);
     dispose();
     engine.dispose();
   });
 
-  it('applies per-class thresholds in ByteTrack tracking while preserving low-confidence recovery', async () => {
+  it('applies per-class thresholds in ByteTrack tracking (including sub-0.01, maxDet gating, and global conf updates on paused frames)', async () => {
     const trackerOpts: FoloTrackOptions[] = [];
     const seenUpdateBoxes: number[][] = [];
     const mod: WasmModule = {
@@ -320,7 +333,7 @@ describe('Playground per-class candidate floors, tracking, session restore & bro
           trackerOpts.push({ ...opts });
         }
         update(boxes: readonly FoloTrackInputBox[]): FoloTrackedBox[] {
-          seenUpdateBoxes.push(boxes.map((b) => Math.round(b.score * 100)));
+          seenUpdateBoxes.push(boxes.map((b) => Math.round(b.score * 1000)));
           return boxes.map((b, i) => ({
             ...b,
             name: b.name ?? String(b.class),
@@ -345,6 +358,7 @@ describe('Playground per-class candidate floors, tracking, session restore & bro
     const predSig = signal<Prediction | null>(null);
     const frameSeq = signal(1);
     const confSig = signal(0.25);
+    const maxDetSig = signal(300);
     const pccSig = signal<PerClassConfMap>({ 0: 0.7 });
 
     let tracking!: ReturnType<typeof useTracking>;
@@ -361,7 +375,7 @@ describe('Playground per-class candidate floors, tracking, session restore & bro
         conf: () => confSig.get(),
         perClassConf: () => pccSig.get(),
         iou: () => 0.7,
-        maxDet: () => 300,
+        maxDet: () => maxDetSig.get(),
         o2o: () => false,
       });
       return d;
@@ -385,7 +399,7 @@ describe('Playground per-class candidate floors, tracking, session restore & bro
     };
     predSig.set(f1);
     flushSync();
-    expect(seenUpdateBoxes[0]).toEqual([85, 40]);
+    expect(seenUpdateBoxes[0]).toEqual([850, 400]);
 
     frameSeq.set(2);
     predSig.set({
@@ -393,22 +407,51 @@ describe('Playground per-class candidate floors, tracking, session restore & bro
       boxes: [{ class: 0, name: 'person', score: 0.15, x1: 102, y1: 0, x2: 152, y2: 50 }],
     });
     flushSync();
-    expect(seenUpdateBoxes[1]).toEqual([15]);
+    expect(seenUpdateBoxes[1]).toEqual([150]);
 
+    // Lowered override on class 1 (0.15 < global 0.25) reconfigures tracker to eff=0.15; with maxDet=1, rejected person@0.50 must not crowd out car@0.20!
+    maxDetSig.set(1);
     pccSig.set({ 0: 0.7, 1: 0.15 });
     flushSync();
     await vi.waitFor(() => expect(trackerOpts).toHaveLength(2));
     expect(trackerOpts[1]?.highThresh).toBe(0.15);
     frameSeq.set(3);
-    predSig.set({
+    const f3: Prediction = {
       ...f1,
       boxes: [
-        { class: 0, name: 'person', score: 0.2, x1: 0, y1: 0, x2: 50, y2: 50 },
+        { class: 0, name: 'person', score: 0.5, x1: 0, y1: 0, x2: 50, y2: 50 },
         { class: 1, name: 'car', score: 0.2, x1: 200, y1: 0, x2: 260, y2: 50 },
       ],
-    });
+    };
+    predSig.set(f3);
     flushSync();
-    expect(seenUpdateBoxes.at(-1)).toEqual([20]);
+    expect(seenUpdateBoxes.at(-1)).toEqual([200]);
+
+    // Raising global conf while class 1 override stays pinned at 0.15 must immediately invalidate & re-track paused frame for non-overridden class 0.
+    maxDetSig.set(300);
+    pccSig.set({ 1: 0.15 });
+    flushSync();
+    const f4: Prediction = {
+      ...f1,
+      boxes: [
+        { class: 0, name: 'person', score: 0.5, x1: 0, y1: 0, x2: 50, y2: 50 },
+        { class: 1, name: 'car', score: 0.2, x1: 200, y1: 0, x2: 260, y2: 50 },
+      ],
+    };
+    frameSeq.set(4);
+    predSig.set(f4);
+    flushSync();
+    expect(tracking.boxesFor(f4)?.map((b) => b.class)).toEqual([0, 1]);
+    confSig.set(0.8);
+    flushSync();
+    expect(tracking.boxesFor(f4)?.map((b) => b.class)).toEqual([1]);
+
+    // Sub-0.01 calibrated override (0.005) configures ByteTrack below 0.01 without clamping to 0.01.
+    pccSig.set({ 1: 0.005 });
+    flushSync();
+    await vi.waitFor(() => expect(trackerOpts.at(-1)?.highThresh).toBe(0.005));
+    expect(trackerOpts.at(-1)?.lowThresh).toBe(0.005);
+    expect(trackerOpts.at(-1)?.newTrackThresh).toBe(0.005);
     dispose();
     engine.dispose();
   });
