@@ -148,18 +148,18 @@ describe('Playground batch QA filter and summary export', () => {
     const prevBtn = target.querySelector<HTMLButtonElement>('button[aria-label="Previous image"]')!;
     nextBtn.focus();
     nextBtn.click();
-    flushSync();
-    await Promise.resolve();
-    expect(nextBtn.disabled).toBe(true);
+    await vi.waitFor(() => {
+      expect(nextBtn.disabled).toBe(true);
+      expect(document.activeElement).toBe(target.querySelector('[data-batch-idx="2"]'));
+    });
     expect(target.querySelector('.src-name')?.textContent).toBe('ccc.png');
-    expect(document.activeElement).toBe(target.querySelector('[data-batch-idx="2"]'));
     prevBtn.focus();
     prevBtn.click();
-    flushSync();
-    await Promise.resolve();
-    expect(prevBtn.disabled).toBe(true);
+    await vi.waitFor(() => {
+      expect(prevBtn.disabled).toBe(true);
+      expect(document.activeElement).toBe(target.querySelector('[data-batch-idx="0"]'));
+    });
     expect(target.querySelector('.src-name')?.textContent).toBe('a.png');
-    expect(document.activeElement).toBe(target.querySelector('[data-batch-idx="0"]'));
 
     const strip = target.querySelector<HTMLElement>('[data-batch-filmstrip]')!;
     strip.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true, cancelable: true }));

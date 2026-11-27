@@ -214,4 +214,33 @@ describe('Labeling editor: Duplicate box (D) and Copy previous frame boxes (P)',
     flushSync();
     expect(boxCount()).toBe(1);
   });
+
+  it('preserves a subsequent save error when P was pressed while save was pending', async () => {
+    await hub.api.updateLabelImage('lb_7c21', '1', [{ class: 0, x1: 20, y1: 20, x2: 120, y2: 120 }]);
+    await openEditor('2', 'lb_7c21');
+
+    let rejectSave!: (err: Error) => void;
+    vi.spyOn(hub.api, 'updateLabelImage').mockImplementation(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectSave = reject;
+        }),
+    );
+
+    byText('Add box').click();
+    flushSync();
+    byText('Save').click();
+    flushSync();
+    // Press P while save is still in flight -> sets copyNoticeId; then save fails and replaces the notice.
+    press('p');
+    rejectSave(new Error('disk full'));
+    await vi.waitFor(() => {
+      flushSync();
+      expect(editor()!.querySelector('[role="alert"]')?.textContent ?? '').toContain('Could not save the boxes');
+    });
+
+    // Subsequent undo must NOT dismiss the save error notice.
+    press('z', { ctrlKey: true });
+    expect(editor()!.querySelector('[role="alert"]')?.textContent ?? '').toContain('Could not save the boxes');
+  });
 });

@@ -125,6 +125,21 @@ describe('buildDatasetCurateCli', () => {
     expect(curateCliCopiedMessage(badPath)).toBe(
       'Replace <dataset_path> and <out_dir> before running this convert command.',
     );
+    expect(curateCliCopiedMessage(buildDatasetCurateCli({ ...BASE_DATASET, path: '/data/bad"dir' }, 'merge'))).toBe(
+      'Replace <dataset_path>, <other_dataset> and <out_dir> before running this merge command.',
+    );
+    // Literal `<...>` inside quoted dataset paths or class names must NOT be reported as placeholders.
+    const literalAngle: Dataset = {
+      ...BASE_DATASET,
+      path: '/data/road/<archive>',
+      classes: ['<unknown>', 'bolt'],
+    };
+    expect(curateCliCopiedMessage(buildDatasetCurateCli(literalAngle, 'check'))).toBe(
+      'Run this audit & dedup command from your terminal.',
+    );
+    expect(curateCliCopiedMessage(buildDatasetCurateCli(literalAngle, 'filter', { stats: BASE_STATS, activeClass: 0 }))).toBe(
+      'Replace <out_dir> before running this filter command.',
+    );
   });
 });
 

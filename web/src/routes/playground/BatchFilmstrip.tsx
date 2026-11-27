@@ -165,7 +165,7 @@ export default function BatchFilmstrip(props: BatchFilmstripProps) {
     b.step(delta);
     if (!hadFocus) return;
     queueMicrotask(() => {
-      if (!btn.disabled) return;
+      if (!btn.isConnected || !btn.disabled) return;
       const active = document.activeElement;
       if (active && active !== document.body && active !== btn) return;
       const opposite = delta > 0 ? 'Previous image' : 'Next image';
