@@ -245,14 +245,15 @@ fn open_session(args: &TrainArgs) -> Result<CloudSession, CliError> {
 }
 
 pub(super) fn train_cloud(args: TrainArgs, out: Out) -> Result<(), CliError> {
-    let (mut arch, mut arch_override) = validate_cloud_args(&args)?;
+    let (mut arch, _) = validate_cloud_args(&args)?;
     let connection_id = args.cloud.clone().expect("train_cloud requires --cloud");
     let data_arg = args.data.as_deref().expect("clap requires --data without --resume");
     let session = open_session(&args)?;
 
-    // Resolve weights architecture before registering any dataset so invalid or v2 `--weights` fails cleanly.
+    // Resolve weights architecture and head before registering any dataset so invalid or v2 `--weights` fails cleanly.
+    let mut weights_head = None;
     if let Some(w) = &args.weights {
-        let model_arch = session.store.model_arch(w).map_err(api_error)?;
+        let (model, model_arch) = session.store.get_model_with_arch(w).map_err(api_error)?;
         let (parsed, ov) = parse_arch_override(&model_arch).map_err(api_error)?;
         if ov.is_some() {
             return Err(CliError::new(
@@ -263,7 +264,7 @@ pub(super) fn train_cloud(args: TrainArgs, out: Out) -> Result<(), CliError> {
             .hint("use v1 weights (`folo-n`..`folo-x`) for `--cloud`, or omit `--cloud` to train locally"));
         }
         arch = parsed;
-        arch_override = None;
+        weights_head = Some(model.head);
     }
 
     // Resolve dataset: an existing registered dataset id, else register the path on the store/server.
@@ -322,10 +323,7 @@ pub(super) fn train_cloud(args: TrainArgs, out: Out) -> Result<(), CliError> {
         },
         seed: args.seed,
         amp: args.amp,
-        head: match args.head {
-            Some(HeadArg::O2o) => Head::O2o,
-            Some(HeadArg::O2m) | None => Head::O2m,
-        },
+        head: resolve_cloud_head(args.head, weights_head),
         compute: Some(Compute {
             connection_id: connection_id.clone(),
             offer_id: offer_id.clone(),
@@ -338,7 +336,7 @@ pub(super) fn train_cloud(args: TrainArgs, out: Out) -> Result<(), CliError> {
             enabled: args.batch.is_auto(),
             target_utilization: args.auto_batch_target,
         },
-        arch: arch_override,
+        arch: None,
         max_preempt_retries: args.max_preempt_retries,
     };
 
@@ -362,6 +360,14 @@ pub(super) fn train_cloud(args: TrainArgs, out: Out) -> Result<(), CliError> {
     ));
 
     follow_cloud_run(&session, &run.id, &stop, args.json_events, out)
+}
+
+fn resolve_cloud_head(explicit: Option<HeadArg>, weights_head: Option<Head>) -> Head {
+    match explicit {
+        Some(HeadArg::O2o) => Head::O2o,
+        Some(HeadArg::O2m) => Head::O2m,
+        None => weights_head.unwrap_or(Head::O2m),
+    }
 }
 
 fn select_default_offer(offers: &[CloudOffer], connection_id: &str) -> Result<String, CliError> {
@@ -690,6 +696,11 @@ mod tests {
             offer("high-stock", 0.80, CloudAvailability::High),
         ];
         assert_eq!(select_default_offer(&offers, "cc_1").unwrap(), "in-stock");
+
+        assert_eq!(resolve_cloud_head(None, None), Head::O2m);
+        assert_eq!(resolve_cloud_head(None, Some(Head::O2o)), Head::O2o);
+        assert_eq!(resolve_cloud_head(Some(HeadArg::O2m), Some(Head::O2o)), Head::O2m);
+        assert_eq!(resolve_cloud_head(Some(HeadArg::O2o), Some(Head::O2m)), Head::O2o);
 
         let only_oos = vec![offer("cheap-oos", 0.10, CloudAvailability::None)];
         let err = select_default_offer(&only_oos, "cc_1").unwrap_err();
