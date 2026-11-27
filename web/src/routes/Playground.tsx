@@ -509,6 +509,7 @@ export default function Playground() {
       classes={classes.get()}
       globalConf={conf.get()}
       perClassConf={perClassConf.get()}
+      modelId={modelId.get()}
       modelName={model.get()?.name ?? null}
       inline={inline}
       onSetClassConf={setClassConf}

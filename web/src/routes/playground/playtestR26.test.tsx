@@ -74,8 +74,9 @@ describe('Playtest R26 regressions', () => {
     expect(target.querySelector('button[aria-label="Copy command"]')).not.toBeNull();
   });
 
-  it('P2-2 & P3-1: excludes hidden upload input from Tab order and clears import confirmation note on model switch', () => {
-    const modelName = signal('shapes-s-best');
+  it('P2-2 & P3-1: excludes hidden upload input from Tab order and clears import feedback on modelId switch, global conf change, or manual edits', () => {
+    const modelId = signal('m_shapes_a');
+    const modelName = signal('best.folo');
     const classes = signal(['circle', 'square', 'triangle']);
     const globalConf = signal(0.25);
     const pcc = signal<PerClassConfMap>({});
@@ -85,6 +86,7 @@ describe('Playtest R26 regressions', () => {
     mounted = render(
       () => (
         <PerClassThresholds
+          modelId={modelId.get()}
           modelName={modelName.get()}
           classes={classes.get()}
           globalConf={globalConf.get()}
@@ -112,12 +114,25 @@ describe('Playtest R26 regressions', () => {
     expect(hiddenFile.getAttribute('tabindex')).toBe('-1');
     expect(hiddenFile.getAttribute('aria-hidden')).toBe('true');
 
-    // Open disclosure and import calibration JSON.
+    // Invalid JSON error clears as soon as user manually edits a per-class slider.
     target.querySelector<HTMLButtonElement>('button.pc-toggle')!.click();
     flushSync();
     target.querySelector<HTMLButtonElement>('[data-per-class-import-btn]')!.click();
     flushSync();
     const ta = target.querySelector<HTMLTextAreaElement>('[data-per-class-import] textarea')!;
+    ta.value = '{not valid json';
+    ta.dispatchEvent(new Event('input', { bubbles: true }));
+    target.querySelector<HTMLButtonElement>('[data-per-class-apply]')!.click();
+    flushSync();
+    expect(target.querySelector('[data-per-class-error]')).not.toBeNull();
+
+    const circleRange = target.querySelector<HTMLInputElement>('[data-class-threshold-row="0"] input[type="range"]')!;
+    circleRange.value = '0.5';
+    circleRange.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    expect(target.querySelector('[data-per-class-error]')).toBeNull();
+
+    // Valid import shows status note; changing global confidence externally clears it cleanly.
     ta.value = JSON.stringify({
       global: { best_conf: 0.3 },
       per_class: [
@@ -130,10 +145,21 @@ describe('Playtest R26 regressions', () => {
     flushSync();
     expect(target.querySelector('[data-per-class-status]')?.textContent).toBe('Applied global 0.30, 2 class overrides.');
 
-    // P3-1: switching to another model clears the stale import status note.
-    modelName.set('fasteners-n-best');
-    classes.set(['bolt', 'nut']);
-    pcc.set({});
+    globalConf.set(0.45);
+    flushSync();
+    expect(target.querySelector('[data-per-class-status]')).toBeNull();
+
+    // Re-import and switch to a distinct modelId with the SAME name & classes -> clears stale status note.
+    target.querySelector<HTMLButtonElement>('[data-per-class-import-btn]')!.click();
+    flushSync();
+    const ta2 = target.querySelector<HTMLTextAreaElement>('[data-per-class-import] textarea')!;
+    ta2.value = JSON.stringify({ global: { best_conf: 0.3 }, per_class: [{ class: 0, best_conf: 0.8 }] });
+    ta2.dispatchEvent(new Event('input', { bubbles: true }));
+    target.querySelector<HTMLButtonElement>('[data-per-class-apply]')!.click();
+    flushSync();
+    expect(target.querySelector('[data-per-class-status]')).not.toBeNull();
+
+    modelId.set('m_shapes_b');
     flushSync();
     expect(target.querySelector('[data-per-class-status]')).toBeNull();
   });
@@ -200,5 +226,28 @@ describe('Playtest R26 regressions', () => {
     // Demo CPU/WebGPU inference controls remain available in mock mode, while real-WASM Track IDs is honestly disabled upfront.
     expect(avail.browserOff.get()).toBeNull();
     dispose();
+
+    // Positive path: when real folo-wasm assets ARE present in mock mode, trackerBrowserOff clears to null.
+    resetWasmProbe();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) =>
+        new Response(null, {
+          status: 200,
+          headers: { 'content-type': String(url).endsWith('.wasm') ? 'application/wasm' : 'text/javascript' },
+        }),
+      ),
+    );
+    const inMedia2 = signal(true);
+    let avail2!: ReturnType<typeof useWasmAvailability>;
+    const dispose2 = createRoot((d) => {
+      avail2 = useWasmAvailability(runOn, () => inMedia2.get());
+      return d;
+    });
+    await vi.waitFor(() => {
+      flushSync();
+      expect(avail2.trackerBrowserOff.get()).toBeNull();
+    });
+    dispose2();
   });
 });

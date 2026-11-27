@@ -19,6 +19,7 @@ import {
   formatConfThreshold,
   parseThresholdsJson,
   perClassConfCount,
+  perClassConfKey,
   roundConf,
   type PerClassConfMap,
 } from './perClassConf';
@@ -27,6 +28,7 @@ export interface PerClassThresholdsProps {
   classes: string[];
   globalConf: number;
   perClassConf: PerClassConfMap;
+  modelId?: string | null;
   modelName?: string | null;
   inline?: boolean;
   onSetClassConf: (classId: number, value: number) => void;
@@ -47,15 +49,32 @@ export default function PerClassThresholds(props: PerClassThresholdsProps) {
 
   const overrideCount = computed(() => perClassConfCount(props.perClassConf));
 
-  // Clear stale import confirmation/error copy when switching to another model or class set.
+  // Clear stale import confirmation/error copy when switching models (by ID, name, or classes)
+  // or when global/per-class thresholds diverge from the imported state (manual edits or external resets).
   let prevModelKey: string | null = null;
+  let prevThreshState: string | null = null;
+  let lastImported: { globalConf: number; pccKey: string } | null = null;
   effect(() => {
-    const key = `${props.modelName ?? ''}|${props.classes.join('\0')}`;
-    if (prevModelKey !== null && key !== prevModelKey) {
+    const modelKey = `${props.modelId ?? ''}|${props.modelName ?? ''}|${props.classes.join('\0')}`;
+    const curConf = props.globalConf;
+    const curPccKey = perClassConfKey(props.perClassConf);
+    const threshState = `${curConf}|${curPccKey}`;
+    if (prevModelKey !== null && modelKey !== prevModelKey) {
       importNote.set(null);
       importError.set(null);
+      lastImported = null;
+    } else if (prevThreshState !== null && threshState !== prevThreshState) {
+      importError.set(null);
+      if (
+        lastImported &&
+        (Math.abs(curConf - lastImported.globalConf) > 1e-6 || curPccKey !== lastImported.pccKey)
+      ) {
+        importNote.set(null);
+        lastImported = null;
+      }
     }
-    prevModelKey = key;
+    prevModelKey = modelKey;
+    prevThreshState = threshState;
   });
 
   const rows = computed(() => {
@@ -79,6 +98,8 @@ export default function PerClassThresholds(props: PerClassThresholdsProps) {
       return;
     }
     importError.set(null);
+    const appliedGlobal = parsed.globalConf !== null ? parsed.globalConf : props.globalConf;
+    lastImported = { globalConf: appliedGlobal, pccKey: perClassConfKey(parsed.perClassConf) };
     props.onImport({ globalConf: parsed.globalConf, perClassConf: parsed.perClassConf });
     importOpen.set(false);
     importText.set('');
@@ -124,16 +145,22 @@ export default function PerClassThresholds(props: PerClassThresholdsProps) {
     }
   }
 
+  function clearImportFeedback() {
+    importNote.set(null);
+    importError.set(null);
+    lastImported = null;
+  }
+
   function onNumCommit(classId: number, raw: string) {
     const trimmed = raw.trim();
     if (!trimmed) {
-      importNote.set(null);
+      clearImportFeedback();
       props.onClearClassConf(classId);
       return;
     }
     const v = Number(trimmed);
     if (!Number.isFinite(v)) return;
-    importNote.set(null);
+    clearImportFeedback();
     props.onSetClassConf(classId, roundConf(v));
   }
 
@@ -189,7 +216,7 @@ export default function PerClassThresholds(props: PerClassThresholdsProps) {
               disabled={overrideCount.get() === 0}
               onclick={() => {
                 props.onResetAll();
-                importNote.set(null);
+                clearImportFeedback();
               }}
             >
               Reset all
@@ -284,7 +311,7 @@ export default function PerClassThresholds(props: PerClassThresholdsProps) {
                         aria-label={`${name()} confidence slider`}
                         value={String(eff())}
                         oninput={(e) => {
-                          importNote.set(null);
+                          clearImportFeedback();
                           props.onSetClassConf(id(), roundConf(Number((e.currentTarget as HTMLInputElement).value)));
                         }}
                       />
@@ -306,7 +333,7 @@ export default function PerClassThresholds(props: PerClassThresholdsProps) {
                         aria-label={`Reset ${name()} threshold`}
                         title={hasOv() ? `Reset to global (${formatConfThreshold(props.globalConf)})` : 'Using global confidence'}
                         onclick={() => {
-                          importNote.set(null);
+                          clearImportFeedback();
                           props.onClearClassConf(id());
                         }}
                       >
