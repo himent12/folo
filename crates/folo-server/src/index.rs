@@ -236,7 +236,7 @@ pub fn data_error(e: folo_data::DataError, path: &str) -> Error {
         DataError::Io { source, .. } if source.kind() == std::io::ErrorKind::NotFound => {
             let path = folo_data::paths::shown(path);
             Error::new(StatusCode::NOT_FOUND, "path_not_found", format!("'{path}' does not exist")).hint(
-                "pass the dataset root: the folder holding data.yaml, images/ + labels/, or annotations/",
+                "pass the dataset root: the folder holding data.yaml, images/ + labels/, annotations/, or Annotations/ + JPEGImages/",
             )
         }
         // The message already says what a dataset folder holds. A dataset one or two folders down (the folder above
@@ -332,12 +332,13 @@ fn looks_like_dataset(dir: &Path, budget: &mut usize) -> bool {
     // The names detection takes without reading the folder: a YAML, YOLO folders, a Roboflow COCO file.
     let named = ["data.yaml", "data.yml", "dataset.yaml", "dataset.yml"].map(|n| dir.join(n));
     let splits = ["train", "valid", "val", "test"];
-    if !charge(named.len() + 4 + 2 * splits.len()) {
+    if !charge(named.len() + 6 + 2 * splits.len()) {
         return false;
     }
     if named.iter().any(|p| p.is_file())
         || (dir.join("images").is_dir() && dir.join("labels").is_dir())
-        || (dir.join("Annotations").is_dir() && dir.join("JPEGImages").is_dir())
+        || ((dir.join("Annotations").is_dir() || dir.join("annotations").is_dir())
+            && (dir.join("JPEGImages").is_dir() || dir.join("jpegimages").is_dir()))
         || splits.iter().any(|s| dir.join(s).join("images").is_dir())
         || splits.iter().any(|s| dir.join(s).join("_annotations.coco.json").is_file())
     {

@@ -254,7 +254,15 @@ impl Confinement {
                 let sub_entries = std::fs::read_dir(&p).map_err(|e| read_err(&p, e))?;
                 for sub in sub_entries {
                     let sub = sub.map_err(|e| read_err(&p, e))?;
-                    self.policy.check_path_if_present(&sub.path()).map_err(&wrap)?;
+                    let sp = sub.path();
+                    self.policy.check_path_if_present(&sp).map_err(&wrap)?;
+                    let sub_name = sub.file_name().to_string_lossy().to_ascii_lowercase();
+                    if matches!(sub_name.as_str(), "main" | "annotations") && sp.is_dir() {
+                        for leaf in std::fs::read_dir(&sp).map_err(|e| read_err(&sp, e))? {
+                            let leaf = leaf.map_err(|e| read_err(&sp, e))?;
+                            self.policy.check_path_if_present(&leaf.path()).map_err(&wrap)?;
+                        }
+                    }
                 }
             }
         }

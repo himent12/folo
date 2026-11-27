@@ -216,7 +216,7 @@ pub(super) fn check_convert_output_outside(
         let message = if dir.starts_with(&src) {
             let rel = if dir == src { "is" } else { "is inside" };
             format!(
-                "output {out_shown} {rel} the input dataset folder {src_shown}: converting into the input would \
+                "output {out_shown} {rel} the input dataset folder {src_shown}: writing into the input would \
                  mix output files into it"
             )
         } else if src.starts_with(&dir) {
@@ -450,49 +450,60 @@ fn is_confirmed_coco_annotation(path: &Path, input: &Path, root: &Path) -> bool 
     name.starts_with("instances") || name == "_annotations.coco.json"
 }
 
-/// Whole COCO split annotation files that `folo-data` could not parse or skipped because of a broken symlink
-/// (which `is_file()` filters out during COCO discovery), returning `(path, message)` pairs.
-pub(super) fn unreadable_coco_splits(ds: &LoadedDataset, input: &Path) -> Vec<(PathBuf, String)> {
-    if ds.format != Format::Coco {
-        return Vec::new();
-    }
-    let mut bad: Vec<(PathBuf, String)> = ds
-        .report
-        .issues
-        .iter()
-        .filter(|i| {
-            i.kind == folo_data::IssueKind::BrokenLabel
-                && (i.message.starts_with("invalid JSON:")
-                    || (i.message == "no `images` array: not a COCO file"
-                        && is_confirmed_coco_annotation(&i.path, input, &ds.root)))
-        })
-        .map(|i| (i.path.clone(), i.message.clone()))
-        .collect();
-    // When converting a directory, also detect broken annotation symlinks (`annotations/instances_val.json`,
-    // `val/_annotations.coco.json`, etc.) that `folo-data`'s `is_file()` discovery silently skips.
-    if !input.is_file() {
-        for (p, msg) in check::coco_dangling_annotation_links(&ds.root) {
-            if is_confirmed_coco_annotation(&p, input, &ds.root) {
-                bad.push((p, msg));
+/// Whole COCO annotation files or Pascal VOC `ImageSets/Main/*.txt` split manifests that `folo-data` could not
+/// read or skipped because of a broken symlink, returning `(path, message)` pairs so `convert` and `split` never
+/// silently drop an entire split.
+pub(super) fn unreadable_split_manifests(ds: &LoadedDataset, input: &Path) -> Vec<(PathBuf, String)> {
+    match ds.format {
+        Format::Coco => {
+            let mut bad: Vec<(PathBuf, String)> = ds
+                .report
+                .issues
+                .iter()
+                .filter(|i| {
+                    i.kind == folo_data::IssueKind::BrokenLabel
+                        && (i.message.starts_with("invalid JSON:")
+                            || (i.message == "no `images` array: not a COCO file"
+                                && is_confirmed_coco_annotation(&i.path, input, &ds.root)))
+                })
+                .map(|i| (i.path.clone(), i.message.clone()))
+                .collect();
+            if !input.is_file() {
+                for (p, msg) in check::coco_dangling_annotation_links(&ds.root) {
+                    if is_confirmed_coco_annotation(&p, input, &ds.root) {
+                        bad.push((p, msg));
+                    }
+                }
             }
+            bad
         }
+        Format::Voc => ds
+            .report
+            .issues
+            .iter()
+            .filter(|i| {
+                i.kind == folo_data::IssueKind::Other
+                    && i.message.starts_with("cannot read ImageSets split file:")
+            })
+            .map(|i| (i.path.clone(), i.message.clone()))
+            .collect(),
+        _ => Vec::new(),
     }
-    bad
 }
 
 fn convert(args: ConvertArgs, out: Out) -> Result<(), CliError> {
     let to = target_format_of(args.to);
     let ds = open(&args.input, format_of(args.from))?;
-    let bad_splits = unreadable_coco_splits(&ds, &args.input);
+    let bad_splits = unreadable_split_manifests(&ds, &args.input);
     if !bad_splits.is_empty() {
         let (first_path, first_msg) = &bad_splits[0];
         let mut msg = format!("{}: {first_msg}", rel(first_path, &ds.root));
         if bad_splits.len() > 1 {
-            msg.push_str(&format!(" (+{} more unreadable annotation file(s))", bad_splits.len() - 1));
+            msg.push_str(&format!(" (+{} more unreadable split file(s))", bad_splits.len() - 1));
         }
         return Err(CliError::new(ExitCode::Runtime, "invalid_dataset", msg).hint(
             folo_api::json::cli_command(
-                "fix the corrupt annotation file; run `folo dataset check {dataset}` to inspect all issues",
+                "fix the corrupt annotation or split file; run `folo dataset check {dataset}` to inspect all issues",
                 &[("dataset", &args.input)],
             ),
         ));

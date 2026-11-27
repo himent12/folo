@@ -10,7 +10,7 @@ use crate::output::{CliError, ExitCode, Out};
 
 use super::{
     check_convert_output_outside, ensure_empty_output, format_name, format_of, open, output_data_error, rel,
-    splits_json, target_format_of, unreadable_coco_splits,
+    splits_json, target_format_of, unreadable_split_manifests,
 };
 
 fn invalid_split(message: impl Into<String>) -> CliError {
@@ -26,7 +26,14 @@ fn split_config(val: f64, test: f64, seed: u64) -> Result<SplitConfig, CliError>
     if !bounds::UNIT_INTERVAL.contains_f64(test) {
         return Err(invalid_split(format!("--test must be in 0..=1, got {test}")));
     }
-    let train = 1.0 - val - test;
+    let used = val + test;
+    let train = if !used.is_finite() {
+        f64::NAN
+    } else if (1.0 - used).abs() <= 1e-12 {
+        0.0
+    } else {
+        1.0 - used
+    };
     if !train.is_finite() || train < -1e-6 {
         return Err(CliError::new(
             ExitCode::Usage,
@@ -43,16 +50,16 @@ fn split_config(val: f64, test: f64, seed: u64) -> Result<SplitConfig, CliError>
 pub(super) fn split(args: SplitArgs, out: Out) -> Result<(), CliError> {
     let cfg = split_config(args.val, args.test, args.seed)?;
     let ds = open(&args.path, format_of(args.from))?;
-    let bad_splits = unreadable_coco_splits(&ds, &args.path);
+    let bad_splits = unreadable_split_manifests(&ds, &args.path);
     if !bad_splits.is_empty() {
         let (first_path, first_msg) = &bad_splits[0];
         let mut msg = format!("{}: {first_msg}", rel(first_path, &ds.root));
         if bad_splits.len() > 1 {
-            msg.push_str(&format!(" (+{} more unreadable annotation file(s))", bad_splits.len() - 1));
+            msg.push_str(&format!(" (+{} more unreadable split file(s))", bad_splits.len() - 1));
         }
         return Err(CliError::new(ExitCode::Runtime, "invalid_dataset", msg).hint(
             folo_api::json::cli_command(
-                "fix the corrupt annotation file; run `folo dataset check {dataset}` to inspect all issues",
+                "fix the corrupt annotation or split file; run `folo dataset check {dataset}` to inspect all issues",
                 &[("dataset", &args.path)],
             ),
         ));
@@ -114,6 +121,10 @@ mod tests {
 
         let all_val = split_config(1.0, 0.0, 0).unwrap();
         assert_eq!(all_val.train, 0.0);
+
+        // `1.0 - 0.7 - 0.3` produces `5.55e-17` in IEEE-754; train must be snapped to exact `0.0`.
+        let val_test_only = split_config(0.7, 0.3, 0).unwrap();
+        assert_eq!(val_test_only.train, 0.0);
 
         for (val, test) in [(-0.1, 0.0), (1.1, 0.0), (0.2, -0.1), (0.2, 1.1), (0.6, 0.5), (f64::NAN, 0.0)] {
             let err = split_config(val, test, 0).unwrap_err();

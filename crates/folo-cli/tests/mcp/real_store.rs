@@ -334,12 +334,14 @@ fn predict_sahi_tta_and_voc_leakage() {
             "dataset_id": ds_id,
             "image_id": image_id,
             "conf": 0.001,
+            "max_det": 1,
             "tile": 32,
             "tile_overlap": 0.25,
             "tile_full_image": true
         }),
     );
     assert_eq!(tiled["image"]["width"], 64);
+    assert!(tiled["boxes"].as_array().unwrap().len() <= 1, "top-level max_det must cap tiled boxes: {tiled}");
 
     let tta = checked(
         &mut c,

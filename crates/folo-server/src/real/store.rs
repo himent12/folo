@@ -516,6 +516,7 @@ impl Store for RealStore {
             PredictSource::Upload(_) => None,
         };
         let m = self.model(&input.model_id)?;
+        crate::store::check_predict_workload(&input.options, m.model.imgsz, None)?;
         let device = engine::resolve(&self.device)?;
         _gpu.on(device);
         // Throughput samples: only a warm predictor's calls with no run queued or training from before the decode
@@ -541,10 +542,22 @@ impl Store for RealStore {
             _ => unreachable!("dataset sources have a path"),
         };
         let decode_ms = t0.elapsed().as_secs_f64() * 1e3;
+        crate::store::check_predict_workload(
+            &input.options,
+            m.model.imgsz,
+            Some((decoded.width, decoded.height)),
+        )?;
+        let mut options = input.options;
+        // Enforce top-level `max_det` as a hard response cap across standard, tiled, and TTA predictions.
+        if let Some(tile) = &mut options.tile {
+            tile.max_det = tile.max_det.min(input.max_det as usize);
+        }
+        if let Some(tta) = &mut options.tta {
+            tta.max_det = Some(tta.max_det.map_or(input.max_det as usize, |n| n.min(input.max_det as usize)));
+        }
         let loaded = self.predictors.get(&m.path, device, self.precision)?;
         let mut guard = loaded.lock().unwrap();
-        // A model's first prediction includes warm-up.
-        let warm = std::mem::replace(&mut guard.warm, true);
+        let warm = guard.warm;
         let p = &mut guard.predictor;
         let cfg = PredictConfig {
             imgsz: p.model().imgsz(),
@@ -557,12 +570,20 @@ impl Store for RealStore {
             ..PredictConfig::default()
         };
         p.set_config(cfg).map_err(engine_error)?;
-        input.options.validate(p.model().imgsz()).map_err(engine_error)?;
-        let pred = p.predict_with_options(&decoded, &input.options).map_err(engine_error)?;
+        crate::store::check_predict_workload(
+            &options,
+            p.model().imgsz(),
+            Some((decoded.width, decoded.height)),
+        )?;
+        let mut pred = p.predict_with_options(&decoded, &options).map_err(engine_error)?;
+        // A model's first successful prediction includes warm-up; rejected requests never flip `warm`.
+        guard.warm = true;
+        pred.detections.truncate(input.max_det as usize);
+        let p = &guard.predictor;
         let mut timing = pred.timing.to_api();
         timing.preprocess_ms += decode_ms;
         timing.total_ms += decode_ms;
-        let single_pass = input.options.tile.is_none() && input.options.tta.is_none();
+        let single_pass = options.tile.is_none() && options.tta.is_none();
         if single_pass && warm && idle && !self.runs.busy() && self.runs.activity() == activity {
             let precision = match p.precision() {
                 folo_vision::Precision::F16 => InferPrecision::F16,

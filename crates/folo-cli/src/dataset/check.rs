@@ -254,7 +254,7 @@ fn check_lines(r: &CheckReport, fixes: bool, min_severity: SeverityArg, secs: f6
     let split_leakage = r.issues.iter().filter(|i| is_split_leakage(i)).count();
     if split_leakage > 0 {
         l.push(format!(
-            "{split_leakage} cross-split duplicate leakage warning(s) (identical image content across splits; deduplicate or re-split with `folo dataset split`)"
+            "{split_leakage} cross-split duplicate leakage warning(s) (identical image content across splits; remove duplicate copies to keep evaluation unbiased)"
         ));
     }
     if empty > 0 {

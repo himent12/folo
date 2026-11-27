@@ -203,10 +203,10 @@ pub enum OptimizerArg {
 #[derive(Debug, Args)]
 #[command(group(clap::ArgGroup::new("input").required(true).multiple(true).args(["data", "resume"])))]
 pub struct TrainArgs {
-    /// Dataset: a folder (YOLO or COCO) or a data.yaml.
+    /// Dataset: a folder (YOLO, COCO or Pascal VOC), data.yaml, COCO .json or VOC .xml.
     #[arg(long)]
     pub data: Option<String>,
-    /// Format of --data: auto (detect from the files), or yolo / coco for a folder that has both.
+    /// Format of --data: auto (detect from the files), or yolo / coco / voc for a folder that has multiple.
     #[arg(long, value_enum, default_value_t = FormatArg::Auto)]
     pub format: FormatArg,
     /// Architecture (folo-n, folo-s, folo-m, folo-l, folo-x), or .folo weights / a published name to fine-tune.
@@ -644,7 +644,6 @@ pub struct PredictArgs {
         long,
         value_name = "SCALES",
         value_delimiter = ',',
-        num_args = 1..,
         requires = "tta",
         conflicts_with_all = ["tile", "tile_overlap", "no_tile_full_image", "tile_batch", "tile_merge"]
     )]

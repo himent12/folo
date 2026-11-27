@@ -264,11 +264,61 @@ fn dataset_check_surfaces_duplicate_and_train_val_split_leakage() {
     );
     assert_eq!(lines.last().unwrap()["error"]["code"], "dataset_issues");
 
-    // Human output includes an explicit cross-split duplicate leakage summary pointing to `folo dataset split`.
+    // Human output includes an explicit cross-split duplicate leakage summary.
     let (code, stdout, _stderr) = folo_human(&["dataset", "check", s(&ds)]);
     assert_eq!(code, 1);
     assert!(stdout.contains("cross-split duplicate leakage"), "stdout:\n{stdout}");
-    assert!(stdout.contains("folo dataset split"), "stdout:\n{stdout}");
+    assert!(stdout.contains("remove duplicate copies"), "stdout:\n{stdout}");
+}
+
+#[test]
+fn dataset_split_val_plus_test_one_has_zero_train_and_voc_unreadable_split_fails() {
+    let dir = TestDir::new("cli-dataset-split-edge");
+    let src = dir.join("src");
+    let (code, _, stderr) =
+        folo(&["dataset", "synth", s(&src), "--images", "10", "--imgsz", "64", "--seed", "1", "--json"]);
+    assert_eq!(code, 0, "{stderr}");
+
+    // `--val 0.7 --test 0.3` sums to 1.0 in decimal (despite IEEE-754 remainder); train must stay 0.
+    let out_vt = dir.join("val_test_only");
+    let (code, vt, stderr) = folo_one(&[
+        "dataset",
+        "split",
+        s(&src),
+        "--out",
+        s(&out_vt),
+        "--val",
+        "0.7",
+        "--test",
+        "0.3",
+        "--to",
+        "coco",
+        "--seed",
+        "1",
+        "--json",
+    ]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(vt["splits"]["train"].as_u64(), Some(0), "{vt}");
+    assert_eq!(vt["splits"]["val"].as_u64(), Some(7), "{vt}");
+    assert_eq!(vt["splits"]["test"].as_u64(), Some(3), "{vt}");
+
+    // An unreadable VOC `ImageSets/Main/val.txt` (invalid UTF-8) fails both `convert` and `split` with
+    // `invalid_dataset` before writing output instead of silently dropping the entire val split.
+    let voc = dir.join("voc");
+    let (code, _, stderr) = folo_one(&["dataset", "convert", s(&src), s(&voc), "--to", "voc", "--json"]);
+    assert_eq!(code, 0, "{stderr}");
+    std::fs::write(voc.join("ImageSets/Main/val.txt"), [0xff, 0xfe, 0xfd]).unwrap();
+
+    let conv_out = dir.join("voc_conv_fail");
+    let (code, err, _) = folo_one(&["dataset", "convert", s(&voc), s(&conv_out), "--to", "yolo", "--json"]);
+    assert_eq!((code, err["error"]["code"].as_str()), (1, Some("invalid_dataset")), "{err}");
+    assert!(!conv_out.exists(), "failed convert must not create output dir");
+
+    let split_out = dir.join("voc_split_fail");
+    let (code, err, _) =
+        folo_one(&["dataset", "split", s(&voc), "--out", s(&split_out), "--val", "0.2", "--json"]);
+    assert_eq!((code, err["error"]["code"].as_str()), (1, Some("invalid_dataset")), "{err}");
+    assert!(!split_out.exists(), "failed split must not create output dir");
 }
 
 #[test]

@@ -643,6 +643,7 @@ fn predict_sahi_tile_and_tta_validation_and_execution() {
     assert_eq!(lines[0]["event"], "prediction", "{lines:?}");
     assert_eq!(lines.last().unwrap()["event"], "done", "{lines:?}");
 
+    // Also verify `--tta-scales` placed BEFORE positional `SOURCES` does not consume the image path.
     let (code, lines, stderr) = folo(&[
         "predict",
         "--json",
@@ -650,15 +651,15 @@ fn predict_sahi_tile_and_tta_validation_and_execution() {
         "cpu",
         "--model",
         s(&best),
-        s(&src_img),
         "--conf",
         "0.001",
         "--tta",
         "--tta-scales",
         "1.0,1.5",
         "--no-tta-hflip",
+        s(&src_img),
     ]);
-    assert_eq!(code, 0, "tta: {stderr}");
+    assert_eq!(code, 0, "tta before positional source: {stderr}");
     assert_eq!(lines[0]["event"], "prediction", "{lines:?}");
     assert_eq!(lines.last().unwrap()["event"], "done", "{lines:?}");
 }

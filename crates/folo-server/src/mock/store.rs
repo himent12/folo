@@ -591,10 +591,7 @@ impl Store for MockStore {
     fn predict(&self, input: PredictInput) -> Result<PredictResponse> {
         crate::store::check_predict_options(&input.options)?;
         let model = self.get_model(&input.model_id)?;
-        input
-            .options
-            .validate(model.imgsz)
-            .map_err(|e| Error::new(StatusCode::BAD_REQUEST, "invalid_config", e.to_string()))?;
+        crate::store::check_predict_workload(&input.options, model.imgsz, None)?;
         let (w, h, truth, seed) = match &input.source {
             PredictSource::Dataset { dataset_id, image_id } => {
                 let ds = self.dataset(dataset_id)?;
@@ -634,6 +631,7 @@ impl Store for MockStore {
                 (w, h, truth, seed)
             }
         };
+        crate::store::check_predict_workload(&input.options, model.imgsz, Some((w, h)))?;
         let seed = seed ^ fnv1a(model.id.as_bytes());
         let mut boxes: Vec<ScoredBox> =
             fake_detections(&truth, w, h, &model.classes, quality_of(&model), seed)

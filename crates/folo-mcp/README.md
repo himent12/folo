@@ -42,7 +42,7 @@ One `ToolDef` per tool in `TOOLS` (`src/tools/mod.rs`), dispatched by name in `s
 | `results.rs` | Size limits, one-line summaries and pages of a result |
 | `info.rs` | `folo_info` |
 | `datasets.rs` | `list_datasets`, `get_dataset` (error-bucket-first issue collection), `list_dataset_issues`, `list_dataset_images`, `register_dataset`, `create_synthetic_dataset`; all three paged list handlers validate paging upfront before store access |
-| `models.rs` | `list_models`, `val`, `predict`, `predict_batch`, `export` |
+| `models.rs`, `models_tests.rs` | `list_models`, `val`, `predict`, `predict_batch`, `export`, plus upfront validation and proxy option-forwarding tests |
 | `runs.rs` | `train` (and resume), `run_status`, `list_runs`, `stop_run`, `reorder_run`, `compare_runs` |
 | `cloud.rs` | `cloud_connections`, `cloud_offers`, `cloud_instances`, `cloud_terminate` |
 | `label.rs` | The ten labeling tools on `crate::label::Labels`: path handling, `--confine` of a job's images (and the refusals through a server), MCP hints, the `view_label_image` image content |
