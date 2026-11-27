@@ -261,6 +261,29 @@ fn run_uploaded_views_with_oom_fallback<T>(
     }
 }
 
+/// Execute one scale's views, using pre-uploaded GPU tensors `uploaded` when present. If the resident-upload
+/// path still hits GPU OOM even after chunking down to single views, drops `uploaded` to reclaim VRAM, calls
+/// `release_memory()`, and retries via per-chunk host-to-device uploads (`run_host`), keeping `uploaded` cleared
+/// for all remaining scales.
+fn run_scale_with_resident_fallback<T, U>(
+    uploaded: &mut Option<U>,
+    run_uploaded: impl FnOnce(&U) -> Result<T>,
+    mut release_memory: impl FnMut(),
+    run_host: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    if let Some(dev) = uploaded.as_ref() {
+        match run_uploaded(dev) {
+            Ok(out) => return Ok(out),
+            Err(e) if e.is_gpu_out_of_memory() => {
+                *uploaded = None;
+                release_memory();
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    run_host()
+}
+
 impl Predictor {
     fn run_tta_views(&self, views: &[&Image], rect: bool, imgsz: u32) -> Result<Vec<Prediction>> {
         run_views_with_oom_fallback(views, &mut |chunk| self.run_with_imgsz(chunk, rect, imgsz))
@@ -279,19 +302,25 @@ impl Predictor {
     }
 
     /// Upload `views` once to a GPU when multi-scale TTA will evaluate more than one inference size, returning
-    /// `Ok(None)` on CPU, single-scale TTA, or GPU OOM (so callers fall back cleanly to chunked per-scale uploads).
+    /// `(None, elapsed_ms)` on CPU, single-scale TTA, or GPU OOM (reclaiming cached GPU memory and preserving
+    /// the elapsed upload time so callers fall back cleanly to chunked per-scale uploads without losing timing).
     fn upload_tta_views_once(
         &self,
         views: &[&Image],
         num_scales: usize,
-    ) -> Result<Option<(Vec<Tensor>, f64)>> {
+    ) -> Result<(Option<Vec<Tensor>>, f64)> {
         if self.device().is_cpu() || num_scales <= 1 {
-            return Ok(None);
+            return Ok((None, 0.0));
         }
         let t_up = Instant::now();
         match upload_images_on_device(views, self.device()) {
-            Ok(dev_imgs) => Ok(Some((dev_imgs, ms(t_up)))),
-            Err(e) if e.is_gpu_out_of_memory() => Ok(None),
+            Ok(dev_imgs) => Ok((Some(dev_imgs), ms(t_up))),
+            Err(e) if e.is_gpu_out_of_memory() => {
+                if let Some(ctx) = folo_gpu::context_for(self.device()) {
+                    let _ = ctx.release_memory();
+                }
+                Ok((None, ms(t_up)))
+            }
             Err(e) => Err(e),
         }
     }
@@ -346,19 +375,22 @@ impl Predictor {
             }
         };
 
-        let uploaded = self.upload_tta_views_once(views, imgszs.len())?;
-        if let Some((_, up_ms)) = &uploaded {
-            pre_ms += *up_ms;
-        }
-        let dev_imgs = uploaded.as_ref().map(|(v, _)| v.as_slice());
+        let (mut uploaded, up_ms) = self.upload_tta_views_once(views, imgszs.len())?;
+        pre_ms += up_ms;
 
         let mut all_dets: Vec<Detection> = Vec::new();
         for &imgsz in &imgszs {
             let t_scale = Instant::now();
-            let mut preds = match dev_imgs {
-                Some(dev) => self.run_uploaded_tta_views(dev, views, self.config().rect, imgsz)?,
-                None => self.run_tta_views(views, self.config().rect, imgsz)?,
-            };
+            let mut preds = run_scale_with_resident_fallback(
+                &mut uploaded,
+                |dev| self.run_uploaded_tta_views(dev, views, self.config().rect, imgsz),
+                || {
+                    if let Some(ctx) = folo_gpu::context_for(self.device()) {
+                        let _ = ctx.release_memory();
+                    }
+                },
+                || self.run_tta_views(views, self.config().rect, imgsz),
+            )?;
             let scale_wall = ms(t_scale);
             let (mut b_pre, mut b_inf, mut b_post) = (0.0f64, 0.0f64, 0.0f64);
             for p in &preds {
@@ -452,21 +484,24 @@ impl Predictor {
         views.extend(imgs.iter());
         views.extend(flipped.iter());
 
-        let uploaded = self.upload_tta_views_once(&views, imgszs.len())?;
-        if let Some((_, up_ms)) = &uploaded {
-            pre_ms += *up_ms * inv_n;
-        }
-        let dev_imgs = uploaded.as_ref().map(|(v, _)| v.as_slice());
+        let (mut uploaded, up_ms) = self.upload_tta_views_once(&views, imgszs.len())?;
+        pre_ms += up_ms * inv_n;
 
         let mut per_img_dets: Vec<Vec<Detection>> = vec![Vec::new(); n];
         for &imgsz in &imgszs {
             // `flipped[i]` has the exact same dimensions as `imgs[i]`, so scanning `imgs` alone suffices.
             let rect = self.config().rect && one_canvas(imgs, imgsz);
             let t_scale = Instant::now();
-            let preds = match dev_imgs {
-                Some(dev) => self.run_uploaded_tta_views(dev, &views, rect, imgsz)?,
-                None => self.run_tta_views(&views, rect, imgsz)?,
-            };
+            let preds = run_scale_with_resident_fallback(
+                &mut uploaded,
+                |dev| self.run_uploaded_tta_views(dev, &views, rect, imgsz),
+                || {
+                    if let Some(ctx) = folo_gpu::context_for(self.device()) {
+                        let _ = ctx.release_memory();
+                    }
+                },
+                || self.run_tta_views(&views, rect, imgsz),
+            )?;
             let scale_wall = ms(t_scale);
             let (mut b_pre, mut b_inf, mut b_post) = (0.0f64, 0.0f64, 0.0f64);
             for p in &preds {
@@ -787,6 +822,65 @@ mod tests {
         })
         .unwrap();
         assert_eq!(out_up, vec![(0, 8), (1, 9), (2, 10), (3, 11), (4, 12), (5, 13)]);
+    }
+
+    #[test]
+    fn resident_fallback_evicts_uploaded_buffers_releases_memory_and_retries_host() {
+        use std::sync::Arc;
+
+        // 1. On GPU OOM during the uploaded path, resident tensors are dropped BEFORE `release_memory()` and
+        // `run_host()`, and `uploaded` remains `None` for subsequent scales.
+        let sentinel = Arc::new(());
+        let weak = Arc::downgrade(&sentinel);
+        let mut uploaded = Some(sentinel);
+        let mut released = 0usize;
+        let mut host_calls = 0usize;
+        let out = run_scale_with_resident_fallback(
+            &mut uploaded,
+            |_| Err(Error::Core(folo_core::Error::Backend { backend: "wgpu", msg: "Out of Memory".into() })),
+            || {
+                assert_eq!(weak.strong_count(), 0, "resident buffers must be dropped before release_memory");
+                released += 1;
+            },
+            || {
+                assert_eq!(weak.strong_count(), 0, "resident buffers must be dropped before host retry");
+                host_calls += 1;
+                Ok(42usize)
+            },
+        )
+        .unwrap();
+        assert_eq!(out, 42);
+        assert!(uploaded.is_none());
+        assert_eq!(released, 1);
+        assert_eq!(host_calls, 1);
+
+        // Next scale runs directly on the host fallback without attempting uploaded execution again.
+        let out2 = run_scale_with_resident_fallback(
+            &mut uploaded,
+            |_| unreachable!("uploaded is cleared"),
+            || released += 1,
+            || {
+                host_calls += 1;
+                Ok(99usize)
+            },
+        )
+        .unwrap();
+        assert_eq!(out2, 99);
+        assert_eq!(released, 1);
+        assert_eq!(host_calls, 2);
+
+        // 2. Non-OOM errors propagate without dropping uploaded buffers or retrying.
+        let mut uploaded_ok = Some(7u32);
+        let mut released_non_oom = 0usize;
+        let err = run_scale_with_resident_fallback::<usize, u32>(
+            &mut uploaded_ok,
+            |_| Err(Error::Config("bad shape".into())),
+            || released_non_oom += 1,
+            || unreachable!("non-OOM must not retry host path"),
+        );
+        assert!(err.is_err());
+        assert_eq!(uploaded_ok, Some(7));
+        assert_eq!(released_non_oom, 0);
     }
 
     #[test]

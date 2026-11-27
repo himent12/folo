@@ -379,6 +379,15 @@ impl Detector {
         }
     }
 
+    /// Cheap O(1) pre-check indicating whether CPU direct `u8` stem execution is configured on this detector.
+    #[inline]
+    pub(crate) fn has_int8_u8_stem(&self) -> bool {
+        match self {
+            Detector::V1(m) => m.has_int8_u8_stem(),
+            Detector::V2(m) => m.has_int8_u8_stem(),
+        }
+    }
+
     /// Active int8 plan when CPU direct `u8` stem inference applies (validating the weight stamp once).
     pub(crate) fn int8_u8_stem_plan(&self) -> Option<std::sync::Arc<quant::Int8Plan>> {
         match self {

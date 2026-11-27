@@ -365,8 +365,8 @@ impl Predictor {
         imgsz: u32,
         conf_override: Option<&ConfOverride>,
     ) -> Result<Vec<Prediction>> {
-        if let Some(plan) = self.model.int8_u8_stem_plan() {
-            return self.run_here_rgb0_u8_with_imgsz(&plan, imgs, rect, imgsz, conf_override);
+        if self.model.has_int8_u8_stem() {
+            return self.run_here_rgb0_u8_with_imgsz(imgs, rect, imgsz, conf_override);
         }
         let t0 = Instant::now();
         let batch = self.prepare_with_imgsz(imgs, rect, imgsz)?;
@@ -405,8 +405,15 @@ impl Predictor {
         let letterboxes: Vec<Letterbox> =
             imgs.iter().map(|i| Letterbox::compute(i.width, i.height, imgsz, imgsz, &opts)).collect();
         let (device, dtype) = (self.model.device(), self.model.dtype());
-        let Some(input) = letterbox_uploaded_on_device(dev_imgs, imgs, &letterboxes, device, dtype)? else {
-            return self.run_here_with_imgsz(imgs, rect, imgsz, None);
+        let input = match letterbox_uploaded_on_device(dev_imgs, imgs, &letterboxes, device, dtype)? {
+            Some(x) => x,
+            None => {
+                // On-device letterbox was unavailable for these shapes/device; letterbox on host and upload
+                // once instead of recursing into `run_here_with_imgsz` (which would re-upload raw images).
+                let x = letterbox_on_host_refs(imgs, &letterboxes)?;
+                let x = if device.is_cpu() { x } else { x.to_device(device)? };
+                x.to_dtype(dtype)?
+            }
         };
         self.wait_for_device()?;
         let pre = ms(t0);
@@ -457,10 +464,10 @@ impl Predictor {
 
     /// Direct `u8` RGB0 path for CPU int8 models (`folo-*` and `folo2-*`): letterboxes directly into packed
     /// `[R, G, B, 0]` `u32` words (zero `f32` canvas materialisation, bit-exact with `apply_planar_f32` +
-    /// `pack_f32_to_rgb0_u8`).
+    /// `pack_f32_to_rgb0_u8`). Validates the int8 plan immediately before execution so any concurrent weight
+    /// write that invalidates calibration during letterboxing falls back cleanly to float inference.
     fn run_here_rgb0_u8_with_imgsz(
         &self,
-        plan: &crate::model::quant::Int8Plan,
         imgs: &[&Image],
         rect: bool,
         s: u32,
@@ -480,6 +487,12 @@ impl Predictor {
         let letterboxes: Vec<Letterbox> =
             imgs.iter().map(|i| Letterbox::compute(i.width, i.height, s, s, &opts)).collect();
         let (rgb0, h, w) = letterbox_on_host_rgb0(imgs, &letterboxes)?;
+        let Some(plan) = self.model.int8_u8_stem_plan() else {
+            folo_core::cpu::q8::recycle(rgb0);
+            let batch = self.prepare_with_imgsz(imgs, rect, s)?;
+            self.wait_for_device()?;
+            return self.run_prepared(batch, ms(t0), conf_override);
+        };
         let pre = ms(t0);
         let nms = self.nms_config(conf_override);
         let b = imgs.len();
@@ -487,7 +500,7 @@ impl Predictor {
             Detector::V1(model) => {
                 if model.candidates_first_applies(Device::Cpu, &nms) {
                     let t1 = Instant::now();
-                    let cands = model.predict_candidates_rgb0_u8_with_plan(plan, &rgb0, b, h, w, &nms)?;
+                    let cands = model.predict_candidates_rgb0_u8_with_plan(&plan, &rgb0, b, h, w, &nms)?;
                     let inf = ms(t1);
                     let t2 = Instant::now();
                     let dets = cands.into_par_iter().map(|c| model.finish_candidates(&c, &nms)).collect();
@@ -496,7 +509,7 @@ impl Predictor {
                     let t1 = Instant::now();
                     let out = {
                         let _g = no_grad();
-                        model.forward_rgb0_u8_with_plan(plan, &rgb0, b, h, w)?
+                        model.forward_rgb0_u8_with_plan(&plan, &rgb0, b, h, w)?
                     };
                     let inf = ms(t1);
                     let t2 = Instant::now();
@@ -507,7 +520,7 @@ impl Predictor {
             Detector::V2(model) => {
                 if model.candidates_first_applies(Device::Cpu, &nms) {
                     let t1 = Instant::now();
-                    let cands = model.predict_candidates_rgb0_u8_with_plan(plan, &rgb0, b, h, w, &nms)?;
+                    let cands = model.predict_candidates_rgb0_u8_with_plan(&plan, &rgb0, b, h, w, &nms)?;
                     let inf = ms(t1);
                     let t2 = Instant::now();
                     let dets = cands.into_par_iter().map(|c| model.finish_candidates(&c, &nms)).collect();
@@ -516,7 +529,7 @@ impl Predictor {
                     let t1 = Instant::now();
                     let out = {
                         let _g = no_grad();
-                        model.forward_rgb0_u8_with_plan(plan, &rgb0, b, h, w)?
+                        model.forward_rgb0_u8_with_plan(&plan, &rgb0, b, h, w)?
                     };
                     let inf = ms(t1);
                     let t2 = Instant::now();

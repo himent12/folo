@@ -649,6 +649,19 @@ impl FoloModel {
         self.forward_impl(x, Some(trace), self.head_mode)
     }
 
+    /// Cheap O(1) pre-check indicating whether direct `u8` RGB0 stem execution is configured on this model
+    /// (verified immediately before execution by [`FoloModel::int8_u8_stem_plan`]).
+    #[inline]
+    pub(crate) fn has_int8_u8_stem(&self) -> bool {
+        self.device().is_cpu()
+            && !self.is_training()
+            && self.config.in_channels == 3
+            && self.dtype() == folo_core::DType::F32
+            && self.int8.as_ref().is_some_and(|p| {
+                !p.is_invalidated() && p.calibration().u8_stem && !p.calibration().is_f32("backbone.stem")
+            })
+    }
+
     /// Active int8 plan when CPU direct `u8` stem inference applies (validating the weight stamp once per call).
     pub(crate) fn int8_u8_stem_plan(&self) -> Option<Arc<quant::Int8Plan>> {
         (self.device().is_cpu() && !self.is_training() && self.config.in_channels == 3)

@@ -1,7 +1,7 @@
 //! Boundary grid metadata, fast FNV-1a hashing, and packed conv/stem/bias cache keys for [`super::exec`].
 
 use std::hash::{BuildHasher, Hash, Hasher};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock, Weak};
 
 use folo_core::Tensor;
 use folo_core::cpu::q8::{Grid, PIXEL_SCALE, QConv, QStem};
@@ -203,7 +203,8 @@ impl BoundaryGrids {
 }
 
 /// Everything a conv's packed weights are made from besides the weights' elements, kept with the packing so a
-/// hash collision cannot pass for a hit.
+/// hash collision cannot pass for a hit. Holds `Weak<BiasCache>` (not `Arc`) so `bias.storage.derived` remains
+/// the sole strong owner of `BiasCache` and an in-place bias write immediately drops its strong count to zero.
 pub(crate) struct Key {
     pub(crate) layout: (Vec<usize>, usize, Vec<usize>),
     pub(crate) geometry: [usize; 5],
@@ -211,7 +212,7 @@ pub(crate) struct Key {
     pub(crate) decouple: bool,
     pub(crate) part_refs: Vec<(Arc<[Grid]>, usize, usize)>,
     pub(crate) in_grids: Vec<(u32, u8)>,
-    pub(crate) bias_cache: Option<Arc<BiasCache>>,
+    pub(crate) bias_cache: Option<Weak<BiasCache>>,
     pub(crate) bias_bits: Vec<u32>,
 }
 
@@ -276,7 +277,7 @@ impl Key {
             }
         }
         match (&self.bias_cache, bias) {
-            (Some(a), Some(b)) if Arc::ptr_eq(a, b) => true,
+            (Some(a), Some(b)) if a.strong_count() > 0 && Weak::as_ptr(a) == Arc::as_ptr(b) => true,
             (None, None) => true,
             (_, Some(b)) => self.bias_bits.as_slice() == b.bits.as_ref(),
             (_, None) => self.bias_bits.len() == geometry[1] && self.bias_bits.iter().all(|&wb| wb == 0),
@@ -293,7 +294,7 @@ pub(crate) struct StemKey {
     pub(crate) layout: (Vec<usize>, usize, Vec<usize>),
     pub(crate) geometry: [usize; 4],
     pub(crate) silu: bool,
-    pub(crate) bias_cache: Option<Arc<BiasCache>>,
+    pub(crate) bias_cache: Option<Weak<BiasCache>>,
     pub(crate) bias_bits: Vec<u32>,
 }
 
@@ -316,7 +317,7 @@ impl StemKey {
             return false;
         }
         match (&self.bias_cache, bias) {
-            (Some(a), Some(b)) if Arc::ptr_eq(a, b) => true,
+            (Some(a), Some(b)) if a.strong_count() > 0 && Weak::as_ptr(a) == Arc::as_ptr(b) => true,
             (None, None) => true,
             (_, Some(b)) => self.bias_bits.as_slice() == b.bits.as_ref(),
             (_, None) => self.bias_bits.len() == geometry[0] && self.bias_bits.iter().all(|&wb| wb == 0),
@@ -329,13 +330,28 @@ pub(crate) struct PackedStem {
     pub(crate) stem: Arc<QStem>,
 }
 
+/// Liveness tokens tying a `ScratchPool` step-cache entry directly to `weight.storage.derived` and
+/// `bias.storage.derived`: `StorageCell::write()` clears `derived` strictly under its write lock, so an
+/// overlapping or subsequent write drops the strong count to zero even when `storage_version()` bumped early.
+pub(crate) struct ConvLiveness {
+    pub(crate) packed: Weak<Packed>,
+    pub(crate) bias: Option<Weak<BiasCache>>,
+}
+
+/// Liveness tokens for a cached [`QStem`] tied directly to `weight.storage.derived` and `bias.storage.derived`.
+pub(crate) struct StemLiveness {
+    pub(crate) packed: Weak<PackedStem>,
+    pub(crate) bias: Option<Weak<BiasCache>>,
+}
+
 /// Load or pack `conv`'s int8 weights for input `parts`, caching the result on `conv.conv.weight` via
-/// [`Tensor::derived_f32`]. Zero heap allocations and O(parts) FNV-1a hashing on cache hit.
+/// [`Tensor::derived_f32`]. Returns `(qconv, Some(liveness))` when `qconv` lives in `weight.storage.derived`,
+/// or `(qconv, None)` on the rare hash-collision fallback (which callers must not cache).
 pub(crate) fn load_qconv_view(
     conv: ConvView<'_>,
     parts: &[PartKeyRef<'_>],
     allow_decouple: bool,
-) -> Result<Arc<QConv>> {
+) -> Result<(Arc<QConv>, Option<ConvLiveness>)> {
     let cfg = conv.conv.config();
     let geometry = [cfg.in_channels, cfg.out_channels, cfg.kernel, cfg.stride, cfg.padding];
     let silu = conv.act == Activation::Silu;
@@ -388,7 +404,7 @@ pub(crate) fn load_qconv_view(
         decouple,
         part_refs: parts.iter().map(|a| (a.grids_arc.clone(), a.grid_offset, a.channels)).collect(),
         in_grids: parts.iter().flat_map(|a| a.grids().iter().map(|g| (g.scale.to_bits(), g.zero))).collect(),
-        bias_cache: bias_cache.clone(),
+        bias_cache: bias_cache.as_ref().map(Arc::downgrade),
         bias_bits: match &bias_cache {
             Some(b) => b.bits.to_vec(),
             None => vec![0u32; cfg.out_channels],
@@ -425,13 +441,16 @@ pub(crate) fn load_qconv_view(
     };
     let kept = conv.conv.weight.derived_f32(h.finish(), |w| Packed { key: make_key(), conv: pack(w) })?;
     if kept.key.matches(dims, offset, strides, geometry, silu, decouple, parts, bias_cache.as_ref()) {
-        return Ok(kept.conv.clone());
+        let liveness =
+            ConvLiveness { packed: Arc::downgrade(&kept), bias: bias_cache.as_ref().map(Arc::downgrade) };
+        return Ok((kept.conv.clone(), Some(liveness)));
     }
-    Ok(pack(&conv.conv.weight.to_vec::<f32>()?))
+    Ok((pack(&conv.conv.weight.to_vec::<f32>()?), None))
 }
 
 /// Load or pack the 3-channel stem's `u8` weights, cached on `conv.conv.weight` (zero heap allocations on hit).
-pub(crate) fn load_qstem(conv: &ConvBnAct) -> Result<Arc<QStem>> {
+/// Returns `(qstem, Some(liveness))` when cached in `weight.storage.derived`, or `(qstem, None)` on fallback.
+pub(crate) fn load_qstem(conv: &ConvBnAct) -> Result<(Arc<QStem>, Option<StemLiveness>)> {
     let cfg = conv.conv.config();
     let geometry = [cfg.out_channels, cfg.kernel, cfg.stride, cfg.padding];
     let silu = conv.act == Activation::Silu;
@@ -459,7 +478,7 @@ pub(crate) fn load_qstem(conv: &ConvBnAct) -> Result<Arc<QStem>> {
         layout: (dims.to_vec(), offset, strides.to_vec()),
         geometry,
         silu,
-        bias_cache: bias_cache.clone(),
+        bias_cache: bias_cache.as_ref().map(Arc::downgrade),
         bias_bits: match &bias_cache {
             Some(b) => b.bits.to_vec(),
             None => vec![0u32; cfg.out_channels],
@@ -476,7 +495,9 @@ pub(crate) fn load_qstem(conv: &ConvBnAct) -> Result<Arc<QStem>> {
     };
     let kept = conv.conv.weight.derived_f32(h.finish(), |w| PackedStem { key: make_key(), stem: pack(w) })?;
     if kept.key.matches(dims, offset, strides, geometry, silu, bias_cache.as_ref()) {
-        return Ok(kept.stem.clone());
+        let liveness =
+            StemLiveness { packed: Arc::downgrade(&kept), bias: bias_cache.as_ref().map(Arc::downgrade) };
+        return Ok((kept.stem.clone(), Some(liveness)));
     }
-    Ok(pack(&conv.conv.weight.to_vec::<f32>()?))
+    Ok((pack(&conv.conv.weight.to_vec::<f32>()?), None))
 }

@@ -157,9 +157,19 @@ impl Int8Plan {
         self.stats.lock().map(|g| *g).unwrap_or_default()
     }
 
-    /// Mark this plan stale after its model's weights were replaced with incompatible ones.
+    /// Whether this plan has been permanently invalidated.
+    #[inline]
+    pub(crate) fn is_invalidated(&self) -> bool {
+        self.invalidated.load(Ordering::Acquire)
+    }
+
+    /// Mark this plan stale after its model's weights were replaced with incompatible ones, immediately releasing
+    /// pooled scratch buffers and cached packed weight handles.
     pub(crate) fn invalidate(&self) {
         self.invalidated.store(true, Ordering::Release);
+        if let Ok(mut v) = self.scratch.lock() {
+            v.clear();
+        }
     }
 
     /// Whether this plan is still valid for `module`'s current weights. Fast-paths in O(tensors) atomic reads
@@ -273,7 +283,8 @@ impl Int8Plan {
             total.allocs += d_allocs;
         }
         pool.trim_for_checkin();
-        if let Ok(mut v) = self.scratch.lock()
+        if !self.is_invalidated()
+            && let Ok(mut v) = self.scratch.lock()
             && v.len() < MAX_CACHED_POOLS
         {
             v.push(pool);

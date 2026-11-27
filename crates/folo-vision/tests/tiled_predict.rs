@@ -273,35 +273,41 @@ fn batched_sahi_uniform_mixed_timing_and_gpu_parity() {
         }
     }
 
-    // 2. Mixed batch combining single-tile + wide + tall + square images under both `rect=true` and `rect=false`.
+    // 2. Mixed batch combining single-tile + wide + tall + square + narrow-strip images (which produce distinct
+    // rectangular tile canvases 80x35 and 35x80 alongside 80x80 tiles) under both `rect=true`/`false` and
+    // `full_image=true`/`false`.
     let mixed = vec![
         patterned_image(64, 48),
         patterned_image(180, 96),
         patterned_image(96, 180),
         patterned_image(160, 160),
+        patterned_image(180, 35),
+        patterned_image(35, 180),
     ];
-    let mixed_cfg = TileConfig {
-        tile_width: 80,
-        tile_height: 80,
-        overlap_x: 0.2,
-        overlap_y: 0.2,
-        full_image: true,
-        tile_batch: 4,
-        max_det: 12,
-        ..Default::default()
-    };
-    for pred in [&pred_rect, &pred_sq] {
-        let batch = pred.predict_batch_tiled(&mixed, &mixed_cfg).unwrap();
-        for (got, im) in batch.iter().zip(&mixed) {
-            let single = pred.predict_tiled(im, &mixed_cfg).unwrap();
-            assert_eq!(
-                got.detections,
-                single.detections,
-                "mixed rect={} {}x{}",
-                pred.config().rect,
-                im.width,
-                im.height
-            );
+    for full_image in [true, false] {
+        let mixed_cfg = TileConfig {
+            tile_width: 80,
+            tile_height: 80,
+            overlap_x: 0.2,
+            overlap_y: 0.2,
+            full_image,
+            tile_batch: 4,
+            max_det: 12,
+            ..Default::default()
+        };
+        for pred in [&pred_rect, &pred_sq] {
+            let batch = pred.predict_batch_tiled(&mixed, &mixed_cfg).unwrap();
+            for (got, im) in batch.iter().zip(&mixed) {
+                let single = pred.predict_tiled(im, &mixed_cfg).unwrap();
+                assert_eq!(
+                    got.detections,
+                    single.detections,
+                    "mixed full_image={full_image} rect={} {}x{}",
+                    pred.config().rect,
+                    im.width,
+                    im.height
+                );
+            }
         }
     }
 

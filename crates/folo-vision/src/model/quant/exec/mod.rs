@@ -26,7 +26,7 @@ use rayon::prelude::*;
 
 use self::act::{QActF32, QActRepr, QActU8};
 use self::plan::GridOwner;
-use super::cache::{PartKeyRef, load_qconv_view, load_qstem};
+use super::cache::{ConvLiveness, PartKeyRef, StemLiveness, load_qconv_view, load_qstem};
 use super::calib::conv_f32;
 use super::pool::{ScratchPool, SlotHandle};
 use super::walk::{self, Exec};
@@ -64,7 +64,11 @@ impl<'a> Int8<'a> {
         Ok((bg, is_f32))
     }
     /// `conv`'s packed weights for inputs `parts` (cached on `conv.conv.weight`).
-    fn qconv_view(&self, conv: ConvView<'_>, parts: &[&QActU8<'a>]) -> Result<Arc<QConv>> {
+    fn qconv_view(
+        &self,
+        conv: ConvView<'_>,
+        parts: &[&QActU8<'a>],
+    ) -> Result<(Arc<QConv>, Option<ConvLiveness>)> {
         fn to_ref<'b, 'a>(a: &'b QActU8<'a>) -> PartKeyRef<'b> {
             PartKeyRef {
                 grids_arc: &a.bg.as_ref().grids,
@@ -90,11 +94,11 @@ impl<'a> Int8<'a> {
 
     #[cfg(test)]
     fn qconv(&self, conv: &ConvBnAct, parts: &[&QActU8<'a>]) -> Result<Arc<QConv>> {
-        self.qconv_view(ConvView::from_cba(conv), parts)
+        Ok(self.qconv_view(ConvView::from_cba(conv), parts)?.0)
     }
 
     /// The stem's packed `u8` weights (cached on `conv.conv.weight`).
-    pub(super) fn qstem(&self, conv: &ConvBnAct) -> Result<Arc<QStem>> {
+    fn qstem(&self, conv: &ConvBnAct) -> Result<(Arc<QStem>, Option<StemLiveness>)> {
         load_qstem(conv)
     }
 
@@ -235,26 +239,34 @@ impl<'a> Int8<'a> {
         let allow_decouple = self.plan.cal.version >= VERSION_V2;
         let step = self.conv_step.get();
         self.conv_step.set(step + 1);
-        let ensure_cached = |pkeys: &[(&Arc<[Grid]>, usize, usize)]| -> Result<()> {
-            if !self.pool.borrow().conv_hit(step, conv, pkeys, allow_decouple) {
-                let qc = self.qconv_view(conv, parts)?;
-                self.pool.borrow_mut().store_conv(step, conv, pkeys, allow_decouple, qc);
+        let ensure_cached = |pkeys: &[(&Arc<[Grid]>, usize, usize)]| -> Result<Option<Arc<QConv>>> {
+            if self.pool.borrow().conv_hit(step, conv, pkeys, allow_decouple) {
+                return Ok(None);
             }
-            Ok(())
+            let (qc, liveness) = self.qconv_view(conv, parts)?;
+            if let Some(live) = liveness {
+                self.pool.borrow_mut().store_conv(step, conv, pkeys, allow_decouple, live, qc);
+                Ok(None)
+            } else {
+                Ok(Some(qc))
+            }
         };
-        if parts.len() <= 8 {
+        let uncached = if parts.len() <= 8 {
             let p0 = (&parts[0].bg.as_ref().grids, parts[0].grid_offset, parts[0].dims[1]);
             let mut pk = [p0; 8];
             for (i, a) in parts.iter().enumerate().skip(1) {
                 pk[i] = (&a.bg.as_ref().grids, a.grid_offset, a.dims[1]);
             }
-            ensure_cached(&pk[..parts.len()])?;
+            ensure_cached(&pk[..parts.len()])?
         } else {
             let pk: Vec<_> = parts.iter().map(|a| (&a.bg.as_ref().grids, a.grid_offset, a.dims[1])).collect();
-            ensure_cached(&pk)?;
-        }
+            ensure_cached(&pk)?
+        };
         let pool = self.pool.borrow();
-        let qc = pool.conv_at(step);
+        let qc: &QConv = match &uncached {
+            Some(arc) => arc,
+            None => pool.conv_at(step),
+        };
         let (oh, ow) = qc.out_hw(h, w);
         let res = res.map(|r| (r.view(&pool), r.grids()));
         if parts.len() <= 8 {
@@ -358,19 +370,30 @@ impl<'a> Exec for Int8<'a> {
             && !is_f32
             && let Some((oh, ow)) = stem_int8_able(conv, [n, c, h, w])
         {
-            if !self.pool.borrow().stem_hit(conv) {
-                let qs = self.qstem(conv)?;
-                self.pool.borrow_mut().store_stem(conv, qs);
-            }
+            let uncached_stem = if self.pool.borrow().stem_hit(conv) {
+                None
+            } else {
+                let (qs, liveness) = self.qstem(conv)?;
+                if let Some(live) = liveness {
+                    self.pool.borrow_mut().store_stem(conv, live, qs);
+                    None
+                } else {
+                    Some(qs)
+                }
+            };
             let mut out = self.pool.borrow_mut().take_buf(n, o, oh * ow);
             if let Some((rgb0, _)) = self.rgb0_input {
                 let pool = self.pool.borrow();
+                let qs: &QStem = match &uncached_stem {
+                    Some(arc) => arc,
+                    None => pool.stem(),
+                };
                 q8::stem_u8(
                     rgb0,
                     n,
                     h,
                     w,
-                    pool.stem(),
+                    qs,
                     QOut::U8PerChannel { data: &mut out, grids: &bg.as_ref().grids },
                 );
             } else {
@@ -384,12 +407,16 @@ impl<'a> Exec for Int8<'a> {
                 }
                 {
                     let pool = self.pool.borrow();
+                    let qs: &QStem = match &uncached_stem {
+                        Some(arc) => arc,
+                        None => pool.stem(),
+                    };
                     q8::stem_u8(
                         &rgb0,
                         n,
                         h,
                         w,
-                        pool.stem(),
+                        qs,
                         QOut::U8PerChannel { data: &mut out, grids: &bg.as_ref().grids },
                     );
                 }
@@ -779,115 +806,4 @@ pub fn features_rgb0_u8(
 }
 
 #[cfg(test)]
-mod tests {
-    use std::collections::BTreeMap;
-
-    use super::*;
-    use crate::model::blocks::Init;
-    use crate::model::quant::cache::BoundaryGrids;
-    use crate::model::quant::{Calibration, Method};
-    use folo_core::rng::Rng;
-
-    /// Weight and bias views sharing the same underlying storage `RwLock` must never deadlock during `qconv` or
-    /// `qstem` packing (cache miss) or lookup (cache hit).
-    #[test]
-    fn aliased_weight_and_bias_storage_does_not_deadlock() {
-        let mut rng = Rng::seed(99);
-        let cal = Calibration {
-            version: VERSION_V2,
-            method: Method::MinMax,
-            images: 1,
-            ranges: BTreeMap::new(),
-            channel_ranges: BTreeMap::new(),
-            u8_stem: true,
-            f32_convs: Vec::new(),
-            weights: None,
-        };
-        let plan = Int8Plan::new(cal);
-        let pool = Rc::new(RefCell::new(ScratchPool::default()));
-        let exec = Int8 {
-            plan: &plan,
-            rgb0_input: None,
-            pool: Rc::clone(&pool),
-            conv_step: Cell::new(0),
-            boundary_step: Cell::new(0),
-        };
-
-        // Aliased conv (`bias` is a view into `weight`'s own storage).
-        let mut conv = Init::new(&mut rng).conv(8, 8, 3, 1);
-        conv.fuse_().unwrap();
-        conv.conv.bias = Some(conv.conv.weight.reshape([8 * 8 * 9]).unwrap().narrow(0, 0, 8).unwrap());
-        let g = Grid::from_range(-1.0, 1.0);
-        let bg = Arc::new(BoundaryGrids::new(vec![g; 8]));
-        let buf = pool.borrow_mut().take_buf(1, 8, 16);
-        let act = QActU8::new(&pool, buf, [1, 8, 4, 4], GridOwner::Owned(bg));
-        let first = exec.qconv(&conv, &[&act]).unwrap();
-        let second = exec.qconv(&conv, &[&act]).unwrap();
-        assert!(Arc::ptr_eq(&first, &second), "second qconv call must hit cache");
-
-        // Aliased stem (`bias` is a view into `weight`'s own storage).
-        let mut stem = Init::new(&mut rng).conv(3, 16, 3, 2);
-        stem.fuse_().unwrap();
-        stem.conv.bias = Some(stem.conv.weight.reshape([16 * 3 * 9]).unwrap().narrow(0, 0, 16).unwrap());
-        let s1 = exec.qstem(&stem).unwrap();
-        let s2 = exec.qstem(&stem).unwrap();
-        assert!(Arc::ptr_eq(&s1, &s2), "second qstem call must hit cache");
-    }
-
-    /// Per-step `ScratchPool` conv and stem caches must invalidate immediately when a weight or bias tensor is
-    /// mutated in place (`storage_version` advances), never returning stale packed outputs.
-    #[test]
-    fn scratch_pool_step_cache_invalidates_on_in_place_weight_mutation() {
-        let mut rng = Rng::seed(123);
-        let cal = Calibration {
-            version: VERSION_V2,
-            method: Method::MinMax,
-            images: 1,
-            ranges: BTreeMap::new(),
-            channel_ranges: BTreeMap::new(),
-            u8_stem: true,
-            f32_convs: Vec::new(),
-            weights: None,
-        };
-        let plan = Int8Plan::new(cal);
-        let pool = Rc::new(RefCell::new(ScratchPool::default()));
-        let mut conv = Init::new(&mut rng).conv(8, 8, 1, 1);
-        conv.fuse_().unwrap();
-        let g = Grid::from_range(-1.0, 1.0);
-        let bg = Arc::new(BoundaryGrids::new(vec![g; 8]));
-
-        let run_once = || -> Vec<f32> {
-            let exec = Int8 {
-                plan: &plan,
-                rgb0_input: None,
-                pool: Rc::clone(&pool),
-                conv_step: Cell::new(0),
-                boundary_step: Cell::new(0),
-            };
-            let x = Tensor::full([1, 8, 4, 4], 0.5);
-            let act =
-                QActU8::from_f32(&pool, &x, GridOwner::Owned(Arc::clone(&bg)), 0, bg.hash, bg.max_scale)
-                    .unwrap();
-            let mut out = vec![0.0f32; 8 * 16];
-            exec.run_view("c", ConvView::from_cba(&conv), &[&act], None, QOut::F32 { data: &mut out })
-                .unwrap();
-            out
-        };
-
-        let y1 = run_once();
-        let y2 = run_once(); // hits ScratchPool step cache
-        assert_eq!(y1, y2);
-
-        // Mutate weight in place: storage_version bumps, so the next forward must re-pack.
-        conv.conv.weight.copy_from(&Tensor::full([8, 8, 1, 1], 0.0)).unwrap();
-        let y3 = run_once();
-        assert_ne!(y1, y3, "in-place weight mutation must invalidate per-step QConv cache");
-
-        // Mutate bias in place: storage_version bumps again.
-        if let Some(bias) = &conv.conv.bias {
-            bias.copy_from(&Tensor::full([8], 2.0)).unwrap();
-            let y4 = run_once();
-            assert_ne!(y3, y4, "in-place bias mutation must invalidate per-step QConv cache");
-        }
-    }
-}
+mod tests;

@@ -15,6 +15,7 @@ use folo_core::cpu::q8::{self, Grid, QConv, QStem};
 use folo_nn::{Activation, ConvBnAct};
 
 use super::ConvView;
+use super::cache::{ConvLiveness, StemLiveness};
 
 /// Maximum number of free `Vec<u32>` buffers retained inside one [`ScratchPool`] across calls.
 const MAX_FREE_BUFS: usize = 20;
@@ -40,17 +41,19 @@ pub struct ScratchStats {
 
 /// Cached packed [`QConv`] for one deterministic walk step inside a [`ScratchPool`].
 ///
-/// Keyed by `(weight_id, weight_ver, bias_id_ver, geometry, silu, allow_decouple, part_refs)` so steady-state
-/// forwards hit in O(parts) atomic version loads with zero mutex locks, zero `BiasCache::load` / `derived_f32`
-/// lookups, and zero `Arc` refcount traffic.
+/// Liveness is tied directly to `weight.storage.derived` and `bias.storage.derived` via `Weak` tokens
+/// (`ConvLiveness`) plus `TensorId`/geometry/part-grid checks. Because `StorageCell::write()` clears `derived`
+/// strictly under its write lock and `derived` is the sole strong owner of `Packed` / `BiasCache`, any
+/// overlapping or subsequent write drops `strong_count()` to zero immediately (immune to pre-lock version races)
+/// while steady-state hits stay lock-free and avoid `Arc` refcount traffic.
 pub(crate) struct ConvCacheEntry {
     weight_id: TensorId,
-    weight_ver: u64,
-    bias_id_ver: Option<(TensorId, u64)>,
+    bias_id: Option<TensorId>,
     geometry: [usize; 5],
     silu: bool,
     allow_decouple: bool,
     part_refs: Vec<(Arc<[Grid]>, usize, usize)>,
+    liveness: ConvLiveness,
     conv: Arc<QConv>,
 }
 
@@ -66,14 +69,15 @@ impl ConvCacheEntry {
         let geometry = [cfg.in_channels, cfg.out_channels, cfg.kernel, cfg.stride, cfg.padding];
         let silu = conv.act == Activation::Silu;
         let w = &conv.conv.weight;
-        let b_key = conv.conv.bias.as_ref().map(|b| (b.id(), b.storage_version()));
+        let b_id = conv.conv.bias.as_ref().map(|b| b.id());
         if self.weight_id != w.id()
-            || self.weight_ver != w.storage_version()
-            || self.bias_id_ver != b_key
+            || self.bias_id != b_id
             || self.geometry != geometry
             || self.silu != silu
             || self.allow_decouple != allow_decouple
             || self.part_refs.len() != parts.len()
+            || self.liveness.packed.strong_count() == 0
+            || self.liveness.bias.as_ref().is_some_and(|bw| bw.strong_count() == 0)
         {
             return false;
         }
@@ -87,17 +91,18 @@ impl ConvCacheEntry {
         conv: ConvView<'_>,
         parts: &[(&Arc<[Grid]>, usize, usize)],
         allow_decouple: bool,
+        liveness: ConvLiveness,
         qconv: Arc<QConv>,
     ) -> Self {
         let cfg = conv.conv.config();
         ConvCacheEntry {
             weight_id: conv.conv.weight.id(),
-            weight_ver: conv.conv.weight.storage_version(),
-            bias_id_ver: conv.conv.bias.as_ref().map(|b| (b.id(), b.storage_version())),
+            bias_id: conv.conv.bias.as_ref().map(|b| b.id()),
             geometry: [cfg.in_channels, cfg.out_channels, cfg.kernel, cfg.stride, cfg.padding],
             silu: conv.act == Activation::Silu,
             allow_decouple,
             part_refs: parts.iter().map(|&(a, off, ch)| (Arc::clone(a), off, ch)).collect(),
+            liveness,
             conv: qconv,
         }
     }
@@ -106,10 +111,10 @@ impl ConvCacheEntry {
 /// Cached packed [`QStem`] for the direct `u8` stem inside a [`ScratchPool`].
 pub(crate) struct StemCacheEntry {
     weight_id: TensorId,
-    weight_ver: u64,
-    bias_id_ver: Option<(TensorId, u64)>,
+    bias_id: Option<TensorId>,
     geometry: [usize; 4],
     silu: bool,
+    liveness: StemLiveness,
     stem: Arc<QStem>,
 }
 
@@ -120,22 +125,23 @@ impl StemCacheEntry {
         let geometry = [cfg.out_channels, cfg.kernel, cfg.stride, cfg.padding];
         let silu = conv.act == Activation::Silu;
         let w = &conv.conv.weight;
-        let b_key = conv.conv.bias.as_ref().map(|b| (b.id(), b.storage_version()));
+        let b_id = conv.conv.bias.as_ref().map(|b| b.id());
         self.weight_id == w.id()
-            && self.weight_ver == w.storage_version()
-            && self.bias_id_ver == b_key
+            && self.bias_id == b_id
             && self.geometry == geometry
             && self.silu == silu
+            && self.liveness.packed.strong_count() > 0
+            && self.liveness.bias.as_ref().is_none_or(|bw| bw.strong_count() > 0)
     }
 
-    fn new(conv: &ConvBnAct, stem: Arc<QStem>) -> Self {
+    fn new(conv: &ConvBnAct, liveness: StemLiveness, stem: Arc<QStem>) -> Self {
         let cfg = conv.conv.config();
         StemCacheEntry {
             weight_id: conv.conv.weight.id(),
-            weight_ver: conv.conv.weight.storage_version(),
-            bias_id_ver: conv.conv.bias.as_ref().map(|b| (b.id(), b.storage_version())),
+            bias_id: conv.conv.bias.as_ref().map(|b| b.id()),
             geometry: [cfg.out_channels, cfg.kernel, cfg.stride, cfg.padding],
             silu: conv.act == Activation::Silu,
+            liveness,
             stem,
         }
     }
@@ -155,7 +161,7 @@ pub(crate) struct ScratchPool {
 }
 
 impl ScratchPool {
-    /// Whether `conv_cache[step]` already holds the exact packed [`QConv`] for `(conv, parts, allow_decouple)`.
+    /// Whether `conv_cache[step]` already holds the exact live packed [`QConv`] for `(conv, parts, allow_decouple)`.
     #[inline]
     pub(crate) fn conv_hit(
         &self,
@@ -170,19 +176,20 @@ impl ScratchPool {
             .is_some_and(|e| e.matches(conv, parts, allow_decouple))
     }
 
-    /// Store packed `qconv` at `conv_cache[step]`.
+    /// Store packed `qconv` (with its `derived` liveness token) at `conv_cache[step]`.
     pub(crate) fn store_conv(
         &mut self,
         step: usize,
         conv: ConvView<'_>,
         parts: &[(&Arc<[Grid]>, usize, usize)],
         allow_decouple: bool,
+        liveness: ConvLiveness,
         qconv: Arc<QConv>,
     ) {
         if self.conv_cache.len() <= step {
             self.conv_cache.resize_with(step + 1, || None);
         }
-        self.conv_cache[step] = Some(ConvCacheEntry::new(conv, parts, allow_decouple, qconv));
+        self.conv_cache[step] = Some(ConvCacheEntry::new(conv, parts, allow_decouple, liveness, qconv));
     }
 
     /// Borrow the cached [`QConv`] at `step` (caller verified hit or just stored it).
@@ -191,15 +198,15 @@ impl ScratchPool {
         &self.conv_cache[step].as_ref().expect("conv_cache populated").conv
     }
 
-    /// Whether `stem_cache` already holds the exact packed [`QStem`] for `conv`.
+    /// Whether `stem_cache` already holds the exact live packed [`QStem`] for `conv`.
     #[inline]
     pub(crate) fn stem_hit(&self, conv: &ConvBnAct) -> bool {
         self.stem_cache.as_ref().is_some_and(|e| e.matches(conv))
     }
 
-    /// Store packed `stem` in `stem_cache`.
-    pub(crate) fn store_stem(&mut self, conv: &ConvBnAct, stem: Arc<QStem>) {
-        self.stem_cache = Some(StemCacheEntry::new(conv, stem));
+    /// Store packed `stem` (with its `derived` liveness token) in `stem_cache`.
+    pub(crate) fn store_stem(&mut self, conv: &ConvBnAct, liveness: StemLiveness, stem: Arc<QStem>) {
+        self.stem_cache = Some(StemCacheEntry::new(conv, liveness, stem));
     }
 
     /// Borrow the cached [`QStem`] (caller verified hit or just stored it).
