@@ -127,10 +127,12 @@ function mount(host: HTMLElement): HTMLDivElement {
     tip.className = 'folo-tooltip';
     tip.setAttribute('role', 'tooltip');
     tip.id = 'folo-tooltip';
+    tip.hidden = true;
     if (popovers()) tip.popover = 'manual';
     tip.addEventListener('pointerenter', () => clearTimeout(hideTimer));
     tip.addEventListener('pointerleave', leave);
   }
+  tip.hidden = false;
   // Moving an open popover hides it; it is shown again below.
   if (tip.parentElement !== host) host.appendChild(tip);
   if (popovers() && !tip.matches(':popover-open')) tip.showPopover();
@@ -234,6 +236,8 @@ export function tooltip(node: HTMLElement, opts: TooltipOptions) {
         delete tip.dataset.show;
         lastHide = Date.now();
         if (popovers() && tip.matches(':popover-open')) tip.hidePopover();
+        tip.hidden = true;
+        tip.textContent = '';
       }
       document.removeEventListener('keydown', onKey);
       window.removeEventListener('scroll', onScroll, true);

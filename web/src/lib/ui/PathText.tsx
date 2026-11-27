@@ -26,12 +26,36 @@ export function splitPath(path: string): { head: string; tail: string } {
  * own (a mono one sits in a full cell and reads as "D:/fo… /data").
  */
 function cutWhenNarrow(node: HTMLElement) {
-  const ro = new ResizeObserver(() => {
+  let raf = 0;
+  let destroyed = false;
+  const update = () => {
     const head = node.querySelector<HTMLElement>('.head');
     node.classList.toggle('cut', !!head && head.scrollWidth > head.clientWidth + 1);
-  });
-  ro.observe(node);
-  return { destroy: () => ro.disconnect() };
+  };
+  // Defer ResizeObserver DOM writes to the next animation frame so toggling `.cut` (which reveals `.ell`)
+  // never triggers Chromium's "ResizeObserver loop completed with undelivered notifications." error.
+  const schedule = () => {
+    if (raf || destroyed) return;
+    if (typeof requestAnimationFrame === 'undefined') {
+      update();
+      return;
+    }
+    raf = requestAnimationFrame(() => {
+      raf = 0;
+      if (!destroyed && node.isConnected) update();
+    });
+  };
+  update();
+  const ro = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(schedule);
+  ro?.observe(node);
+  return {
+    destroy() {
+      destroyed = true;
+      if (raf && typeof cancelAnimationFrame !== 'undefined') cancelAnimationFrame(raf);
+      raf = 0;
+      ro?.disconnect();
+    },
+  };
 }
 
 export default function PathText(props: PathTextProps) {

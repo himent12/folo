@@ -217,4 +217,76 @@ describe('TileGrid scroll scheduling and tabindex stability', () => {
       tb.remove();
     }
   });
+
+  it('defers ResizeObserver width updates via coalesced rAF, skips height-only notifications, and cleans up on unmount', async () => {
+    const roCallbacks: ResizeObserverCallback[] = [];
+    const disconnect = vi.fn();
+    class FakeResizeObserver {
+      constructor(cb: ResizeObserverCallback) {
+        roCallbacks.push(cb);
+      }
+      observe() {}
+      unobserve() {}
+      disconnect = disconnect;
+    }
+    const origRO = globalThis.ResizeObserver;
+    globalThis.ResizeObserver = FakeResizeObserver as unknown as typeof ResizeObserver;
+
+    let gridWidth = 800;
+    vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockImplementation(function (this: HTMLElement) {
+      return this.classList.contains('grid') ? gridWidth : 0;
+    });
+    const rafSpy = vi.spyOn(window, 'requestAnimationFrame');
+    const cafSpy = vi.spyOn(window, 'cancelAnimationFrame');
+
+    const { container, unmount } = render(() => (
+      <TileGrid
+        total={16}
+        density="m"
+        aspect={4 / 3}
+        label={(i) => `tile ${i}`}
+        onopen={() => {}}
+        toolbar=".toolbar"
+        tile={(i) => <span>{i()}</span>}
+      />
+    ));
+    try {
+      flush();
+      const grid = container.querySelector('.grid') as HTMLElement;
+      const initialHeight = grid.style.height;
+      const initialCols = grid.getAttribute('aria-colcount');
+      expect(initialCols).toBe('4');
+      expect(roCallbacks.length).toBe(1);
+
+      // Height-only ResizeObserver notification (clientWidth unchanged) must not schedule a frame.
+      rafSpy.mockClear();
+      roCallbacks[0]!([], {} as ResizeObserver);
+      expect(rafSpy).not.toHaveBeenCalled();
+
+      // Width shrink (e.g. vertical scrollbar appearing or viewport narrowing): must NOT mutate `.grid` height
+      // synchronously inside the ResizeObserver callback (which triggers Chromium's ResizeObserver loop error).
+      gridWidth = 360;
+      roCallbacks[0]!([], {} as ResizeObserver);
+      roCallbacks[0]!([], {} as ResizeObserver);
+      flush();
+      expect(rafSpy).toHaveBeenCalledTimes(1);
+      expect(grid.style.height).toBe(initialHeight);
+      expect(grid.getAttribute('aria-colcount')).toBe(initialCols);
+
+      // Next animation frame applies the new column count and height cleanly.
+      await vi.advanceTimersByTimeAsync(20);
+      flush();
+      expect(grid.getAttribute('aria-colcount')).toBe('2');
+      expect(grid.style.height).not.toBe(initialHeight);
+
+      // Pending rAF is cancelled and observer disconnected when the grid unmounts.
+      gridWidth = 600;
+      roCallbacks[0]!([], {} as ResizeObserver);
+      unmount();
+      expect(cafSpy).toHaveBeenCalled();
+      expect(disconnect).toHaveBeenCalledTimes(1);
+    } finally {
+      globalThis.ResizeObserver = origRO;
+    }
+  });
 });
