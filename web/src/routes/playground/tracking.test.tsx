@@ -4,7 +4,9 @@
 import { flush as flushSync, signal } from 'fw';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { render } from '../../../framework/testing';
+import { ApiError } from '$lib/api/client';
 import type { Prediction } from '$lib/api/types';
+import DetectionView from '$lib/detect/DetectionView';
 import {
   BrowserEngine,
   detectorInfoBadge,
@@ -130,7 +132,9 @@ describe('BrowserEngine FoloTracker bridge and folo2 detector badge', () => {
   it('creates FoloTracker when exported and falls back to null when missing on older WASM builds', async () => {
     const withT = makeFakeWasm(true);
     const e1 = new BrowserEngine(async () => withT.mod);
-    const tr = await e1.createTracker(trackerOptionsForConf(0.25, ['circle']));
+    const opts = trackerOptionsForConf(0.25);
+    expect(opts.classes).toBeUndefined();
+    const tr = await e1.createTracker(opts);
     expect(tr).not.toBeNull();
     expect(e1.capabilities.tracker).toBe(true);
     tr!.free();
@@ -352,16 +356,151 @@ describe('useTracking lifecycle: update, reset on seek/model/source/toggle, free
     view.unmount();
     host.remove();
   });
+
+  it('does not leak class names on model switch, skips duplicate frameKey / slider drags, handles wasm_not_built, and keeps MediaBar toggle focus', async () => {
+    const { mod, spy } = makeFakeWasm(true);
+    const engine = new BrowserEngine(async () => mod);
+    const mediaMode = signal<MediaMode>('video');
+    const mediaKey = signal<string | null>('video:1');
+    const frameKey = signal<string | null>('video:1:1');
+    const modelId = signal<string | null>('m1');
+    const classes = signal<string[]>(['circle']);
+    const pred = signal<Prediction | null>(null);
+    const iou = signal(0.45);
+    const maxDet = signal(300);
+    const host = document.body.appendChild(document.createElement('div'));
+    let ctrl!: ReturnType<typeof useTracking>;
+
+    const fakeMedia = {
+      mode: mediaMode,
+      videoUrl: signal<string | null>('blob:v'),
+      videoReady: signal(true),
+      seeking: signal(false),
+      playing: signal(false),
+      currentTime: signal(1),
+      duration: signal(10),
+      frameStep: signal(1 / 30),
+      autoDetect: signal(true),
+      speed: signal(1),
+      frameSynced: signal(true),
+      videoErr: signal<string | null>(null),
+      camActive: signal(false),
+      camStarting: signal(false),
+      camPaused: signal(false),
+      camErr: signal<string | null>(null),
+      fps: signal(0),
+      latencyMs: signal(0),
+      togglePlay: vi.fn(),
+      stepFrame: vi.fn(),
+      seekTo: vi.fn(),
+      setSpeed: vi.fn(),
+      detectCurrentFrame: vi.fn(async () => true),
+      closeVideo: vi.fn(),
+    } as unknown as MediaSession;
+
+    function Harness() {
+      ctrl = useTracking({
+        engine,
+        browserOff: () => null,
+        mediaMode: () => mediaMode.get(),
+        mediaKey: () => mediaKey.get(),
+        frameKey: () => frameKey.get(),
+        modelId: () => modelId.get(),
+        classes: () => classes.get(),
+        pred: () => pred.get(),
+        conf: () => 0.25,
+        iou: () => iou.get(),
+        maxDet: () => maxDet.get(),
+        o2o: () => false,
+      });
+      return <MediaBar media={fakeMedia} predicting={false} tracking={ctrl} />;
+    }
+
+    const view = render(() => <Harness />, host);
+    flushSync();
+
+    // Focus the switch and toggle it on: DOM node stays mounted and keeps focus as activeCount changes.
+    const toggle = host.querySelector<HTMLInputElement>('[data-track-toggle] input[role="switch"]')!;
+    toggle.focus();
+    expect(document.activeElement).toBe(toggle);
+    ctrl.setEnabled(true);
+    const f1 = predFrame(10);
+    pred.set(f1);
+    flushSync();
+    await vi.waitFor(() => expect(ctrl.boxesFor(f1)?.[0]?.track_id).toBe(1));
+    expect(document.activeElement).toBe(toggle);
+    expect(host.querySelector('[data-track-toggle] input[role="switch"]')).toBe(toggle);
+
+    // Repeat prediction for the same physical frameKey (e.g. candidate completion or duplicate Detect frame) does NOT re-step ByteTrack.
+    const f1Dup = predFrame(10);
+    pred.set(f1Dup);
+    flushSync();
+    expect(spy.updates).toHaveLength(1);
+    expect(ctrl.boxesFor(f1Dup)?.[0]?.track_id).toBe(1);
+
+    // Dragging iou or maxDet sliders does NOT re-step ByteTrack.
+    iou.set(0.7);
+    maxDet.set(10);
+    flushSync();
+    expect(spy.updates).toHaveLength(1);
+
+    // Switching models with a new class table resets and emits the new model's class name.
+    modelId.set('m2');
+    classes.set(['bolt']);
+    frameKey.set('video:1:2');
+    const f2: Prediction = { ...predFrame(20, 0.9, 'm2'), boxes: [{ class: 0, name: 'bolt', score: 0.9, x1: 20, y1: 20, x2: 60, y2: 60 }] };
+    pred.set(f2);
+    flushSync();
+    expect(ctrl.boxesFor(f2)?.[0]?.name).toBe('bolt');
+
+    view.unmount();
+    host.remove();
+
+    // Missing WASM build error sets disabledReason and disables Track IDs cleanly instead of silently bouncing off.
+    const failEngine = new BrowserEngine(async () => {
+      throw new ApiError(0, 'wasm_not_built', 'not built');
+    });
+    const host2 = document.body.appendChild(document.createElement('div'));
+    let ctrl2!: ReturnType<typeof useTracking>;
+    function FailHarness() {
+      ctrl2 = useTracking({
+        engine: failEngine,
+        browserOff: () => null,
+        mediaMode: () => 'webcam',
+        mediaKey: () => 'webcam:1',
+        modelId: () => 'm1',
+        classes: () => ['circle'],
+        pred: () => null,
+        conf: () => 0.25,
+        iou: () => 0.45,
+        maxDet: () => 300,
+        o2o: () => false,
+      });
+      return <div />;
+    }
+    const view2 = render(() => <FailHarness />, host2);
+    flushSync();
+    ctrl2.setEnabled(true);
+    flushSync();
+    await vi.waitFor(() => expect(ctrl2.disabledReason.get()).toContain('folo-wasm'));
+    expect(ctrl2.enabled.get()).toBe(false);
+    expect(ctrl2.supported.get()).toBe(false);
+    view2.unmount();
+    host2.remove();
+  });
 });
 
-describe('ResultsPanel, predictionJson, and PlaygroundTiming integration', () => {
-  it('renders #track_id in ResultsPanel, preserves track_id in JSON, and shows folo2 engine info badge', () => {
-    const p = predFrame(20);
-    const trackedBox = { ...p.boxes[0]!, track_id: 7 };
-    const json = predictionJson(p, true, [trackedBox], { conf: 0.25, iou: 0.45, maxDet: 300, o2o: false });
+describe('ResultsPanel, predictionJson, DetectionView trails, and PlaygroundTiming integration', () => {
+  it('renders #track_id in ResultsPanel, SVG trails in DetectionView, preserves track_id in JSON, and guards folo2 engine badge by backend', () => {
+    const pWebgpu: Prediction = { ...predFrame(20), backend: 'webgpu', device: 'gpu:0' };
+    const pCpu = predFrame(20);
+    const trackedBox = { ...pWebgpu.boxes[0]!, track_id: 7 };
+    const json = predictionJson(pWebgpu, true, [trackedBox], { conf: 0.25, iou: 0.45, maxDet: 300, o2o: false });
     expect(json?.boxes[0]).toMatchObject({ track_id: 7, class: 0, name: 'circle' });
 
     const host = document.body.appendChild(document.createElement('div'));
+    vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(640);
+    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(360);
     const info: DetectorInfo = {
       backend: 'webgpu',
       device: 'gpu:0',
@@ -373,17 +512,37 @@ describe('ResultsPanel, predictionJson, and PlaygroundTiming integration', () =>
       family: 'folo2',
       headMode: 'o2m',
       hasIouHead: true,
+      precision: 'f16',
     };
+    const predSig = signal<Prediction>(pWebgpu);
     const view = render(
       () => (
         <div>
+          <DetectionView
+            src="data:image/gif;base64,R0lGODlhAQABAAAAACw="
+            width={640}
+            height={360}
+            alt="tracked frame"
+            boxes={[trackedBox]}
+            trails={[
+              {
+                track_id: 7,
+                class: 0,
+                points: [
+                  { x: 10, y: 20 },
+                  { x: 30, y: 40 },
+                ],
+              },
+            ]}
+            classes={['circle']}
+          />
           <ResultsPanel
             result={{ boxes: [trackedBox], ms: 0.1 }}
             rows={[{ b: trackedBox, i: 0 }]}
             predicting={false}
             notice={null}
             json={json}
-            pred={p}
+            pred={predSig.get()}
             hidden={new Set()}
             tabRow={0}
             activeIdx={null}
@@ -395,7 +554,7 @@ describe('ResultsPanel, predictionJson, and PlaygroundTiming integration', () =>
             narrow={false}
             modelA={null}
             modelB={null}
-            predA={p}
+            predA={predSig.get()}
             predB={null}
             predictingA={false}
             predictingB={false}
@@ -411,7 +570,13 @@ describe('ResultsPanel, predictionJson, and PlaygroundTiming integration', () =>
 
     expect(host.querySelector('.track-id')?.textContent).toBe('#7');
     expect(host.querySelector('tbody tr')?.getAttribute('aria-label')).toContain('track #7');
-    expect(host.querySelector('[data-browser-engine-info]')?.textContent).toContain('folo2-n · FOLO v2 · o2m · IoU head');
+    expect(host.querySelector('svg.trails polyline')?.getAttribute('points')).toBe('10.0,20.0 30.0,40.0');
+    expect(host.querySelector('[data-browser-engine-info]')?.textContent).toContain('folo2-n · FOLO v2 · o2m · IoU head · f16');
+
+    // When a CPU prediction is shown while engineInfo still reports a WebGPU f16 detector, do NOT display the mismatched badge.
+    predSig.set(pCpu);
+    flushSync();
+    expect(host.querySelector('[data-browser-engine-info]')).toBeNull();
 
     view.unmount();
     host.remove();

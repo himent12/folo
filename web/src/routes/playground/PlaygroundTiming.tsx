@@ -26,7 +26,7 @@ export interface PlaygroundTimingProps {
 
 function browserBadgeFor(pred: Prediction | null, info: DetectorInfo | null | undefined, model: Model | null): string | null {
   if (!pred?.backend) return null;
-  if (info && (!info.modelId || info.modelId === pred.model_id)) return detectorInfoBadge(info);
+  if (info && info.backend === pred.backend && (!info.modelId || info.modelId === pred.model_id)) return detectorInfoBadge(info);
   if (model) {
     const parts: string[] = [model.arch];
     if (model.arch.startsWith('folo2-')) parts.push('FOLO v2');

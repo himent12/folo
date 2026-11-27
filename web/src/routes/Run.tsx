@@ -29,6 +29,7 @@ import { settledEta, trainingSeconds } from '$lib/api/progress';
 import { Resource } from '$lib/api/resource';
 import { runsChanged } from '$lib/api/runs';
 import { hasFeature, queuePlace } from '$lib/api/queue';
+import { archFromCli, isFolo2Arch } from '$lib/arch';
 import { media } from '$lib/design/tokens';
 import { ago, deviceName, eta } from '$lib/format';
 import { timeRange } from '$lib/throughput';
@@ -111,7 +112,11 @@ export default function Run() {
   });
   // Read again with the runs list (one tick): a dataset removed while the page is open shows as removed (stress s3-live-3).
   const datasets = new Resource((s) => hub.api.datasets(s), { poll: 5000 });
-  const run = computed(() => live.run);
+  const run = computed(() => {
+    const r = live.run;
+    const a = cliArch.get();
+    return r && a && isFolo2Arch(a) && a !== r.config.arch ? { ...r, config: { ...r.config, arch: a } } : r;
+  });
   /** The run's settings: the same object while only its progress moves (a step replaces the run, not its config). */
   const config = computed(() => run.get()?.config);
   const resolved = computed(() => run.get()?.resolved);
@@ -200,9 +205,11 @@ export default function Run() {
   const cli = new Resource(async (s) => {
     const rid = id.get();
     if (!rid || !hasFeature(system.data, 'run_cli')) return null;
-    return { id: rid, cli: (await hub.api.runCli(rid, s)).cli };
+    const cmd = await hub.api.runCli(rid, s);
+    return { id: rid, cli: cmd.cli, arch: archFromCli(cmd) };
   });
   const runCli = computed(() => (cli.data && cli.data.id === id.get() ? cli.data.cli : null));
+  const cliArch = computed(() => (cli.data && cli.data.id === id.get() ? cli.data.arch : null));
   // Its place in the training queue, what trains ahead and when it should start; Start next and the moves (./run/queueState).
   const { ahead, place, queue, waitingCount, before, wait, frontTime, starting, canStart, move } = queueState({ run: () => run.get(), live, others, system });
 

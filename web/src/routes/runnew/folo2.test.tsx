@@ -7,8 +7,8 @@ import { render } from '../../../framework/testing';
 import { HttpApi } from '$lib/api/client';
 import { MockApi } from '$lib/api/mock';
 import type { Resource } from '$lib/api/resource';
-import type { Arch, Model, ThroughputTable, TrainConfig } from '$lib/api/types';
-import { archFamily, archNameSuffix, archWithFamily, FOLO2_FEATURE, isArch, isFolo2Arch, smallerArchInFamily, V2_ARCHES } from '$lib/arch';
+import type { Arch, Model, Run, ThroughputTable, TrainConfig } from '$lib/api/types';
+import { archFamily, archFromCli, archNameSuffix, archWithFamily, FOLO2_FEATURE, isArch, isFolo2Arch, smallerArchInFamily, V2_ARCHES } from '$lib/arch';
 import { oomFixes } from '$lib/oom';
 import { trainCommand } from '$lib/trainCli';
 import type { CloudPick } from './cloudPick';
@@ -266,5 +266,86 @@ describe('MockApi & HttpApi folo2 contracts', () => {
     const api = new HttpApi('http://127.0.0.1:7878');
     const loaded = await api.model('m_v2');
     expect(loaded.arch).toBe('folo2-s');
+  });
+
+  it('archFromCli extracts folo2-* from argv and HttpApi preserves canonical folo2-* across runs(), run(), models(), and runCli()', async () => {
+    expect(archFromCli({ argv: ['folo', 'train', '--model', 'folo2-m'] })).toBe('folo2-m');
+    expect(archFromCli({ argv: ['folo', 'train', '--model=folo2-l'] })).toBe('folo2-l');
+    expect(archFromCli({ argv: ['folo', 'train', '--model', 'folo-s'] })).toBe('folo-s');
+
+    const wireRun: Run = {
+      id: 'run_v2',
+      name: 'shapes-folo2-m',
+      status: 'running',
+      config: {
+        name: 'shapes-folo2-m',
+        dataset_id: 'ds_shapes',
+        arch: 'folo-m',
+        epochs: 20,
+        batch: 16,
+        imgsz: 640,
+        device: 'auto',
+        optimizer: 'auto',
+        lr0: 0.01,
+        seed: 0,
+        weights: null,
+        augment: DEFAULT_AUGMENT,
+      },
+      device: 'gpu:0',
+      epoch: 1,
+      epochs: 20,
+      step: 10,
+      steps_per_epoch: 100,
+      eta_s: 60,
+      model_id: null,
+      created: '2026-11-27T00:00:00Z',
+      started: '2026-11-27T00:00:01Z',
+      finished: null,
+      error: null,
+      best: null,
+    };
+    const wireModel: Model = {
+      id: 'm_v2_run',
+      name: 'shapes-folo2-m-best',
+      arch: 'folo-m',
+      imgsz: 640,
+      classes: ['circle'],
+      params: 21_000_000,
+      flops_g: 50.0,
+      bytes: 42_000_000,
+      created: '2026-11-27T00:00:00Z',
+      run_id: 'run_v2',
+      metrics: null,
+    };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string | URL) => {
+        const url = String(input);
+        if (url.endsWith('/api/runs/run_v2/cli')) {
+          return new Response(JSON.stringify({ argv: ['folo', 'train', '--model', 'folo2-m'], cli: 'folo train --model folo2-m' }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+        }
+        if (url.endsWith('/api/runs')) {
+          return new Response(JSON.stringify({ runs: [wireRun] }), { status: 200, headers: { 'content-type': 'application/json' } });
+        }
+        if (url.endsWith('/api/runs/run_v2')) {
+          return new Response(JSON.stringify(wireRun), { status: 200, headers: { 'content-type': 'application/json' } });
+        }
+        if (url.endsWith('/api/models')) {
+          return new Response(JSON.stringify({ models: [wireModel] }), { status: 200, headers: { 'content-type': 'application/json' } });
+        }
+        return new Response(JSON.stringify(wireRun), { status: 200, headers: { 'content-type': 'application/json' } });
+      }),
+    );
+
+    const api = new HttpApi('http://127.0.0.1:7878');
+    // Reading runCli caches the canonical folo2-m arch for run_v2.
+    await api.runCli('run_v2');
+    expect((await api.run('run_v2')).config.arch).toBe('folo2-m');
+    expect((await api.runs())[0]!.config.arch).toBe('folo2-m');
+    // models() also promotes any checkpoint linked via run_id to run_v2!
+    expect((await api.models())[0]!.arch).toBe('folo2-m');
   });
 });

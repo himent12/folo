@@ -66,8 +66,10 @@ export function useSinglePredict(o: SinglePredictInput): () => boolean {
   let lastRetry = 0;
   let activeCtrl: AbortController | null = null;
   o.onRegisterAbort?.(() => {
-    activeCtrl?.abort();
+    if (!activeCtrl) return;
+    activeCtrl.abort();
     activeCtrl = null;
+    o.predicting.set(false);
   });
   effect(() => {
     const id = o.modelId();

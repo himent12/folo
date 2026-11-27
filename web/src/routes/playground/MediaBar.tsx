@@ -27,43 +27,44 @@ export interface MediaBarProps {
 
 type VideoAction = 'step-back' | 'step-fwd' | 'detect';
 
+/** Dedicated component so Switch DOM identity stays stable (no keyboard focus loss when toggled or track count updates). */
+function TrackControl(props: { tracking: TrackingController; uid: string }) {
+  const tr = props.tracking;
+  const whyId = `${props.uid}-track-why`;
+  return (
+    <>
+      {tr.enabled.get() ? (
+        <span class="live-stat num" data-track-count>
+          {tr.activeCount.get()} {tr.activeCount.get() === 1 ? 'track' : 'tracks'}
+        </span>
+      ) : null}
+      <span
+        class="auto-wrap track-wrap"
+        class:disabled={!tr.supported.get()}
+        use:tooltip={tr.disabledReason.get() ?? undefined}
+        data-track-toggle
+      >
+        <Switch
+          label="Track IDs"
+          checked={tr.enabled.get()}
+          disabled={!tr.supported.get()}
+          describedby={!tr.supported.get() && tr.disabledReason.get() ? whyId : undefined}
+          onchange={(v) => tr.setEnabled(v)}
+        />
+      </span>
+      {!tr.supported.get() && tr.disabledReason.get() ? (
+        <span class="sr-only" id={whyId}>
+          {tr.disabledReason.get()}
+        </span>
+      ) : null}
+    </>
+  );
+}
+
 export default function MediaBar(props: MediaBarProps) {
   const m = props.media;
   const uid = createUniqueId();
   const barEl = signal<HTMLDivElement | undefined>(undefined);
-
-  const trackControl = () => {
-    const tr = props.tracking;
-    if (!tr) return null;
-    const supported = tr.supported.get();
-    const reason = tr.disabledReason.get();
-    const on = tr.enabled.get();
-    const count = tr.activeCount.get();
-    const whyId = `${uid}-track-why`;
-    return (
-      <>
-        {on ? (
-          <span class="live-stat num" data-track-count>
-            {count} {count === 1 ? 'track' : 'tracks'}
-          </span>
-        ) : null}
-        <span class="auto-wrap track-wrap" class:disabled={!supported} use:tooltip={reason ?? undefined} data-track-toggle>
-          <Switch
-            label="Track IDs"
-            checked={on}
-            disabled={!supported}
-            describedby={!supported && reason ? whyId : undefined}
-            onchange={(v) => tr.setEnabled(v)}
-          />
-        </span>
-        {!supported && reason ? (
-          <span class="sr-only" id={whyId}>
-            {reason}
-          </span>
-        ) : null}
-      </>
-    );
-  };
   let pendingFocus: { action: VideoAction; url: string | null; sawDisabled: boolean } | null = null;
   let focusSeq = 0;
 
@@ -215,7 +216,7 @@ export default function MediaBar(props: MediaBarProps) {
               <div class="auto-wrap">
                 <Switch label="Auto" bind:checked={m.autoDetect} />
               </div>
-              {trackControl()}
+              {props.tracking ? <TrackControl tracking={props.tracking} uid={uid} /> : null}
               <Button
                 size="sm"
                 variant="ghost"
@@ -284,7 +285,7 @@ export default function MediaBar(props: MediaBarProps) {
               </span>
             ) : null}
             <div class="media-right">
-              {trackControl()}
+              {props.tracking ? <TrackControl tracking={props.tracking} uid={uid} /> : null}
               {m.camActive.get() ? (
                 <Button
                   size="sm"

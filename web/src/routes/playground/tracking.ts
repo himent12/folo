@@ -21,16 +21,16 @@ export const MAX_TRAIL_POINTS = 20;
 const TRAIL_STALE_FRAMES = 3;
 
 /** Builds valid `FoloTrackOptions` aligned with Playground's active confidence slider (`lowThresh <= highThresh <= newTrackThresh`). */
-export function trackerOptionsForConf(conf: number, classes?: readonly string[]): FoloTrackOptions {
+export function trackerOptionsForConf(conf: number): FoloTrackOptions {
   const high = Math.max(0.01, Math.min(1, Number.isFinite(conf) ? conf : 0.25));
   const low = Math.min(0.1, high);
+  // Omit `classes` so per-frame `seen_names` are cleared cleanly on `reset()` when switching models.
   return {
     highThresh: high,
     lowThresh: low,
     newTrackThresh: high,
     minHits: 1,
     classAware: true,
-    ...(classes?.length ? { classes: [...classes] } : {}),
   };
 }
 

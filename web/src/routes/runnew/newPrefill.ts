@@ -3,7 +3,7 @@ import { deep, effect, signal, untrack, type ReadSignal, type Signal } from 'fw'
 import { ApiError, hub } from '$lib/api/index';
 import { Resource } from '$lib/api/resource';
 import type { Arch, Augment, Model, Optimizer, Run } from '$lib/api/types';
-import { isArch } from '$lib/arch';
+import { archFromCli, isArch, isFolo2Arch } from '$lib/arch';
 import { IMGSZ_STEPS } from '$lib/oom';
 import { errorDetail, toast } from '$lib/ui/toast';
 import type { CloudPick } from './cloudPick';
@@ -88,7 +88,13 @@ export interface RunPrefillOptions {
  * the linked weights' architecture when found. Cleans up link-scoped toasts on unmount.
  */
 export function useRunPrefill(o: RunPrefillOptions) {
-  const source = new Resource((s) => (o.fromId ? hub.api.run(o.fromId, s) : Promise.resolve(null)));
+  const source = new Resource(async (s) => {
+    if (!o.fromId) return null;
+    const [run, cli] = await Promise.all([hub.api.run(o.fromId, s), hub.api.runCli(o.fromId, s).catch(() => null)]);
+    // Preserve canonical `folo2-*` arch from `GET /api/runs/{id}/cli` when the server normalized wire `config.arch`.
+    const cliArch = archFromCli(cli);
+    return cliArch && isFolo2Arch(cliArch) && cliArch !== run.config.arch ? { ...run, config: { ...run.config, arch: cliArch } } : run;
+  });
   const prefilled = signal(!o.fromId || !!o.own);
   const pendingWeights = signal<string | null>(o.queryWeights);
 

@@ -30,12 +30,20 @@ export interface ViewBox {
   track_id?: number;
 }
 
+export interface ViewTrail {
+  track_id: number;
+  class: number;
+  points: readonly { x: number; y: number }[];
+}
+
 export interface DetectionViewProps {
   src: string | null;
   width: number;
   height: number;
   boxes?: ViewBox[];
   truth?: ViewBox[];
+  /** Optional short per-track motion trails rendered underneath boxes when live tracking is paused/inspected. */
+  trails?: readonly ViewTrail[];
   classes: readonly string[];
   labels?: boolean;
   scores?: boolean;
@@ -250,6 +258,28 @@ export default function DetectionView(props: DetectionViewProps) {
           onpointerout={p.onhover ? onLayerPointerOut : undefined}
           onclick={p.onselect ? onLayerClick : undefined}
         >
+          {p.trails?.length ? (
+            <svg class="trails" aria-hidden="true">
+              <Index each={p.trails}>
+                {(t) => {
+                  const g = () => geo.get()!;
+                  const pts = () => t().points.map((pt) => `${(g().ox + pt.x * g().s).toFixed(1)},${(g().oy + pt.y * g().s).toFixed(1)}`).join(' ');
+                  const head = () => t().points[t().points.length - 1]!;
+                  return (
+                    <>
+                      {shown({ class: t().class, x1: 0, y1: 0, x2: 0, y2: 0 }) && t().points.length >= 2 ? (
+                        <g style={{ '--c': classColor(t().class) }}>
+                          <polyline class="trail-halo" points={pts()} />
+                          <polyline class="trail-line" points={pts()} />
+                          <circle class="trail-head" cx={g().ox + head().x * g().s} cy={g().oy + head().y * g().s} r={3} />
+                        </g>
+                      ) : null}
+                    </>
+                  );
+                }}
+              </Index>
+            </svg>
+          ) : null}
           <Index each={p.truth}>
             {(b) => (
               <>
@@ -361,6 +391,35 @@ css`
     position: absolute;
     inset: 0;
     pointer-events: none;
+  }
+  .trails {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+    pointer-events: none;
+  }
+  .trail-halo {
+    fill: none;
+    stroke: var(--class-halo);
+    stroke-width: 4;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    opacity: 0.7;
+  }
+  .trail-line {
+    fill: none;
+    stroke: var(--c);
+    stroke-width: 2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    opacity: 0.85;
+  }
+  .trail-head {
+    fill: var(--c);
+    stroke: var(--class-halo);
+    stroke-width: 1;
   }
   /* Strokes sit outside the box (content-box plus a negative margin of the border width), so the object inside stays
      fully visible: a small circle no longer reads as a filled square under a 2 px border. The halo wraps the stroke on

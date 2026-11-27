@@ -5,8 +5,8 @@ import { followedDatasets, listedName } from '$lib/api/datasetReads';
 import { ApiError, hub } from '$lib/api/index';
 import { Resource } from '$lib/api/resource';
 import { runsChanged } from '$lib/api/runs';
-import type { Arch, Augment, DatasetImage, Optimizer, TrainConfig } from '$lib/api/types';
-import { archNameSuffix, archWithFamily, isFolo2Arch, supportsFolo2 } from '$lib/arch';
+import type { Arch, Augment, DatasetImage, Model, Optimizer, TrainConfig } from '$lib/api/types';
+import { archFromCli, archNameSuffix, archWithFamily, isFolo2Arch, supportsFolo2 } from '$lib/arch';
 import { hasCloud } from '$lib/cloud';
 import { sentence } from '$lib/format';
 import { fitFix, isOom, oomCalibration, vramForecaster, type OomFix } from '$lib/oom';
@@ -99,10 +99,11 @@ export function runNewState() {
   const datasets = followedDatasets();
   const system = new Resource((s) => hub.api.system(s));
   const folo2Supported = computed(() => supportsFolo2(system.data));
-  // If an older server without `folo2_arch` is reached with a stale `?arch=folo2-*` link or draft, step back to v1 cleanly.
+  // Reactively step back any `folo2-*` arch (initial link, draft, or async ?from=/?weights= prefill) on servers without `folo2_arch`.
   effect(() => {
-    if (system.data && !folo2Supported.get() && isFolo2Arch(untrack(() => arch.get()))) {
-      arch.set(archWithFamily(untrack(() => arch.get()), 'folo'));
+    const cur = arch.get();
+    if (system.data && !folo2Supported.get() && isFolo2Arch(cur)) {
+      arch.set(archWithFamily(cur, 'folo'));
     }
   });
   // Run on (servers with the `cloud` feature): this machine or a cloud connection, its GPU and the time limit.
@@ -123,7 +124,15 @@ export function runNewState() {
   const tp = new Resource((s) => (hasFeature(system.data, 'throughput') ? hub.api.throughput(s).catch(() => null) : Promise.resolve(null)));
 
   // Fused weights (an export) load for inference only, so they are never a starting point.
-  const startable = computed(() => (models.data ?? []).filter((m) => m.fused !== true));
+  // Real servers list models with wire `folo-*` arch; `resolvedModelArchs` overlays canonical `folo2-*` discovered via `model(id)` / `runCli`.
+  const resolvedModelArchs = signal<Record<string, Arch>>({});
+  const resolvingWeights = signal(false);
+  const startable = computed(() => {
+    const overrides = resolvedModelArchs.get();
+    return (models.data ?? [])
+      .filter((m) => m.fused !== true)
+      .map((m) => (overrides[m.id] && overrides[m.id] !== m.arch ? { ...m, arch: overrides[m.id]! } : m));
+  });
 
   const { source, prefilled, pendingWeights } = useRunPrefill({
     q,
@@ -235,10 +244,45 @@ export function runNewState() {
     const m = list.find((x) => x.id === w);
     if (!m || m.arch !== a) weights.set('none');
   });
+  const checkedModels = new Set<string>();
+  const inFlightModels = new Set<string>();
+  let resolveSeq = 0;
+  async function resolveModelArch(m: Model) {
+    if (hub.api.mock || isFolo2Arch(m.arch) || checkedModels.has(m.id) || inFlightModels.has(m.id)) return;
+    inFlightModels.add(m.id);
+    const seq = ++resolveSeq;
+    resolvingWeights.set(true);
+    try {
+      const detail = await hub.api.model(m.id).catch(() => null);
+      let resolved: Arch = detail && isFolo2Arch(detail.arch) ? detail.arch : m.arch;
+      let cliOk = false;
+      if (!isFolo2Arch(resolved) && m.run_id) {
+        const cli = await hub.api.runCli(m.run_id).catch(() => null);
+        cliOk = cli !== null;
+        const cliArch = archFromCli(cli);
+        if (cliArch && isFolo2Arch(cliArch)) resolved = cliArch;
+      }
+      if (detail || cliOk) checkedModels.add(m.id);
+      if (mounted && resolved !== m.arch) {
+        resolvedModelArchs.set({ ...resolvedModelArchs.peek(), [m.id]: resolved });
+        if (weights.peek() === m.id && arch.peek() !== resolved) arch.set(resolved);
+      }
+    } finally {
+      inFlightModels.delete(m.id);
+      if (mounted && seq === resolveSeq) resolvingWeights.set(false);
+    }
+  }
+  effect(() => {
+    const p = picked.get();
+    if (p && !hub.api.mock && !isFolo2Arch(p.arch) && !checkedModels.has(p.id)) {
+      void resolveModelArch(p);
+    }
+  });
   /** Start from picked: weights of another size (trained or published) bring their size (the size picker follows). */
   function pickWeights(id: string) {
     const m = startable.get().find((x) => x.id === id);
     if (m && m.arch !== arch.get()) arch.set(m.arch);
+    if (m) void resolveModelArch(m);
   }
   const gpu = computed(() => system.data?.gpus[0]);
 
@@ -381,7 +425,7 @@ export function runNewState() {
       ),
     ),
   );
-  const valid = computed(() => prefilled.get() && !pendingWeights.get() && errorCount(errors.get()) === 0);
+  const valid = computed(() => prefilled.get() && !pendingWeights.get() && !resolvingWeights.get() && errorCount(errors.get()) === 0);
   /**
    * Settings no estimate can stand for: no dataset, or one with nothing to train on, or an epoch count (or Close mosaic)
    * out of range. The Summary shows dashes (never "0 optimizer steps", "under 1 min" or "24–55 h" for 99,999 epochs),

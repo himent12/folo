@@ -205,12 +205,14 @@ export default function Playground() {
   const samples = sampleImages(model);
 
   let trackingRef: TrackingController | null = null;
+  let cancelSinglePredict: () => void = () => {};
   const result = computed(() => {
     const p = pred.get();
     if (!p) return null;
     const t0 = performance.now();
     const tracked = trackingRef?.boxesFor(p) ?? null;
-    const boxes = tracked ?? filterDetections(p.boxes, { conf: conf.get(), iou: o2o.get() ? 1 : iou.get(), maxDet: maxDet.get() });
+    const f = { conf: conf.get(), iou: o2o.get() ? 1 : iou.get(), maxDet: maxDet.get() };
+    const boxes = tracked ? filterDetections(tracked, { ...f, conf: 0 }) : filterDetections(p.boxes, f);
     return { boxes, ms: performance.now() - t0 };
   });
   const kept = computed(() => result.get()?.boxes ?? []);
@@ -261,14 +263,20 @@ export default function Playground() {
     hasValidResult: () => !!pred.peek() && (!cmp.compare.peek() || !!cmp.predB.peek()),
     lastLatencyMs: () => pred.peek()?.timing.total_ms ?? null,
     onStopped: () => seg.set(source.peek()?.kind ?? 'file'),
-    onTrackReset: () => trackingRef?.reset(),
+    onTrackReset: () => { cancelSinglePredict(); trackingRef?.reset(); },
   });
   const tracking = (trackingRef = useTracking({
     engine, browserOff: () => browserOff.get(), mediaMode: () => mediaSession.mode.get(),
     mediaKey: () => `${mediaSession.mode.get()}:${mediaSession.sessionSeq.get()}`,
+    frameKey: () => (mediaSession.mode.get() === 'none' ? null : `${mediaSession.mode.get()}:${mediaSession.sessionSeq.get()}:${mediaSession.frameSeq.get()}`),
     modelId: () => modelId.get(), classes: () => classes.get(), pred: () => pred.get(),
     conf: () => conf.get(), iou: () => iou.get(), maxDet: () => maxDet.get(), o2o: () => o2o.get(),
   }));
+  const visibleTrails = computed(() => {
+    if (!tracking.enabled.get()) return undefined;
+    const list = tracking.trails.get().filter((t) => !hidden.get().has(t.class));
+    return list.length ? list : undefined;
+  });
   stopMedia = () => mediaSession.stopAll(false);
   loadVideoFile = (f) => {
     prepareMediaSource('video');
@@ -326,7 +334,6 @@ export default function Playground() {
     if (id !== null) lastModelId = id;
   });
 
-  let cancelSinglePredict: () => void = () => {};
   const batch = useBatchSession({
     engine,
     model: () => model.peek(),
@@ -507,6 +514,7 @@ export default function Playground() {
     splitPct: cmp.splitPct,
     zoom: cmp.zoom,
     activeJson: () => activeJson.peek(),
+    trailsA: () => (isUnsyncedVideoFn() ? undefined : visibleTrails.peek()),
     isUnsyncedVideoPreview: () => mediaSession.mode.get() === 'video' && !mediaSession.frameSynced.get(),
     isLiveStreaming: () => mediaSession.liveStreaming.get(),
   });
@@ -635,8 +643,6 @@ export default function Playground() {
     const isCam = mediaSession.mode.get() === 'webcam';
     const isPreview = !isCam && !mediaSession.frameSynced.get() && !mediaSession.playing.get();
     const showBoxes = isCam ? predAMatches.get() || mediaSession.camActive.get() : mediaSession.frameSynced.get();
-    const h = hidden.get();
-    const activeTrails = showBoxes && tracking.enabled.get() ? tracking.trails.get().filter((t) => !h.has(t.class)) : undefined;
     return (
       <LiveMediaCanvas
         video={mediaSession.videoEl.get()} mode={isCam ? 'webcam' : 'video'}
@@ -644,7 +650,7 @@ export default function Playground() {
         starting={isCam && mediaSession.camStarting.get()} paused={isCam && mediaSession.camPaused.get()}
         preview={isPreview} renderTick={mediaSession.previewTick.get()}
         error={isCam ? mediaSession.camErr.get() : mediaSession.videoErr.get()}
-        boxes={showBoxes ? rows.get().map((r) => r.b) : []} trails={activeTrails}
+        boxes={showBoxes ? rows.get().map((r) => r.b) : []} trails={showBoxes ? visibleTrails.get() : undefined}
         classes={classes.get()} labels={labels.get()} scores={scores.get()}
         fps={mediaSession.fps.get()} latencyMs={mediaSession.latencyMs.get()}
         onRetry={() => void mediaSession.startWebcam()} onDismiss={() => mediaSession.stopWebcam()}
@@ -837,6 +843,7 @@ export default function Playground() {
                 pred={isUnsyncedVideoFn() ? null : pred.get()}
                 cut={cut()}
                 kept={isUnsyncedVideoFn() ? [] : kept.get()}
+                trails={isUnsyncedVideoFn() ? undefined : visibleTrails.get()}
                 truthBoxes={truthBoxes.get()}
                 truthOnly={truthOnly.get()}
                 classes={classes.get()}

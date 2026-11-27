@@ -20,7 +20,7 @@ import { bindable, computed, createUniqueId, css, effect, onCleanup, signal, tic
 import { ApiError } from '$lib/api/client';
 import { hub } from '$lib/api/index';
 import type { Arch, Bench, BenchEntry, BenchLoop, BenchSelfLabeling, Dataset, LabelJob, Model, Split, StartBenchLoop } from '$lib/api/types';
-import { biggerArchInFamily, isFolo2Arch, V1_ARCHES, V2_ARCHES } from '$lib/arch';
+import { archWithFamily, biggerArchInFamily, isFolo2Arch, V1_ARCHES } from '$lib/arch';
 import { GENERATIONS_MAX } from '$lib/bench/rules';
 import { conf, count, num } from '$lib/format';
 import { FROM_SCRATCH } from '$lib/lineage';
@@ -125,8 +125,13 @@ export default function NewLoopDialog(props: NewLoopDialogProps) {
       split.set('train');
     });
   });
-  /** The students follow the teacher (architecture, image size) until a person picks theirs. */
-  const arch = computed(() => archChoice.get() ?? teacher.get()?.arch ?? '');
+  /** The students follow the teacher (architecture mapped to v1 for bench loops, image size) until a person picks theirs. */
+  const teacherStudentArch = computed<Arch | ''>(() => {
+    const ta = teacher.get()?.arch;
+    if (!ta) return '';
+    return isFolo2Arch(ta) ? archWithFamily(ta, 'folo') : ta;
+  });
+  const arch = computed(() => archChoice.get() ?? teacherStudentArch.get());
   const imgsz = computed(() => {
     const t = teacher.get();
     return sizeChoice.get() ?? (t ? String(t.imgsz) : '');
@@ -277,14 +282,14 @@ export default function NewLoopDialog(props: NewLoopDialogProps) {
   }
 
   const bigger = computed(() => {
-    const t = teacher.get();
-    return t ? biggerArchInFamily(t.arch) : undefined;
+    const ta = teacherStudentArch.get();
+    return ta ? biggerArchInFamily(ta) : undefined;
   });
   const archOptions = computed(() => {
-    const ta = teacher.get()?.arch;
+    const ta = teacherStudentArch.get();
     const big = bigger.get();
-    const list = ta && isFolo2Arch(ta) ? [...V2_ARCHES, ...ARCHS] : ARCHS;
-    return list.map((a) => ({ value: a, label: a === ta ? `${a} · the teacher’s size` : a === big ? `${a} · the next bigger model` : a }));
+    // `POST /api/bench/benchmarks/{id}/loops` validates `student.arch` against `folo_api::Arch` (v1 scales).
+    return ARCHS.map((a) => ({ value: a, label: a === ta ? `${a} · the teacher’s size` : a === big ? `${a} · the next bigger model` : a }));
   });
   const weightOptions = computed(() => {
     const a = arch.get();

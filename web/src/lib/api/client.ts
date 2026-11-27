@@ -2,6 +2,7 @@
 // same interface, so screens never know which one they talk to.
 
 import type {
+  Arch,
   Bench,
   BenchCatalog,
   BenchDesign,
@@ -68,7 +69,7 @@ import type {
   TrainConfig,
   UpdateLabelJob,
 } from './types';
-import { isArch } from '$lib/arch';
+import { archFromCli, isArch, isFolo2Arch } from '$lib/arch';
 import type { AccessWatch } from './access';
 import type { Reachability } from './reach';
 import { BENCH_EVENTS, LABEL_EVENTS, openEventStream, RUN_EVENTS, type EventHandlers } from './sse';
@@ -331,6 +332,25 @@ export function qs(params: Record<string, string | number | undefined | null>): 
 
 export class HttpApi implements Api {
   readonly mock = false;
+  /** Session-known canonical `folo2-*` architectures keyed by run id and model id (bridging wire `folo_api::Arch`). */
+  #runArchs = new Map<string, Arch>();
+  #modelArchs = new Map<string, Arch>();
+
+  #promoteRun(r: Run): Run {
+    if (!r?.config) return r;
+    const known = this.#runArchs.get(r.id);
+    if (known && known !== r.config.arch) return { ...r, config: { ...r.config, arch: known } };
+    if (isFolo2Arch(r.config.arch)) this.#runArchs.set(r.id, r.config.arch);
+    return r;
+  }
+
+  #promoteModel(m: Model): Model {
+    if (!m) return m;
+    const known = this.#modelArchs.get(m.id) ?? (m.run_id ? this.#runArchs.get(m.run_id) : undefined);
+    if (known && known !== m.arch) return { ...m, arch: known };
+    if (isFolo2Arch(m.arch)) this.#modelArchs.set(m.id, m.arch);
+    return m;
+  }
 
   /**
    * `base` is the server origin ('' for same origin, e.g. behind the Vite proxy or `folo serve`). `reach` hears whether
@@ -440,7 +460,8 @@ export class HttpApi implements Api {
   }
 
   async models(signal?: AbortSignal) {
-    return this.#list<Model>('/models', 'models', signal);
+    const list = await this.#list<Model>('/models', 'models', signal);
+    return list.map((m) => this.#promoteModel(m));
   }
   async model(id: string, signal?: AbortSignal) {
     let headerArch: string | null = null;
@@ -448,7 +469,12 @@ export class HttpApi implements Api {
       headerArch = res.headers.get('x-folo-arch')?.trim() ?? null;
     });
     // folo-server emits the exact `folo2-*` architecture in `x-folo-arch` alongside the wire `folo_api::Arch` field.
-    return isArch(headerArch) && headerArch !== m.arch ? { ...m, arch: headerArch } : m;
+    if (isArch(headerArch) && isFolo2Arch(headerArch)) {
+      this.#modelArchs.set(m.id, headerArch);
+      if (m.run_id) this.#runArchs.set(m.run_id, headerArch);
+      return headerArch !== m.arch ? { ...m, arch: headerArch } : m;
+    }
+    return this.#promoteModel(m);
   }
   modelEval(id: string, signal?: AbortSignal) {
     return this.#req<ModelEval>('GET', `/models/${encodeURIComponent(id)}/eval`, undefined, signal);
@@ -460,31 +486,37 @@ export class HttpApi implements Api {
   }
 
   async runs(signal?: AbortSignal) {
-    return this.#list<Run>('/runs', 'runs', signal);
+    const list = await this.#list<Run>('/runs', 'runs', signal);
+    return list.map((r) => this.#promoteRun(r));
   }
-  run(id: string, signal?: AbortSignal) {
-    return this.#req<Run>('GET', `/runs/${encodeURIComponent(id)}`, undefined, signal);
+  async run(id: string, signal?: AbortSignal) {
+    return this.#promoteRun(await this.#req<Run>('GET', `/runs/${encodeURIComponent(id)}`, undefined, signal));
   }
-  createRun(config: TrainConfig) {
-    return this.#req<Run>('POST', '/runs', config);
+  async createRun(config: TrainConfig) {
+    const run = await this.#req<Run>('POST', '/runs', config);
+    if (isFolo2Arch(config.arch)) this.#runArchs.set(run.id, config.arch);
+    return this.#promoteRun(run);
   }
   estimateRun(config: TrainConfig, signal?: AbortSignal) {
     return this.#req<RunEstimate>('POST', '/runs/estimate', config, signal);
   }
-  stopRun(id: string) {
-    return this.#req<Run>('POST', `/runs/${encodeURIComponent(id)}/stop`);
+  async stopRun(id: string) {
+    return this.#promoteRun(await this.#req<Run>('POST', `/runs/${encodeURIComponent(id)}/stop`));
   }
-  resumeRun(id: string, device?: string) {
-    return this.#req<Run>('POST', '/runs', device ? { resume_run_id: id, device } : { resume_run_id: id });
+  async resumeRun(id: string, device?: string) {
+    return this.#promoteRun(await this.#req<Run>('POST', '/runs', device ? { resume_run_id: id, device } : { resume_run_id: id }));
   }
   deleteRun(id: string) {
     return this.#req<void>('DELETE', `/runs/${encodeURIComponent(id)}`);
   }
-  moveRun(id: string, req: QueueRequest) {
-    return this.#req<Run>('POST', `/runs/${encodeURIComponent(id)}/queue`, req);
+  async moveRun(id: string, req: QueueRequest) {
+    return this.#promoteRun(await this.#req<Run>('POST', `/runs/${encodeURIComponent(id)}/queue`, req));
   }
-  runCli(id: string, signal?: AbortSignal) {
-    return this.#req<CliCommand>('GET', `/runs/${encodeURIComponent(id)}/cli`, undefined, signal);
+  async runCli(id: string, signal?: AbortSignal) {
+    const cmd = await this.#req<CliCommand>('GET', `/runs/${encodeURIComponent(id)}/cli`, undefined, signal);
+    const cliArch = archFromCli(cmd);
+    if (cliArch && isFolo2Arch(cliArch)) this.#runArchs.set(id, cliArch);
+    return cmd;
   }
   runMetrics(id: string, signal?: AbortSignal, every?: number) {
     return this.#req<RunMetrics>('GET', `/runs/${encodeURIComponent(id)}/metrics${qs({ every })}`, undefined, signal);

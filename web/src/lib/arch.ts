@@ -66,3 +66,18 @@ export function archNameSuffix(arch: Arch): string {
 export function supportsFolo2(system: Pick<SystemInfo, 'features'> | null | undefined): boolean {
   return system === undefined || system === null || (system.features?.includes(FOLO2_FEATURE) ?? false);
 }
+
+/** Extracts a canonical FOLO v1/v2 architecture from a `folo train` CLI `argv` (`--model folo2-s` or `--model=folo2-s`). */
+export function archFromCli(cmd: { argv?: readonly string[] } | null | undefined): Arch | null {
+  const argv = cmd?.argv;
+  if (!argv) return null;
+  for (let i = 0; i < argv.length; i++) {
+    const tok = argv[i]!;
+    if (tok === '--model' && i + 1 < argv.length && isArch(argv[i + 1])) return argv[i + 1] as Arch;
+    if (tok.startsWith('--model=')) {
+      const val = tok.slice('--model='.length);
+      if (isArch(val)) return val;
+    }
+  }
+  return null;
+}

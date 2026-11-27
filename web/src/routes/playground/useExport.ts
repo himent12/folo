@@ -6,6 +6,7 @@ import type { DatasetImage as Img, Model, Prediction } from '$lib/api/types';
 import type { CompareViewMode } from './compare';
 import { runJsonExport, runPngExport } from './exportActions';
 import { sourceImageKey, type Source } from './source';
+import type { TrackTrail } from './tracking';
 import type { Det } from './viewState';
 import type { ZoomState } from './zoomState';
 
@@ -24,6 +25,7 @@ export interface UsePlaygroundExportInput {
   resultB: () => { boxes: Det[]; ms: number } | null;
   rowsA: () => { b: Det; i: number }[];
   rowsB: () => { b: Det; i: number }[];
+  trailsA?: () => readonly TrackTrail[] | undefined;
   classesA: () => string[];
   classesB: () => string[];
   truthOnly: () => Set<number> | null;
@@ -101,6 +103,7 @@ export function usePlaygroundExport(o: UsePlaygroundExportInput) {
         predB: hasB ? o.predB.peek() : null,
         boxesA: hasA ? o.rowsA().map((r) => r.b) : [],
         boxesB: hasB ? o.rowsB().map((r) => r.b) : [],
+        trailsA: hasA ? o.trailsA?.() : undefined,
         classesA: o.classesA(),
         classesB: o.classesB(),
         truthOnly: o.truthOnly(),

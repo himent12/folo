@@ -1,10 +1,13 @@
 // Reactive ByteTrack controller for Playground live video & webcam sessions.
 // Holds one persistent `folo-wasm` `FoloTracker` instance per active media session, resets it on seek, source change,
-// camera restart, model change, or toggle off, and always calls `free()` on exit/unmount (zero WASM memory leaks).
+// camera restart, model change, or toggle off, avoids double-stepping duplicate/re-filtered frames, and always calls
+// `free()` on exit/unmount (zero WASM memory leaks).
 import { computed, effect, onCleanup, signal, untrack } from 'fw';
+import { ApiError } from '$lib/api/client';
 import type { PredictBox, Prediction } from '$lib/api/types';
 import { filterDetections } from '$lib/detect/nms';
 import type { BrowserEngine, Tracker } from '$lib/inference/browser';
+import { toast } from '$lib/ui/toast';
 import { trackerOptionsForConf, TrackTrailHistory, type TrackTrail } from './tracking';
 import type { MediaMode } from './useMediaSession';
 
@@ -12,8 +15,10 @@ export interface UseTrackingInput {
   engine: BrowserEngine;
   browserOff: () => string | null;
   mediaMode: () => MediaMode;
-  /** Stable key for the active clip or camera stream (changes on source switch / clip replacement). */
+  /** Stable key for the active clip or camera stream (changes on source switch / clip replacement / camera restart). */
   mediaKey: () => string | null;
+  /** Stable key identifying the current unique video/webcam frame (unchanged across Detect-frame retries & candidate completion). */
+  frameKey?: () => string | null;
   modelId: () => string | null;
   classes: () => readonly string[];
   pred: () => Prediction | null;
@@ -29,9 +34,10 @@ const NO_WASM_TIP = 'Track IDs requires the folo-wasm browser runtime.';
 export function useTracking(input: UseTrackingInput) {
   const enabled = signal(false);
   const loading = signal(false);
+  const loadError = signal<string | null>(null);
   const activeCount = signal(0);
   const trails = signal<TrackTrail[]>([]);
-  const trackedFrame = signal<{ pred: Prediction; boxes: PredictBox[] } | null>(null);
+  const trackedFrame = signal<{ pred: Prediction; frameKey: string | null; boxes: PredictBox[] } | null>(null);
   const trackerReadyTick = signal(0);
 
   let tracker: Tracker | null = null;
@@ -39,21 +45,24 @@ export function useTracking(input: UseTrackingInput) {
   let trackerSeq = 0;
   let alive = true;
   let lastProcessedPred: Prediction | null = null;
+  let lastProcessedFrameKey: string | null = null;
   const trailHistory = new TrackTrailHistory();
 
-  const supported = computed(() => !input.browserOff() && input.engine.capabilities.tracker !== false);
+  const supported = computed(() => !input.browserOff() && !loadError.get() && input.engine.capabilities.tracker !== false);
   const disabledReason = computed(() => {
     if (input.browserOff()) return NO_WASM_TIP;
+    if (loadError.get()) return loadError.get();
     if (input.engine.capabilities.tracker === false) return NO_TRACKER_TIP;
     return null;
   });
 
-  function clearOutputs(ignoreCurrentPred = false) {
+  function clearOutputs(ignorePred: Prediction | null = null) {
     trailHistory.clear();
     trails.set([]);
     activeCount.set(0);
     trackedFrame.set(null);
-    lastProcessedPred = ignoreCurrentPred ? untrack(() => input.pred()) : null;
+    lastProcessedPred = ignorePred;
+    lastProcessedFrameKey = null;
   }
 
   function freeTracker() {
@@ -72,8 +81,8 @@ export function useTracking(input: UseTrackingInput) {
   }
 
   /** Resets the persistent tracker's tracks & motion trails without reallocating the WASM handle. */
-  function reset() {
-    clearOutputs(true);
+  function reset(ignorePred: Prediction | null = untrack(() => input.pred())) {
+    clearOutputs(ignorePred);
     if (tracker) {
       try {
         tracker.reset();
@@ -83,7 +92,7 @@ export function useTracking(input: UseTrackingInput) {
     }
   }
 
-  async function ensureTracker(wantConf: number, classes: readonly string[]) {
+  async function ensureTracker(wantConf: number) {
     if (!alive) return;
     if (tracker && trackerConf !== null && Math.abs(trackerConf - wantConf) <= 1e-4) return;
     const seq = ++trackerSeq;
@@ -100,7 +109,7 @@ export function useTracking(input: UseTrackingInput) {
     }
     loading.set(true);
     try {
-      const created = await input.engine.createTracker(trackerOptionsForConf(wantConf, classes));
+      const created = await input.engine.createTracker(trackerOptionsForConf(wantConf));
       if (!alive || seq !== trackerSeq || !enabled.peek() || input.mediaMode() === 'none') {
         try {
           created?.free();
@@ -112,15 +121,22 @@ export function useTracking(input: UseTrackingInput) {
       if (!created) {
         enabled.set(false);
         clearOutputs();
+        toast.info('Track IDs unavailable', NO_TRACKER_TIP, undefined, { key: 'playground-tracking' });
         return;
       }
       tracker = created;
       trackerConf = wantConf;
       trackerReadyTick.set((t) => t + 1);
-    } catch {
+    } catch (err) {
       if (!alive || seq !== trackerSeq) return;
       enabled.set(false);
       clearOutputs();
+      if (err instanceof ApiError && err.code === 'wasm_not_built') {
+        loadError.set(NO_WASM_TIP);
+        toast.info('Track IDs unavailable', NO_WASM_TIP, undefined, { key: 'playground-tracking' });
+      } else {
+        toast.error(err, 'Could not start Track IDs', { key: 'playground-tracking' });
+      }
     } finally {
       if (alive && seq === trackerSeq) loading.set(false);
     }
@@ -135,6 +151,7 @@ export function useTracking(input: UseTrackingInput) {
       reset();
     } else {
       lastProcessedPred = null;
+      lastProcessedFrameKey = null;
     }
   }
 
@@ -156,7 +173,8 @@ export function useTracking(input: UseTrackingInput) {
         reset();
       }
       if (lastModelId !== null && mid !== lastModelId) {
-        reset();
+        const cur = input.pred();
+        reset(cur && cur.model_id === lastModelId ? cur : null);
       }
       lastMediaKey = key;
       lastModelId = mid;
@@ -168,25 +186,22 @@ export function useTracking(input: UseTrackingInput) {
     const on = enabled.get();
     const mode = input.mediaMode();
     const c = input.conf();
-    const cls = input.classes();
     if (!on || mode === 'none') return;
     untrack(() => {
       if (tracker && trackerConf !== null && Math.abs(trackerConf - c) > 1e-4) {
         clearOutputs();
       }
-      void ensureTracker(c, cls);
+      void ensureTracker(c);
     });
   });
 
-  // Feed each new live prediction into FoloTracker exactly once (never double-stepping ByteTrack on UI re-renders).
+  // Feed each new live frame into FoloTracker exactly once (never double-stepping on UI toggles, slider drags,
+  // duplicate Detect-frame clicks on the same timestamp, or askAllWhenCut candidate completion).
   effect(() => {
     const on = enabled.get();
     const mode = input.mediaMode();
     const p = input.pred();
-    const c = input.conf();
-    const iou = input.iou();
-    const maxDet = input.maxDet();
-    const o2o = input.o2o();
+    const fk = input.frameKey ? input.frameKey() : null;
     void trackerReadyTick.get();
     if (!on || mode === 'none' || !p) {
       untrack(() => {
@@ -196,14 +211,27 @@ export function useTracking(input: UseTrackingInput) {
     }
     untrack(() => {
       if (!tracker || p === lastProcessedPred) return;
+      if (fk !== null && fk === lastProcessedFrameKey) {
+        // Same physical frame (e.g. candidate completion or repeat Detect frame): keep existing tracked boxes without advancing ByteTrack.
+        lastProcessedPred = p;
+        const cur = trackedFrame.peek();
+        if (cur && cur.frameKey === fk) trackedFrame.set({ pred: p, frameKey: fk, boxes: cur.boxes });
+        return;
+      }
       lastProcessedPred = p;
+      lastProcessedFrameKey = fk;
+      const c = input.conf();
+      const iou = input.iou();
+      const maxDet = input.maxDet();
+      const o2o = input.o2o();
+      const cls = input.classes();
       // Preserve ByteTrack's two-stage low-confidence occlusion recovery by keeping candidates down to `min(0.1, conf)`.
       const low = Math.min(0.1, Math.max(0.01, c));
       const candidates = filterDetections(p.boxes, { conf: low, iou: o2o ? 1 : iou, maxDet });
       const tracked = tracker.update(candidates);
       const boxes: PredictBox[] = tracked.map((t) => ({
         class: t.class,
-        name: t.name,
+        name: cls[t.class] ?? t.name,
         score: t.score,
         x1: t.x1,
         y1: t.y1,
@@ -211,7 +239,7 @@ export function useTracking(input: UseTrackingInput) {
         y2: t.y2,
         track_id: t.track_id,
       }));
-      trackedFrame.set({ pred: p, boxes });
+      trackedFrame.set({ pred: p, frameKey: fk, boxes });
       trails.set(trailHistory.update(tracked));
       activeCount.set(tracked.length);
     });
