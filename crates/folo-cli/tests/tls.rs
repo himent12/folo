@@ -248,21 +248,25 @@ fn serve_tls_rejects_unpaired_missing_malformed_and_mismatched_files_upfront() {
     assert_eq!(mcp_bad.status.code(), Some(2));
     assert!(mcp_bad.stdout.is_empty());
 
-    // 6. `folo describe serve --json` advertises `--tls-cert` and `--tls-key`.
+    // 6. `folo describe serve --json` advertises `--tls-cert` / `--tls-key` pairing (`requires`) and `--port` bounds.
     let desc = folo_cmd().args(["describe", "serve", "--json"]).output().unwrap();
     assert_eq!(desc.status.code(), Some(0));
     let v: Value = serde_json::from_slice(&desc.stdout).unwrap();
     let args = v["args"].as_array().unwrap();
     let cert_arg = args.iter().find(|a| a["name"] == "tls_cert").unwrap();
     let key_arg = args.iter().find(|a| a["name"] == "tls_key").unwrap();
+    let port_arg = args.iter().find(|a| a["name"] == "port").unwrap();
     assert_eq!(
         (cert_arg["long"].as_str(), cert_arg["env"].as_str(), cert_arg["type"].as_str()),
         (Some("--tls-cert"), Some("FOLO_TLS_CERT"), Some("path"))
     );
+    assert_eq!(cert_arg["requires"], serde_json::json!(["--tls-key"]));
     assert_eq!(
         (key_arg["long"].as_str(), key_arg["env"].as_str(), key_arg["type"].as_str()),
         (Some("--tls-key"), Some("FOLO_TLS_KEY"), Some("path"))
     );
+    assert_eq!(key_arg["requires"], serde_json::json!(["--tls-cert"]));
+    assert_eq!(port_arg["bounds"], serde_json::json!({ "minimum": 0, "maximum": 65535 }));
 
     // 7. Single-line / mangled private key PEM never leaks key bytes into JSON or stderr.
     let sentinel = "CLISECRETKEYBYTES987654321";
@@ -420,4 +424,217 @@ fn serve_tls_preserves_dns_host_for_dns_only_cert_and_mcp_auto_proxy() {
         .unwrap();
     assert_eq!(bad_mcp.status.code(), Some(2), "stderr={}", String::from_utf8_lossy(&bad_mcp.stderr));
     assert!(bad_mcp.stdout.is_empty());
+}
+
+#[test]
+fn serve_tls_works_with_bench_label_and_cloud_remote() {
+    let dir = TestDir::new("cli-serve-tls-clients");
+    let worker_data = dir.join("worker-data");
+    let control_data = dir.join("control-data");
+    let (cert_pem, key_pem) = make_cert(&["127.0.0.1"]);
+    let (other_ca_pem, _) = make_cert(&["127.0.0.1"]);
+    let cert_path = dir.join("self.pem");
+    let key_path = dir.join("self.key");
+    let other_ca_path = dir.join("other-ca.pem");
+    let bad_ca_path = dir.join("bad-ca.pem");
+    std::fs::write(&cert_path, &cert_pem).unwrap();
+    std::fs::write(&key_path, &key_pem).unwrap();
+    std::fs::write(&other_ca_path, &other_ca_pem).unwrap();
+    std::fs::write(&bad_ca_path, "not valid pem").unwrap();
+
+    let cert_s = cert_path.to_str().unwrap();
+    let key_s = key_path.to_str().unwrap();
+    let other_ca_s = other_ca_path.to_str().unwrap();
+    let bad_ca_s = bad_ca_path.to_str().unwrap();
+    let missing_ca = dir.join("missing-ca.pem");
+    let missing_ca_s = missing_ca.to_str().unwrap();
+    let worker_s = worker_data.to_str().unwrap();
+    let control_s = control_data.to_str().unwrap();
+
+    let mut server: ChildGuard = folo_cmd()
+        .args([
+            "serve",
+            "--data-dir",
+            worker_s,
+            "--port",
+            "0",
+            "--device",
+            "cpu",
+            "--tls-cert",
+            cert_s,
+            "--tls-key",
+            key_s,
+            "--token",
+            SECRET,
+            "--json",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap()
+        .into();
+
+    let line = read_line_within(server.stdout.take().unwrap(), Duration::from_secs(30));
+    let listening: Value = serde_json::from_str(&line).unwrap_or_else(|e| panic!("{e}: {line:?}"));
+    assert_eq!(listening["event"], "listening", "{listening}");
+    let https_url = listening["url"].as_str().unwrap().to_string();
+    assert!(https_url.starts_with("https://127.0.0.1:"), "{listening}");
+    let http_url = https_url.replacen("https://", "http://", 1);
+
+    let run = |args: &[&str], env: &[(&str, &str)]| -> (i32, Value) {
+        let out = folo_cmd().args(args).envs(env.iter().copied()).stdin(Stdio::null()).output().unwrap();
+        let stdout = String::from_utf8(out.stdout).unwrap();
+        let last: Value =
+            stdout.lines().last().and_then(|l| serde_json::from_str(l).ok()).unwrap_or_else(|| {
+                panic!(
+                    "{args:?}: expected JSON output, got stdout={stdout:?} stderr={}",
+                    String::from_utf8_lossy(&out.stderr)
+                )
+            });
+        (out.status.code().unwrap(), last)
+    };
+
+    // 1. `folo bench list` succeeds over HTTPS via `--server` + `--tls-ca` and via `--data-dir` + `FOLO_TLS_CA`.
+    let (code, v) =
+        run(&["bench", "list", "--server", &https_url, "--token", SECRET, "--tls-ca", cert_s, "--json"], &[]);
+    assert_eq!(code, 0, "{v}");
+    assert_eq!(v["benchmarks"], serde_json::json!([]), "{v}");
+
+    let (code, v) = run(
+        &["bench", "list", "--data-dir", worker_s, "--json"],
+        &[("FOLO_TOKEN", SECRET), ("FOLO_TLS_CA", cert_s)],
+    );
+    assert_eq!(code, 0, "{v}");
+    assert_eq!(v["benchmarks"], serde_json::json!([]), "{v}");
+
+    // 2. `folo label jobs` succeeds over HTTPS via `--server` + `--tls-ca` and via `--data-dir` + `FOLO_TLS_CA`.
+    let (code, v) =
+        run(&["label", "jobs", "--server", &https_url, "--token", SECRET, "--tls-ca", cert_s, "--json"], &[]);
+    assert_eq!(code, 0, "{v}");
+    assert_eq!(v["jobs"], serde_json::json!([]), "{v}");
+
+    let (code, v) = run(
+        &["label", "jobs", "--data-dir", worker_s, "--json"],
+        &[("FOLO_TOKEN", SECRET), ("FOLO_TLS_CA", cert_s)],
+    );
+    assert_eq!(code, 0, "{v}");
+    assert_eq!(v["jobs"], serde_json::json!([]), "{v}");
+
+    // 3. Invalid or missing `--tls-ca` on `bench` / `label` fails upfront (exit 2 / 3), NOT `data_dir_in_use`.
+    for cmd in [&["bench", "list"][..], &["label", "jobs"]] {
+        let (code, v) = run(&[cmd[0], cmd[1], "--data-dir", worker_s, "--tls-ca", bad_ca_s, "--json"], &[]);
+        assert_eq!((code, v["error"]["code"].as_str()), (2, Some("usage")), "{cmd:?}: {v}");
+        let (code, v) =
+            run(&[cmd[0], cmd[1], "--data-dir", worker_s, "--tls-ca", missing_ca_s, "--json"], &[]);
+        assert_eq!((code, v["error"]["code"].as_str()), (3, Some("path_not_found")), "{cmd:?}: {v}");
+    }
+
+    // 4. `folo cloud connect remote` against `https://` without `FOLO_TLS_CA` hints at `FOLO_TLS_CA`.
+    let (code, v) = run(
+        &[
+            "cloud",
+            "connect",
+            "remote",
+            "--data-dir",
+            control_s,
+            "--set",
+            &format!("url={https_url}"),
+            "--secret",
+            "token=env:FOLO_TOKEN",
+            "--json",
+        ],
+        &[("FOLO_TOKEN", SECRET)],
+    );
+    assert_eq!((code, v["error"]["code"].as_str()), (1, Some("cloud_unavailable")), "{v}");
+    assert!(v["error"]["message"].as_str().unwrap().contains("FOLO_TLS_CA=<ca.pem>"), "{v}");
+
+    // 5. Wrong CA in `FOLO_TLS_CA` reports that the cert is not trusted by `FOLO_TLS_CA`.
+    let (code, v) = run(
+        &[
+            "cloud",
+            "connect",
+            "remote",
+            "--data-dir",
+            control_s,
+            "--set",
+            &format!("url={https_url}"),
+            "--secret",
+            "token=env:FOLO_TOKEN",
+            "--json",
+        ],
+        &[("FOLO_TOKEN", SECRET), ("FOLO_TLS_CA", other_ca_s)],
+    );
+    assert_eq!((code, v["error"]["code"].as_str()), (1, Some("cloud_unavailable")), "{v}");
+    assert!(v["error"]["message"].as_str().unwrap().contains("not trusted by FOLO_TLS_CA"), "{v}");
+
+    // 6. Missing `FOLO_TLS_CA` file fails upfront as `invalid_body` (exit 2) naming `FOLO_TLS_CA`.
+    let (code, v) = run(
+        &[
+            "cloud",
+            "connect",
+            "remote",
+            "--data-dir",
+            control_s,
+            "--set",
+            &format!("url={https_url}"),
+            "--secret",
+            "token=env:FOLO_TOKEN",
+            "--json",
+        ],
+        &[("FOLO_TOKEN", SECRET), ("FOLO_TLS_CA", missing_ca_s)],
+    );
+    assert_eq!((code, v["error"]["code"].as_str()), (2, Some("invalid_body")), "{v}");
+    assert!(v["error"]["message"].as_str().unwrap().contains("FOLO_TLS_CA"), "{v}");
+
+    // 7. `http://` against the TLS worker tells the user to use `https://`.
+    let (code, v) = run(
+        &[
+            "cloud",
+            "connect",
+            "remote",
+            "--data-dir",
+            control_s,
+            "--set",
+            &format!("url={http_url}"),
+            "--secret",
+            "token=env:FOLO_TOKEN",
+            "--json",
+        ],
+        &[("FOLO_TOKEN", SECRET)],
+    );
+    assert_eq!((code, v["error"]["code"].as_str()), (1, Some("cloud_unavailable")), "{v}");
+    assert!(v["error"]["message"].as_str().unwrap().contains("use https:// instead of http://"), "{v}");
+
+    // 8. `folo cloud connect remote`, `check`, and `offers` succeed over HTTPS when `FOLO_TLS_CA` trusts the cert.
+    let (code, conn) = run(
+        &[
+            "cloud",
+            "connect",
+            "remote",
+            "--data-dir",
+            control_s,
+            "--name",
+            "tls-worker",
+            "--set",
+            &format!("url={https_url}"),
+            "--secret",
+            "token=env:FOLO_TOKEN",
+            "--json",
+        ],
+        &[("FOLO_TOKEN", SECRET), ("FOLO_TLS_CA", cert_s)],
+    );
+    assert_eq!(code, 0, "{conn}");
+    assert_eq!(conn["status"], "ok", "{conn}");
+    let conn_id = conn["id"].as_str().unwrap().to_string();
+
+    let (code, checked) =
+        run(&["cloud", "check", &conn_id, "--data-dir", control_s, "--json"], &[("FOLO_TLS_CA", cert_s)]);
+    assert_eq!(code, 0, "{checked}");
+    assert_eq!(checked["status"], "ok", "{checked}");
+
+    let (code, offer) =
+        run(&["cloud", "offers", &conn_id, "--data-dir", control_s, "--json"], &[("FOLO_TLS_CA", cert_s)]);
+    assert_eq!(code, 0, "{offer}");
+    assert_eq!(offer["id"], "cpu", "{offer}");
 }

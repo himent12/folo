@@ -12,22 +12,7 @@ pub(crate) fn mcp(args: McpArgs) -> Result<(), CliError> {
     init_tracing();
     // Validate `--tls-ca` upfront (before touching the data dir or acquiring `serve.lock`) so an unreadable or
     // unusable CA bundle fails immediately instead of falling through to `data_dir_in_use` or embedded mode.
-    let tls_ca = match &args.tls_ca {
-        Some(ca) if ca.as_os_str().is_empty() => {
-            return Err(CliError::new(ExitCode::Usage, "usage", "--tls-ca must not be empty")
-                .hint("pass the path to a PEM CA certificate file to --tls-ca (or FOLO_TLS_CA)"));
-        }
-        Some(ca) => Some(folo_client::TlsCa::from_file(ca).map_err(|e| {
-            let (exit, code) = if e.is_not_found() {
-                (ExitCode::NotFound, "path_not_found")
-            } else {
-                (ExitCode::Usage, "usage")
-            };
-            CliError::new(exit, code, e.to_string())
-                .hint("pass a readable PEM X.509 CA certificate file to --tls-ca (or FOLO_TLS_CA)")
-        })?),
-        None => None,
-    };
+    let tls_ca = serve_lock::load_tls_ca(args.tls_ca.as_deref())?;
     if args.tensor_cores && args.server.is_none() {
         // As `folo serve --tensor-cores`: before anything creates the GPU context.
         folo_gpu::context::request_tensor_cores();

@@ -94,8 +94,9 @@ impl Drop for Session {
 
 /// The benchmarks of `conn`. `device`: in this process, where model entries run (`run --device`).
 fn open(conn: &BenchServerArgs, device: Option<&str>) -> Result<Session, CliError> {
+    let tls_ca = serve_lock::load_tls_ca(conn.tls_ca.as_deref())?;
     let http = |url: &str| {
-        let h = Arc::new(HttpStore::new(url, conn.token.as_deref()));
+        let h = Arc::new(HttpStore::with_tls_ca(url, conn.token.as_deref(), tls_ca.as_ref()));
         Session { benchmarks: Benchmarks::Http(h.clone()), store: h, local: None }
     };
     if let Some(url) = &conn.server {
@@ -119,7 +120,7 @@ fn open(conn: &BenchServerArgs, device: Option<&str>) -> Result<Session, CliErro
             Ok(Session { benchmarks: Benchmarks::Store(store.clone()), store, local: Some(lock) })
         }
         Ok(Acquire::InUse { url: Some(url) })
-            if serve_lock::serves(&url, &data_dir, conn.token.as_deref(), None) =>
+            if serve_lock::serves(&url, &data_dir, conn.token.as_deref(), tls_ca.as_ref()) =>
         {
             Ok(http(&url))
         }
@@ -476,6 +477,7 @@ mod tests {
                     data_dir: None,
                     server: Some("http://127.0.0.1:9".into()),
                     token: None,
+                    tls_ca: None,
                 },
             }),
             Out { json: true },

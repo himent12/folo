@@ -522,8 +522,8 @@ mod tests {
         assert_eq!(hint, "run `folo dataset --help` or `folo describe dataset --json`");
     }
 
-    /// Every command/subcommand in the CLI tree that defines `--server` binds it to `FOLO_SERVER` and rejects empty
-    /// values.
+    /// Every command/subcommand in the CLI tree that defines `--server` binds it to `FOLO_SERVER`, exposes
+    /// `--tls-ca` bound to `FOLO_TLS_CA`, and rejects empty `--server` values.
     #[test]
     fn server_flag_advertises_folo_server_env_everywhere() {
         fn check_cmd(cmd: &clap::Command, found: &mut Vec<String>, prefix: &str) {
@@ -532,6 +532,8 @@ mod tests {
             } else {
                 format!("{prefix} {}", cmd.get_name())
             };
+            let mut has_server = false;
+            let mut has_tls_ca = false;
             for arg in cmd.get_arguments() {
                 if arg.get_long() == Some("server") {
                     assert_eq!(
@@ -539,8 +541,20 @@ mod tests {
                         Some("FOLO_SERVER"),
                         "{path} --server must bind FOLO_SERVER"
                     );
-                    found.push(path.clone());
+                    has_server = true;
                 }
+                if arg.get_long() == Some("tls-ca") {
+                    assert_eq!(
+                        arg.get_env().and_then(|e| e.to_str()),
+                        Some("FOLO_TLS_CA"),
+                        "{path} --tls-ca must bind FOLO_TLS_CA"
+                    );
+                    has_tls_ca = true;
+                }
+            }
+            if has_server {
+                assert!(has_tls_ca, "{path} exposes --server without --tls-ca");
+                found.push(path.clone());
             }
             for sub in cmd.get_subcommands() {
                 check_cmd(sub, found, &path);
@@ -551,7 +565,7 @@ mod tests {
         assert!(found.contains(&"folo mcp".to_string()), "{found:?}");
         assert!(found.contains(&"folo bench catalog".to_string()), "{found:?}");
         assert!(found.contains(&"folo label jobs".to_string()), "{found:?}");
-        // All 1 mcp + 8 bench + 12 label subcommands expose --server with FOLO_SERVER.
+        // All 1 mcp + 8 bench + 12 label subcommands expose --server with FOLO_SERVER and --tls-ca with FOLO_TLS_CA.
         assert_eq!(found.len(), 21, "{found:?}");
 
         // Explicit empty `--server ""` is rejected as a usage error.
@@ -592,12 +606,17 @@ mod tests {
         assert_eq!(arg(&val, "precision")["conflicts_with"], json!(["--half"]));
         assert_eq!(val["groups"], json!([]));
 
-        // `serve`: `--tls-cert` / `--tls-key` path flags with env vars.
+        // `serve`: `--tls-cert` / `--tls-key` path flags with env vars, symmetric `requires`, and `--port` bounds.
         let serve = describe::describe(&Cli::command(), &["serve".into()], false).unwrap();
         assert_eq!(arg(&serve, "tls_cert")["type"], json!("path"));
         assert_eq!(arg(&serve, "tls_cert")["env"], json!("FOLO_TLS_CERT"));
+        assert_eq!(arg(&serve, "tls_cert")["requires"], json!(["--tls-key"]));
         assert_eq!(arg(&serve, "tls_key")["type"], json!("path"));
         assert_eq!(arg(&serve, "tls_key")["env"], json!("FOLO_TLS_KEY"));
+        assert_eq!(arg(&serve, "tls_key")["requires"], json!(["--tls-cert"]));
+        assert_eq!(arg(&serve, "host")["requires"], json!([]));
+        assert_eq!(arg(&serve, "port")["bounds"], json!({ "minimum": 0, "maximum": 65535 }));
+        assert!(arg(&serve, "port")["help"].as_str().unwrap().contains("[0..=65535]"));
 
         // `mcp`: `FOLO_SERVER` / `FOLO_TLS_CA` env and symmetric `--mock` conflicts.
         let mcp = describe::describe(&Cli::command(), &["mcp".into()], false).unwrap();
@@ -794,6 +813,67 @@ mod tests {
                     let v: f64 = d.parse().unwrap_or_else(|e| panic!("{cmd_path} {arg_id}={d}: {e}"));
                     assert!(b.contains_f64(v), "{cmd_path} {arg_id} default {v} outside {b:?}");
                 }
+            }
+        }
+    }
+
+    /// Every entry in `cli::bounds::ARG_REQUIRES` matches visible arguments in the clap tree, appears identically
+    /// in full and scoped `folo describe`, and is actually enforced by clap when the argument is passed alone.
+    #[test]
+    fn arg_requires_table_matches_clap_tree_and_parser() {
+        use std::collections::BTreeSet;
+        let root = Cli::command();
+        let all = describe::describe(&root, &[], false).unwrap();
+        let mut seen = BTreeSet::new();
+
+        fn find_cmd<'a>(node: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::Value> {
+            if node["path"].as_str() == Some(path) {
+                return Some(node);
+            }
+            let children = node.get("commands").or_else(|| node.get("subcommands"))?.as_array()?;
+            children.iter().find_map(|c| find_cmd(c, path))
+        }
+
+        for &(cmd_path, arg_id, req_ids) in cli::bounds::ARG_REQUIRES {
+            assert!(seen.insert((cmd_path, arg_id)), "duplicate ARG_REQUIRES entry for {cmd_path} {arg_id}");
+            assert!(!req_ids.is_empty(), "{cmd_path} {arg_id} has empty requires list");
+            let sub_path: Vec<String> =
+                cmd_path.split_whitespace().skip(1).map(ToString::to_string).collect();
+            let scoped = describe::describe(&root, &sub_path, false).unwrap();
+            let from_all = find_cmd(&all, cmd_path).unwrap();
+            let find_arg = |cmd: &serde_json::Value, id: &str| {
+                cmd["args"].as_array().unwrap().iter().find(|a| a["name"] == id).unwrap().clone()
+            };
+            let a_scoped = find_arg(&scoped, arg_id);
+            let a_all = find_arg(from_all, arg_id);
+            assert_eq!(a_scoped["requires"], a_all["requires"], "{cmd_path} {arg_id}");
+            let expected: BTreeSet<String> = req_ids
+                .iter()
+                .map(|req| {
+                    assert_ne!(*req, arg_id, "{cmd_path} {arg_id} must not require itself");
+                    let peer = find_arg(&scoped, req);
+                    peer["long"].as_str().unwrap().to_string()
+                })
+                .collect();
+            let actual: BTreeSet<String> = a_scoped["requires"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap().to_string())
+                .collect();
+            assert_eq!(actual, expected, "{cmd_path} {arg_id}");
+
+            // Prove clap enforces the pairing when the argument is supplied without its peer(s).
+            let mut argv: Vec<String> = cmd_path.split_whitespace().map(ToString::to_string).collect();
+            argv.push(a_scoped["long"].as_str().unwrap().to_string());
+            if a_scoped["type"] != "boolean" {
+                argv.push("dummy".to_string());
+            }
+            let err = Cli::command().try_get_matches_from(&argv).unwrap_err();
+            assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument, "{argv:?}: {err}");
+            let rendered = err.render().to_string();
+            for peer_flag in &expected {
+                assert!(rendered.contains(peer_flag), "{argv:?}: expected {peer_flag} in {rendered}");
             }
         }
     }

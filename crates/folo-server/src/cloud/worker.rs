@@ -13,9 +13,17 @@ use serde_json::{Value, json};
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(90);
 
-/// A client of the worker at `url` with its `token`.
-pub(crate) fn client(url: &str, token: &str) -> Client {
-    Client::with_timeouts(url, CONNECT_TIMEOUT, REQUEST_TIMEOUT).token(token)
+/// A client of the worker at `url` with its `token`. When `use_tls_ca` is true (a user-managed `remote` worker)
+/// and `url` uses `https://`, honors `FOLO_TLS_CA` if set.
+pub(crate) fn client(url: &str, token: &str, use_tls_ca: bool) -> Result<Client, String> {
+    let is_https = url.get(..8).is_some_and(|s| s.eq_ignore_ascii_case("https://"));
+    let tls_ca =
+        if use_tls_ca && is_https { folo_cloud::tls_ca_from_env().map_err(|e| e.message)? } else { None };
+    let client = match tls_ca.as_ref() {
+        Some(ca) => Client::with_tls_ca(url, CONNECT_TIMEOUT, REQUEST_TIMEOUT, ca),
+        None => Client::with_timeouts(url, CONNECT_TIMEOUT, REQUEST_TIMEOUT),
+    };
+    Ok(client.token(token))
 }
 
 /// Why the worker described by `system` (running FOLO `version`) cannot train the run, if it cannot: it lacks a

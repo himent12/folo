@@ -16,7 +16,7 @@ and two constants, so tests can parse commands with the real parser; every comma
 | `src/lib.rs` | `VERSION` (`folo --version`), `WEIGHTS_REPO` (default of `weights pull --repo`), `pub mod cli` |
 | `src/cli.rs` | The clap tree: `Cli`, `Command` and every `*Args` struct (`src/cli/label.rs`: `folo label`'s; `src/cli/bench.rs`: `folo bench`'s; `src/cli/bounds.rs`: shared numeric validation bounds). Help strings, bounds and defaults here are what `folo describe` prints |
 | `src/output.rs` | `Out` (human text vs `--json` records), `CliError` and its JSON envelope, `ExitCode` |
-| `src/describe.rs` | `folo describe`: the clap tree as JSON, plus the MCP tool schemas from folo-mcp. Each argument carries `"bounds"`: `null` when unbounded, or an object with any active subset of `minimum`, `exclusive_minimum`, `maximum`, `exclusive_maximum`, and `multiple_of` from `src/cli/bounds.rs` |
+| `src/describe.rs` | `folo describe`: the clap tree as JSON, plus the MCP tool schemas from folo-mcp. Each argument carries `"bounds"` (`null` when unbounded, or an object with any active subset of `minimum`, `exclusive_minimum`, `maximum`, `exclusive_maximum`, and `multiple_of`) and `"requires"` (peer flags required whenever the argument is supplied), backed by `src/cli/bounds.rs` |
 | `src/engine.rs` | Opening datasets, registering the GPU backend for `--device`, engine errors as `CliError` |
 | `src/serve.rs` | `folo serve`; also tracing to stderr, the data-dir lock errors and where the Studio comes from |
 | `src/serve_lock.rs` | One owner per data dir: the OS lock on `<data dir>/serve.lock` and the address in `serve.json` |

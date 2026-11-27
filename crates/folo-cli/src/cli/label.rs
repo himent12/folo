@@ -51,6 +51,10 @@ pub struct LabelServerArgs {
     /// The token that `folo serve` was started with (`--token`).
     #[arg(long, env = "FOLO_TOKEN", hide_env_values = true, value_parser = NonEmptyStringValueParser::new())]
     pub token: Option<String>,
+    /// PEM CA certificate file to trust when connecting to an https:// `folo serve` (for self-signed or private-CA
+    /// certificates).
+    #[arg(long = "tls-ca", env = "FOLO_TLS_CA", value_name = "PATH")]
+    pub tls_ca: Option<PathBuf>,
 }
 
 /// `folo label stop`.

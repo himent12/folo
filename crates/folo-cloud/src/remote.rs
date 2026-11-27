@@ -72,14 +72,14 @@ impl Provider for Remote {
 
     fn check(&self, values: &Values) -> Result<Account> {
         let server = Server::of(values)?;
-        let client = server.client();
-        let health: Health = client
-            .get("/health")
-            .map_err(|e| if e.is_unreachable() { server.unreachable(e) } else { server.not_folo(e) })?;
+        let (client, custom_ca) = server.client()?;
+        let health: Health = client.get("/health").map_err(|e| {
+            if e.is_unreachable() { server.unreachable(e, custom_ca) } else { server.not_folo(e) }
+        })?;
         if health.status != "ok" {
             return Err(server.not_folo(format!("its health is `{}`", health.status)));
         }
-        let system = server.system(&client)?;
+        let system = server.system(&client, custom_ca)?;
         let missing: Vec<&str> =
             REQUIRED_FEATURES.into_iter().filter(|f| !system.features.iter().any(|g| g == f)).collect();
         if !missing.is_empty() {
@@ -100,7 +100,8 @@ impl Provider for Remote {
 
     fn offers(&self, values: &Values) -> Result<Vec<CloudOffer>> {
         let server = Server::of(values)?;
-        let system = server.system(&server.client())?;
+        let (client, custom_ca) = server.client()?;
+        let system = server.system(&client, custom_ca)?;
         // Offers are logged when a run starts.
         let mut offer = offer(&system);
         offer.gpu = server.scrub(&offer.gpu);
@@ -166,13 +167,17 @@ impl Server {
         })
     }
 
-    fn client(&self) -> folo_client::Client {
-        folo_client::Client::with_timeouts(&self.url, CONNECT_TIMEOUT, REQUEST_TIMEOUT)
-            .token(self.token.clone())
+    fn client(&self) -> Result<(folo_client::Client, bool)> {
+        let tls_ca = if self.https { crate::tls_ca_from_env()? } else { None };
+        let client = match tls_ca.as_ref() {
+            Some(ca) => folo_client::Client::with_tls_ca(&self.url, CONNECT_TIMEOUT, REQUEST_TIMEOUT, ca),
+            None => folo_client::Client::with_timeouts(&self.url, CONNECT_TIMEOUT, REQUEST_TIMEOUT),
+        };
+        Ok((client.token(self.token.clone()), tls_ca.is_some()))
     }
 
     /// `GET /api/system` with the token.
-    fn system(&self, client: &folo_client::Client) -> Result<SystemResponse> {
+    fn system(&self, client: &folo_client::Client, custom_ca: bool) -> Result<SystemResponse> {
         client.get("/system").map_err(|e| match e.status.map(|s| s.as_u16()) {
             Some(401) if self.token.is_empty() => Error::new(
                 ErrorKind::Auth,
@@ -181,7 +186,7 @@ impl Server {
             Some(401) => {
                 Error::new(ErrorKind::Auth, format!("the server at {} rejected the token", self.host))
             }
-            None => self.unreachable(e),
+            None => self.unreachable(e, custom_ca),
             Some(_) => {
                 Error::new(ErrorKind::Unavailable, format!("the server at {}: {}", self.host, self.scrub(e)))
             }
@@ -190,23 +195,40 @@ impl Server {
 
     /// The server does not answer: said as a sentence about it (never starting with the URL, which a front end would
     /// capitalise), the transport's own words once (without the URL they repeat), and the likely cause.
-    fn unreachable(&self, e: impl std::fmt::Display) -> Error {
+    fn unreachable(&self, e: impl std::fmt::Display, custom_ca: bool) -> Error {
         let why = self.detail(e);
-        // An https:// URL of a server that speaks plain HTTP fails in the TLS handshake: its answer ("HTTP/1.1 400 …",
-        // as `folo serve` gives) starts with a byte that is no TLS record type (rustls: `InvalidContentType`). Other
-        // broken records are not that, and keep the general cause.
-        let tls = self.https && why.contains("InvalidContentType");
-        let cause = if tls {
-            "it seems to speak plain HTTP: use http://, start the server with --tls-cert / --tls-key, or put a TLS \
-             proxy in front of it"
-                .to_string()
-        } else {
-            "is `folo serve --host 0.0.0.0` running there?".to_string()
-        };
+        let cause = self.unreachable_cause(&why, custom_ca);
         Error::new(
             ErrorKind::Unavailable,
             format!("the server at {} does not answer ({why}); {cause}", self.url),
         )
+    }
+
+    fn unreachable_cause(&self, why: &str, custom_ca: bool) -> &'static str {
+        // An https:// URL of a server that speaks plain HTTP fails in the TLS handshake: its answer ("HTTP/1.1 400 …",
+        // as `folo serve` gives) starts with a byte that is no TLS record type (rustls: `InvalidContentType`). Other
+        // broken records are not that, and keep the general cause.
+        if self.https && why.contains("InvalidContentType") {
+            "it seems to speak plain HTTP: use http://, start the server with --tls-cert / --tls-key, or put a TLS \
+             proxy in front of it"
+        } else if !self.https && why.contains("invalid HTTP version") {
+            // An http:// URL of a TLS server receives a TLS alert record instead of an HTTP status line.
+            "it may be speaking HTTPS (TLS): use https:// instead of http://, or check that `folo serve --host \
+             0.0.0.0` is running there"
+        } else if self.https && (why.contains("UnknownIssuer") || (custom_ca && why.contains("BadSignature")))
+        {
+            if custom_ca {
+                "its TLS certificate is not trusted by FOLO_TLS_CA: verify FOLO_TLS_CA points to the CA certificate \
+                 that signed the server's certificate"
+            } else {
+                "its TLS certificate is not trusted by the default roots: if it uses a self-signed or private CA, set \
+                 FOLO_TLS_CA=<ca.pem>"
+            }
+        } else if self.https && why.contains("NotValidForName") {
+            "its TLS certificate does not match the hostname or IP in the URL"
+        } else {
+            "is `folo serve --host 0.0.0.0` running there?"
+        }
     }
 
     /// The error of a health check that found something other than FOLO.
@@ -425,11 +447,30 @@ mod tests {
         let e = check_over_tls(&[0x16, 0x03, 0x03, 0xff, 0xff]);
         assert_error(&e, ErrorKind::Unavailable, "does not answer");
         assert!(!e.message.contains("plain HTTP"), "{}", e.message);
+        // http:// to a server that speaks TLS: it answers the plain HTTP request with a TLS fatal alert record.
+        let e = check_over_scheme("http", &[0x15, 0x03, 0x03, 0x00, 0x02, 0x02, 0x0a]);
+        assert_error(&e, ErrorKind::Unavailable, "use https:// instead of http://");
+        // Untrusted CA and hostname mismatch hints for https://.
+        let https_server = Server::of(&values("https://127.0.0.1:7878", TOKEN)).unwrap();
+        let default_ca_hint =
+            https_server.unreachable_cause("rustls: invalid peer certificate: UnknownIssuer", false);
+        assert!(default_ca_hint.contains("FOLO_TLS_CA=<ca.pem>"), "{default_ca_hint}");
+        let custom_ca_hint =
+            https_server.unreachable_cause("rustls: invalid peer certificate: UnknownIssuer", true);
+        assert!(custom_ca_hint.contains("not trusted by FOLO_TLS_CA"), "{custom_ca_hint}");
+        let name_hint =
+            https_server.unreachable_cause("rustls: invalid peer certificate: NotValidForName", false);
+        assert!(name_hint.contains("does not match the hostname or IP"), "{name_hint}");
     }
 
-    /// `Remote.check` of `https://` a listener that answers the first bytes it reads with `answer` and closes. The
-    /// listener waits at most 10 s for the connection, so a check that never reaches it cannot hang the test.
+    /// `Remote.check` of `https://` a listener that answers the first bytes it reads with `answer` and closes.
     fn check_over_tls(answer: &'static [u8]) -> Error {
+        check_over_scheme("https", answer)
+    }
+
+    /// `Remote.check` of `{scheme}://` a listener that answers the first bytes it reads with `answer` and closes.
+    /// The listener waits at most 10 s for the connection, so a check that never reaches it cannot hang the test.
+    fn check_over_scheme(scheme: &str, answer: &'static [u8]) -> Error {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -449,7 +490,7 @@ mod tests {
                 }
             }
         });
-        let e = Remote.check(&values(&format!("https://{addr}"), TOKEN)).unwrap_err();
+        let e = Remote.check(&values(&format!("{scheme}://{addr}"), TOKEN)).unwrap_err();
         server.join().unwrap();
         e
     }
