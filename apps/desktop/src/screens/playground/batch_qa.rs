@@ -38,6 +38,16 @@ pub struct BatchQaCounts {
 }
 
 impl PlayBatchState {
+    /// Unified effective class filter for batch matching, filmstrip counts, and Summary CSV:
+    /// when `BatchQaFilter::ByClass(cid)` is active it takes precedence so a `ByClass`-matched
+    /// image can never show or export `0` detections due to a conflicting `play_class`.
+    pub fn effective_class(&self, play_class: Option<u32>) -> Option<u32> {
+        match self.qa_filter {
+            BatchQaFilter::ByClass(cid) => Some(cid),
+            _ => play_class,
+        }
+    }
+
     /// True when batch item `idx` matches `filter` under the current Playground settings.
     #[allow(clippy::too_many_arguments)]
     pub fn item_matches_qa(
@@ -246,8 +256,9 @@ impl FoloApp {
         {
             shown_classes.push((*cid, name.clone(), *n));
         }
-        for (cid, cname, n) in shown_classes {
+        for (chip_idx, (cid, cname, n)) in shown_classes.into_iter().enumerate() {
             let active = cur == BatchQaFilter::ByClass(cid);
+            let will_unmount_on_clear = n == 0 || chip_idx >= MAX_QA_CLASS_CHIPS;
             chips.push(
                 self.chip(
                     &format!("play-batch-qa-cls-{cid}"),
@@ -257,13 +268,13 @@ impl FoloApp {
                     Some(n as u64),
                     window,
                     cx,
-                    act(move |this, _, cx| {
-                        let next = if this.play_batch.qa_filter == BatchQaFilter::ByClass(cid) {
-                            BatchQaFilter::All
-                        } else {
-                            BatchQaFilter::ByClass(cid)
-                        };
+                    act(move |this, w, cx| {
+                        let clearing = this.play_batch.qa_filter == BatchQaFilter::ByClass(cid);
+                        let next = if clearing { BatchQaFilter::All } else { BatchQaFilter::ByClass(cid) };
                         this.set_play_batch_qa_filter(next, cx);
+                        if clearing && will_unmount_on_clear {
+                            this.focus_key("play-batch-qa-all", w, cx);
+                        }
                     }),
                 )
                 .into_any_element(),

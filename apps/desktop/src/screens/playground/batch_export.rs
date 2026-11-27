@@ -161,12 +161,13 @@ pub fn batch_summary_export_filename(model_name: &str, count: usize) -> String {
     base.replacen("playground-batch-", "playground-batch-summary-", 1)
 }
 
-/// Formats per-image Playground batch summary rows as RFC 4180 CSV with formula-injection
-/// protection and columns:
+/// Formats per-image Playground batch summary rows as RFC 4180 CSV (CRLF record separators) with
+/// formula-injection protection and columns:
 /// `filename,status,detection_count,classes,top_confidence,total_ms,width,height,error`.
 pub fn batch_summary_csv(rows: &[BatchSummaryRow]) -> String {
-    let mut out =
-        String::from("filename,status,detection_count,classes,top_confidence,total_ms,width,height,error\n");
+    let mut out = String::from(
+        "filename,status,detection_count,classes,top_confidence,total_ms,width,height,error\r\n",
+    );
     for r in rows {
         push_csv_safe_text(&mut out, &r.filename);
         out.push(',');
@@ -195,7 +196,7 @@ pub fn batch_summary_csv(rows: &[BatchSummaryRow]) -> String {
         }
         out.push(',');
         push_csv_safe_text(&mut out, &r.error);
-        out.push('\n');
+        out.push_str("\r\n");
     }
     out
 }
@@ -312,6 +313,7 @@ impl FoloApp {
         let model_name = shown.map(|m| m.name.as_str()).or(model_id).unwrap_or("model");
         let e2e = shown.is_some_and(|m| self.model_e2e(m));
 
+        let eff_class = self.play_batch.effective_class(self.play_class);
         let mut rows: Vec<BatchSummaryRow> = Vec::with_capacity(filtered.len());
         for idx in filtered {
             let item = &self.play_batch.items[idx];
@@ -322,7 +324,7 @@ impl FoloApp {
                         res.matches_current(m, self.play_iou, self.play_target, self.play_conf, e2e)
                     });
                     if fresh {
-                        let vis = filter_detections(&res.pred.boxes, self.play_conf, self.play_class);
+                        let vis = filter_detections(&res.pred.boxes, self.play_conf, eff_class);
                         let mut class_names: BTreeSet<String> = BTreeSet::new();
                         let mut top_conf: Option<f32> = None;
                         for b in &vis {
@@ -422,11 +424,15 @@ impl FoloApp {
         } else {
             "Save completed batch detections as CSV"
         };
+        let model_tag = if compare_on { "Model A " } else { "" };
         let summary_tip = if self.play_batch.qa_filter == super::batch_qa::BatchQaFilter::All {
-            format!("Save per-image batch summary CSV ({})", counted(filtered_n as u64, "image", "images"))
+            format!(
+                "Save per-image {model_tag}batch summary CSV ({})",
+                counted(filtered_n as u64, "image", "images")
+            )
         } else {
             format!(
-                "Save filtered per-image batch summary CSV ({} matching QA filter)",
+                "Save filtered per-image {model_tag}batch summary CSV ({} matching QA filter)",
                 counted(filtered_n as u64, "image", "images")
             )
         };
@@ -656,12 +662,36 @@ mod tests {
             },
         ];
         let csv = batch_summary_csv(&rows);
-        let lines: Vec<&str> = csv.lines().collect();
+        assert!(
+            csv.starts_with(
+                "filename,status,detection_count,classes,top_confidence,total_ms,width,height,error\r\n"
+            ),
+            "RFC 4180 CSV uses CRLF record endings"
+        );
+        assert!(csv.ends_with("\r\n"));
+        let lines: Vec<&str> = csv.split("\r\n").filter(|l| !l.is_empty()).collect();
         assert_eq!(
             lines[0],
             "filename,status,detection_count,classes,top_confidence,total_ms,width,height,error"
         );
         assert_eq!(lines[1], "'=cmd.png,done,2,circle; square,0.9422,12.35,640,480,");
         assert_eq!(lines[2], "\"broken, file.jpg\",failed,,,,,,,'+decode failed");
+
+        // Embedded newlines inside quoted fields stay preserved verbatim while record endings remain CRLF.
+        let multiline = batch_summary_csv(&[BatchSummaryRow {
+            filename: "a.png".into(),
+            status: "failed",
+            detection_count: None,
+            classes: String::new(),
+            top_confidence: None,
+            total_ms: None,
+            width: None,
+            height: None,
+            error: "line1\nline2".into(),
+        }]);
+        assert_eq!(
+            multiline,
+            "filename,status,detection_count,classes,top_confidence,total_ms,width,height,error\r\na.png,failed,,,,,,,\"line1\nline2\"\r\n"
+        );
     }
 }

@@ -137,15 +137,25 @@ fn labeling_sequence_accelerators_end_to_end() {
         );
     });
 
-    // Undo duplicate -> clean again; switch filter to Reviewed (which hides Pending id1), then press 'U':
-    // jumps to id1 and automatically switches filter back to All.
+    // Undo duplicate -> clean again; switch filter to Failed (which matches 0 images, so
+    // active_label_image_id is None and the empty-filter view renders), verify the empty-filter
+    // Next unlabeled button mounts, and press 'U': jumps to Pending id1 and resets filter to All!
     press(&mut app, window, "ctrl-z");
     drive(&mut app, window, |this, _, cx| {
         assert!(!this.label.editor.is_dirty());
-        this.label.img_filter = LabelImageFilter::Reviewed;
+        this.label.img_filter = LabelImageFilter::Failed;
+        this.reconcile_selected_label_image("lb_4f10");
         cx.notify();
     });
     settle(&mut app, window);
+    drive(&mut app, window, |this, _, _| {
+        assert!(this.label.selected_image.is_none(), "empty Failed filter has no active image");
+        let keys: Vec<String> = this.focus.borrow().keys().map(|k| k.to_string()).collect();
+        assert!(
+            keys.iter().any(|k| k == "label-next-unlabeled"),
+            "Next unlabeled button must be available on empty-filter view"
+        );
+    });
     press(&mut app, window, "u");
     drive(&mut app, window, |this, _, _| {
         assert_eq!(this.label.selected_image.as_deref(), Some(id1.as_str()));
@@ -312,7 +322,7 @@ fn playground_batch_qa_filter_stepping_and_summary_csv_respect_active_filter() {
     drive(&mut app, window, |this, _, cx| {
         this.set_play_batch_qa_filter(BatchQaFilter::WithDetections, cx);
         let (csv, _, _) = this.build_play_batch_summary_csv().expect("filtered summary csv");
-        let lines: Vec<&str> = csv.lines().collect();
+        let lines: Vec<&str> = csv.split("\r\n").filter(|l| !l.is_empty()).collect();
         assert_eq!(lines.len(), 3, "header + 2 matching images (excluding empty b.png):\n{csv}");
         assert!(lines[1].starts_with("a.png,done,1,circle,0.9100,6.50,640,480,"));
         assert!(lines[2].starts_with("c.png,done,1,square,0.8400,6.50,640,480,"));
@@ -322,15 +332,84 @@ fn playground_batch_qa_filter_stepping_and_summary_csv_respect_active_filter() {
     settle(&mut app, window);
     assert_eq!(drive(&mut app, window, |this, _, _| this.play_batch.active), 2);
 
-    // Switch filter to Empty -> jumps automatically to index 1 and Summary CSV contains only b.png.
+    // Conflicting Single-mode class filter (play_class = Circle) + ByClass(Square):
+    // set_play_batch_qa_filter clears conflicting play_class, and Summary CSV still reports Square!
     drive(&mut app, window, |this, _, cx| {
+        this.play_class = Some(0);
+        this.set_play_batch_qa_filter(BatchQaFilter::ByClass(1), cx);
+        assert_eq!(this.play_class, None, "conflicting play_class cleared on ByClass select");
+        // Even if play_class were set conflictingly again, effective_class guarantees non-zero Square export.
+        this.play_class = Some(0);
+        let (csv, _, _) = this.build_play_batch_summary_csv().expect("by-class summary csv");
+        let lines: Vec<&str> = csv.split("\r\n").filter(|l| !l.is_empty()).collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[1].starts_with("c.png,done,1,square,0.8400,6.50,640,480,"), "{csv}");
+        this.play_class = None;
+    });
+
+    // Empty-filter "Show all" button restores keyboard focus to play-batch-qa-all when activated.
+    drive(&mut app, window, |this, w, cx| {
+        this.set_play_batch_qa_filter(BatchQaFilter::ByClass(99), cx);
+        cx.notify();
+        let _ = w;
+    });
+    settle(&mut app, window);
+    drive(&mut app, window, |this, w, cx| {
+        this.focus_key("play-batch-qa-reset", w, cx);
+        assert!(this.fh("play-batch-qa-reset", cx).is_focused(w));
+    });
+    press(&mut app, window, "enter");
+    drive(&mut app, window, |this, w, cx| {
+        assert_eq!(this.play_batch.qa_filter, BatchQaFilter::All);
+        assert!(
+            this.fh("play-batch-qa-all", cx).is_focused(w),
+            "focus must transfer from unmounting Show all button to All chip"
+        );
+    });
+
+    // Model switch invalidates batch and resets ByClass back to All so stale class IDs never linger.
+    drive(&mut app, window, |this, _, cx| {
+        this.set_play_batch_qa_filter(BatchQaFilter::ByClass(1), cx);
+        assert_eq!(this.play_batch.qa_filter, BatchQaFilter::ByClass(1));
+        let other_model =
+            this.store.models.ready().unwrap().iter().find(|m| m.id != model_id).map(|m| m.id.clone());
+        if let Some(other) = other_model {
+            this.pick_play_model(other, cx);
+        } else {
+            this.invalidate_play_batch();
+        }
+        assert_eq!(this.play_batch.qa_filter, BatchQaFilter::All, "model switch resets QA filter to All");
+    });
+
+    // Restore original model + fresh results and verify Empty filter jumps to b.png.
+    drive(&mut app, window, |this, _, cx| {
+        this.play_model = Some(model_id.clone());
+        this.play_batch.items[0].status = mk_res(vec![ScoredBox {
+            class: 0,
+            name: "circle".into(),
+            score: 0.91,
+            x1: 10.,
+            y1: 10.,
+            x2: 60.,
+            y2: 60.,
+        }]);
+        this.play_batch.items[1].status = mk_res(vec![]);
+        this.play_batch.items[2].status = mk_res(vec![ScoredBox {
+            class: 1,
+            name: "square".into(),
+            score: 0.84,
+            x1: 20.,
+            y1: 20.,
+            x2: 80.,
+            y2: 80.,
+        }]);
         this.set_play_batch_qa_filter(BatchQaFilter::Empty, cx);
     });
     settle(&mut app, window);
     drive(&mut app, window, |this, _, _| {
         assert_eq!(this.play_batch.active, 1);
         let (csv, _, _) = this.build_play_batch_summary_csv().expect("empty summary csv");
-        let lines: Vec<&str> = csv.lines().collect();
+        let lines: Vec<&str> = csv.split("\r\n").filter(|l| !l.is_empty()).collect();
         assert_eq!(lines.len(), 2);
         assert!(lines[1].starts_with("b.png,done,0,,"));
         let keys: Vec<String> = this.focus.borrow().keys().map(|k| k.to_string()).collect();

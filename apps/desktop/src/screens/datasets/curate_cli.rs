@@ -152,59 +152,90 @@ pub struct BuiltDatasetCli {
     pub command: String,
     pub hint: String,
     pub quote_note: Option<String>,
+    /// Set when the command cannot be safely copied as-is (e.g. class name contains a comma,
+    /// which `folo dataset filter` splits on via `value_delimiter = ','`, or an unquotable path
+    /// still contains placeholders).
+    pub copy_blocked: Option<&'static str>,
 }
 
 /// Derives a sibling output folder path for `convert` / `split` / `filter` from `ds.path`,
-/// stripping trailing path separators and known manifest filenames (`data.yaml`, `*.json`, `*.xml`).
-fn derive_output_dir(path: &str, suffix: &str) -> String {
+/// stripping trailing path separators, known manifest filenames (`data.yaml`, `*.json`, `*.xml`),
+/// and a standard COCO/VOC `annotations` parent directory so the derived output never lands inside
+/// the dataset root. Returns `None` when `path` is empty or reduces to a bare filesystem root.
+fn derive_output_dir(path: &str, suffix: &str) -> Option<String> {
     let trimmed = path.trim().trim_end_matches(['/', '\\']);
     if trimmed.is_empty() {
-        return format!("<output-{suffix}>");
+        return None;
     }
     let lower = trimmed.to_ascii_lowercase();
-    let base = if lower.ends_with(".yaml")
+    let is_manifest = lower.ends_with(".yaml")
         || lower.ends_with(".yml")
         || lower.ends_with(".json")
-        || lower.ends_with(".xml")
-    {
+        || lower.ends_with(".xml");
+    let mut base = if is_manifest {
         trimmed
             .rsplit_once(['/', '\\'])
             .map(|(parent, _)| parent.trim_end_matches(['/', '\\']))
-            .filter(|p| !p.is_empty())
-            .unwrap_or(trimmed)
+            .filter(|p| !p.is_empty())?
     } else {
         trimmed
     };
-    format!("{base}-{suffix}")
+    if (lower.ends_with(".json") || lower.ends_with(".xml"))
+        && let Some((parent, tail)) = base.rsplit_once(['/', '\\'])
+        && tail.eq_ignore_ascii_case("annotations")
+    {
+        let parent = parent.trim_end_matches(['/', '\\']);
+        if parent.is_empty() {
+            return None;
+        }
+        base = parent;
+    }
+    // Reject bare Windows drive prefixes ("C:") so we never emit "C:-yolo".
+    if base.len() == 2 && base.as_bytes()[0].is_ascii_alphabetic() && base.as_bytes()[1] == b':' {
+        return None;
+    }
+    Some(format!("{base}-{suffix}"))
 }
 
-fn quote_or_placeholder(raw: &str, placeholder: &str, notes: &mut Vec<String>) -> String {
+fn quote_or_placeholder(raw: &str, placeholder: &str, notes: &mut Vec<String>) -> (String, bool) {
     if raw.trim().is_empty() {
-        return placeholder.to_string();
+        notes.push(format!("Replace {placeholder} with the dataset path."));
+        return (placeholder.to_string(), true);
     }
     match folo_api::json::quote_path(raw) {
-        Some(q) => q,
+        Some(q) => (q, false),
         None => {
             notes.push(format!("Replace {placeholder} with this value, quoted for your shell: {raw}"));
-            placeholder.to_string()
+            (placeholder.to_string(), true)
         }
     }
 }
 
+fn resolve_output_arg(path: &str, suffix: &str, notes: &mut Vec<String>) -> (String, bool) {
+    match derive_output_dir(path, suffix) {
+        Some(raw_out) => quote_or_placeholder(&raw_out, "<output>", notes),
+        None => {
+            notes.push(format!("Replace <output-{suffix}> with a new or empty output folder path."));
+            (format!("<output-{suffix}>"), true)
+        }
+    }
+}
+
+const BLOCKED_PLACEHOLDER_REASON: &str =
+    "Replace placeholder arguments with shell-quoted paths before running";
+const BLOCKED_COMMA_CLASS_REASON: &str =
+    "Selected class contains a comma, which `folo dataset filter` splits into multiple names";
+
 /// Builds a verified, shell-safe `folo dataset` CLI command matching `crates/folo-cli/src/cli/dataset.rs`.
 pub fn build_dataset_cli(ds: &Dataset, state: &DatasetCliState) -> BuiltDatasetCli {
     let mut notes: Vec<String> = Vec::new();
-    let input_arg = quote_or_placeholder(&ds.path, "<dataset>", &mut notes);
+    let (input_arg, mut needs_replace) = quote_or_placeholder(&ds.path, "<dataset>", &mut notes);
 
     match state.mode {
         DatasetCliMode::Convert => {
             let suffix = state.convert_to.cli_value();
-            let raw_out = derive_output_dir(&ds.path, suffix);
-            let out_arg = if raw_out.starts_with('<') {
-                raw_out
-            } else {
-                quote_or_placeholder(&raw_out, "<output>", &mut notes)
-            };
+            let (out_arg, out_placeholder) = resolve_output_arg(&ds.path, suffix, &mut notes);
+            needs_replace |= out_placeholder;
             let cmd =
                 format!("folo dataset convert {input_arg} {out_arg} --to {}", state.convert_to.cli_value());
             let hint = format!(
@@ -212,17 +243,19 @@ pub fn build_dataset_cli(ds: &Dataset, state: &DatasetCliState) -> BuiltDatasetC
                 ds.format.label(),
                 state.convert_to.label()
             );
-            BuiltDatasetCli { command: cmd, hint, quote_note: (!notes.is_empty()).then(|| notes.join(" ")) }
+            let quote_note = (!notes.is_empty()).then(|| notes.join(" "));
+            BuiltDatasetCli {
+                command: cmd,
+                hint,
+                copy_blocked: needs_replace.then_some(BLOCKED_PLACEHOLDER_REASON),
+                quote_note,
+            }
         }
         DatasetCliMode::Split => {
             let val = SPLIT_VAL_PRESETS[state.split_val_idx.min(SPLIT_VAL_PRESETS.len() - 1)];
             let test = SPLIT_TEST_PRESETS[state.split_test_idx.min(SPLIT_TEST_PRESETS.len() - 1)];
-            let raw_out = derive_output_dir(&ds.path, "split");
-            let out_arg = if raw_out.starts_with('<') {
-                raw_out
-            } else {
-                quote_or_placeholder(&raw_out, "<output>", &mut notes)
-            };
+            let (out_arg, out_placeholder) = resolve_output_arg(&ds.path, "split", &mut notes);
+            needs_replace |= out_placeholder;
             let mut parts = vec![
                 "folo dataset split".to_string(),
                 input_arg,
@@ -240,19 +273,18 @@ pub fn build_dataset_cli(ds: &Dataset, state: &DatasetCliState) -> BuiltDatasetC
                 parts.push(to.cli_value().to_string());
             }
             let hint = "Deterministic multi-label stratified re-split (preserves rare-class balance across train / val / test).".to_string();
+            let quote_note = (!notes.is_empty()).then(|| notes.join(" "));
             BuiltDatasetCli {
                 command: parts.join(" "),
                 hint,
-                quote_note: (!notes.is_empty()).then(|| notes.join(" ")),
+                copy_blocked: needs_replace.then_some(BLOCKED_PLACEHOLDER_REASON),
+                quote_note,
             }
         }
         DatasetCliMode::Filter => {
-            let raw_out = derive_output_dir(&ds.path, "filtered");
-            let out_arg = if raw_out.starts_with('<') {
-                raw_out
-            } else {
-                quote_or_placeholder(&raw_out, "<output>", &mut notes)
-            };
+            let (out_arg, out_placeholder) = resolve_output_arg(&ds.path, "filtered", &mut notes);
+            needs_replace |= out_placeholder;
+            let mut comma_block: Option<String> = None;
             let mut parts = vec!["folo dataset filter".to_string(), input_arg, "--out".to_string(), out_arg];
             if let Some(sp) = state.filter_split {
                 let s = match sp {
@@ -270,9 +302,18 @@ pub fn build_dataset_cli(ds: &Dataset, state: &DatasetCliState) -> BuiltDatasetC
                     FilterClassMode::Include => "--include-class",
                     FilterClassMode::Exclude => "--exclude-class",
                 };
-                let cls_arg = quote_or_placeholder(cname, "<class>", &mut notes);
-                parts.push(flag.to_string());
-                parts.push(cls_arg);
+                if cname.contains(',') {
+                    comma_block = Some(format!(
+                        "Class `{cname}` contains a comma, which `folo dataset filter {flag}` splits as multiple names (`value_delimiter = ','`). Pick a different class."
+                    ));
+                    parts.push(flag.to_string());
+                    parts.push("<class>".to_string());
+                } else {
+                    let (cls_arg, cls_placeholder) = quote_or_placeholder(cname, "<class>", &mut notes);
+                    needs_replace |= cls_placeholder;
+                    parts.push(flag.to_string());
+                    parts.push(cls_arg);
+                }
             }
             if state.filter_drop_tiny {
                 parts.push("--min-box-area".to_string());
@@ -286,10 +327,20 @@ pub fn build_dataset_cli(ds: &Dataset, state: &DatasetCliState) -> BuiltDatasetC
                 parts.push(to.cli_value().to_string());
             }
             let hint = "Writes a curated copy without modifying source files (`--min-box-area 0.0025` drops boxes smaller than 5% of the image side).".to_string();
+            let quote_note = (!notes.is_empty()).then(|| notes.join(" "));
+            let copy_blocked = comma_block
+                .as_ref()
+                .map(|_| BLOCKED_COMMA_CLASS_REASON)
+                .or_else(|| needs_replace.then_some(BLOCKED_PLACEHOLDER_REASON));
             BuiltDatasetCli {
                 command: parts.join(" "),
                 hint,
-                quote_note: (!notes.is_empty()).then(|| notes.join(" ")),
+                quote_note: match (comma_block, quote_note) {
+                    (Some(c), Some(q)) => Some(format!("{c} {q}")),
+                    (Some(c), None) => Some(c),
+                    (None, q) => q,
+                },
+                copy_blocked,
             }
         }
         DatasetCliMode::DedupCheck => {
@@ -311,10 +362,12 @@ pub fn build_dataset_cli(ds: &Dataset, state: &DatasetCliState) -> BuiltDatasetC
                 "Validates labels, corrupt images, exact duplicate files, and train/val split leakage (read-only)."
             }
             .to_string();
+            let quote_note = (!notes.is_empty()).then(|| notes.join(" "));
             BuiltDatasetCli {
                 command: parts.join(" "),
                 hint,
-                quote_note: (!notes.is_empty()).then(|| notes.join(" ")),
+                copy_blocked: needs_replace.then_some(BLOCKED_PLACEHOLDER_REASON),
+                quote_note,
             }
         }
     }
@@ -578,6 +631,33 @@ impl FoloApp {
                         .child(cls_mode)
                         .child(div().w(px(180.)).child(cls_sel))
                 });
+                let to_chips: Vec<AnyElement> = [
+                    None,
+                    Some(DatasetTargetFormat::Yolo),
+                    Some(DatasetTargetFormat::Coco),
+                    Some(DatasetTargetFormat::Voc),
+                ]
+                .into_iter()
+                .enumerate()
+                .map(|(i, fmt)| {
+                    let active = self.ds_cli.filter_to == fmt;
+                    let label = fmt.map_or("Same", DatasetTargetFormat::label);
+                    self.chip(
+                        &format!("ds-cli-flt-to-{i}"),
+                        label,
+                        active,
+                        None,
+                        None,
+                        window,
+                        cx,
+                        act(move |this, _, cx| {
+                            this.ds_cli.filter_to = fmt;
+                            cx.notify();
+                        }),
+                    )
+                    .into_any_element()
+                })
+                .collect();
                 div()
                     .flex()
                     .flex_col()
@@ -593,6 +673,15 @@ impl FoloApp {
                             .child(drop_tiny),
                     )
                     .children(class_row)
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .items_center()
+                            .gap(px(6.))
+                            .child(text(ty::SM, t.text_tertiary).child("Format"))
+                            .children(to_chips),
+                    )
                     .into_any_element()
             }
             DatasetCliMode::DedupCheck => {
@@ -659,25 +748,39 @@ impl FoloApp {
             }
         };
 
-        let copy_cmd = built.command.clone();
-        let copy_note = built.quote_note.clone();
-        let copy_btn = self.button(
-            "ds-cli-copy",
-            "Copy command",
-            Btn::Secondary,
-            Some("icons/copy.svg"),
-            window,
-            cx,
-            act(move |this, _, cx| {
-                cx.write_to_clipboard(folo_ui::ClipboardItem::new_string(copy_cmd.clone()));
-                this.toast(
-                    Tone::Success,
-                    "Copied dataset CLI command",
-                    copy_note.clone().map(Into::into),
-                    cx,
-                );
-            }),
-        );
+        let copy_disabled = built.copy_blocked.is_some();
+        if copy_disabled && self.fh("ds-cli-copy", cx).is_focused(window) {
+            window.focus(&self.fh("ds-cli-copy-disabled", cx));
+        } else if !copy_disabled && self.fh("ds-cli-copy-disabled", cx).is_focused(window) {
+            window.focus(&self.fh("ds-cli-copy", cx));
+        }
+        let copy_btn = if let Some(reason) = built.copy_blocked {
+            self.button_disabled(
+                "ds-cli-copy",
+                "Copy command",
+                Btn::Secondary,
+                Some("icons/copy.svg"),
+                reason,
+                window,
+                cx,
+            )
+            .into_any_element()
+        } else {
+            let copy_cmd = built.command.clone();
+            self.button(
+                "ds-cli-copy",
+                "Copy command",
+                Btn::Secondary,
+                Some("icons/copy.svg"),
+                window,
+                cx,
+                act(move |this, _, cx| {
+                    cx.write_to_clipboard(folo_ui::ClipboardItem::new_string(copy_cmd.clone()));
+                    this.toast(Tone::Success, "Copied dataset CLI command", None, cx);
+                }),
+            )
+            .into_any_element()
+        };
 
         panel(&t)
             .flex()
@@ -793,11 +896,40 @@ mod tests {
             "folo dataset check \"/data/my shapes/data.yaml\" --perceptual --dhash-threshold 4 --fix-dry-run"
         );
 
-        // 5. Shell-unsafe path falls back to <dataset> placeholder with an explicit quote_note.
-        ds.path = "/data/bad`$(rm -rf)/data.yaml".into();
+        // 5a. Leading '<' path never bypasses quote_path (safely quoted instead of raw shell redirection).
+        ds.path = "<bad;id>/data.yaml".into();
         st.mode = DatasetCliMode::Convert;
+        let angle_cmd = build_dataset_cli(&ds, &st);
+        assert_eq!(
+            angle_cmd.command,
+            "folo dataset convert \"<bad;id>/data.yaml\" \"<bad;id>-coco\" --to coco"
+        );
+        assert!(angle_cmd.copy_blocked.is_none());
+
+        // 5b. Unquotable shell-unsafe path falls back to placeholders and blocks clipboard copying.
+        ds.path = "/data/bad`$(rm -rf)/data.yaml".into();
         let unsafe_cmd = build_dataset_cli(&ds, &st);
-        assert!(unsafe_cmd.command.contains("<dataset>"));
+        assert_eq!(unsafe_cmd.command, "folo dataset convert <dataset> <output> --to coco");
         assert!(unsafe_cmd.quote_note.is_some());
+        assert!(unsafe_cmd.copy_blocked.is_some());
+
+        // 6. Standard COCO manifest under `annotations/` derives sibling of the dataset root.
+        ds.path = "/data/coco/annotations/instances_train.json".into();
+        ds.format = DatasetFormat::Coco;
+        st.convert_to = DatasetTargetFormat::Yolo;
+        let coco_conv = build_dataset_cli(&ds, &st);
+        assert_eq!(
+            coco_conv.command,
+            "folo dataset convert /data/coco/annotations/instances_train.json /data/coco-yolo --to yolo"
+        );
+        assert!(coco_conv.copy_blocked.is_none());
+
+        // 7. Comma in class name blocks `folo dataset filter --include-class` (clap splits on ',').
+        ds.classes = vec!["circle".into(), "person, ped".into()];
+        st.mode = DatasetCliMode::Filter;
+        st.filter_class = Some(1);
+        let comma_flt = build_dataset_cli(&ds, &st);
+        assert!(comma_flt.copy_blocked.is_some());
+        assert!(comma_flt.command.contains("--include-class <class>"));
     }
 }

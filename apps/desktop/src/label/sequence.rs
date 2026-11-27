@@ -314,12 +314,18 @@ impl FoloApp {
             n_classes,
         );
         if added.is_empty() {
-            self.toast(
-                Tone::Info,
-                "Boxes already present",
-                Some(format!("All boxes from {} are already on this image.", prev.file).into()),
-                cx,
-            );
+            let (title, body) = if self.label.editor.draft.is_empty() {
+                (
+                    "No compatible boxes to copy",
+                    format!(
+                        "Boxes from {} were too small after scaling or outside this job's classes.",
+                        prev.file
+                    ),
+                )
+            } else {
+                ("Boxes already present", format!("All boxes from {} are already on this image.", prev.file))
+            };
+            self.toast(Tone::Info, title, Some(body.into()), cx);
             return;
         }
         let scaled = prev.width != im.width || prev.height != im.height;

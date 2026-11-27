@@ -575,6 +575,11 @@ impl FoloApp {
             format!("{} / {total}", active + 1)
         };
 
+        let eff_class = self.play_batch.effective_class(self.play_class);
+        if !filtered.is_empty() && self.fh("play-batch-qa-reset", cx).is_focused(window) {
+            window.focus(&self.fh("play-batch-qa-all", cx));
+        }
+
         let max_tiles = batch_filmstrip_max_tiles(stage_w);
         let tile_row: AnyElement = if filtered.is_empty() {
             let show_all = self.button(
@@ -584,8 +589,9 @@ impl FoloApp {
                 None,
                 window,
                 cx,
-                act(|this, _, cx| {
+                act(|this, w, cx| {
                     this.set_play_batch_qa_filter(super::batch_qa::BatchQaFilter::All, cx);
+                    this.focus_key("play-batch-qa-all", w, cx);
                 }),
             );
             div()
@@ -629,8 +635,7 @@ impl FoloApp {
                                 res.matches_current(m, self.play_iou, self.play_target, self.play_conf, e2e)
                             });
                             if fresh {
-                                let n =
-                                    filter_detections(&res.pred.boxes, self.play_conf, self.play_class).len();
+                                let n = filter_detections(&res.pred.boxes, self.play_conf, eff_class).len();
                                 (t.success_solid, n.to_string(), plural(n, "detection"))
                             } else {
                                 (

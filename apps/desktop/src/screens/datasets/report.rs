@@ -126,17 +126,17 @@ fn push_report_row(
     push_csv_safe_text(out, severity);
     out.push(',');
     push_csv_safe_text(out, detail);
-    out.push('\n');
+    out.push_str("\r\n");
 }
 
-/// Builds a unified RFC 4180 CSV dataset health & class-balance report with spreadsheet
-/// formula-injection protection across all text fields.
+/// Builds a unified RFC 4180 CSV (CRLF record separators) dataset health & class-balance report
+/// with spreadsheet formula-injection protection across all text fields.
 pub fn build_dataset_health_csv(ds: &Dataset, stats: &DatasetStats, issues: Option<&IssueCounts>) -> String {
     let summary = ClassBalanceSummary::compute(ds, stats);
     let findings = health_checks(ds, stats, issues);
     let classes = sorted_class_distribution(ds, stats);
 
-    let mut out = String::from("section,key,value,count,share_pct,severity,detail\n");
+    let mut out = String::from("section,key,value,count,share_pct,severity,detail\r\n");
 
     // 1. Summary metrics.
     push_report_row(&mut out, "summary", "dataset_id", &ds.id, None, None, "", "");
@@ -507,7 +507,12 @@ mod tests {
         let issues = IssueCounts { error: 2, warning: 3, info: 12, by_kind };
 
         let csv = build_dataset_health_csv(&ds, &s, Some(&issues));
-        let lines: Vec<&str> = csv.lines().collect();
+        assert!(
+            csv.starts_with("section,key,value,count,share_pct,severity,detail\r\n"),
+            "RFC 4180 CSV uses CRLF record endings"
+        );
+        assert!(csv.ends_with("\r\n"));
+        let lines: Vec<&str> = csv.split("\r\n").filter(|l| !l.is_empty()).collect();
         assert_eq!(lines[0], "section,key,value,count,share_pct,severity,detail");
         // Formula-like dataset name and class names are neutralized with leading apostrophe + RFC 4180 quotes.
         assert!(

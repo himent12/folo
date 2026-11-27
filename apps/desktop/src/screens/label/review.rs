@@ -222,6 +222,22 @@ impl FoloApp {
                     cx.notify();
                 }),
             );
+            let jump_unlabeled = (pending_n + failed_n > 0).then(|| {
+                let jid_u = jid.clone();
+                self.button(
+                    "label-next-unlabeled",
+                    "Next unlabeled",
+                    Btn::Primary,
+                    Some("icons/target.svg"),
+                    window,
+                    cx,
+                    act(move |this, _, cx| this.request_jump_next_unlabeled(&jid_u, cx)),
+                )
+                .tooltip(crate::controls::tip(
+                    "Jump to the next pending or failed image in sequence",
+                    Some("U"),
+                ))
+            });
             return div()
                 .flex()
                 .flex_col()
@@ -236,7 +252,7 @@ impl FoloApp {
                             "Switch status filter or clear the class filter to review other images.",
                             Tone::Neutral,
                         )
-                        .child(reset),
+                        .child(div().flex().items_center().gap(px(8.)).child(reset).children(jump_unlabeled)),
                     ),
                 )
                 .into_any_element();

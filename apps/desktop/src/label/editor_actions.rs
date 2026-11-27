@@ -120,6 +120,17 @@ impl FoloApp {
         if self.label.confirm_delete_job.is_some() || self.label.confirm_delete_image.is_some() {
             return false;
         }
+        // `U` (Next unlabeled) works even when the active filter matches 0 images, clearing
+        // restrictive filters to jump to the first unlabeled image in the job.
+        if matches!(key, "u" | "U") {
+            let has_images =
+                self.label.images.get(job_id).and_then(|l| l.ready()).is_some_and(|list| !list.is_empty());
+            if has_images {
+                self.request_jump_next_unlabeled(job_id, cx);
+                return true;
+            }
+            return false;
+        }
         let Some(active_id) = self.active_label_image_id(job_id) else {
             return false;
         };
@@ -128,7 +139,6 @@ impl FoloApp {
         match key {
             "left" => self.request_step_label_image(job_id, -1, cx),
             "right" | "s" | "S" => self.request_step_label_image(job_id, 1, cx),
-            "u" | "U" => self.request_jump_next_unlabeled(job_id, cx),
             "p" | "P" => self.copy_prev_frame_label_boxes(job_id, &active_id, cx),
             "a" | "A" => self.approve_label_image(job_id, &active_id, true, cx),
             "d" | "D" => {
