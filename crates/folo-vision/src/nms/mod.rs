@@ -23,16 +23,17 @@
 
 use crate::boxes::Xyxy;
 use crate::fusion::{
-    BoxFusion, FUSION_IOU, ScoreRule, consensus_scores, dfl_cgr_scores, dfl_consensus_scores,
-    dfl_repulse_scores, elc_scores, fuse_boxes, fuse_boxes_sebf,
+    BoxFusion, ScoreRule, consensus_scores, dfl_cgr_scores, dfl_consensus_scores, dfl_repulse_scores,
+    elc_scores, fuse_boxes, fuse_boxes_sebf,
 };
 use crate::model::HeadMode;
 use rayon::prelude::*;
-use serde::{Deserialize, Serialize};
 
+mod config;
 mod kernel;
 mod matrix;
 mod topk;
+pub use config::{CALIBRATED_PRE_CONF, DEFAULT_SOFT_NMS_SIGMA, Detection, NmsConfig, NmsKind};
 pub use kernel::{
     batched_nms, batched_nms_with_kind, diou_nms_sorted, diou_nms_sorted_with_owner, nms_sorted,
     nms_sorted_with_owner, soft_nms_sorted,
@@ -40,180 +41,8 @@ pub use kernel::{
 pub use matrix::matrix_nms_sorted;
 pub use topk::{topk_candidates, topk_detections};
 
-/// Default Gaussian bandwidth `sigma` for [`NmsKind::SoftGaussian`] (Bodla et al. 2017).
-pub const DEFAULT_SOFT_NMS_SIGMA: f32 = 0.5;
-
-fn default_soft_nms_sigma() -> f32 {
-    DEFAULT_SOFT_NMS_SIGMA
-}
-
-/// Suppression rule used by NMS (default: [`NmsKind::Standard`]).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum NmsKind {
-    /// Standard greedy IoU NMS: suppress when `IoU > iou`.
-    #[default]
-    Standard,
-    /// DIoU-NMS (Zheng et al. 2020): suppress when `IoU − rho² / c² > iou`, keeping overlapping boxes whose
-    /// centres are distinct.
-    Diou,
-    /// Linear Soft-NMS (Bodla et al. 2017): when `IoU > iou`, decay `score *= (1 − IoU)` instead of
-    /// hard-dropping; drop once `score <= conf`.
-    SoftLinear,
-    /// Gaussian Soft-NMS (Bodla et al. 2017): when `IoU > 0`, decay `score *= exp(−IoU² / sigma)`; drop once
-    /// `score <= conf`.
-    SoftGaussian {
-        /// Gaussian decay bandwidth `sigma > 0` (default [`DEFAULT_SOFT_NMS_SIGMA`]).
-        #[serde(default = "default_soft_nms_sigma")]
-        sigma: f32,
-    },
-    /// Linear Matrix-NMS (Wang et al. 2020, SOLOv2): non-sequential parallel score decay
-    /// `decay_j = min_{i < j} (1 - IoU_{i,j}) / (1 - max_{k < i} IoU_{k,i})`, dropping once `score <= conf`.
-    MatrixLinear,
-    /// Gaussian Matrix-NMS (Wang et al. 2020, SOLOv2): non-sequential parallel score decay
-    /// `decay_j = min_{i < j} exp(-(IoU_{i,j}² - max_{k < i} IoU_{k,i}²) / sigma)`, dropping once `score <= conf`.
-    MatrixGaussian {
-        /// Gaussian decay bandwidth `sigma > 0` (default [`DEFAULT_SOFT_NMS_SIGMA`]).
-        #[serde(default = "default_soft_nms_sigma")]
-        sigma: f32,
-    },
-}
-
-impl NmsKind {
-    fn is_standard(&self) -> bool {
-        matches!(self, NmsKind::Standard)
-    }
-
-    /// True for score-decaying NMS variants (`SoftLinear` / `SoftGaussian` / `MatrixLinear` / `MatrixGaussian`),
-    /// which decay scores instead of hard-dropping and therefore have no hard suppression clusters.
-    #[inline]
-    pub fn is_soft(&self) -> bool {
-        matches!(
-            self,
-            NmsKind::SoftLinear
-                | NmsKind::SoftGaussian { .. }
-                | NmsKind::MatrixLinear
-                | NmsKind::MatrixGaussian { .. }
-        )
-    }
-
-    /// True for Matrix-NMS variants (`MatrixLinear` / `MatrixGaussian`).
-    #[inline]
-    pub fn is_matrix(&self) -> bool {
-        matches!(self, NmsKind::MatrixLinear | NmsKind::MatrixGaussian { .. })
-    }
-}
-
-/// Pre-NMS extraction threshold for single-label calibrated scoring (`Elc` / `DflConsensus` / `DflRepulse` /
-/// `DflCgr`) when `conf > 0.10`: nearby supporting anchors down to `0.10` join the cluster before final scores are
-/// filtered by `score > conf`. When `conf <= 0.10` (e.g. evaluation at `0.001`), pre-NMS extraction uses `conf` and
-/// calibrated scores below `conf` are kept without post-filtering.
-pub const CALIBRATED_PRE_CONF: f32 = 0.10;
-
 /// Anchor-row count above which candidate extraction runs in parallel.
 const PAR_ROWS: usize = 4096;
-
-/// One detection: a box, its confidence and its class index.
-///
-/// Serialises flat as `{ "x1", "y1", "x2", "y2", "score", "class" }` (the `ScoredBox` shape of `docs/API.md` minus
-/// `name`).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct Detection {
-    /// The box, `xyxy`.
-    #[serde(flatten)]
-    pub bbox: Xyxy,
-    /// Confidence in `[0, 1]`.
-    pub score: f32,
-    /// Class index.
-    pub class: u32,
-}
-
-/// Post-processing settings. Defaults are Ultralytics' predict defaults; [`NmsConfig::val`] gives its validation
-/// settings.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct NmsConfig {
-    /// Keep candidates with `score > conf`.
-    pub conf: f32,
-    /// Suppress a box when its IoU with a kept box is `> iou` (used by `Standard`, `Diou`, and `SoftLinear`;
-    /// ignored by `SoftGaussian`, `MatrixLinear`, and `MatrixGaussian`).
-    pub iou: f32,
-    /// Maximum detections returned per image.
-    pub max_det: usize,
-    /// Only the `max_candidates` highest-scoring candidates enter NMS (Ultralytics' `max_nms`).
-    pub max_candidates: usize,
-    /// Keep only these classes (applied after the per-anchor best class is chosen, as Ultralytics does).
-    pub classes: Option<Vec<u32>>,
-    /// Class-agnostic NMS: boxes of different classes suppress each other.
-    pub agnostic: bool,
-    /// One candidate per (anchor, class) pair above `conf` instead of one per anchor (its best class).
-    pub multi_label: bool,
-    /// Refine each kept box from its NMS cluster ([`crate::fusion`], docs/MODEL.md §9.4). Off by default. Not used
-    /// by the NMS-free `o2o` selection, which has no clusters. Under Soft-NMS (`SoftLinear` / `SoftGaussian`),
-    /// `BoxFusion::Sebf` has no hard suppression clusters and keeps each survivor's own box (validation rejects it).
-    pub fusion: BoxFusion,
-    /// The cluster of a kept box for [`NmsConfig::fusion`]: the candidates of its class (any class with
-    /// `agnostic`) whose IoU with it is `>=` this.
-    pub fusion_iou: f32,
-    /// How the kept boxes are scored ([`ScoreRule`], docs/MODEL.md §9.4). Off by default: the consensus score
-    /// changes the score scale. Not used by the NMS-free `o2o` selection or Soft-NMS, which have no hard
-    /// suppression clusters.
-    pub score: ScoreRule,
-    /// Suppression rule ([`NmsKind::Standard`] by default; opt-in DIoU-NMS, Soft-NMS, or Matrix-NMS).
-    #[serde(default, skip_serializing_if = "NmsKind::is_standard")]
-    pub nms_kind: NmsKind,
-}
-
-impl Default for NmsConfig {
-    fn default() -> Self {
-        Self {
-            conf: 0.25,
-            iou: 0.7,
-            max_det: 300,
-            max_candidates: 30_000,
-            classes: None,
-            agnostic: false,
-            multi_label: false,
-            fusion: BoxFusion::None,
-            fusion_iou: FUSION_IOU,
-            score: ScoreRule::None,
-            nms_kind: NmsKind::Standard,
-        }
-    }
-}
-
-impl NmsConfig {
-    /// Validation settings: `conf = 0.001`, `iou = 0.7`, `max_det = 300`, multi-label.
-    pub fn val() -> Self {
-        Self { conf: 0.001, multi_label: true, ..Self::default() }
-    }
-
-    /// Pre-NMS candidate threshold: `0.10` for single-label calibrated scoring (`Elc` / `DflConsensus` /
-    /// `DflRepulse` / `DflCgr`) when `conf > 0.10`, else `self.conf` unchanged (for `conf <= 0.10`, post-calibration
-    /// scores below `conf` are kept in full).
-    #[inline]
-    pub fn candidate_conf(&self) -> f32 {
-        if self.post_filter_calibrated() { CALIBRATED_PRE_CONF } else { self.conf }
-    }
-
-    /// Like [`NmsConfig::candidate_conf`], but returns `self.conf` unchanged for [`HeadMode::O2o`]
-    /// (which skips NMS and score rules).
-    #[inline]
-    pub fn candidate_conf_for(&self, mode: HeadMode) -> f32 {
-        if mode == HeadMode::O2m { self.candidate_conf() } else { self.conf }
-    }
-
-    /// Whether final detections are filtered by `score > self.conf` after calibrated re-scoring (active for
-    /// single-label calibrated scoring with `self.conf > CALIBRATED_PRE_CONF` under hard NMS; when `self.conf <= 0.10`,
-    /// `multi_label` is set, or `nms_kind` is Soft-NMS, all surviving detections are retained).
-    #[inline]
-    pub(crate) fn post_filter_calibrated(&self) -> bool {
-        !self.multi_label
-            && !self.nms_kind.is_soft()
-            && self.score.is_calibrated()
-            && self.conf > CALIBRATED_PRE_CONF
-    }
-}
 
 /// A compact NMS candidate: score, source index (anchor or input detection) and class.
 #[derive(Clone, Copy, Debug)]
@@ -363,12 +192,13 @@ fn finish(
                 NmsKind::SoftGaussian { sigma } => Some(sigma),
                 _ => None,
             };
-            let pairs = kernel::batched_soft_nms(
+            let pairs = kernel::batched_soft_nms_with_thr(
                 &boxes,
                 &scores,
                 &classes,
                 cfg.iou,
-                cfg.conf,
+                &|c| cfg.conf_for_class(c),
+                cfg.conf_inclusive,
                 sigma,
                 cfg.max_det,
                 cfg.agnostic,
@@ -390,11 +220,12 @@ fn finish(
                 NmsKind::MatrixGaussian { sigma } => Some(sigma),
                 _ => None,
             };
-            let pairs = matrix::batched_matrix_nms(
+            let pairs = matrix::batched_matrix_nms_with_thr(
                 &boxes,
                 &scores,
                 &classes,
-                cfg.conf,
+                &|c| cfg.conf_for_class(c),
+                cfg.conf_inclusive,
                 sigma,
                 cfg.max_det,
                 cfg.agnostic,
@@ -481,8 +312,11 @@ fn finish(
         }
         // Stable: equal new scores stay in NMS's order.
         dets.sort_by(|a, b| b.score.total_cmp(&a.score));
-        if cfg.post_filter_calibrated() {
-            dets.retain(|d| d.score > cfg.conf);
+        if cfg.post_filter_score() {
+            dets.retain(|d| {
+                !cfg.post_filter_score_for_class(d.class)
+                    || cfg.score_passes(d.score, cfg.conf_for_class(d.class))
+            });
         }
     }
     dets
@@ -498,11 +332,12 @@ pub(crate) fn class_allowed(cfg: &NmsConfig, c: u32) -> bool {
 /// If there are more than `u32::MAX` detections.
 pub fn nms_detections(dets: &[Detection], cfg: &NmsConfig) -> Vec<Detection> {
     assert!(dets.len() <= u32::MAX as usize, "nms_detections: too many detections");
-    let conf = cfg.candidate_conf();
     let cands: Vec<Cand> = dets
         .iter()
         .enumerate()
-        .filter(|(_, d)| d.score > conf && class_allowed(cfg, d.class))
+        .filter(|(_, d)| {
+            cfg.score_passes(d.score, cfg.candidate_conf_for_class(d.class)) && class_allowed(cfg, d.class)
+        })
         .map(|(i, d)| Cand { score: d.score, idx: i as u32, class: d.class })
         .collect();
     finish(cands, cfg, |i| dets[i as usize].bbox, DflInputs::default())
@@ -697,18 +532,17 @@ pub fn non_max_suppression_pairs_with_inputs(
     cfg: &NmsConfig,
 ) -> Vec<Detection> {
     debug_assert!(cfg.multi_label, "non_max_suppression_pairs is the multi-label path");
-    let conf = cfg.candidate_conf();
     pairs.sort_unstable_by_key(|&(a, c, _)| (a, c));
     let cands = pairs
         .into_iter()
-        .filter(|&(_, c, s)| s > conf && class_allowed(cfg, c))
+        .filter(|&(_, c, s)| cfg.score_passes(s, cfg.candidate_conf_for_class(c)) && class_allowed(cfg, c))
         .map(|(idx, class, score)| Cand { score, idx, class })
         .collect();
     finish(cands, cfg, bbox_of, dfl)
 }
 
 /// The candidates of `anchors` score rows (row `a` is `data[a * stride + offset..][..num_classes]`), in anchor
-/// order: every class above `conf` with `multi_label`, else the anchor's best class (first on ties) if above.
+/// order: every class above its threshold with `multi_label`, else the anchor's best class (first on ties) if above.
 fn extract_candidates(
     data: &[f32],
     anchors: usize,
@@ -717,12 +551,23 @@ fn extract_candidates(
     offset: usize,
     cfg: &NmsConfig,
 ) -> Vec<Cand> {
-    let conf = cfg.candidate_conf();
+    let class_thrs: Option<Vec<f32>> = cfg
+        .per_class_conf
+        .is_some()
+        .then(|| (0..num_classes).map(|c| cfg.candidate_conf_for_class(c as u32)).collect());
+    let scalar_conf = cfg.candidate_conf_for_class(0);
     let finite_only = cfg.nms_kind.is_soft();
+    let passes = |s: f32, c: usize| {
+        let t = match &class_thrs {
+            Some(v) => v[c],
+            None => scalar_conf,
+        };
+        cfg.score_passes(s, t)
+    };
     let extract = |a: usize, row: &[f32], out: &mut Vec<Cand>| {
         if cfg.multi_label {
             for (c, &s) in row.iter().enumerate() {
-                if (!finite_only || s.is_finite()) && s > conf && class_allowed(cfg, c as u32) {
+                if (!finite_only || s.is_finite()) && passes(s, c) && class_allowed(cfg, c as u32) {
                     out.push(Cand { score: s, idx: a as u32, class: c as u32 });
                 }
             }
@@ -734,7 +579,7 @@ fn extract_candidates(
                 }
             }
             if let Some((best, bs)) = best
-                && bs > conf
+                && passes(bs, best)
                 && class_allowed(cfg, best as u32)
             {
                 out.push(Cand { score: bs, idx: a as u32, class: best as u32 });
@@ -747,7 +592,7 @@ fn extract_candidates(
                     bs = s;
                 }
             }
-            if bs > conf && class_allowed(cfg, best as u32) {
+            if passes(bs, best) && class_allowed(cfg, best as u32) {
                 out.push(Cand { score: bs, idx: a as u32, class: best as u32 });
             }
         }
@@ -833,12 +678,13 @@ pub fn nms_candidates_with_inputs(
     assert!(dfl.entropy.is_none_or(|e| e.len() == n), "nms_candidates: entropy must match cands");
     assert!(dfl.strides.is_none_or(|s| s.len() == n), "nms_candidates: strides must match cands");
     debug_assert!(cands.windows(2).all(|w| w[0].anchor < w[1].anchor), "nms_candidates: unsorted");
-    let conf = cfg.candidate_conf();
     // Positions in anchor order tie-break exactly as anchor indices do.
     let list: Vec<Cand> = cands
         .iter()
         .enumerate()
-        .filter(|(_, c)| c.score > conf && class_allowed(cfg, c.class))
+        .filter(|(_, c)| {
+            cfg.score_passes(c.score, cfg.candidate_conf_for_class(c.class)) && class_allowed(cfg, c.class)
+        })
         .map(|(i, c)| Cand { score: c.score, idx: i as u32, class: c.class })
         .collect();
     finish(list, cfg, |i| cands[i as usize].bbox, dfl)

@@ -505,12 +505,17 @@ impl Predictor {
             check_image(frame)?;
         }
 
-        let det_conf = sequence_det_conf(
-            self.config().conf,
-            track_cfg.low_thresh,
-            self.config().score,
-            self.detector().head_mode(),
-        );
+        let score_rule = self.config().score;
+        let head_mode = self.detector().head_mode();
+        let conf_override = crate::predict::ConfOverride {
+            conf: sequence_det_conf(self.config().conf, track_cfg.low_thresh, score_rule, head_mode),
+            per_class_conf: self.per_class_conf().map(|map| {
+                map.iter()
+                    .map(|(&c, &v)| (c, sequence_det_conf(v, track_cfg.low_thresh, score_rule, head_mode)))
+                    .collect()
+            }),
+            conf_inclusive: false,
+        };
         let imgsz = self.config().imgsz;
         let rect = self.config().rect;
         let mut out = Vec::with_capacity(frames.len());
@@ -521,7 +526,7 @@ impl Predictor {
             let refs: Vec<&Image> = chunk.iter().collect();
             let t_chunk = Instant::now();
             let preds = run_views_with_oom_fallback(&refs, &mut |sub| {
-                self.run_with_imgsz_conf(sub, rect, imgsz, Some(det_conf))
+                self.run_with_imgsz_conf(sub, rect, imgsz, Some(&conf_override))
             })?;
             let chunk_wall = ms(t_chunk);
             let inv_n = 1.0 / chunk.len() as f64;

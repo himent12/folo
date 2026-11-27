@@ -79,12 +79,22 @@ pub(super) fn needing_boxes(
 ) -> [Vec<Found>; 3] {
     let allowed = |f: &Found| class_allowed(nms, f.1);
     match mode {
-        HeadMode::O2m => found.map(|v| v.into_iter().filter(allowed).collect()),
+        HeadMode::O2m => found.map(|v| {
+            v.into_iter()
+                .filter(|f| nms.score_passes(f.2, nms.candidate_conf_for_class(f.1)) && allowed(f))
+                .collect()
+        }),
         HeadMode::O2o => {
-            // (score, global anchor, level, found): every global anchor is distinct, so the order is total.
+            // MODEL.md §6.6: rank the top `max_det` raw anchors first (every anchor passing `min_conf`), then
+            // filter by per-class threshold and `class_allowed`, matching `topk_detections` bit for bit.
+            let min_conf = nms.min_conf();
             let mut all: Vec<(f32, usize, usize, Found)> = Vec::new();
             for (l, v) in found.iter().enumerate() {
-                all.extend(v.iter().map(|f| (f.2, offsets[l] + f.0 as usize, l, *f)));
+                all.extend(
+                    v.iter()
+                        .filter(|f| nms.score_passes(f.2, min_conf))
+                        .map(|f| (f.2, offsets[l] + f.0 as usize, l, *f)),
+                );
             }
             let rank = |x: &(f32, usize, usize, Found), y: &(f32, usize, usize, Found)| {
                 y.0.total_cmp(&x.0).then(x.1.cmp(&y.1))
@@ -99,7 +109,10 @@ pub(super) fn needing_boxes(
             }
             all.sort_unstable_by_key(|x| x.1);
             let mut out: [Vec<Found>; 3] = Default::default();
-            for (_, _, l, f) in all.into_iter().filter(|x| allowed(&x.3)) {
+            for (_, _, l, f) in all
+                .into_iter()
+                .filter(|x| nms.score_passes(x.3.2, nms.conf_for_class(x.3.1)) && allowed(&x.3))
+            {
                 out[l].push(f);
             }
             out
