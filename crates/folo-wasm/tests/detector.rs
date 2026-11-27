@@ -10,8 +10,10 @@ use folo_nn::Module;
 use folo_nn::io::{ModelFile, Purpose};
 use folo_test_support::TestDir;
 use folo_vision::fusion::BoxFusion;
+use folo_vision::model::HeadMode;
 use folo_vision::{
-    FoloModel, ModelConfig, Precision, PredictConfig, Predictor, TileConfig, TileMergeMetric, TtaConfig,
+    Detector as VisionDetector, FoloModel, FoloV2Config, FoloV2Model, ModelConfig, Precision, PredictConfig,
+    Predictor, TileConfig, TileMergeMetric, TtaConfig,
 };
 use folo_wasm::detector::rgba_to_image;
 use folo_wasm::{
@@ -152,7 +154,18 @@ fn cpu_matches_predictor() {
     assert!(t["total_ms"].as_f64().unwrap() >= t["inference_ms"].as_f64().unwrap());
 
     let info = det.info();
-    assert_eq!((info.arch.as_str(), info.imgsz, info.classes.len()), ("folo-n", 256, 3));
+    assert_eq!(
+        (
+            info.family.as_str(),
+            info.arch.as_str(),
+            info.head_mode.as_str(),
+            info.has_o2o,
+            info.has_iou_head,
+            info.imgsz,
+            info.classes.len(),
+        ),
+        ("folo", "folo-n", "o2m", false, false, 256, 3)
+    );
     assert!(info.fallback.is_none() && info.adapter.is_none());
 
     // Repeated frames reuse internal scratch buffers cleanly and return bit-identical boxes.
@@ -589,4 +602,187 @@ fn concurrent_detect_and_tta_futures_do_not_conflict() {
     assert_eq!(single.response.boxes, baseline.response.boxes);
     assert!(!tta.response.boxes.is_empty());
     assert_eq!(det.info().imgsz, 128);
+}
+
+fn make_folo2_model(head: HeadMode, iou_head: bool) -> Vec<u8> {
+    let cfg = FoloV2Config::new("n", 3).unwrap().with_head(head).with_iou_head(iou_head);
+    let mut m = FoloV2Model::with_rng(cfg, &mut Rng::seed(17)).unwrap();
+    m.set_classes(vec!["circle".into(), "square".into(), "triangle".into()]).unwrap();
+    {
+        let _g = no_grad();
+        for t in m.named_tensors() {
+            if (t.name.starts_with("head.cls.") || t.name.starts_with("head.o2o."))
+                && t.name.ends_with(".out.bias")
+                || t.name.starts_with("head.o2o.") && t.name.ends_with(".cls.bias")
+            {
+                t.tensor.copy_from(&t.tensor.zeros_like().unwrap()).unwrap();
+            }
+        }
+    }
+    let dir = TestDir::new("wasm-v2-test");
+    let path = dir.join("m2.folo");
+    m.save(&path).unwrap();
+    std::fs::read(&path).unwrap()
+}
+
+fn folo2_bytes() -> Vec<u8> {
+    static BYTES: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    BYTES.get_or_init(|| make_folo2_model(HeadMode::O2m, false)).clone()
+}
+
+fn folo2_iou_bytes() -> Vec<u8> {
+    static BYTES: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    BYTES.get_or_init(|| make_folo2_model(HeadMode::O2m, true)).clone()
+}
+
+fn folo2_o2o_bytes() -> Vec<u8> {
+    static BYTES: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    BYTES.get_or_init(|| make_folo2_model(HeadMode::O2o, false)).clone()
+}
+
+fn cpu_vision_predictor(bytes: Vec<u8>, imgsz: u32, conf: f32, iou: f32, max_det: usize) -> Predictor {
+    let file = ModelFile::from_bytes(bytes).unwrap();
+    let (mut m, _) = VisionDetector::from_file(&file, Purpose::Inference).unwrap();
+    m.fuse().unwrap();
+    let cfg = PredictConfig { imgsz, conf, iou, max_det, rect: true, head: None, ..PredictConfig::default() };
+    Predictor::from_detector(m, cfg).unwrap()
+}
+
+#[test]
+fn folo2_cpu_matches_predictor_across_single_tiled_tta_and_variants() {
+    let (w, h) = (180, 128);
+    let img = rgba(w, h);
+    let rgb = rgba_to_image(&img, w, h).unwrap();
+
+    for (label, bytes, want_head, want_o2o, want_iou) in [
+        ("o2m", folo2_bytes(), "o2m", false, false),
+        ("o2m+iou_head", folo2_iou_bytes(), "o2m", false, true),
+        ("o2o", folo2_o2o_bytes(), "o2o", true, false),
+    ] {
+        let det = load_with_imgsz(bytes.clone(), BackendChoice::Cpu, Precision::F32, 128).unwrap();
+        let p = cpu_vision_predictor(bytes, 128, OPTS.conf, OPTS.iou, OPTS.max_det);
+
+        let info = det.info();
+        assert_eq!(
+            (
+                info.family.as_str(),
+                info.arch.as_str(),
+                info.head_mode.as_str(),
+                info.has_o2o,
+                info.has_iou_head,
+                info.imgsz,
+                info.classes.len(),
+            ),
+            ("folo2", "folo2-n", want_head, want_o2o, want_iou, 128, 3),
+            "{label}: DetectorInfo mismatch"
+        );
+
+        // Single-pass parity.
+        let got = pollster::block_on(det.detect(&img, w, h, OPTS)).unwrap();
+        let want = p.predict(&rgb).unwrap();
+        assert!(!want.detections.is_empty(), "{label}: test needs detections");
+        assert_eq!(got.response.boxes, want.scored_boxes(p.classes()), "{label}: single detect mismatch");
+
+        // SAHI tiled parity.
+        let tile_opts = TileDetectOptions {
+            conf: OPTS.conf,
+            iou: OPTS.iou,
+            max_det: OPTS.max_det,
+            tile_size: Some(112),
+            overlap: Some(0.25),
+            full_image: true,
+            tile_batch: 4,
+            ..TileDetectOptions::default()
+        };
+        let got_t = pollster::block_on(det.detect_tiled(&img, w, h, tile_opts.clone())).unwrap();
+        let want_t = p.predict_tiled(&rgb, &tile_opts.to_tile_config().unwrap()).unwrap();
+        assert_eq!(got_t.response.boxes, want_t.scored_boxes(p.classes()), "{label}: tiled mismatch");
+
+        // Multi-scale + hflip TTA parity.
+        let tta_opts = TtaDetectOptions {
+            conf: OPTS.conf,
+            iou: OPTS.iou,
+            max_det: OPTS.max_det,
+            hflip: true,
+            scales: vec![0.75, 1.0],
+            ..TtaDetectOptions::default()
+        };
+        let got_a = pollster::block_on(det.detect_tta(&img, w, h, tta_opts.clone())).unwrap();
+        let want_a = p.predict_tta(&rgb, &tta_opts.to_tta_config().unwrap()).unwrap();
+        assert_eq!(got_a.response.boxes, want_a.scored_boxes(p.classes()), "{label}: TTA mismatch");
+        assert_eq!(det.info().imgsz, 128);
+    }
+}
+
+#[test]
+fn folo2_gpu_matches_predictor_across_single_tiled_tta_and_iou_head() {
+    if !has_gpu() {
+        return;
+    }
+    let gpu_dev = folo_gpu::init().unwrap();
+    let (w, h) = (160, 128);
+    let img = rgba(w, h);
+    let rgb = rgba_to_image(&img, w, h).unwrap();
+
+    for (label, bytes, want_iou) in [
+        ("o2m", folo2_bytes(), false),
+        ("o2m+iou_head", folo2_iou_bytes(), true),
+        ("o2o", folo2_o2o_bytes(), false),
+    ] {
+        let gpu = load_with_imgsz(bytes.clone(), BackendChoice::Webgpu, Precision::F32, 128).unwrap();
+        assert_eq!(gpu.backend(), Backend::Webgpu);
+        assert_eq!(gpu.info().family, "folo2");
+        assert_eq!(gpu.info().arch, "folo2-n");
+        assert_eq!(gpu.info().has_iou_head, want_iou);
+
+        let file = ModelFile::from_bytes(bytes).unwrap();
+        let (mut gm, _) = VisionDetector::from_file(&file, Purpose::Inference).unwrap();
+        gm.fuse().unwrap();
+        gm.to_device(gpu_dev).unwrap();
+        let gpu_pred = Predictor::from_detector(
+            gm,
+            PredictConfig {
+                imgsz: 128,
+                conf: OPTS.conf,
+                iou: OPTS.iou,
+                max_det: OPTS.max_det,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        // Single-pass bit-for-bit parity against native GPU Predictor.
+        let g = pollster::block_on(gpu.detect(&img, w, h, OPTS)).unwrap();
+        let want = gpu_pred.predict(&rgb).unwrap();
+        assert!(!want.detections.is_empty(), "{label}: GPU single needs detections");
+        assert_eq!(g.response.boxes, want.scored_boxes(gpu_pred.classes()), "{label}: GPU single mismatch");
+
+        // SAHI tiled bit-for-bit parity against native GPU Predictor.
+        let tile_opts = TileDetectOptions {
+            conf: OPTS.conf,
+            iou: OPTS.iou,
+            max_det: OPTS.max_det,
+            tile_size: Some(112),
+            overlap: Some(0.25),
+            full_image: true,
+            tile_batch: 4,
+            ..TileDetectOptions::default()
+        };
+        let gt = pollster::block_on(gpu.detect_tiled(&img, w, h, tile_opts.clone())).unwrap();
+        let want_t = gpu_pred.predict_tiled(&rgb, &tile_opts.to_tile_config().unwrap()).unwrap();
+        assert_eq!(gt.response.boxes, want_t.scored_boxes(gpu_pred.classes()), "{label}: GPU tiled mismatch");
+
+        // TTA bit-for-bit parity against native GPU Predictor.
+        let tta_opts = TtaDetectOptions {
+            conf: OPTS.conf,
+            iou: OPTS.iou,
+            max_det: OPTS.max_det,
+            hflip: true,
+            scales: vec![0.75, 1.0],
+            ..TtaDetectOptions::default()
+        };
+        let ga = pollster::block_on(gpu.detect_tta(&img, w, h, tta_opts.clone())).unwrap();
+        let want_a = gpu_pred.predict_tta(&rgb, &tta_opts.to_tta_config().unwrap()).unwrap();
+        assert_eq!(ga.response.boxes, want_a.scored_boxes(gpu_pred.classes()), "{label}: GPU TTA mismatch");
+    }
 }

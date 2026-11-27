@@ -2,11 +2,16 @@
 //   sh scripts/build-wasm.sh && web/node_modules/.bin/tsc -p crates/folo-wasm/demo/tsconfig.json
 import init, {
   FoloDetector,
+  FoloTracker,
   hasWebGpu,
   version,
   type FoloDetectResult,
   type FoloDetectorInfo,
   type FoloTileDetectOptions,
+  type FoloTrackConfig,
+  type FoloTrackOptions,
+  type FoloTrackedBox,
+  type FoloTrackerInfo,
   type FoloTtaDetectOptions,
 } from "../../../web/public/folo-wasm/folo_wasm.js";
 
@@ -53,9 +58,38 @@ export async function check(bytes: Uint8Array, buffer: ArrayBuffer, img: ImageDa
   const backend: "webgpu" | "cpu" = r1.backend;
   const precision: "f32" | "f16" = info.precision;
   const why: string | null = info.precisionFallback;
+  const family: "folo" | "folo2" = info.family;
+  const headMode: "o2m" | "o2o" = info.headMode;
+  const hasO2o: boolean = info.hasO2o;
+  const hasIouHead: boolean = info.hasIouHead;
+
+  const trackOpts: FoloTrackOptions = {
+    highThresh: 0.5,
+    lowThresh: 0.1,
+    newTrackThresh: 0.6,
+    matchIou: 0.2,
+    secondMatchIou: 0.5,
+    tentativeMatchIou: 0.3,
+    trackBuffer: 30,
+    minHits: 1,
+    classAware: true,
+    classes: info.classes,
+  };
+  const tracker = new FoloTracker(trackOpts);
+  const defaultTracker = new FoloTracker();
+  const tracks: FoloTrackedBox[] = tracker.update(r1.boxes);
+  const cfg: FoloTrackConfig = tracker.config();
+  const tinfo: FoloTrackerInfo = tracker.info();
+  const firstTrackId: number = tracks[0]?.track_id ?? 0;
+  tracker.reset();
+  tracker.free();
+  defaultTracker.free();
+
   a.free();
   b.free();
   return r1.boxes.length + r2.timing.total_ms + r3.image.width + r4.boxes.length + r5.boxes.length
     + r6.boxes.length + r7.boxes.length + info.classes.length + backend.length
-    + precision.length + (why ?? "").length + (hasWebGpu() ? 1 : 0) + version().length + (a.backend === "cpu" ? 0 : 1);
+    + precision.length + (why ?? "").length + family.length + headMode.length
+    + (hasO2o ? 1 : 0) + (hasIouHead ? 1 : 0) + firstTrackId + cfg.trackBuffer + tinfo.frameId
+    + (hasWebGpu() ? 1 : 0) + version().length + (a.backend === "cpu" ? 0 : 1);
 }

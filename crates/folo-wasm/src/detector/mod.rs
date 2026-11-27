@@ -30,14 +30,17 @@ pub(crate) use std::time::Instant;
 pub(crate) use web_time::Instant;
 
 use folo_core::backend::DETECT_RECORD_WORDS;
-use folo_core::{DetectDecode, Device, Tensor, no_grad};
+use folo_core::{DType, DetectDecode, Device, Tensor, no_grad};
 use folo_data::{Image, Letterbox, LetterboxOptions, PAD_VALUE};
 use folo_gpu::GpuContext;
 use folo_nn::io::{ModelFile, Purpose};
 use folo_vision::boxes::Xyxy;
 use folo_vision::model::HeadMode;
+use folo_vision::model::v2::fuse_cls_iou_scores;
 use folo_vision::nms::{Candidate, Detection, NmsConfig, nms_candidates, topk_candidates};
-use folo_vision::{FoloModel, HeadOutput, Precision, PredictConfig, Predictor, Timing};
+use folo_vision::{
+    Detector as VisionDetector, DetectorOutput, HeadOutput, Precision, PredictConfig, Predictor, Timing,
+};
 
 use crate::simd::{RgbaScratch, letterbox_rgba_planar_f32_with_scratch, rgba_to_rgb};
 
@@ -112,9 +115,10 @@ pub(crate) fn ms(t: Instant) -> f64 {
     t.elapsed().as_secs_f64() * 1e3
 }
 
-/// The fused eval-mode model of `file` on the CPU (fusing never needs a device readback this way).
-fn cpu_model(file: &ModelFile) -> Result<FoloModel, String> {
-    let (mut model, _) = FoloModel::from_file(file, Purpose::Inference).map_err(err)?;
+/// The fused eval-mode detector (`folo-*` or `folo2-*`) of `file` on the CPU (fusing never needs a device
+/// readback this way).
+fn cpu_model(file: &ModelFile) -> Result<VisionDetector, String> {
+    let (mut model, _) = VisionDetector::from_file(file, Purpose::Inference).map_err(err)?;
     model.fuse().map_err(err)?;
     Ok(model)
 }
@@ -194,7 +198,8 @@ impl Detector {
             }
         }
         let predictor =
-            Predictor::with_precision(cpu_model(&file)?, cfg.clone(), opts.precision).map_err(err)?;
+            Predictor::from_detector_with_precision(cpu_model(&file)?, cfg.clone(), opts.precision)
+                .map_err(err)?;
         Ok(Detector {
             predictor: RefCell::new(predictor),
             base_cfg: cfg,
@@ -218,7 +223,8 @@ impl Detector {
         let ctx = GpuContext::shared().map_err(err)?;
         let mut model = cpu_model(file)?;
         model.to_device(device).map_err(err)?;
-        let predictor = Predictor::with_precision(model, cfg.clone(), precision).map_err(err)?;
+        let predictor =
+            Predictor::from_detector_with_precision(model, cfg.clone(), precision).map_err(err)?;
         let d = Detector {
             predictor: RefCell::new(predictor),
             base_cfg: cfg.clone(),
@@ -271,6 +277,7 @@ impl Detector {
     /// Backend, model and class details.
     pub fn info(&self) -> DetectorInfo {
         let p = self.predictor.borrow();
+        let det = p.detector();
         DetectorInfo {
             backend: self.backend,
             device: p.device().to_string(),
@@ -285,7 +292,11 @@ impl Detector {
             } else {
                 std::thread::available_parallelism().map_or(1, |n| n.get())
             },
-            arch: p.model().arch(),
+            family: if det.is_v2() { "folo2" } else { "folo" }.to_string(),
+            arch: p.arch(),
+            head_mode: det.head_mode().as_str().to_string(),
+            has_o2o: det.has_o2o(),
+            has_iou_head: p.model_v2().is_some_and(|m| m.config().iou_head),
             imgsz: self.base_cfg.imgsz,
             classes: p.classes().to_vec(),
             model_id: self.model_id.clone(),
@@ -407,8 +418,10 @@ impl Detector {
         let pre = ms(t0);
 
         let p = self.predictor.borrow();
-        let model = p.model();
-        let (raw_dets, inf, post) = if model.candidates_first_applies(Device::Cpu, nms) {
+        let det = p.detector();
+        let (raw_dets, inf, post) = if let Some(model) = det.as_v1()
+            && model.candidates_first_applies(Device::Cpu, nms)
+        {
             let t1 = Instant::now();
             let cands = model.predict_candidates(&input, nms).map_err(err)?;
             let inf = ms(t1);
@@ -419,11 +432,15 @@ impl Detector {
             let t1 = Instant::now();
             let out = {
                 let _g = no_grad();
-                model.forward(&input).map_err(err)?
+                det.forward(&input).map_err(err)?
             };
             let inf = ms(t1);
             let t2 = Instant::now();
-            let dets = out.detections(nms).map_err(err)?.pop().expect("one image in, one out");
+            let dets = out
+                .detections(nms, DetectorOutput::default_iou_alpha())
+                .map_err(err)?
+                .pop()
+                .expect("one image in, one out");
             (dets, inf, ms(t2))
         };
 
@@ -461,7 +478,7 @@ impl Detector {
         nms: &NmsConfig,
     ) -> Result<(Vec<Vec<Detection>>, Timing), BatchError> {
         let t0 = Instant::now();
-        let (batch, pre, t1, out, canvas) = {
+        let (batch, pre, t1, det_out, canvas) = {
             let mut p = self.predictor.borrow_mut();
             p.set_config(cfg.clone()).map_err(BatchError::from_vision)?;
             let batch = p.prepare(imgs, cfg.rect).map_err(BatchError::from_vision)?;
@@ -469,14 +486,21 @@ impl Detector {
             let canvas = [dims[2], dims[3]];
             let pre = ms(t0);
             let t1 = Instant::now();
-            let out = p.forward(&batch).map_err(BatchError::from_vision)?;
-            (batch, pre, t1, out, canvas)
+            let det_out = p.forward_detector(&batch).map_err(BatchError::from_vision)?;
+            (batch, pre, t1, det_out, canvas)
         };
 
-        // Prefer device-side candidate extraction (downloads ~28 KiB/img instead of ~2.8 MiB/img for dense head).
-        let (dets, inf, t2) = match self.try_gpu_candidates(ctx, &out, canvas, nms)? {
+        // Prefer device-side candidate extraction when no `iou_raw` score-fusion branch is active (~28 KiB/img
+        // instead of ~2.8 MiB/img for the dense head). Models with FOLO v2 `iou_head` decode on device and
+        // download both `dec` and `iou_raw` asynchronously before applying `fuse_cls_iou_scores`.
+        let gpu_cands = if det_out.iou_raw.is_none() {
+            self.try_gpu_candidates(ctx, &det_out.head, canvas, nms)?
+        } else {
+            None
+        };
+        let (dets, inf, t2) = match gpu_cands {
             Some((cands_tensor, mode, b, a)) => {
-                drop(out);
+                drop(det_out);
                 let records = download_candidate_records_batch(ctx, &cands_tensor, b, a).await?;
                 let inf = ms(t1);
                 let t2 = Instant::now();
@@ -494,15 +518,54 @@ impl Detector {
                 (p.finish_detections(&batch, raw_dets), inf, t2)
             }
             None => {
-                let nc = out.num_classes;
-                let dec = out.decoded_on_device().map_err(|e| BatchError::from_vision(e.into()))?;
-                drop(out);
+                let nc = det_out.head.num_classes;
+                let b = det_out.head.batch();
+                let a = det_out.head.num_anchors();
+                let dec = det_out.head.decoded_on_device().map_err(|e| BatchError::from_vision(e.into()))?;
+                let iou_f32 = match det_out.iou_raw {
+                    Some(iou) => {
+                        if iou.dims() != [b, 1, a] {
+                            return Err(BatchError::Other(format!(
+                                "iou_raw {:?} does not match [{b}, 1, {a}]",
+                                iou.dims()
+                            )));
+                        }
+                        let _g = no_grad();
+                        let t = if iou.dtype() == DType::F32 {
+                            iou
+                        } else {
+                            iou.to_dtype(DType::F32).map_err(BatchError::from_core)?
+                        };
+                        Some(t)
+                    }
+                    None => None,
+                };
+                drop(det_out.head);
                 let host = folo_gpu::download_async(ctx, &dec).await.map_err(BatchError::from_core)?;
+                let iou_host = match iou_f32 {
+                    Some(iou) => {
+                        Some(folo_gpu::download_async(ctx, &iou).await.map_err(BatchError::from_core)?)
+                    }
+                    None => None,
+                };
                 let inf = ms(t1);
                 let t2 = Instant::now();
                 let all = host.to_vec::<f32>().map_err(BatchError::from_core)?;
-                let a = dec.dims()[1];
-                let decoded = HeadOutput::split_decoded(&all, a, nc);
+                let mut decoded = HeadOutput::split_decoded(&all, a, nc);
+                if let Some(iou_host) = iou_host {
+                    let iou_vals = iou_host.to_vec::<f32>().map_err(BatchError::from_core)?;
+                    if iou_vals.len() != b * a {
+                        return Err(BatchError::Other(format!(
+                            "iou_raw: expected {} values, got {}",
+                            b * a,
+                            iou_vals.len()
+                        )));
+                    }
+                    let alpha = DetectorOutput::default_iou_alpha();
+                    for ((_, scores), iou_img) in decoded.iter_mut().zip(iou_vals.chunks_exact(a)) {
+                        fuse_cls_iou_scores(scores, iou_img, nc, alpha);
+                    }
+                }
                 let mut p = self.predictor.borrow_mut();
                 p.set_config(cfg.clone()).map_err(BatchError::from_vision)?;
                 (p.finish(&batch, decoded, nc), inf, t2)
