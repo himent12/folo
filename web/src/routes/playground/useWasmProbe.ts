@@ -38,5 +38,13 @@ export function useWasmAvailability(runOn: Signal<RunOn>) {
   });
 
   const runOnNote = computed(() => (!browserOff.get() && !webgpu ? 'No WebGPU in this browser' : null));
-  return { webgpu, browserOff, runOnNote };
+  const serverPredictOptions = computed(() => {
+    if (hub.api.mock || hub.serverMock === true || hub.offline) return false;
+    // `/api/health`'s feature list (`hub.features`) is refreshed on every reconnect and cleared on outage:
+    // treat it as authoritative when present so stale `/api/system` data never survives a server downgrade.
+    const healthFeatures = hub.features;
+    if (healthFeatures !== null) return healthFeatures.includes('predict_options');
+    return !!system.data?.features?.includes('predict_options');
+  });
+  return { webgpu, browserOff, runOnNote, serverPredictOptions };
 }

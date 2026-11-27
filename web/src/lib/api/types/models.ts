@@ -73,6 +73,10 @@ export interface OnnxSwitches {
   decode?: boolean;
   /** Symbolic batch, height and width (any batch, sides in multiples of 32). */
   dynamic?: boolean;
+  /** Symbolic batch axis only (`folo export --dynamic-batch`; servers advertising `export_dynamic_axes`). */
+  dynamic_batch?: boolean;
+  /** Symbolic height and width axes only (`folo export --dynamic-hw`; servers advertising `export_dynamic_axes`). */
+  dynamic_hw?: boolean;
   /** f16 weights, input, activations and outputs. */
   half?: boolean;
 }

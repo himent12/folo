@@ -8,6 +8,7 @@
 
 import { hub } from '$lib/api/index';
 import type { Dataset, DatasetImage as Img, Prediction, Split } from '$lib/api/types';
+import type { InferenceConfig } from '$lib/inference/browser';
 import type { CompareViewMode } from './compare';
 import { DEFAULTS } from './predict';
 import type { Source } from './source';
@@ -20,6 +21,8 @@ export interface Session {
   /** The result for `source` (and its model, `pred.model_id`) on `runOn`: shown again without asking twice. */
   pred: Prediction | null;
   runOn: string;
+  /** Active inference options (standard / SAHI / TTA) for the tab. */
+  inference?: InferenceConfig;
   conf: number;
   iou: number;
   maxDet: number;

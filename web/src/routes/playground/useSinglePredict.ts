@@ -2,7 +2,14 @@
 import { computed, effect, untrack, type Signal } from 'fw';
 import { hub } from '$lib/api/index';
 import type { Prediction } from '$lib/api/types';
-import { isDetectorLoadError, type BrowserEngine } from '$lib/inference/browser';
+import {
+  DEFAULT_INFERENCE_CONFIG,
+  inferenceConfigKey,
+  inferenceMetaKey,
+  isDetectorLoadError,
+  type BrowserEngine,
+  type InferenceConfig,
+} from '$lib/inference/browser';
 import { askAllWhenCut } from './allCandidates';
 import { ask, FETCH, noServerWeights, type RunOn } from './predict';
 import { sourceImageKey, type Source } from './source';
@@ -14,7 +21,7 @@ export interface SinglePredictInput {
   runOn: Signal<RunOn>;
   localWeights: Signal<Map<string, File>>;
   retryTick: Signal<number>;
-  restored: (model: string, s: Source, runOn: string) => boolean;
+  restored: (model: string, s: Source, runOn: string, infKey?: string) => boolean;
   /** Optional one-shot reuse check (e.g. after swapping Model A and Model B in Compare mode). */
   consumeReuse?: (model: string, s: Source, runOn: RunOn) => boolean;
   pred: Signal<Prediction | null>;
@@ -28,17 +35,19 @@ export interface SinglePredictInput {
   picked: Signal<Det | null>;
   conf: Signal<number>;
   engine: BrowserEngine;
+  /** Active effective inference config (standard / SAHI / TTA) for Model A's backend. */
+  inference?: () => InferenceConfig;
   dropLocal: (id: string, f: File, e: unknown) => void;
   /** True while streaming live video/webcam frames (skips secondary full-candidate re-fetches). */
   isLiveStream?: () => boolean;
   /** True while batch Run All is driving sequential inference (suppresses duplicate single-image requests). */
   isBatchRunningAll?: () => boolean;
-  /** Returns a cached batch prediction for `(model, source, runOn)` if already computed. */
-  getCachedBatchPred?: (model: string, s: Source, runOn: RunOn) => Prediction | null;
+  /** Returns a cached batch prediction for `(model, source, runOn, inferenceKey)` if already computed. */
+  getCachedBatchPred?: (model: string, s: Source, runOn: RunOn, inferenceKey?: string) => Prediction | null;
   /** True when the user stopped Run All on this unrun batch item (prevents instant auto-restart). */
   wasBatchStopped?: (s: Source) => boolean;
   /** Mirrors single-image completion/error into the active batch item so filmstrip badges update live. */
-  onBatchResult?: (s: Source, model: string, runOn: RunOn, pred: Prediction | null, error: unknown) => void;
+  onBatchResult?: (s: Source, model: string, runOn: RunOn, pred: Prediction | null, error: unknown, inferenceKey?: string) => void;
   /** Mirrors single-image running state into the active batch item. */
   onBatchBusy?: (s: Source, busy: boolean) => void;
   /** Receives a synchronous abort callback so `Run all` cancels any in-flight single request before dispatching batch work. */
@@ -65,17 +74,19 @@ export function useSinglePredict(o: SinglePredictInput): () => boolean {
     const s = o.source.get();
     const on = o.runOn.get();
     const file = activeFile.get();
+    const inf = o.inference ? o.inference() : DEFAULT_INFERENCE_CONFIG;
+    const infKey = inferenceConfigKey(inf);
     const retry = o.retryTick.get();
     const batchRunning = !!o.isBatchRunningAll?.();
     const explicitRetry = retry !== lastRetry;
     lastRetry = retry;
     if (batchRunning) return;
-    if (!id || !s || untrack(() => o.restored(id, s, on) || !!o.consumeReuse?.(id, s, on))) {
+    if (!id || !s || untrack(() => o.restored(id, s, on, infKey) || !!o.consumeReuse?.(id, s, on))) {
       untrack(() => {
         const curPred = o.pred.peek();
         if (s && curPred) {
           o.predSourceKey.set(sourceImageKey(s));
-          if (id) o.onBatchResult?.(s, id, on, curPred, null);
+          if (id) o.onBatchResult?.(s, id, on, curPred, null, infKey);
         }
         o.predicting.set(false);
         o.error.set(null);
@@ -83,7 +94,7 @@ export function useSinglePredict(o: SinglePredictInput): () => boolean {
       });
       return;
     }
-    const cached = !explicitRetry ? untrack(() => o.getCachedBatchPred?.(id, s, on) ?? null) : null;
+    const cached = !explicitRetry ? untrack(() => o.getCachedBatchPred?.(id, s, on, infKey) ?? null) : null;
     if (cached) {
       untrack(() => {
         const sameDisplayed = o.pred.peek() === cached;
@@ -109,9 +120,9 @@ export function useSinglePredict(o: SinglePredictInput): () => boolean {
       o.error.set(null);
       o.weightsMissing.set(false);
       o.onBatchBusy?.(s, true);
-      // Results belong to a model and backend: never show another model's or backend's boxes while (or if) this one fails.
+      // Results belong to a model, backend, and inference mode: never show stale boxes while (or if) this run fails.
       const p = o.pred.get();
-      if (p && (p.model_id !== id || (p.backend ?? 'server') !== on)) {
+      if (p && (p.model_id !== id || (p.backend ?? 'server') !== on || inferenceMetaKey(p.inference) !== infKey)) {
         o.pred.set(null);
         o.predSourceKey.set(null);
         if (p.model_id !== id) o.hidden.set(new Set());
@@ -119,7 +130,7 @@ export function useSinglePredict(o: SinglePredictInput): () => boolean {
         o.picked.set(null);
       }
     });
-    const run = ask({ api: hub.api, engine: o.engine, model: id, source: s, on, file, options: FETCH, signal: ctrl.signal });
+    const run = ask({ api: hub.api, engine: o.engine, model: id, source: s, on, file, options: FETCH, inference: inf, signal: ctrl.signal });
     run.then(
       (p) => {
         if (ctrl.signal.aborted) return;
@@ -129,7 +140,7 @@ export function useSinglePredict(o: SinglePredictInput): () => boolean {
         o.hover.set(null);
         o.picked.set(null);
         o.predicting.set(false);
-        o.onBatchResult?.(s, id, on, p, null);
+        o.onBatchResult?.(s, id, on, p, null, infKey);
       },
       (e: unknown) => {
         if (ctrl.signal.aborted) return;
@@ -158,7 +169,7 @@ export function useSinglePredict(o: SinglePredictInput): () => boolean {
         o.hover.set(null);
         o.picked.set(null);
         o.error.set(e);
-        o.onBatchResult?.(s, id, on, null, e);
+        o.onBatchResult?.(s, id, on, null, e, infKey);
       },
     );
     return () => {
@@ -177,7 +188,8 @@ export function useSinglePredict(o: SinglePredictInput): () => boolean {
     file: () => activeFile.peek(),
     busy: () => o.predicting.get() || !!o.isLiveStream?.() || !!o.isBatchRunningAll?.(),
     engine: o.engine,
+    inference: () => (o.inference ? untrack(() => o.inference!()) : DEFAULT_INFERENCE_CONFIG),
     weightsMissing: () => o.weightsMissing.set(true),
-    onCompleted: (s, id, on, next) => o.onBatchResult?.(s, id, on, next, null),
+    onCompleted: (s, id, on, next) => o.onBatchResult?.(s, id, on, next, null, inferenceMetaKey(next.inference)),
   });
 }

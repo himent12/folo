@@ -4,7 +4,14 @@ import { computed, effect, signal, untrack, type Signal } from 'fw';
 import { hub } from '$lib/api/index';
 import type { Model, Prediction } from '$lib/api/types';
 import { filterDetections } from '$lib/detect/nms';
-import { isDetectorLoadError, type BrowserEngine } from '$lib/inference/browser';
+import {
+  DEFAULT_INFERENCE_CONFIG,
+  inferenceConfigKey,
+  inferenceMetaKey,
+  isDetectorLoadError,
+  type BrowserEngine,
+  type InferenceConfig,
+} from '$lib/inference/browser';
 import type { ModelChoice } from '$lib/scoreSummary';
 import { askAllWhenCut } from './allCandidates';
 import { comparePredictionJson, pickDefaultModelB, summarizeComparison, type CompareViewMode } from './compare';
@@ -38,6 +45,8 @@ export interface CompareControllerInput {
   dropLocalB: (id: string, f: File, e: unknown) => void;
   badFileB: Signal<{ name: string; why: string | null } | null>;
   engine: BrowserEngine;
+  /** Resolves effective inference options (standard / SAHI / TTA) for a given backend. */
+  inferenceFor?: (on: RunOn) => InferenceConfig;
   /** True while streaming live video/webcam frames (skips secondary full-candidate re-fetches). */
   isLiveStream?: () => boolean;
 }
@@ -63,7 +72,8 @@ export function createCompareController(input: CompareControllerInput) {
 
   let reuseSwapA: string | null = null;
   let reuseSwapB: string | null = null;
-  const swapKey = (id: string, s: Source, on: RunOn) => `${id}|${sourceImageKey(s)}|${on}`;
+  const infOf = (on: RunOn) => (input.inferenceFor ? input.inferenceFor(on) : DEFAULT_INFERENCE_CONFIG);
+  const swapKey = (id: string, s: Source, on: RunOn, infKey: string) => `${id}|${sourceImageKey(s)}|${on}|${infKey}`;
 
   const modelB = computed((): Model | null => {
     const list = input.ranked();
@@ -137,11 +147,13 @@ export function createCompareController(input: CompareControllerInput) {
     const prevKeyB = predBSourceKey.peek();
 
     // Reuse already-fetched predictions for the swapped sides so Swap does not fire 2 redundant requests.
-    if (s && prevPredB && prevPredB.model_id === bId && (prevPredB.backend ?? 'server') === prevRunB && prevKeyB === sourceImageKey(s)) {
-      reuseSwapA = swapKey(bId, s, prevRunB);
+    const infKeyA = inferenceConfigKey(untrack(() => infOf(prevRunB)));
+    const infKeyB = inferenceConfigKey(untrack(() => infOf(prevRunA)));
+    if (s && prevPredB && prevPredB.model_id === bId && (prevPredB.backend ?? 'server') === prevRunB && prevKeyB === sourceImageKey(s) && inferenceMetaKey(prevPredB.inference) === infKeyA) {
+      reuseSwapA = swapKey(bId, s, prevRunB, infKeyA);
     }
-    if (s && prevPredA && prevPredA.model_id === aId && (prevPredA.backend ?? 'server') === prevRunA && prevKeyA === sourceImageKey(s)) {
-      reuseSwapB = swapKey(aId, s, prevRunA);
+    if (s && prevPredA && prevPredA.model_id === aId && (prevPredA.backend ?? 'server') === prevRunA && prevKeyA === sourceImageKey(s) && inferenceMetaKey(prevPredA.inference) === infKeyB) {
+      reuseSwapB = swapKey(aId, s, prevRunA, infKeyB);
     }
 
     // Set Model B before choosing Model A so immediate URL sync writes both swapped IDs atomically.
@@ -160,7 +172,8 @@ export function createCompareController(input: CompareControllerInput) {
   }
 
   function consumeReuseA(id: string, s: Source, on: RunOn): boolean {
-    const match = reuseSwapA !== null && reuseSwapA === swapKey(id, s, on);
+    const infKey = inferenceConfigKey(untrack(() => infOf(on)));
+    const match = reuseSwapA !== null && reuseSwapA === swapKey(id, s, on, infKey);
     reuseSwapA = null;
     return match;
   }
@@ -178,6 +191,8 @@ export function createCompareController(input: CompareControllerInput) {
     resetZoomState(zoom, false);
   }
 
+  const effectiveInfB = computed(() => infOf(runOnB.get()));
+
   // Model B prediction effect: strictly skipped when Compare mode is OFF (zero extra network calls).
   effect(() => {
     const onCompare = compare.get();
@@ -185,6 +200,8 @@ export function createCompareController(input: CompareControllerInput) {
     const s = input.source.get();
     const on = runOnB.get();
     const file = activeFileB.get();
+    const inf = effectiveInfB.get();
+    const infKey = inferenceConfigKey(inf);
     void retryTickB.get();
     if (!onCompare || !id || !s) {
       untrack(() => {
@@ -201,7 +218,7 @@ export function createCompareController(input: CompareControllerInput) {
       return;
     }
     const reused = untrack(() => {
-      const hit = reuseSwapB !== null && reuseSwapB === swapKey(id, s, on);
+      const hit = reuseSwapB !== null && reuseSwapB === swapKey(id, s, on, infKey);
       reuseSwapB = null;
       return hit;
     });
@@ -220,14 +237,14 @@ export function createCompareController(input: CompareControllerInput) {
       errorB.set(null);
       weightsMissingB.set(false);
       const p = predB.get();
-      if (p && (p.model_id !== id || (p.backend ?? 'server') !== on)) {
+      if (p && (p.model_id !== id || (p.backend ?? 'server') !== on || inferenceMetaKey(p.inference) !== infKey)) {
         predB.set(null);
         predBSourceKey.set(null);
         hoverB.set(null);
         pickedB.set(null);
       }
     });
-    ask({ api: hub.api, engine: input.engine, model: id, source: s, on, file, options: FETCH, signal: ctrl.signal }).then(
+    ask({ api: hub.api, engine: input.engine, model: id, source: s, on, file, options: FETCH, inference: inf, signal: ctrl.signal }).then(
       (p) => {
         if (ctrl.signal.aborted) return;
         input.badFileB.set(null);
@@ -271,6 +288,7 @@ export function createCompareController(input: CompareControllerInput) {
     file: () => activeFileB.peek(),
     busy: () => predictingB.get() || !!input.isLiveStream?.(),
     engine: input.engine,
+    inference: () => untrack(() => infOf(runOnB.peek())),
     weightsMissing: () => weightsMissingB.set(true),
   });
 

@@ -7,7 +7,7 @@ import { computed, css, For } from 'fw';
 import type { Timing } from '$lib/api/types';
 import { ms, num } from '$lib/format';
 
-export default function TimingBar(props: { timing: Timing; device: string; cold?: boolean }) {
+export default function TimingBar(props: { timing: Timing; device: string; cold?: boolean; mode?: string | null }) {
   const parts = computed(() => [
     { key: 'pre', label: 'Preprocess', what: 'decode, resize', v: props.timing.preprocess_ms, color: 'var(--text-tertiary)' },
     { key: 'inf', label: 'Inference', what: 'the model', v: props.timing.inference_ms, color: 'var(--text-primary)' },
@@ -54,6 +54,11 @@ export default function TimingBar(props: { timing: Timing; device: string; cold?
       <p class="device">
         <span class="faint">Device</span> <span class="mono">{props.device}</span>
       </p>
+      {props.mode ? (
+        <p class="device mode">
+          <span class="faint">Mode</span> <span class="mono">{props.mode}</span>
+        </p>
+      ) : null}
     </div>
   );
 }

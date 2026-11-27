@@ -3,10 +3,17 @@
 import { computed, effect, onCleanup, onWindow, signal, untrack, type Signal } from 'fw';
 import { hub } from '$lib/api/index';
 import type { Model, Prediction } from '$lib/api/types';
-import { isDetectorLoadError, type BrowserEngine } from '$lib/inference/browser';
+import {
+  DEFAULT_INFERENCE_CONFIG,
+  inferenceConfigKey,
+  inferenceMetaOf,
+  isDetectorLoadError,
+  type BrowserEngine,
+  type InferenceConfig,
+} from '$lib/inference/browser';
 import { isOom } from '$lib/oom';
 import { toast } from '$lib/ui/toast';
-import { isPredictionCutAt, markCompletionFailed, markPredictionComplete } from './allCandidates';
+import { isPredictionCutAt, markCompletionFailed, markPredictionComplete, needsCompletionAt } from './allCandidates';
 import {
   batchItemSource,
   batchPredKey,
@@ -26,6 +33,8 @@ export interface UseBatchSessionInput {
   model: () => Model | null;
   modelId: () => string | null;
   runOn: Signal<RunOn>;
+  /** Effective inference enhancement config (standard / SAHI / TTA) for Model A's backend. */
+  inference?: () => InferenceConfig;
   localWeights: Signal<Map<string, File>>;
   compare: Signal<boolean>;
   o2o: () => boolean;
@@ -149,9 +158,13 @@ export function useBatchSession(o: UseBatchSessionInput) {
     );
   }
 
+  function currentInference(): InferenceConfig {
+    return o.inference ? o.inference() : DEFAULT_INFERENCE_CONFIG;
+  }
+
   function currentKey(): string | null {
     const id = o.modelId();
-    return id ? batchPredKey(id, o.runOn.peek()) : null;
+    return id ? batchPredKey(id, o.runOn.peek(), inferenceConfigKey(untrack(currentInference))) : null;
   }
 
   function selectIndex(index: number) {
@@ -262,21 +275,21 @@ export function useBatchSession(o: UseBatchSessionInput) {
   }
 
   /** Returns a valid cached prediction for `source` when navigating back to an already-inferred batch item. */
-  function getCachedPred(modelId: string, s: Source, runOn: RunOn): Prediction | null {
+  function getCachedPred(modelId: string, s: Source, runOn: RunOn, inferenceKey = 'standard'): Prediction | null {
     if (s.kind !== 'file' || !s.sharedUrl) return null;
     const list = items.peek();
     const item = list.find((it) => it.file === s.file);
     if (!item || !item.pred) return null;
-    return item.predKey === batchPredKey(modelId, runOn) ? item.pred : null;
+    return item.predKey === batchPredKey(modelId, runOn, inferenceKey) ? item.pred : null;
   }
 
   /** Mirrors single-image inference completions/errors onto the matching batch item so filmstrip badges stay live. */
-  function recordSingleResult(s: Source, modelId: string, runOn: RunOn, pred: Prediction | null, err: unknown) {
+  function recordSingleResult(s: Source, modelId: string, runOn: RunOn, pred: Prediction | null, err: unknown, inferenceKey = 'standard') {
     if (s.kind !== 'file' || !s.sharedUrl) return;
     const idx = items.peek().findIndex((it) => it.file === s.file);
     if (idx < 0) return;
     if (pred) {
-      updateItem(idx, { pred, predKey: batchPredKey(modelId, runOn), status: 'done', error: null });
+      updateItem(idx, { pred, predKey: batchPredKey(modelId, runOn, inferenceKey), status: 'done', error: null });
     } else if (err) {
       updateItem(idx, { pred: null, predKey: null, status: 'error', error: errorText(err) });
     }
@@ -303,9 +316,10 @@ export function useBatchSession(o: UseBatchSessionInput) {
     id: string,
     on: RunOn,
     localFile: File | null,
+    inference: InferenceConfig,
     signal: AbortSignal,
   ): Promise<{ pred: Prediction; haltError?: unknown }> {
-    if (!isPredictionCutAt(p, o.conf.peek())) return { pred: p };
+    if (!needsCompletionAt(p, o.conf.peek())) return { pred: p };
     try {
       const all = await ask({
         api: hub.api,
@@ -315,10 +329,11 @@ export function useBatchSession(o: UseBatchSessionInput) {
         on,
         file: localFile,
         options: ALL,
+        inference,
         signal,
       });
       if (signal.aborted) return { pred: p };
-      const next = { ...all, timing: p.timing, cold: p.cold };
+      const next = { ...all, timing: p.timing, cold: p.cold, ...(p.inference ? { inference: p.inference } : {}) };
       markPredictionComplete(next);
       return { pred: next };
     } catch (e: unknown) {
@@ -338,7 +353,8 @@ export function useBatchSession(o: UseBatchSessionInput) {
     if (!id || list.length < 2 || runningAll.peek()) return;
 
     const on = o.runOn.peek();
-    const key = batchPredKey(id, on);
+    const inf = untrack(currentInference);
+    const key = batchPredKey(id, on, inferenceConfigKey(inf));
     const localFile = on === 'server' ? null : (o.localWeights.peek().get(id) ?? null);
 
     // If all items are already complete for this model/backend, nothing to run.
@@ -390,10 +406,11 @@ export function useBatchSession(o: UseBatchSessionInput) {
             on,
             file: localFile,
             options: FETCH,
+            inference: inf,
             signal: ctrl.signal,
           });
           if (destroyed || seq !== runSeq || ctrl.signal.aborted) break;
-          const completed = await completeIfCut(itemSource, raw, id, on, localFile, ctrl.signal);
+          const completed = await completeIfCut(itemSource, raw, id, on, localFile, inf, ctrl.signal);
           if (destroyed || seq !== runSeq || ctrl.signal.aborted) break;
           const p = completed.pred;
           updateItem(i, { pred: p, predKey: key, status: 'done', error: null });
@@ -490,11 +507,13 @@ export function useBatchSession(o: UseBatchSessionInput) {
   }
 
   function makeExportInput() {
+    const inf = untrack(currentInference);
     return {
       items: items.peek(),
       modelId: o.modelId(),
       modelName: o.model()?.name ?? null,
       runOn: o.runOn.peek(),
+      inference: inferenceMetaOf(inf),
       filter: filter.peek(),
       hidden: o.hidden.peek(),
       classes: o.classes(),
@@ -508,7 +527,7 @@ export function useBatchSession(o: UseBatchSessionInput) {
     const confNow = o.conf.peek();
     const list = items.peek();
     const cutIndices = list
-      .map((it, idx) => (it.status === 'done' && isPredictionCutAt(it.pred, confNow) ? idx : -1))
+      .map((it, idx) => (it.status === 'done' && needsCompletionAt(it.pred, confNow) ? idx : -1))
       .filter((idx) => idx >= 0);
 
     const doExport = () => (kind === 'json' ? exportBatchJson(makeExportInput()) : exportBatchCsv(makeExportInput()));
@@ -519,7 +538,8 @@ export function useBatchSession(o: UseBatchSessionInput) {
 
     const id = o.modelId();
     const on = o.runOn.peek();
-    const key = id ? batchPredKey(id, on) : null;
+    const inf = untrack(currentInference);
+    const key = id ? batchPredKey(id, on, inferenceConfigKey(inf)) : null;
     const localFile = id && on !== 'server' ? (o.localWeights.peek().get(id) ?? null) : null;
     if (!id || !key) {
       doExport();
@@ -533,7 +553,7 @@ export function useBatchSession(o: UseBatchSessionInput) {
         const item = items.peek()[idx];
         if (!item?.pred || item.predKey !== key) continue;
         const itemSource = batchItemSource(item);
-        const { pred: next } = await completeIfCut(itemSource, item.pred, id, on, localFile, ctrl.signal);
+        const { pred: next } = await completeIfCut(itemSource, item.pred, id, on, localFile, inf, ctrl.signal);
         if (destroyed || ctrl.signal.aborted) return;
         if (next !== item.pred) {
           updateItem(idx, { pred: next });
@@ -562,14 +582,15 @@ export function useBatchSession(o: UseBatchSessionInput) {
     untrack(() => o.predicting.set(runIdx !== null && runIdx === curIdx));
   });
 
-  // Abort and invalidate cached batch predictions whenever model, backend, or local weights change.
+  // Abort and invalidate cached batch predictions whenever model, backend, inference mode, or local weights change.
   let lastModelKey: string | null = null;
   let lastLocalFile: File | null = null;
   effect(() => {
     const id = o.modelId();
     const on = o.runOn.get();
+    const infKey = inferenceConfigKey(currentInference());
     const f = activeLocalFile.get();
-    const nextKey = id ? batchPredKey(id, on) : null;
+    const nextKey = id ? batchPredKey(id, on, infKey) : null;
     if (lastModelKey !== null && (nextKey !== lastModelKey || f !== lastLocalFile)) {
       untrack(() => {
         if (items.peek().length) invalidatePredictions();

@@ -1,6 +1,7 @@
 // Pure state types, threshold filtering, summary stats, and JSON/CSV export helpers for Playground multi-image batch mode.
 import type { Prediction } from '$lib/api/types';
 import { filterDetections } from '$lib/detect/nms';
+import type { InferenceMeta } from '$lib/inference/browser';
 import { exportTableCsv, exportTableJson, type CsvCell } from '$lib/tableExport';
 import { toast } from '$lib/ui/toast';
 import { isPredictionCutAt } from './allCandidates';
@@ -54,9 +55,9 @@ export const BATCH_CSV_HEADERS = [
   'image_height',
 ] as const;
 
-/** Cache key binding a batch item's raw prediction to the model and backend that produced it. */
-export function batchPredKey(modelId: string, runOn: RunOn): string {
-  return `${modelId}|${runOn}`;
+/** Cache key binding a batch item's raw prediction to the model, backend, and inference mode that produced it. */
+export function batchPredKey(modelId: string, runOn: RunOn, inferenceKey = 'standard'): string {
+  return inferenceKey === 'standard' ? `${modelId}|${runOn}` : `${modelId}|${runOn}|${inferenceKey}`;
 }
 
 /** Builds a Playground `Source` pointing at a batch item whose object URL is owned by the batch session. */
@@ -126,6 +127,7 @@ export interface BatchExportInput {
   modelId: string | null;
   modelName: string | null;
   runOn: RunOn;
+  inference?: InferenceMeta;
   filter: BatchFilter;
   hidden: ReadonlySet<number>;
   classes: readonly string[];
@@ -145,6 +147,7 @@ export function buildBatchJson(input: BatchExportInput) {
     model_id: input.modelId,
     model_name: input.modelName,
     backend: input.runOn,
+    ...(input.inference ? { inference: input.inference } : {}),
     filter: hiddenClasses?.length ? { ...baseFilter, hidden_classes: hiddenClasses } : baseFilter,
     summary: {
       total_images: summary.total,

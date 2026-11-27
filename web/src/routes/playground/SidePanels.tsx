@@ -18,6 +18,7 @@ export interface SidePanelsProps {
   conf?: number;
   resetButton: () => JSX.Element;
   secondarySliders: (inline: boolean) => JSX.Element;
+  inferenceOptions?: (() => JSX.Element) | null;
   displayToggles: () => JSX.Element;
   showAllButton: () => JSX.Element;
   classList: () => JSX.Element;
@@ -35,6 +36,7 @@ export default function SidePanels(props: SidePanelsProps) {
             <Slider label="Confidence" bind:value={conf} min={0.01} max={0.95} step={0.01} hint="Hide boxes scored below this." />
             {props.secondarySliders(false)}
           </div>
+          {props.inferenceOptions ? props.inferenceOptions() : null}
           {/* What is drawn on the image: here rather than on the image's toolbar, which is only as wide as the image
               (on phones the same toggles sit in the Thresholds sheet). */}
           {props.source ? (

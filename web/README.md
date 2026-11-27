@@ -86,7 +86,7 @@ server shows that offline state: start `folo serve`, or open `http://localhost:5
 | `src/lib/ui/` | The design system's components (`Button`, `Panel`, `Dialog`, `Menu`, `Segmented`, `KpiStrip`, `Stat`, `StatusBadge`, `Field`, ...) and their helpers (`focus.ts`, `motion.ts`, `toast.ts`) |
 | `src/lib/charts/` | SVG/canvas charts (`LineChart`, `Sparkline`, `Histogram`, `ConfusionMatrix`, `XYChart`) and their geometry |
 | `src/lib/detect/` | Images with detection boxes (`DetectionView`, `DatasetImage`), label chips, NMS run in the browser (the Playground filters the server's candidates with it) |
-| `src/lib/inference/` | `browser.ts`: FOLO models in this browser through folo-wasm, on WebGPU or the wasm CPU |
+| `src/lib/inference/` | `browser.ts`, `options.ts`: FOLO models in this browser through folo-wasm, on WebGPU or the wasm CPU (single-pass, SAHI tiled `detectTiled`, and TTA `detectTta` with capability detection) |
 | `src/lib/bench/` | Vision benchmarks' rules, score functions, and external prediction validation (`external.ts`, `externalParse.ts`, `externalWorker.ts`), shared by the screens and the mock |
 | `src/lib/design/` | `tokens.css` and `tokens.ts` (generated from `design/tokens.json`, never edited by hand: every built-in theme's palette too), `themes.ts` (custom theme files checked, themes resolved and listed), `applyTheme.ts` (a theme onto `<html>`), `base.css`, `classInk.ts` |
 | `src/lib/*.ts` | Shared rules and wording: `chunkError.ts` (retryable chunk fetch vs reload-only evaluation errors), `failedStyles.ts` (stylesheets that failed to load, loaded again before the next chunk), `format.ts`, `prefs.ts` (preferences in localStorage: the mode, each mode's theme, the custom themes in `folo.themes`), `keys.ts`, `tableExport.ts` (CSV/JSON table export with RFC-4180 quoting and spreadsheet formula neutralization), `trainCli.ts`, `throughput.ts`, `cloud.ts`, `label.ts`, ... |
@@ -107,9 +107,9 @@ Screens (`src/routes/`):
 | Datasets | `#/datasets`, `#/datasets/<id>` | `Datasets.tsx`, `Dataset.tsx` | `datasets/`, `dataset/` (images grid with class-balance & annotation-quality insights strip, inspector, statistics, health checks) |
 | Labeling | `#/datasets/label`, `#/datasets/label/<id>` | `LabelJobs.tsx`, `LabelJob.tsx` | `label/` |
 | Runs | `#/runs`, `#/runs/new`, `#/runs/compare`, `#/runs/<id>` | `Runs.tsx`, `RunNew.tsx`, `RunCompare.tsx`, `Run.tsx` | `runs/`, `runnew/` (`state.ts`, `SummaryRail.tsx`, sections, estimation & validation), `compare/` (`config.ts`, `state.ts`, `ComparePlot.tsx`, `RunChips.tsx`, `AddRun.tsx`, `ManageSheet.tsx`, `CompareTable.tsx`), `run/` |
-| Models | `#/models`, `#/models/<id>` | `Models.tsx`, `Model.tsx` | `models/`, `model/` |
+| Models | `#/models`, `#/models/<id>` | `Models.tsx`, `Model.tsx` | `models/`, `model/` (including `ExportDialog`, `ExportCliPanel`, `modelCli.ts` for FOLO f16 / dynamic-axis ONNX export and `folo export` / `folo predict` CLI snippets) |
 | Benchmarks | `#/benchmarks`, `#/benchmarks/<id>`, `…/<id>/entries/<entryId>`, `…/<id>/compare`, `…/<id>/loops/<loopId>` | `Benchmarks.tsx`, `Benchmark.tsx`, `BenchEntry.tsx`, `BenchCompare.tsx`, `BenchLoop.tsx` | `bench/` (including `entry/` Per-Image Error-Analysis Explorer with FP/FN/IoU diagnostic filters & GT/Pred/Error layer toggles) |
-| Playground | `#/playground` | `Playground.tsx` | `playground/` (single & A/B visual compare with synchronized zoom/pan, multi-image batch filmstrip with sequential Run All & Batch JSON/CSV export, annotated PNG & JSON export, inline local video frame scrubber, live webcam detection) |
+| Playground | `#/playground` | `Playground.tsx` | `playground/` (single & A/B visual compare with synchronized zoom/pan, collapsible SAHI tiled & TTA inference options with backend/WASM capability detection, multi-image batch filmstrip with sequential Run All & Batch JSON/CSV export, annotated PNG & JSON export, inline local video frame scrubber, live webcam detection) |
 | Settings | `#/settings` | `Settings.tsx` | `settings/` |
 | (any other) | | `NotFound.tsx`, rendered by `App` | |
 

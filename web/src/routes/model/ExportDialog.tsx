@@ -27,8 +27,11 @@ import { href } from '$lib/router';
 import Button from '$lib/ui/Button';
 import Dialog from '$lib/ui/Dialog';
 import ErrorState from '$lib/ui/ErrorState';
+import Segmented from '$lib/ui/Segmented';
 import { DialogStatus } from '$lib/ui/feedback';
 import { toast } from '$lib/ui/toast';
+import ExportCliPanel from './ExportCliPanel';
+import { ONNX_AXES_OPTIONS, onnxSwitchesForRequest, type OnnxDynamicAxes } from './modelCli';
 
 export interface ExportDialogProps {
   model: Model;
@@ -53,13 +56,14 @@ const formats: { value: ExportFormat; label: string; ext: string; desc: string; 
 ];
 
 /** folo export's ONNX switches (docs/CLI.md, ONNX export); off is its default. */
-const switchOptions: { key: keyof OnnxSwitches; label: string; desc: string }[] = [
+const switchOptions: { key: 'decode' | 'dynamic' | 'half'; label: string; desc: string }[] = [
   { key: 'decode', label: 'Decode boxes in the graph', desc: 'Outputs boxes and class scores instead of the raw head. NMS still runs outside.' },
   { key: 'dynamic', label: 'Dynamic input size', desc: 'Any batch, and any height and width in multiples of 32.' },
   { key: 'half', label: 'Half precision (f16)', desc: 'f16 weights, input and outputs: about half the file size.' },
 ];
 
-const OFF: Required<OnnxSwitches> = { decode: false, dynamic: false, half: false };
+const AXES_SEG = ONNX_AXES_OPTIONS.map((o) => ({ value: o.value, label: o.label }));
+const OFF = { decode: false, dynamic: false, half: false };
 
 export default function ExportDialog(props: ExportDialogProps) {
   const open = bindable(props, 'open', false);
@@ -68,9 +72,13 @@ export default function ExportDialog(props: ExportDialogProps) {
   /** The demo's models are not real networks: an export there is a preview that creates no file. */
   const demo = computed(() => hub.api.mock);
   const format = signal<ExportFormat>('folo-f16');
-  const switches = signal<Required<OnnxSwitches>>(OFF);
+  const switches = signal<{ decode: boolean; dynamic: boolean; half: boolean }>(OFF);
+  /** Independent ONNX dynamic axes (`static`, `batch`, `hw`, `full`), synced with the `dynamic` switch. */
+  const axes = signal<OnnxDynamicAxes>('static');
   /** Whether the server takes the switches (older ones would ignore them): asked once the dialog opens. */
   const switchesOk = signal(false);
+  /** Whether the server supports independent `dynamic_batch` / `dynamic_hw` axes on `POST /api/models/{id}/export`. */
+  const dynamicAxesOk = signal(false);
   /** Whether the server serves the ONNX graph for download (`weights_onnx`), so ONNX skips the server-side file. */
   const onnxDirect = signal(false);
   /** Capability discovery state for `/api/system` on the current open/server epoch. */
@@ -92,12 +100,14 @@ export default function ExportDialog(props: ExportDialogProps) {
       (s) => {
         if (ctrl.signal.aborted) return;
         switchesOk.set(!!s.features?.includes('export_onnx_switches'));
+        dynamicAxesOk.set(!!s.features?.includes('export_dynamic_axes'));
         onnxDirect.set(!!s.features?.includes('weights_onnx'));
         capsState.set('ready');
       },
       (e) => {
         if (ctrl.signal.aborted) return;
         switchesOk.set(false);
+        dynamicAxesOk.set(false);
         onnxDirect.set(false);
         capsError.set(e);
         capsState.set('error');
@@ -130,7 +140,9 @@ export default function ExportDialog(props: ExportDialogProps) {
   const onnxSwitches = computed(() => switchesOk.get() || onnxDirect.get());
   /** Direct download: the file it will be, by the server's naming rule, and the file once it arrived. */
   const onnxName = computed(() => onnxFileName(model().name, onnxSwitches.get() && switches.get().half, onnxSwitches.get() && switches.get().decode));
-  const direct = computed(() => !demo.get() && (format.get() === 'folo-f16' || onnxDirect.get()));
+  /** Split dynamic axes (`batch` or `hw`) are served via `POST /api/models/{id}/export` (not `/weights?format=onnx`). */
+  const splitAxesActive = computed(() => dynamicAxesOk.get() && (axes.get() === 'batch' || axes.get() === 'hw'));
+  const direct = computed(() => !demo.get() && (format.get() === 'folo-f16' || (onnxDirect.get() && !splitAxesActive.get())));
   const directName = computed(() => (format.get() === 'onnx' ? onnxName.get() : f16FileName(model().name)));
   /** The format as listed, for the demo preview's size. */
   const picked = computed(() => formats.find((f) => f.value === format.get())!);
@@ -173,6 +185,7 @@ export default function ExportDialog(props: ExportDialogProps) {
     if (ep !== lastEpoch) {
       lastEpoch = ep;
       switchesOk.set(false);
+      dynamicAxesOk.set(false);
       onnxDirect.set(false);
       reset();
     }
@@ -265,7 +278,17 @@ export default function ExportDialog(props: ExportDialogProps) {
     error.set(null);
     try {
       const fmt = format.peek();
-      const r = await hub.api.exportModel(m.id, fmt, fmt === 'onnx' && onnxSwitches.peek() ? { ...switches.peek() } : undefined);
+      const sw = switches.peek();
+      const reqSwitches: OnnxSwitches | undefined =
+        fmt === 'onnx' && onnxSwitches.peek()
+          ? onnxSwitchesForRequest({
+              decode: sw.decode,
+              half: sw.half,
+              axes: axes.peek(),
+              supportsSplitAxes: dynamicAxesOk.peek(),
+            })
+          : undefined;
+      const r = await hub.api.exportModel(m.id, fmt, reqSwitches);
       if (hub.epoch !== epoch) return;
       const ownsUi = !destroyed && id === uiRun && model().id === m.id;
       if (ownsUi) {
@@ -312,6 +335,7 @@ export default function ExportDialog(props: ExportDialogProps) {
     status.clear();
     done.set(null);
     switches.set(OFF);
+    axes.set('static');
     phase.set('idle');
     result.set(null);
     file.set(null);
@@ -319,11 +343,25 @@ export default function ExportDialog(props: ExportDialogProps) {
     copied.set(false);
   }
 
+  function setAxes(next: OnnxDynamicAxes) {
+    axes.set(next);
+    switches.set({ ...switches.peek(), dynamic: next !== 'static' });
+  }
+
   /** `bind:checked` of one switch (the switches are one immutable object). */
-  const switchOf = (key: keyof OnnxSwitches) => ({
+  const switchOf = (key: 'decode' | 'dynamic' | 'half') => ({
     get: () => switches.get()[key],
-    set: (v: boolean) => switches.set({ ...switches.peek(), [key]: v }),
+    set: (v: boolean) => {
+      if (key === 'dynamic') {
+        axes.set(v ? 'full' : 'static');
+      }
+      switches.set({ ...switches.peek(), [key]: v });
+    },
   });
+  const axesBind = {
+    get: () => axes.get(),
+    set: (v: OnnxDynamicAxes) => setAxes(v),
+  };
   const close = () => open.set(false);
   // A file on its way is not dropped by closing: it goes on, and a toast says how it ended.
   const onclose = () => {
@@ -440,10 +478,17 @@ export default function ExportDialog(props: ExportDialogProps) {
             </div>
           </div>
           {done.get() === 'onnx' ? (
-            <p class="note">
-              Studio cannot download ONNX files yet: the file stays on the machine running <span class="mono">folo serve</span>. Copy it from there, or
-              run <span class="mono">folo export --format onnx</span> where you need it.
-            </p>
+            onnxDirect.get() ? (
+              <p class="note">
+                Split dynamic-axis ONNX exports (<span class="mono">--dynamic-batch</span> / <span class="mono">--dynamic-hw</span>) stay on the machine
+                running <span class="mono">folo serve</span>. Pick Static or Full dynamic for direct browser download.
+              </p>
+            ) : (
+              <p class="note">
+                Studio cannot download ONNX files yet: the file stays on the machine running <span class="mono">folo serve</span>. Copy it from there, or
+                run <span class="mono">folo export --format onnx</span> where you need it.
+              </p>
+            )
           ) : null}
         </div>
       ) : (
@@ -483,17 +528,48 @@ export default function ExportDialog(props: ExportDialogProps) {
                             </span>
                             <span class="opt-text">
                               <span class="sw-name">{o().label}</span>
-                              <span class="opt-desc">{o().desc}</span>
+                              <span class="opt-desc">
+                                {o().key === 'dynamic' && dynamicAxesOk.get() && axes.get() === 'batch'
+                                  ? 'Symbolic batch only, fixed height and width.'
+                                  : o().key === 'dynamic' && dynamicAxesOk.get() && axes.get() === 'hw'
+                                    ? 'Fixed batch 1, symbolic height and width in multiples of 32.'
+                                    : o().desc}
+                              </span>
                             </span>
                           </label>
                         )}
                       </For>
+                      {dynamicAxesOk.get() && format.get() === 'onnx' ? (
+                        <div class="axes-row">
+                          <span class="axes-label">Dynamic axes</span>
+                          <Segmented
+                            label="Dynamic ONNX axes"
+                            size="sm"
+                            disabled={phase.get() === 'running'}
+                            bind:value={axesBind}
+                            options={AXES_SEG}
+                          />
+                          {splitAxesActive.get() && onnxDirect.get() && !demo.get() ? (
+                            <span class="opt-desc">Exports to the server exports folder (direct download supports Static or Full).</span>
+                          ) : null}
+                        </div>
+                      ) : null}
                     </div>
                   ) : null}
                 </>
               )}
             </For>
           </fieldset>
+          {phase.get() !== 'running' ? (
+            <ExportCliPanel
+              model={model()}
+              format={format.get()}
+              decode={switches.get().decode}
+              half={switches.get().half}
+              axes={axes.get()}
+              showAxesPicker={!dynamicAxesOk.get()}
+            />
+          ) : null}
           {demo.get() && phase.get() !== 'running' ? (
             // Said before the export, not only after it.
             <p class="demo-note">
@@ -722,6 +798,17 @@ css`
   .switches {
     display: grid;
     padding: 0 var(--space-3) var(--space-1) calc(var(--space-6) + 14px);
+  }
+  .axes-row {
+    display: grid;
+    gap: var(--space-1);
+    margin-top: var(--space-2);
+    padding-top: var(--space-2);
+    border-top: 1px solid var(--line-subtle);
+  }
+  .axes-label {
+    font-size: var(--type-sm-size);
+    color: var(--text-secondary);
   }
   .sw-opt {
     position: relative;

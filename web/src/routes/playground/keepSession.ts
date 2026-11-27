@@ -5,6 +5,7 @@
 import { effect, onCleanup, signal, untrack, type Signal } from 'fw';
 import { ApiError } from '$lib/api/client';
 import type { Prediction } from '$lib/api/types';
+import { inferenceMetaKey, type InferenceConfig } from '$lib/inference/browser';
 import { router } from '$lib/router';
 import { toast } from '$lib/ui/toast';
 import { DEFAULTS } from './predict';
@@ -21,6 +22,8 @@ export interface Kept {
   /** Optional guard confirming `pred` was computed for the current `source` (avoids saving stale live-frame results). */
   predMatchesSource?: () => boolean;
   runOn: Signal<string>;
+  /** Optional inference enhancement state (SAHI / TTA) persisted across tab navigation. */
+  inference?: { config: () => InferenceConfig; restore: (cfg: InferenceConfig) => void };
   conf: Signal<number>;
   iou: Signal<number>;
   maxDet: Signal<number>;
@@ -55,7 +58,7 @@ const sourceKey = (s: Source) => (s.kind === 'file' ? `file:${s.name}:${s.file.s
  * on. Returns `restored(model, source, runOn)`: true once, for the first prediction the page would make, when the
  * kept result is that prediction already (no second request for the same answer).
  */
-export function keepSession(k: Kept): (model: string, s: Source, runOn: string) => boolean {
+export function keepSession(k: Kept): (model: string, s: Source, runOn: string, infKey?: string) => boolean {
   const saved = session.get();
   const url = fromUrl(router.route.query);
   const cmpUrl = compareFromUrl(router.route.query);
@@ -69,6 +72,7 @@ export function keepSession(k: Kept): (model: string, s: Source, runOn: string) 
     k.scores.set(saved.scores);
     k.truth.set(saved.truth);
     k.runOn.set(saved.runOn);
+    if (saved.inference && k.inference) k.inference.restore(saved.inference);
   }
   k.conf.set(url.conf ?? saved?.conf ?? DEFAULTS.conf);
   k.iou.set(url.iou ?? saved?.iou ?? DEFAULTS.iou);
@@ -127,7 +131,7 @@ export function keepSession(k: Kept): (model: string, s: Source, runOn: string) 
     if (saved?.pred) {
       k.pred.set(saved.pred);
       k.hidden.set(new Set(saved.hidden));
-      reuse = `${saved.pred.model_id}|${sourceKey(s)}|${saved.runOn}`;
+      reuse = `${saved.pred.model_id}|${sourceKey(s)}|${saved.runOn}|${inferenceMetaKey(saved.pred.inference)}`;
     }
   } else if (url.image) follow(url.image);
 
@@ -211,6 +215,7 @@ export function keepSession(k: Kept): (model: string, s: Source, runOn: string) 
       source: keep(k.source.get()),
       pred: matches ? k.pred.get() : null,
       runOn: k.runOn.get(),
+      inference: k.inference ? k.inference.config() : undefined,
       conf: k.conf.get(),
       iou: k.iou.get(),
       maxDet: k.maxDet.get(),
@@ -252,9 +257,9 @@ export function keepSession(k: Kept): (model: string, s: Source, runOn: string) 
     return () => clearTimeout(timer);
   });
 
-  return (model, s, runOn) => {
+  return (model, s, runOn, infKey = 'standard') => {
     const r = reuse;
     reuse = null;
-    return r !== null && r === `${model}|${sourceKey(s)}|${runOn}`;
+    return r !== null && r === `${model}|${sourceKey(s)}|${runOn}|${infKey}`;
   };
 }

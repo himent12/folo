@@ -2,9 +2,15 @@
 import { computed, effect, signal, type Signal } from 'fw';
 import { hub } from '$lib/api/index';
 import type { Prediction } from '$lib/api/types';
-import type { BrowserEngine } from '$lib/inference/browser';
+import {
+  DEFAULT_INFERENCE_CONFIG,
+  inferenceConfigKey,
+  inferenceMetaKey,
+  type BrowserEngine,
+  type InferenceConfig,
+} from '$lib/inference/browser';
 import { errorDetail, toast } from '$lib/ui/toast';
-import { ALL, ask, candidateFloor, noServerWeights, type RunOn } from './predict';
+import { ALL, ask, candidateFloor, FETCH, noServerWeights, type RunOn } from './predict';
 import type { Source } from './source';
 
 const KEY = 'all-candidates';
@@ -25,10 +31,24 @@ export function markCompletionFailed(p: Prediction): void {
   completionFailed.add(p);
 }
 
-/** True when `p` hit `FETCH.max_det` and its candidate floor is at or above `conf`, so lower boxes may be missing. */
+/**
+ * True when `p` hit the candidate cap of the request that produced it (`FETCH.max_det` for standard runs,
+ * `ALL.max_det` for enhanced SAHI/TTA or already-completed runs) at or above `conf`.
+ */
 export function isPredictionCutAt(p: Prediction | null, conf: number): boolean {
-  if (!p || complete.has(p)) return false;
-  const f = candidateFloor(p);
+  if (!p) return false;
+  const cap = p.inference || complete.has(p) ? ALL.max_det : FETCH.max_det;
+  const f = candidateFloor(p, cap);
+  return f !== null && conf <= f;
+}
+
+/**
+ * True when `p` can still be upgraded by a wider `ALL` candidate fetch at `conf`. Enhanced (`sahi`/`tta`)
+ * predictions already start with `ALL.max_det`, so replaying them cannot increase the budget.
+ */
+export function needsCompletionAt(p: Prediction | null, conf: number): boolean {
+  if (!p || p.inference || complete.has(p)) return false;
+  const f = candidateFloor(p, FETCH.max_det);
   return f !== null && conf <= f;
 }
 
@@ -48,6 +68,8 @@ export function askAllWhenCut(o: {
   /** A prediction of the image is on its way: its answer, not the one on screen, is the one to complete. */
   busy: () => boolean;
   engine: BrowserEngine;
+  /** Active inference enhancement (SAHI / TTA / standard) for this prediction. */
+  inference?: () => InferenceConfig;
   /** In the browser, the server cannot send the model's file (`noServerWeights`) and none was picked. */
   weightsMissing: () => void;
   /** Optional hook called when full-candidate completion upgrades `pred`, so batch caches stay in sync. */
@@ -55,12 +77,17 @@ export function askAllWhenCut(o: {
 }): () => boolean {
   const floor = computed(() => {
     const p = o.pred.get();
-    return p && !complete.has(p) ? candidateFloor(p) : null;
+    if (!p) return null;
+    const cap = p.inference || complete.has(p) ? ALL.max_det : FETCH.max_det;
+    return candidateFloor(p, cap);
   });
   // The answer to complete: a computed, so moving the slider further down does not ask (or abort) again.
+  // Enhanced SAHI/TTA runs already use `ALL.max_det`, so they report the cap via `floor` without replaying.
   const short = computed(() => {
-    const f = floor.get();
-    return f !== null && o.conf() <= f ? o.pred.get() : null;
+    const p = o.pred.get();
+    if (!p || p.inference || complete.has(p)) return null;
+    const f = candidateFloor(p, FETCH.max_det);
+    return f !== null && o.conf() <= f ? p : null;
   });
   const retry = signal(0);
   // The answer a failure toast is about: the toast goes with it (another image, model or backend) and with the page.
@@ -88,11 +115,13 @@ export function askAllWhenCut(o: {
     if (!explicitRetry && completionFailed.has(p)) return;
     completionFailed.delete(p);
     const file = o.file(id);
+    const inference = o.inference ? o.inference() : DEFAULT_INFERENCE_CONFIG;
+    if (inferenceMetaKey(p.inference) !== inferenceConfigKey(inference)) return;
     const ctrl = new AbortController();
-    ask({ api: hub.api, engine: o.engine, model: id, source: s, on, file, options: ALL, signal: ctrl.signal }).then(
+    ask({ api: hub.api, engine: o.engine, model: id, source: s, on, file, options: ALL, inference, signal: ctrl.signal }).then(
       (all) => {
         if (ctrl.signal.aborted || o.pred.peek() !== p) return;
-        const next = { ...all, timing: p.timing, cold: p.cold };
+        const next = { ...all, timing: p.timing, cold: p.cold, ...(p.inference ? { inference: p.inference } : {}) };
         complete.add(next);
         takeBack();
         o.pred.set(next);

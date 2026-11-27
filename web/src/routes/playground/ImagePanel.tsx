@@ -18,7 +18,7 @@ import { hub } from '$lib/api/index';
 import type { Dataset, DatasetImage as Img, Model, Prediction } from '$lib/api/types';
 import { classColor } from '$lib/design/tokens';
 import DetectionView from '$lib/detect/DetectionView';
-import { PHASE_TEXT, type Backend, type BrowserEngine } from '$lib/inference/browser';
+import { inferenceShortTag, PHASE_TEXT, type Backend, type BrowserEngine } from '$lib/inference/browser';
 import { ms, num } from '$lib/format';
 import SheetHandle from '$lib/ui/SheetHandle';
 import { sheetDrag } from '$lib/ui/sheetDrag';
@@ -239,6 +239,7 @@ export default function ImagePanel(props: ImagePanelProps) {
                           {props.hidden.size} {props.hidden.size === 1 ? 'class' : 'classes'} hidden
                         </span>
                       ) : null}
+                      {inferenceShortTag(props.pred?.inference) ? <span class="fi">{inferenceShortTag(props.pred?.inference)}</span> : null}
                       {props.pred ? <span class="fi">{ms(props.pred.timing.total_ms)}</span> : null}
                     </>
                   ) : props.notice === 'error' ? (
@@ -411,6 +412,7 @@ export default function ImagePanel(props: ImagePanelProps) {
                       {props.hidden.size} {props.hidden.size === 1 ? 'class' : 'classes'} hidden
                     </span>
                   ) : null}
+                  {inferenceShortTag(props.pred?.inference) ? <span class="fi">{inferenceShortTag(props.pred?.inference)}</span> : null}
                   <span class="grow"></span>
                   {props.selectedIdx === null && props.rows.length > 0 && !props.compareStage ? <span class="tap">Tap a box to inspect</span> : null}
                   <span class="faint">filtered in {props.result.ms < 0.01 ? '<0.01' : props.result.ms.toFixed(2)} ms</span>
