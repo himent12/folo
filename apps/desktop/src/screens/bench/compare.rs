@@ -4,8 +4,8 @@
 
 use folo_ui::prelude::FluentBuilder;
 use folo_ui::{
-    AnyElement, Context, FontWeight, Hsla, IntoElement, ParentElement, SharedString, Styled, Window, div, px,
-    relative,
+    AnyElement, Context, FontWeight, Hsla, InteractiveElement, IntoElement, ParentElement, SharedString,
+    Styled, Window, div, px, relative,
 };
 
 use super::format::{axis_name, calibration_none, pct, score_text};
@@ -318,6 +318,11 @@ impl FoloApp {
         let compact = self.content_width(window) < 880.;
         let lead_w = if compact { 116. } else { 164. };
         let col_gap = if compact { 8. } else { 12. };
+        let n_cols = shown.len().max(1) as f32;
+        // Available width for each entry header name: table inner width less Measure column,
+        // column gaps, and the 12 px swatch + 6 px gap beside the name.
+        let avail_table = (self.content_width(window) - 32. - lead_w - col_gap * n_cols).max(0.);
+        let name_budget = ((avail_table / n_cols).max(110.) - 18.).max(0.);
 
         // Header row: Measure + each entry with Baseline / Make baseline control.
         let mut head = div()
@@ -331,8 +336,17 @@ impl FoloApp {
             .child(div().w(px(lead_w)).flex_none().child(caption(&t, "Measure")));
         for (i, e) in shown.iter().enumerate() {
             let color = slot_color(&t, i);
+            let name_w = f32::from(crate::charts::text_width(window, &e.name, ty::SM.size));
+            // Small slack for FontWeight::MEDIUM vs regular shaping.
+            let name_clipped = name_w * 1.04 > name_budget;
+            let head_key = format!("bench-cmp-head-{}", e.id);
             let role_el: AnyElement = if i == 0 {
-                text(ty::SM, t.accent_text).child("Baseline").into_any_element()
+                div()
+                    .h(px(crate::theme::size::CONTROL_MD))
+                    .flex()
+                    .items_center()
+                    .child(text(ty::SM, t.accent_text).child("Baseline"))
+                    .into_any_element()
             } else {
                 let (bid, eid) = (b.id.clone(), e.id.clone());
                 self.button(
@@ -355,21 +369,31 @@ impl FoloApp {
                     .items_end()
                     .gap(px(4.))
                     .child(
-                        div()
-                            .flex()
-                            .items_start()
-                            .justify_end()
-                            .gap(px(6.))
-                            .w_full()
-                            .child(div().pt(px(7.)).child(slot_swatch(color)))
-                            .child(
-                                text(ty::SM, t.text_primary)
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .flex_shrink()
-                                    .min_w_0()
-                                    .whitespace_normal()
-                                    .child(e.name.clone()),
-                            ),
+                        self.disclose(
+                            div().id(SharedString::from(head_key.clone())),
+                            &head_key,
+                            e.name.clone(),
+                            name_clipped,
+                            22.,
+                            true,
+                            window,
+                            cx,
+                        )
+                        .flex()
+                        .items_center()
+                        .justify_end()
+                        .gap(px(6.))
+                        .w_full()
+                        .min_w_0()
+                        .child(slot_swatch(color))
+                        .child(
+                            text(ty::SM, t.text_primary)
+                                .font_weight(FontWeight::MEDIUM)
+                                .flex_shrink()
+                                .min_w_0()
+                                .ellipsis()
+                                .child(e.name.clone()),
+                        ),
                     )
                     .child(role_el),
             );
