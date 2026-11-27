@@ -281,8 +281,13 @@ fn folo2_detector_boxes_feed_directly_into_tracker() {
             rgba.extend_from_slice(&[(x * 2) as u8, (y * 2) as u8, ((x + y) % 256) as u8, 255]);
         }
     }
-    let res = pollster::block_on(det.detect(&rgba, w, h, DetectOptions { conf: 0.3, iou: 0.7, max_det: 20 }))
-        .unwrap();
+    let res = pollster::block_on(det.detect(
+        &rgba,
+        w,
+        h,
+        DetectOptions { conf: 0.3, iou: 0.7, max_det: 20, ..Default::default() },
+    ))
+    .unwrap();
     assert!(!res.response.boxes.is_empty(), "test needs detections from folo2");
 
     let mut trk = Tracker::new(TrackerOptions {

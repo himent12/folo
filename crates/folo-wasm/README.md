@@ -14,13 +14,13 @@ documents the JS API, how it works and its performance.
 |---|---|
 | `src/lib.rs` | The JS API: `FoloDetector` (`load`, `detect`, `detectTiled`, `detectTta`, `info`, `backend`), `FoloTracker` (`new`, `update`, `reset`, `config`, `info`), `hasWebGpu`, `version`, pooled RGBA input copies, the panic hook, and the hand-written TypeScript declarations (`TS_TYPES`) |
 | `src/js_util.rs` | Safe catching `Reflect` traversal, strict `f64`-range option validation (for detector and tracker options), box array parsing, and detached-buffer-safe typed-array copies |
-| `src/detector/mod.rs` | `Detector`: the logic behind `FoloDetector` for both `folo-*` (v1) and `folo2-*` (v2-Iso, including `o2o` and `iou_head`), free of wasm-bindgen types; batched candidate-compacted async GPU readback with typed OOM/limit chunk-splitting, async `iou_head` score fusion, reusable RGBA/RGB scratch buffers, and direct CPU path |
-| `src/detector/options.rs` | `Backend`, `BackendChoice`, `LoadOptions`, `DetectOptions`, `TileDetectOptions`, `TtaDetectOptions`, `DetectorInfo`, `DetectResult` |
+| `src/detector/mod.rs` | `Detector`: the logic behind `FoloDetector` for both `folo-*` (v1) and `folo2-*` (v2-Iso, including `o2o`, `iou_head`, and `folo.quant` CPU int8 checkpoints), free of wasm-bindgen types; batched candidate-compacted async GPU readback with typed OOM/limit chunk-splitting, async `iou_head` score fusion, reusable RGBA/RGB scratch buffers, and direct CPU path |
+| `src/detector/options.rs` | `Backend`, `BackendChoice`, `Precision`, `LoadOptions`, `DetectOptions` (`perClassConf`, `confInclusive`), `TileDetectOptions`, `TtaDetectOptions`, `DetectorInfo`, `DetectResult`, and strict option/key validators |
 | `src/detector/tiled.rs` | SAHI overlapping tiled inference (`Detector::detect_tiled`, `MAX_BROWSER_TILES`): `O(1)` tile-count cap, direct RGBA tile cropping on CPU, batched tile execution on WebGPU, optional full-image pass, and deterministic IoS/IoU merging |
 | `src/detector/tta.rs` | Multi-scale & horizontal-flip Test-Time Augmentation (`Detector::detect_tta`): SIMD128 RGBA horizontal mirror on CPU, batched views on WebGPU, box un-flipping, and cross-view fusion |
 | `src/tracker/mod.rs` | `Tracker`: pure-Rust ByteTrack multi-object tracker (`TrackerOptions`, `TrackerConfig`, `TrackerInfo`, `TrackInputBox`, `TrackedBox`) over `folo_vision::ByteTracker`, free of wasm-bindgen types |
 | `src/simd/mod.rs`, `src/simd/wasm_simd.rs` | WASM SIMD128 (and portable fallback) RGBA→RGB stripping, box-prefilter downsampling, 2×4-unrolled direct RGBA→planar-`f32` letterbox preprocessing with reusable `RgbaScratch`, RGBA tile cropping, and 4-pixel-per-op RGBA horizontal flipping |
-| `tests/detector.rs` | Native detector parity tests: `folo-*` (v1) and `folo2-*` (v2-Iso, `o2m` / `o2m + iou_head` / `o2o`) single-pass, tiled, and TTA CPU & GPU paths against `folo_vision::Predictor`, invalid parameter rejection, JSON shape, and options parsing |
+| `tests/detector/` | Native detector parity tests (`main.rs`, `thresholds.rs`, `int8.rs`): `folo-*` (v1) and `folo2-*` (v2-Iso, `o2m` / `o2m + iou_head` / `o2o`) single-pass, tiled, and TTA CPU & GPU paths against `folo_vision::Predictor`, per-class confidence thresholds (`perClassConf`) & inclusive threshold parity (`confInclusive`), quantized int8 `.folo` loading & CPU parity, invalid parameter rejection, JSON shape, and options parsing |
 | `tests/tracker.rs` | Native tracker integration tests: ByteTrack parity with `folo_vision::ByteTracker`, multi-frame ID persistence, stage-2 low-confidence occlusion recovery, coasting/retirement, `min_hits`, `class_aware`, `reset()`, end-to-end `folo2` → `Tracker`, and invalid config rejection |
 | `demo/index.html` | A standalone page: pick a model and an image, pick the backend, detect, benchmark |
 | `demo/test.mjs` | End-to-end check in headless Chrome (Playwright): each backend, latency, boxes against `folo predict --json` |
@@ -54,7 +54,7 @@ rustup when missing) and `wasm-bindgen-cli` at exactly the `wasm-bindgen` versio
 
 | To do this | Touch these files |
 |---|---|
-| Add or change an option or a result field | `LoadOptions`, `DetectOptions`, `TileDetectOptions`, `TtaDetectOptions` or `DetectorInfo` in `src/detector/options.rs`; a result field in `DetectResult` (`src/detector/options.rs`) or in `folo_api::PredictResponse`, which it flattens; the matching interface in `TS_TYPES` in `src/lib.rs`; `tests/detector.rs`; `demo/api-check.ts`; WASM.md (JS API) |
+| Add or change an option or a result field | `LoadOptions`, `DetectOptions`, `TileDetectOptions`, `TtaDetectOptions` or `DetectorInfo` in `src/detector/options.rs`; a result field in `DetectResult` (`src/detector/options.rs`) or in `folo_api::PredictResponse`, which it flattens; the matching interface in `TS_TYPES` in `src/lib.rs`; `tests/detector/`; `demo/api-check.ts`; WASM.md (JS API) |
 | Change the JS bindings | `src/lib.rs` (keep `TS_TYPES` in step: `load`, `detect`, `detectTiled`, and `detectTta` are declared there, not generated); `demo/api-check.ts`; WASM.md |
 
 ## Tests
@@ -65,7 +65,7 @@ sh scripts/build-wasm.sh && web/node_modules/.bin/tsc -p crates/folo-wasm/demo/t
 node crates/folo-wasm/demo/test.mjs --model shapes-n.folo --image img.jpg [--expect native.json]
 ```
 
-The GPU test in `tests/detector.rs` skips without a hardware adapter (`FOLO_GPU_TEST_SOFTWARE=1` allows a software
+The GPU test in `tests/detector/` skips without a hardware adapter (`FOLO_GPU_TEST_SOFTWARE=1` allows a software
 one). `demo/test.mjs` needs `playwright-core`, from `web/node_modules` (`npm ci` in `web/`) or anywhere Node resolves
 it, and a Chrome. No test is `#[ignore]`d.
 

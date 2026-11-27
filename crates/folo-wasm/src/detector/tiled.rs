@@ -18,9 +18,7 @@ use folo_vision::tile::{TileConfig, compute_tiles, crop_tile, merge_tiled_detect
 
 use crate::simd::crop_rgba_tile;
 
-use super::{
-    DetectResult, Detector, Instant, PooledRgb, TileDetectOptions, err, ms, nms_config, validate_rgba,
-};
+use super::{DetectResult, Detector, Instant, PooledRgb, TileDetectOptions, err, ms, validate_rgba};
 
 /// Maximum number of tiles allowed in one browser [`Detector::detect_tiled`] call (64×64 grid). Checked in `O(1)`
 /// before allocating the tile grid so adversarial `tileSize` / `overlap` combinations reject cleanly instead of
@@ -68,11 +66,17 @@ impl Detector {
     ) -> Result<DetectResult, String> {
         let t0 = Instant::now();
         validate_rgba(rgba, width, height)?;
-        let cfg = self.predict_config(opts.conf, opts.iou, opts.max_det, self.base_cfg.imgsz)?;
         let tile_cfg = opts.to_tile_config()?;
+        let (cfg, nms) = self.build_predict_and_nms(
+            opts.conf,
+            opts.iou,
+            opts.max_det,
+            opts.per_class_conf,
+            opts.conf_inclusive,
+            self.base_cfg.imgsz,
+        )?;
         check_tile_grid_limit(width, height, &tile_cfg)?;
         let tiles = compute_tiles(width, height, &tile_cfg).map_err(err)?;
-        let nms = nms_config(&cfg);
 
         // Single-tile fast path: degrade cleanly to single-pass inference with zero cropping overhead.
         if tiles.len() == 1 {

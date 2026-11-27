@@ -17,9 +17,7 @@ use folo_vision::tta::{merge_tta_detections, unflip_xyxy_h};
 
 use crate::simd::flip_rgba_h;
 
-use super::{
-    DetectResult, Detector, Instant, PooledRgb, TtaDetectOptions, err, ms, nms_config, validate_rgba,
-};
+use super::{DetectResult, Detector, Instant, PooledRgb, TtaDetectOptions, err, ms, validate_rgba};
 
 /// Owns the WebGPU TTA view slice (`[orig]` or `[orig, flipped]`) without cloning `orig`, returning `orig`'s RGB
 /// buffer to `Detector`'s scratch pool on drop.
@@ -64,10 +62,16 @@ impl Detector {
     ) -> Result<DetectResult, String> {
         let t0 = Instant::now();
         validate_rgba(rgba, width, height)?;
-        let cfg = self.predict_config(opts.conf, opts.iou, opts.max_det, self.base_cfg.imgsz)?;
         let tta_cfg = opts.to_tta_config()?;
+        let (cfg, nms) = self.build_predict_and_nms(
+            opts.conf,
+            opts.iou,
+            opts.max_det,
+            opts.per_class_conf,
+            opts.conf_inclusive,
+            self.base_cfg.imgsz,
+        )?;
         let imgszs = tta_cfg.resolve_imgszs(self.base_cfg.imgsz).map_err(err)?;
-        let nms = nms_config(&cfg);
 
         // Single unflipped view: degrade cleanly to one pass at that size, skipping cross-view merge.
         if !tta_cfg.hflip && imgszs.len() == 1 {

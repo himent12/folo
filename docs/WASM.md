@@ -47,25 +47,33 @@ det.free();                                            // releases the model (wa
 ```
 
 ### `FoloDetector.load(bytes, options?) → Promise<FoloDetector>`
-`bytes` is a `Uint8Array` or `ArrayBuffer` holding a `.folo` file for either **FOLO v1** (`folo-*`) or **FOLO v2-Iso** (`folo2-*`, including `o2o` and `iou_head` variants): weights, a checkpoint (its EMA weights are used)
-or an export (`folo export`, F32 or F16), exactly as `Predictor::open` reads them. The model is fused (`Conv+BN` and v2 `WS-QARepConv3x3` multi-branch folding) on
+`bytes` is a `Uint8Array` or `ArrayBuffer` holding a `.folo` file for either **FOLO v1** (`folo-*`) or **FOLO v2-Iso** (`folo2-*`, including `o2o`, `iou_head`, and `folo.quant` int8 quantized checkpoints): weights, a checkpoint (its EMA weights are used),
+an export (`folo export`, F32 or F16), or a quantized checkpoint (`folo quantize` for v1 `folo-*`, or `folo2-*` calibrated via the Rust API), matching `Predictor::open` / `Predictor::open_int8`. The model is fused (`Conv+BN` and v2 `WS-QARepConv3x3` multi-branch folding) on
 the CPU, then moved to the backend. Options (all optional; unknown fields are ignored):
 
 | option | default | meaning |
 |---|---|---|
-| `backend` | `"auto"` | `"auto"`: WebGPU when it initialises and passes a test pass (a small gray image letterboxed to `imgsz`, which also compiles the kernels a real call needs), otherwise the CPU, with the reason in `info().fallback`. `"webgpu"`: WebGPU or a rejected promise. `"cpu"`: always the CPU |
+| `backend` | `"auto"` | `"auto"`: WebGPU when it initialises and passes a test pass (a small gray image letterboxed to `imgsz`, which also compiles the kernels a real call needs), otherwise the CPU, with the reason in `info().fallback` (explicit `precision: "int8"` on `"auto"` runs directly on the CPU). `"webgpu"`: WebGPU or a rejected promise. `"cpu"`: always the CPU |
 | `modelId` | `""` | echoed as `model_id` in every result |
 | `imgsz` | the file's `folo.imgsz` | letterbox size `S` (a multiple of 32): one image is padded `rect` to multiples of 32 inside `S × S`, like `folo predict` |
-| `precision` | `"f32"` | `"f16"`: half precision (f16 weights and activations, f32 accumulation) on WebGPU when the adapter has `shader-f16`; on the CPU or without `shader-f16` the model runs in f32 and `info().precisionFallback` says why. `"f32"`: always f32 |
+| `precision` | omitted (auto) | `"f32"`: always f32. `"f16"`: half precision (f16 weights and activations, f32 accumulation) on WebGPU when the adapter has `shader-f16`; on the CPU or without `shader-f16` the model runs in f32 and `info().precisionFallback` says why. `"int8"`: post-training int8 backbone & neck on the CPU (WASM SIMD128 `i32x4_dot_i16x8` / native SIMD) using the file's `folo.quant` calibration metadata (requires `folo.quant` on `"auto"`/`"cpu"`; on explicit `backend: "webgpu"` it runs in f32 and records `info().precisionFallback`). When omitted, WebGPU runs in `"f32"` and the CPU activates `"int8"` automatically when the file carries valid `folo.quant` metadata |
 
-Rejects with an `Error` whose message says what is wrong (not a `.folo` file, unsupported config, no WebGPU, a
+Rejects with an `Error` whose message says what is wrong (not a `.folo` file, unsupported config, missing/mismatched
+`folo.quant` calibration when `precision: "int8"` is requested, no WebGPU, a
 detached buffer, ...). `detect` likewise never throws: every problem rejects its promise.
 
 ### `detector.detect(image, width?, height?, options?) → Promise<FoloDetectResult>`
 `image` is an `ImageData` (or any `{ data, width, height }`, in which case `width` / `height` may be `undefined`),
 or raw RGBA bytes (`Uint8Array` / `Uint8ClampedArray`, `width × height × 4`, rows top to bottom) with `width` and
 `height`. Alpha is ignored. The pixels are copied before the call returns, so the buffer may be reused at once.
-Options are `/api/predict`'s, with its defaults: `conf` (0.25, `0..=1`), `iou` (0.7, `0..=1`), `maxDet` (300, `>= 1`).
+Options are `/api/predict`'s, with its defaults: `conf` (0.25, `0..=1`), `iou` (0.7, `0..=1`), `maxDet` (300, `>= 1`),
+plus optional calibrated-threshold parity options:
+- `perClassConf`: optional `Record<number, number>` mapping canonical non-negative integer class IDs (`"0"`, `"1"`, ...)
+  to finite confidence thresholds in `[0, 1]`. Classes present in `perClassConf` use their mapped threshold instead of
+  `conf`; all other classes fall back to `conf`.
+- `confInclusive`: optional boolean (default `false`). When `true`, uses inclusive (`score >= conf`) thresholding
+  matching `folo val`'s calibrated F1 operating points (`ThresholdCalibration`); when `false`, uses strict `score > conf`.
+  Both `perClassConf` and `confInclusive` are inherited by `detectTiled` and `detectTta` on both CPU and WebGPU paths.
 The result is `/api/predict`'s response plus `backend`:
 
 ```jsonc
@@ -100,7 +108,7 @@ detections deterministically in original-image pixel coordinates. When the image
 directly to a single pass with zero slicing overhead. Grids exceeding 4,096 tiles (`MAX_BROWSER_TILES`, checked in
 `O(1)` before allocating the tile grid) reject with an `Error`.
 
-Options extend `FoloDetectOptions` (`conf`, `iou`, `maxDet`):
+Options extend `FoloDetectOptions` (`conf`, `iou`, `maxDet`, `perClassConf`, `confInclusive`):
 
 | option | default | meaning |
 |---|---|---|
@@ -122,7 +130,7 @@ mirrored via SIMD128 4-pixel-per-instruction RGBA reversal on the CPU), maps mir
 coordinates, and merges all views deterministically. When TTA resolves to a single unflipped view, it runs a single
 pass at that size without cross-view merging.
 
-Options extend `FoloDetectOptions` (`conf`, `iou`, `maxDet`):
+Options extend `FoloDetectOptions` (`conf`, `iou`, `maxDet`, `perClassConf`, `confInclusive`):
 
 | option | default | meaning |
 |---|---|---|
@@ -135,8 +143,8 @@ Options extend `FoloDetectOptions` (`conf`, `iou`, `maxDet`):
 ### `detector.info() → FoloDetectorInfo`
 `{ backend, device, adapter, fallback, precision, precisionFallback, simd128, threads, family, arch, headMode, hasO2o, hasIouHead, imgsz, classes, modelId }`:
 `adapter` is the GPU adapter's name, or `null` when the browser does not disclose it (Chrome does not); `fallback` is
-why `auto` chose the CPU (`null` otherwise); `precision` is what the model runs in (`"f32"` / `"f16"`) and
-`precisionFallback` why a requested `"f16"` runs in f32 (`null` otherwise); `simd128` is whether the module was built with SIMD128 (always, from the script);
+why `auto` chose the CPU (`null` otherwise); `precision` is what the model runs in (`"f32"`, `"f16"`, or `"int8"`) and
+`precisionFallback` why a requested or embedded precision runs in f32 (`null` otherwise); `simd128` is whether the module was built with SIMD128 (always, from the script);
 `threads` is 1 (see Limitations); `family` is `"folo"` or `"folo2"`; `arch` is e.g. `"folo-n"` or `"folo2-n"`; `headMode` is `"o2m"` (NMS) or `"o2o"` (NMS-free top-k); `hasO2o` reports whether the model includes a one-to-one head branch; and `hasIouHead` reports whether a FOLO v2 model includes the `iou_head` localization-quality branch.
 
 ### `new FoloTracker(options?) → FoloTracker`

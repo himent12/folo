@@ -19,9 +19,16 @@ export async function check(bytes: Uint8Array, buffer: ArrayBuffer, img: ImageDa
   await init();
   const a: FoloDetector = await FoloDetector.load(bytes);
   const b = await FoloDetector.load(buffer, { backend: "cpu", modelId: "m_1", imgsz: 320, precision: "f16" });
+  const c = await FoloDetector.load(bytes, { backend: "cpu", precision: "int8" });
   const r1: FoloDetectResult = await a.detect(img);
-  const r2 = await b.detect(rgba, 64, 48, { conf: 0.5, iou: 0.6, maxDet: 10 });
-  const r3 = await a.detect(img, undefined, undefined, { conf: 0.3 });
+  const r2 = await b.detect(rgba, 64, 48, {
+    conf: 0.5,
+    iou: 0.6,
+    maxDet: 10,
+    perClassConf: { 0: 0.35, 2: 0.6 },
+    confInclusive: true,
+  });
+  const r3 = await c.detect(img, undefined, undefined, { conf: 0.3, perClassConf: { 1: 0.4 } });
   const tileOpts: FoloTileDetectOptions = {
     tileSize: 320,
     overlap: 0.2,
@@ -34,6 +41,8 @@ export async function check(bytes: Uint8Array, buffer: ArrayBuffer, img: ImageDa
     conf: 0.25,
     iou: 0.7,
     maxDet: 100,
+    perClassConf: { 0: 0.2, 1: 0.5 },
+    confInclusive: true,
   };
   const r4: FoloDetectResult = await a.detectTiled(img, undefined, undefined, tileOpts);
   const r5: FoloDetectResult = await b.detectTiled(rgba, 64, 48, {
@@ -51,12 +60,14 @@ export async function check(bytes: Uint8Array, buffer: ArrayBuffer, img: ImageDa
     conf: 0.25,
     iou: 0.7,
     maxDet: 100,
+    perClassConf: { 0: 0.3 },
+    confInclusive: true,
   };
   const r6: FoloDetectResult = await a.detectTta(img, undefined, undefined, ttaOpts);
   const r7: FoloDetectResult = await b.detectTta(rgba, 64, 48);
   const info: FoloDetectorInfo = a.info();
   const backend: "webgpu" | "cpu" = r1.backend;
-  const precision: "f32" | "f16" = info.precision;
+  const precision: "f32" | "f16" | "int8" = info.precision;
   const why: string | null = info.precisionFallback;
   const family: "folo" | "folo2" = info.family;
   const headMode: "o2m" | "o2o" = info.headMode;
@@ -87,6 +98,7 @@ export async function check(bytes: Uint8Array, buffer: ArrayBuffer, img: ImageDa
 
   a.free();
   b.free();
+  c.free();
   return r1.boxes.length + r2.timing.total_ms + r3.image.width + r4.boxes.length + r5.boxes.length
     + r6.boxes.length + r7.boxes.length + info.classes.length + backend.length
     + precision.length + (why ?? "").length + family.length + headMode.length

@@ -3,6 +3,9 @@
 //! parameter rejection, repeated-frame scratch reuse, and JS options JSON parsing. The GPU tests skip without a
 //! hardware adapter, like folo-vision's.
 
+mod int8;
+mod thresholds;
+
 use folo_core::no_grad;
 use folo_core::rng::Rng;
 use folo_data::Image;
@@ -12,12 +15,13 @@ use folo_test_support::TestDir;
 use folo_vision::fusion::BoxFusion;
 use folo_vision::model::HeadMode;
 use folo_vision::{
-    Detector as VisionDetector, FoloModel, FoloV2Config, FoloV2Model, ModelConfig, Precision, PredictConfig,
-    Predictor, TileConfig, TileMergeMetric, TtaConfig,
+    Detector as VisionDetector, FoloModel, FoloV2Config, FoloV2Model, ModelConfig, PredictConfig, Predictor,
+    TileConfig, TileMergeMetric, TtaConfig,
 };
 use folo_wasm::detector::rgba_to_image;
 use folo_wasm::{
-    Backend, BackendChoice, DetectOptions, Detector, LoadOptions, TileDetectOptions, TtaDetectOptions,
+    Backend, BackendChoice, DetectOptions, Detector, LoadOptions, Precision, TileDetectOptions,
+    TtaDetectOptions,
 };
 
 /// A random folo-n with its class-output biases zeroed: the trained priors (MODEL.md §6.5) put every score near
@@ -60,20 +64,22 @@ fn rgba(w: u32, h: u32) -> Vec<u8> {
     v
 }
 
-const OPTS: DetectOptions = DetectOptions { conf: 0.3, iou: 0.7, max_det: 40 };
-
-fn load(bytes: Vec<u8>, backend: BackendChoice) -> Result<Detector, String> {
-    load_at(bytes, backend, Precision::F32)
+fn default_opts() -> DetectOptions {
+    DetectOptions { conf: 0.3, iou: 0.7, max_det: 40, per_class_conf: None, conf_inclusive: false }
 }
 
-fn load_at(bytes: Vec<u8>, backend: BackendChoice, precision: Precision) -> Result<Detector, String> {
+fn load(bytes: Vec<u8>, backend: BackendChoice) -> Result<Detector, String> {
+    load_at(bytes, backend, Some(Precision::F32))
+}
+
+fn load_at(bytes: Vec<u8>, backend: BackendChoice, precision: Option<Precision>) -> Result<Detector, String> {
     load_with_imgsz(bytes, backend, precision, 256)
 }
 
 fn load_with_imgsz(
     bytes: Vec<u8>,
     backend: BackendChoice,
-    precision: Precision,
+    precision: Option<Precision>,
     imgsz: u32,
 ) -> Result<Detector, String> {
     pollster::block_on(Detector::load(
@@ -134,9 +140,9 @@ fn cpu_matches_predictor() {
     assert_eq!(det.backend(), Backend::Cpu);
     let (w, h) = (200, 120);
     let img = rgba(w, h);
-    let res = pollster::block_on(det.detect(&img, w, h, OPTS)).unwrap();
+    let res = pollster::block_on(det.detect(&img, w, h, default_opts())).unwrap();
 
-    let p = cpu_predictor(bytes, 256, OPTS.conf, OPTS.iou, OPTS.max_det);
+    let p = cpu_predictor(bytes, 256, default_opts().conf, default_opts().iou, default_opts().max_det);
     let want = p.predict(&rgba_to_image(&img, w, h).unwrap()).unwrap();
     assert!(!want.detections.is_empty(), "the test needs some detections");
     assert_eq!(res.response.boxes, want.scored_boxes(p.classes()));
@@ -169,15 +175,16 @@ fn cpu_matches_predictor() {
     assert!(info.fallback.is_none() && info.adapter.is_none());
 
     // Repeated frames reuse internal scratch buffers cleanly and return bit-identical boxes.
-    let res2 = pollster::block_on(det.detect(&img, w, h, OPTS)).unwrap();
+    let res2 = pollster::block_on(det.detect(&img, w, h, default_opts())).unwrap();
     assert_eq!(res2.response.boxes, res.response.boxes);
 }
 
 #[test]
 fn cpu_tiled_matches_predictor() {
     let bytes = model_bytes();
-    let det = load_with_imgsz(bytes.clone(), BackendChoice::Cpu, Precision::F32, 128).unwrap();
-    let p = cpu_predictor(bytes, 128, OPTS.conf, OPTS.iou, OPTS.max_det);
+    let det = load_with_imgsz(bytes.clone(), BackendChoice::Cpu, Some(Precision::F32), 128).unwrap();
+    let opts = default_opts();
+    let p = cpu_predictor(bytes, 128, opts.conf, opts.iou, opts.max_det);
 
     let (w, h) = (260, 180);
     let img = rgba(w, h);
@@ -185,9 +192,9 @@ fn cpu_tiled_matches_predictor() {
 
     // Multi-tile with full-image pass and default IoS + Vote fusion.
     let tile_opts = TileDetectOptions {
-        conf: OPTS.conf,
-        iou: OPTS.iou,
-        max_det: OPTS.max_det,
+        conf: opts.conf,
+        iou: opts.iou,
+        max_det: opts.max_det,
         tile_size: Some(140),
         overlap: Some(0.25),
         full_image: true,
@@ -220,9 +227,9 @@ fn cpu_tiled_matches_predictor() {
 
     // Single-tile degradation (tile larger than image) matches single-pass predict bit for bit.
     let single_opts = TileDetectOptions {
-        conf: OPTS.conf,
-        iou: OPTS.iou,
-        max_det: OPTS.max_det,
+        conf: opts.conf,
+        iou: opts.iou,
+        max_det: opts.max_det,
         tile_size: Some(512),
         ..TileDetectOptions::default()
     };
@@ -235,8 +242,9 @@ fn cpu_tiled_matches_predictor() {
 #[test]
 fn cpu_tta_matches_predictor() {
     let bytes = model_bytes();
-    let det = load_with_imgsz(bytes.clone(), BackendChoice::Cpu, Precision::F32, 128).unwrap();
-    let p = cpu_predictor(bytes, 128, OPTS.conf, OPTS.iou, OPTS.max_det);
+    let det = load_with_imgsz(bytes.clone(), BackendChoice::Cpu, Some(Precision::F32), 128).unwrap();
+    let opts = default_opts();
+    let p = cpu_predictor(bytes, 128, opts.conf, opts.iou, opts.max_det);
 
     let (w, h) = (180, 120);
     let img = rgba(w, h);
@@ -244,14 +252,15 @@ fn cpu_tta_matches_predictor() {
 
     // Multi-scale + horizontal flip TTA (resolves 128 * [0.75, 1.0, 1.25] -> [96, 128, 160]).
     let tta_opts = TtaDetectOptions {
-        conf: OPTS.conf,
-        iou: OPTS.iou,
-        max_det: OPTS.max_det,
+        conf: opts.conf,
+        iou: opts.iou,
+        max_det: opts.max_det,
         hflip: true,
         scales: vec![0.75, 1.0, 1.25],
         merge_iou: Some(0.55),
         merge_fusion: BoxFusion::Vote,
         class_agnostic: false,
+        ..TtaDetectOptions::default()
     };
     let tta_cfg: TtaConfig = tta_opts.to_tta_config().unwrap();
     let got = pollster::block_on(det.detect_tta(&img, w, h, tta_opts.clone())).unwrap();
@@ -290,8 +299,8 @@ fn gpu_matches_cpu() {
     let cpu = load(bytes, BackendChoice::Cpu).unwrap();
     let (w, h) = (160, 224);
     let img = rgba(w, h);
-    let g = pollster::block_on(gpu.detect(&img, w, h, OPTS)).unwrap();
-    let c = pollster::block_on(cpu.detect(&img, w, h, OPTS)).unwrap();
+    let g = pollster::block_on(gpu.detect(&img, w, h, default_opts())).unwrap();
+    let c = pollster::block_on(cpu.detect(&img, w, h, default_opts())).unwrap();
     assert_eq!(g.response.device, "gpu:0");
     assert_eq!(g.backend, Backend::Webgpu);
     assert_gpu_matches_cpu_boxes(&g.response.boxes, &c.response.boxes, 1e-3, 0.05, "single");
@@ -300,8 +309,8 @@ fn gpu_matches_cpu() {
     // (32^2 + 16^2 + 8^2 > 1,024), so conf = 0.0 overflows the 1,024-record first download.
     let (ow, oh) = (256, 256);
     let sq = rgba(ow, oh);
-    let overflow = DetectOptions { conf: 0.0, iou: 0.7, max_det: 50 };
-    let go = pollster::block_on(gpu.detect(&sq, ow, oh, overflow)).unwrap();
+    let overflow = DetectOptions { conf: 0.0, iou: 0.7, max_det: 50, ..Default::default() };
+    let go = pollster::block_on(gpu.detect(&sq, ow, oh, overflow.clone())).unwrap();
     let co = pollster::block_on(cpu.detect(&sq, ow, oh, overflow)).unwrap();
     assert_gpu_matches_cpu_boxes(&go.response.boxes, &co.response.boxes, 1e-3, 0.05, "overflow");
 }
@@ -312,7 +321,8 @@ fn gpu_tiled_and_tta_match_predictor() {
         return;
     }
     let bytes = model_bytes();
-    let gpu = load_with_imgsz(bytes.clone(), BackendChoice::Webgpu, Precision::F32, 128).unwrap();
+    let gpu = load_with_imgsz(bytes.clone(), BackendChoice::Webgpu, Some(Precision::F32), 128).unwrap();
+    let opts = default_opts();
 
     // Compare async batched WebGPU `detect_tiled` and `detect_tta` bit-for-bit against native GPU `Predictor`.
     let gpu_dev = folo_gpu::init().unwrap();
@@ -324,9 +334,9 @@ fn gpu_tiled_and_tta_match_predictor() {
         gm,
         PredictConfig {
             imgsz: 128,
-            conf: OPTS.conf,
-            iou: OPTS.iou,
-            max_det: OPTS.max_det,
+            conf: opts.conf,
+            iou: opts.iou,
+            max_det: opts.max_det,
             ..Default::default()
         },
     )
@@ -338,9 +348,9 @@ fn gpu_tiled_and_tta_match_predictor() {
     let trgb = rgba_to_image(&timg, tw, th).unwrap();
     for full_image in [true, false] {
         let tile_opts = TileDetectOptions {
-            conf: OPTS.conf,
-            iou: OPTS.iou,
-            max_det: OPTS.max_det,
+            conf: opts.conf,
+            iou: opts.iou,
+            max_det: opts.max_det,
             tile_size: Some(140),
             overlap: Some(0.25),
             full_image,
@@ -364,9 +374,9 @@ fn gpu_tiled_and_tta_match_predictor() {
     let img = rgba(w, h);
     let rgb = rgba_to_image(&img, w, h).unwrap();
     let tta_opts = TtaDetectOptions {
-        conf: OPTS.conf,
-        iou: OPTS.iou,
-        max_det: OPTS.max_det,
+        conf: opts.conf,
+        iou: opts.iou,
+        max_det: opts.max_det,
         hflip: true,
         scales: vec![0.75, 1.0, 1.25],
         ..TtaDetectOptions::default()
@@ -389,14 +399,14 @@ fn gpu_tiled_and_tta_match_predictor() {
 #[test]
 fn f16_precision_option() {
     let bytes = model_bytes();
-    let cpu = load_at(bytes.clone(), BackendChoice::Cpu, Precision::F16).unwrap();
+    let cpu = load_at(bytes.clone(), BackendChoice::Cpu, Some(Precision::F16)).unwrap();
     let info = cpu.info();
     assert_eq!(info.precision, Precision::F32);
     assert!(info.precision_fallback.as_deref().is_some_and(|w| w.contains("GPU")), "{info:?}");
     if !has_gpu() {
         return;
     }
-    let gpu = load_at(bytes, BackendChoice::Webgpu, Precision::F16).unwrap();
+    let gpu = load_at(bytes, BackendChoice::Webgpu, Some(Precision::F16)).unwrap();
     let info = gpu.info();
     if let Some(why) = &info.precision_fallback {
         return eprintln!("note: {why}");
@@ -404,12 +414,13 @@ fn f16_precision_option() {
     assert_eq!(info.precision, Precision::F16);
     let (w, h) = (160, 224);
     let img = rgba(w, h);
-    let g = pollster::block_on(gpu.detect(&img, w, h, OPTS)).unwrap();
-    let c = pollster::block_on(cpu.detect(&img, w, h, OPTS)).unwrap();
+    let opts = default_opts();
+    let g = pollster::block_on(gpu.detect(&img, w, h, opts.clone())).unwrap();
+    let c = pollster::block_on(cpu.detect(&img, w, h, opts.clone())).unwrap();
     assert!(!c.response.boxes.is_empty());
     // f16 activations: scores agree to ~1e-2, boxes to a fraction of a pixel. Near the threshold a box can
     // appear on one side only, so match the CPU boxes clearly above it.
-    for want in c.response.boxes.iter().filter(|b| b.score > OPTS.conf + 0.02) {
+    for want in c.response.boxes.iter().filter(|b| b.score > opts.conf + 0.02) {
         let close = g.response.boxes.iter().any(|b| {
             b.class == want.class
                 && (b.score - want.score).abs() < 2e-2
@@ -432,11 +443,11 @@ fn rejects_bad_images_and_invalid_parameters() {
 
     // Invalid load inputs.
     assert!(load(b"not a folo file".to_vec(), BackendChoice::Cpu).is_err());
-    assert!(load_with_imgsz(model_bytes(), BackendChoice::Cpu, Precision::F32, 0).is_err());
-    assert!(load_with_imgsz(model_bytes(), BackendChoice::Cpu, Precision::F32, 50).is_err());
-    assert!(load_with_imgsz(model_bytes(), BackendChoice::Cpu, Precision::F32, 8224).is_err());
+    assert!(load_with_imgsz(model_bytes(), BackendChoice::Cpu, Some(Precision::F32), 0).is_err());
+    assert!(load_with_imgsz(model_bytes(), BackendChoice::Cpu, Some(Precision::F32), 50).is_err());
+    assert!(load_with_imgsz(model_bytes(), BackendChoice::Cpu, Some(Precision::F32), 8224).is_err());
 
-    let det = load_with_imgsz(model_bytes(), BackendChoice::Cpu, Precision::F32, 128).unwrap();
+    let det = load_with_imgsz(model_bytes(), BackendChoice::Cpu, Some(Precision::F32), 128).unwrap();
     let img = [0u8; 4 * 4 * 4];
 
     // Single-pass detect parameter validation (NaN, Inf, negative, out-of-range, zero max_det).
@@ -449,7 +460,10 @@ fn rejects_bad_images_and_invalid_parameters() {
         DetectOptions { iou: 1.1, ..Default::default() },
         DetectOptions { max_det: 0, ..Default::default() },
     ] {
-        assert!(pollster::block_on(det.detect(&img, 4, 4, bad)).is_err(), "expected error for {bad:?}");
+        assert!(
+            pollster::block_on(det.detect(&img, 4, 4, bad.clone())).is_err(),
+            "expected error for {bad:?}"
+        );
     }
 
     // SAHI tiled parameter validation.
@@ -516,9 +530,13 @@ fn options_parse_from_js_json() {
     assert_eq!(l.backend, BackendChoice::Webgpu);
     assert_eq!((l.model_id.as_deref(), l.imgsz), (Some("m_1"), Some(320)));
     let l: LoadOptions = serde_json::from_str("{}").unwrap();
-    assert_eq!((l.backend, l.precision), (BackendChoice::Auto, Precision::F32));
+    assert_eq!((l.backend, l.precision), (BackendChoice::Auto, None));
     let l: LoadOptions = serde_json::from_str(r#"{"precision":"f16"}"#).unwrap();
-    assert_eq!(l.precision, Precision::F16);
+    assert_eq!(l.precision, Some(Precision::F16));
+    let l: LoadOptions = serde_json::from_str(r#"{"precision":"int8"}"#).unwrap();
+    assert_eq!(l.precision, Some(Precision::Int8));
+    let l: LoadOptions = serde_json::from_str(r#"{"precision":"f32"}"#).unwrap();
+    assert_eq!(l.precision, Some(Precision::F32));
     assert!(serde_json::from_str::<LoadOptions>(r#"{"precision":"f8"}"#).is_err());
     assert!(serde_json::from_str::<LoadOptions>(r#"{"backend":"cuda"}"#).is_err());
 
@@ -563,20 +581,21 @@ fn concurrent_detect_and_tta_futures_do_not_conflict() {
 
     let bytes = model_bytes();
     let backend = if has_gpu() { BackendChoice::Webgpu } else { BackendChoice::Cpu };
-    let det = load_with_imgsz(bytes, backend, Precision::F32, 128).unwrap();
+    let det = load_with_imgsz(bytes, backend, Some(Precision::F32), 128).unwrap();
     let (w, h) = (160, 128);
     let img = rgba(w, h);
+    let opts = default_opts();
     let tta_opts = TtaDetectOptions {
-        conf: OPTS.conf,
-        iou: OPTS.iou,
-        max_det: OPTS.max_det,
+        conf: opts.conf,
+        iou: opts.iou,
+        max_det: opts.max_det,
         hflip: true,
         scales: vec![0.75, 1.25],
         ..Default::default()
     };
 
     let mut f_tta = pin!(det.detect_tta(&img, w, h, tta_opts));
-    let mut f_single = pin!(det.detect(&img, w, h, OPTS));
+    let mut f_single = pin!(det.detect(&img, w, h, opts.clone()));
     let mut cx = Context::from_waker(Waker::noop());
     let mut r_tta = None;
     let mut r_single = None;
@@ -598,7 +617,7 @@ fn concurrent_detect_and_tta_futures_do_not_conflict() {
     }
     let single = r_single.expect("single detect future completed");
     let tta = r_tta.expect("TTA future completed");
-    let baseline = pollster::block_on(det.detect(&img, w, h, OPTS)).unwrap();
+    let baseline = pollster::block_on(det.detect(&img, w, h, opts)).unwrap();
     assert_eq!(single.response.boxes, baseline.response.boxes);
     assert!(!tta.response.boxes.is_empty());
     assert_eq!(det.info().imgsz, 128);
@@ -654,13 +673,14 @@ fn folo2_cpu_matches_predictor_across_single_tiled_tta_and_variants() {
     let img = rgba(w, h);
     let rgb = rgba_to_image(&img, w, h).unwrap();
 
+    let opts = default_opts();
     for (label, bytes, want_head, want_o2o, want_iou) in [
         ("o2m", folo2_bytes(), "o2m", false, false),
         ("o2m+iou_head", folo2_iou_bytes(), "o2m", false, true),
         ("o2o", folo2_o2o_bytes(), "o2o", true, false),
     ] {
-        let det = load_with_imgsz(bytes.clone(), BackendChoice::Cpu, Precision::F32, 128).unwrap();
-        let p = cpu_vision_predictor(bytes, 128, OPTS.conf, OPTS.iou, OPTS.max_det);
+        let det = load_with_imgsz(bytes.clone(), BackendChoice::Cpu, Some(Precision::F32), 128).unwrap();
+        let p = cpu_vision_predictor(bytes, 128, opts.conf, opts.iou, opts.max_det);
 
         let info = det.info();
         assert_eq!(
@@ -678,16 +698,16 @@ fn folo2_cpu_matches_predictor_across_single_tiled_tta_and_variants() {
         );
 
         // Single-pass parity.
-        let got = pollster::block_on(det.detect(&img, w, h, OPTS)).unwrap();
+        let got = pollster::block_on(det.detect(&img, w, h, opts.clone())).unwrap();
         let want = p.predict(&rgb).unwrap();
         assert!(!want.detections.is_empty(), "{label}: test needs detections");
         assert_eq!(got.response.boxes, want.scored_boxes(p.classes()), "{label}: single detect mismatch");
 
         // SAHI tiled parity.
         let tile_opts = TileDetectOptions {
-            conf: OPTS.conf,
-            iou: OPTS.iou,
-            max_det: OPTS.max_det,
+            conf: opts.conf,
+            iou: opts.iou,
+            max_det: opts.max_det,
             tile_size: Some(112),
             overlap: Some(0.25),
             full_image: true,
@@ -700,9 +720,9 @@ fn folo2_cpu_matches_predictor_across_single_tiled_tta_and_variants() {
 
         // Multi-scale + hflip TTA parity.
         let tta_opts = TtaDetectOptions {
-            conf: OPTS.conf,
-            iou: OPTS.iou,
-            max_det: OPTS.max_det,
+            conf: opts.conf,
+            iou: opts.iou,
+            max_det: opts.max_det,
             hflip: true,
             scales: vec![0.75, 1.0],
             ..TtaDetectOptions::default()
@@ -723,13 +743,14 @@ fn folo2_gpu_matches_predictor_across_single_tiled_tta_and_iou_head() {
     let (w, h) = (160, 128);
     let img = rgba(w, h);
     let rgb = rgba_to_image(&img, w, h).unwrap();
+    let opts = default_opts();
 
     for (label, bytes, want_iou) in [
         ("o2m", folo2_bytes(), false),
         ("o2m+iou_head", folo2_iou_bytes(), true),
         ("o2o", folo2_o2o_bytes(), false),
     ] {
-        let gpu = load_with_imgsz(bytes.clone(), BackendChoice::Webgpu, Precision::F32, 128).unwrap();
+        let gpu = load_with_imgsz(bytes.clone(), BackendChoice::Webgpu, Some(Precision::F32), 128).unwrap();
         assert_eq!(gpu.backend(), Backend::Webgpu);
         assert_eq!(gpu.info().family, "folo2");
         assert_eq!(gpu.info().arch, "folo2-n");
@@ -743,25 +764,25 @@ fn folo2_gpu_matches_predictor_across_single_tiled_tta_and_iou_head() {
             gm,
             PredictConfig {
                 imgsz: 128,
-                conf: OPTS.conf,
-                iou: OPTS.iou,
-                max_det: OPTS.max_det,
+                conf: opts.conf,
+                iou: opts.iou,
+                max_det: opts.max_det,
                 ..Default::default()
             },
         )
         .unwrap();
 
         // Single-pass bit-for-bit parity against native GPU Predictor.
-        let g = pollster::block_on(gpu.detect(&img, w, h, OPTS)).unwrap();
+        let g = pollster::block_on(gpu.detect(&img, w, h, opts.clone())).unwrap();
         let want = gpu_pred.predict(&rgb).unwrap();
         assert!(!want.detections.is_empty(), "{label}: GPU single needs detections");
         assert_eq!(g.response.boxes, want.scored_boxes(gpu_pred.classes()), "{label}: GPU single mismatch");
 
         // SAHI tiled bit-for-bit parity against native GPU Predictor.
         let tile_opts = TileDetectOptions {
-            conf: OPTS.conf,
-            iou: OPTS.iou,
-            max_det: OPTS.max_det,
+            conf: opts.conf,
+            iou: opts.iou,
+            max_det: opts.max_det,
             tile_size: Some(112),
             overlap: Some(0.25),
             full_image: true,
@@ -774,9 +795,9 @@ fn folo2_gpu_matches_predictor_across_single_tiled_tta_and_iou_head() {
 
         // TTA bit-for-bit parity against native GPU Predictor.
         let tta_opts = TtaDetectOptions {
-            conf: OPTS.conf,
-            iou: OPTS.iou,
-            max_det: OPTS.max_det,
+            conf: opts.conf,
+            iou: opts.iou,
+            max_det: opts.max_det,
             hflip: true,
             scales: vec![0.75, 1.0],
             ..TtaDetectOptions::default()

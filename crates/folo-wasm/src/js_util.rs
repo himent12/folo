@@ -136,9 +136,27 @@ fn js_to_json_value(v: &JsValue, path: &str, depth: usize) -> Result<Option<serd
         let child = if path.is_empty() { name.clone() } else { format!("{path}.{name}") };
         if let Some(val) = js_to_json_value(&prop, &child, depth + 1)? {
             map.insert(name, val);
+        } else {
+            reject_omitted_js_field(path, &name, prop.is_undefined()).map_err(js_err)?;
         }
     }
     Ok(Some(serde_json::Value::Object(map)))
+}
+
+/// Reject JS `undefined` / function / symbol (or `toJSON() -> undefined`) values where silently dropping them
+/// would hide an invalid `perClassConf` entry or non-object `perClassConf` value.
+pub(crate) fn reject_omitted_js_field(
+    parent_path: &str,
+    name: &str,
+    prop_is_undefined: bool,
+) -> Result<(), String> {
+    if parent_path == "perClassConf" {
+        return Err(format!("invalid options: perClassConf[{name}] must be a finite number in [0, 1]"));
+    }
+    if parent_path.is_empty() && name == "perClassConf" && !prop_is_undefined {
+        return Err("invalid options: perClassConf must be an object mapping class IDs to thresholds".into());
+    }
+    Ok(())
 }
 
 fn json_number_from_f64(f: f64, path: &str) -> Result<serde_json::Value, JsValue> {
@@ -197,6 +215,30 @@ pub(crate) fn validate_option_f64_ranges(
                 && (!f.is_finite() || f <= 0.0 || (f as f32) <= 0.0)
             {
                 return Err(format!("invalid options: scales[{i}] must be finite and positive, got {f}"));
+            }
+        }
+    }
+    if let Some(v) = map.get("perClassConf")
+        && !v.is_null()
+    {
+        let Some(entries) = v.as_object() else {
+            return Err(
+                "invalid options: perClassConf must be an object mapping class IDs to thresholds".into()
+            );
+        };
+        for (k, val) in entries {
+            if crate::detector::parse_class_id_key(k).is_none() {
+                return Err(format!(
+                    "invalid options: perClassConf key `{k}` must be a non-negative integer class ID"
+                ));
+            }
+            let Some(f) = val.as_f64() else {
+                return Err(format!("invalid options: perClassConf[{k}] must be a finite number in [0, 1]"));
+            };
+            if !f.is_finite() || !(0.0..=1.0).contains(&f) {
+                return Err(format!(
+                    "invalid options: perClassConf[{k}] must be finite and in [0, 1], got {f}"
+                ));
             }
         }
     }
@@ -361,7 +403,10 @@ pub(crate) fn bytes_of(v: &JsValue, what: &str) -> Result<Vec<u8>, JsValue> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_track_boxes_json, validate_option_f64_ranges, validate_track_option_f64_ranges};
+    use super::{
+        parse_track_boxes_json, reject_omitted_js_field, validate_option_f64_ranges,
+        validate_track_option_f64_ranges,
+    };
     use crate::tracker::Tracker;
 
     fn parse_map(s: &str) -> serde_json::Map<String, serde_json::Value> {
@@ -380,6 +425,42 @@ mod tests {
         assert!(validate_option_f64_ranges(&parse_map(r#"{"mergeIou":1.00000001}"#)).is_err());
         assert!(validate_option_f64_ranges(&parse_map(r#"{"overlap":0.99999999}"#)).is_err());
         assert!(validate_option_f64_ranges(&parse_map(r#"{"scales":[1e-50]}"#)).is_err());
+
+        // perClassConf validation: valid keys/ranges, plus strict key & f64-range rejection.
+        assert!(
+            validate_option_f64_ranges(&parse_map(r#"{"perClassConf":{"0":0.0,"2":0.65,"4294967295":1.0}}"#))
+                .is_ok()
+        );
+        assert!(validate_option_f64_ranges(&parse_map(r#"{"perClassConf":{}}"#)).is_ok());
+        assert!(validate_option_f64_ranges(&parse_map(r#"{"perClassConf":null}"#)).is_ok());
+        for bad in [
+            r#"{"perClassConf":[]}"#,
+            r#"{"perClassConf":0.5}"#,
+            r#"{"perClassConf":{"-1":0.5}}"#,
+            r#"{"perClassConf":{"+0":0.5}}"#,
+            r#"{"perClassConf":{"00":0.5}}"#,
+            r#"{"perClassConf":{"01":0.5}}"#,
+            r#"{"perClassConf":{"1.5":0.5}}"#,
+            r#"{"perClassConf":{"abc":0.5}}"#,
+            r#"{"perClassConf":{"4294967296":0.5}}"#,
+            r#"{"perClassConf":{"0":1.00000001}}"#,
+            r#"{"perClassConf":{"0":-1e-12}}"#,
+            r#"{"perClassConf":{"0":"0.5"}}"#,
+            r#"{"perClassConf":{"0":null}}"#,
+        ] {
+            assert!(
+                validate_option_f64_ranges(&parse_map(bad)).is_err(),
+                "expected perClassConf validation failure for {bad}"
+            );
+        }
+
+        // Omitted JS values (`undefined`, functions, symbols, `toJSON() -> undefined`) inside `perClassConf`
+        // must be rejected instead of silently dropped, while top-level `perClassConf: undefined` stays optional.
+        assert!(reject_omitted_js_field("", "perClassConf", true).is_ok());
+        assert!(reject_omitted_js_field("", "perClassConf", false).is_err());
+        assert!(reject_omitted_js_field("perClassConf", "0", true).is_err());
+        assert!(reject_omitted_js_field("perClassConf", "0", false).is_err());
+        assert!(reject_omitted_js_field("", "conf", true).is_ok());
     }
 
     #[test]
