@@ -14,10 +14,10 @@
 //! - **Loading** ([`DataLoader`]): worker threads decode and augment ahead; batches are identical for a given seed
 //!   and epoch whatever the number of workers.
 //! - **Synthetic data** ([`synthetic`]): procedural shapes datasets for tests, demos and benchmarks.
-//! - **Tools** ([`audit`], [`check`], [`convert`], [`split`], [`pack`]): duplicate & cross-split leakage auditing,
-//!   line-level dataset validation, YOLO / COCO / Pascal VOC conversion, deterministic multi-label stratified
-//!   splitting, and a dataset as one tar stream for another FOLO server. [`unfinished`]: the marker of a folder being
-//!   written.
+//! - **Tools** ([`audit`], [`check`], [`convert`], [`curate`], [`split`], [`pack`]): exact & perceptual (`dHash`)
+//!   duplicate and cross-split leakage auditing, line-level dataset validation, YOLO / COCO / Pascal VOC conversion,
+//!   dataset merging, class remapping and subset filtering, deterministic multi-label stratified splitting, and a
+//!   dataset as one tar stream for another FOLO server. [`unfinished`]: the marker of a folder being written.
 //! - **Support**: [`guard`] (a process-wide read guard, installed by `folo mcp --confine`), [`par`] (row
 //!   parallelism that the loader's workers switch off), [`paths`] (file names shared by `folo dataset check --json`
 //!   and the server), [`CacheMode`] (`--cache ram`) and [`DatasetStats`].
@@ -62,6 +62,7 @@ mod bbox;
 mod buffers;
 pub mod check;
 pub mod convert;
+pub mod curate;
 pub mod dataset;
 mod error;
 pub mod guard;
@@ -81,9 +82,17 @@ pub mod synthetic;
 pub mod unfinished;
 pub mod warp;
 
-pub use audit::{AuditImageRef, AuditReport, DuplicateGroup, SplitLeakage, UnreadableImage, audit_dataset};
+pub use audit::{
+    AuditImageRef, AuditOptions, AuditReport, DEFAULT_DHASH_THRESHOLD, DuplicateGroup, NearDuplicateGroup,
+    NearDuplicateLeakage, PerceptualImageRef, SplitLeakage, UnreadableImage, audit_dataset,
+    audit_dataset_with, dhash_file, dhash_image, hamming_distance,
+};
 pub use augment::{AugmentConfig, Fetched, TrainTransform, Transformed};
 pub use bbox::BBox;
+pub use curate::{
+    ClassNormalize, CollisionPolicy, FilterConfig, MergeConfig, MergeReport, MergeSplitPolicy, RemapConfig,
+    filter_dataset, merge_datasets, merge_paths, remap_classes, write_filtered, write_merged,
+};
 pub use dataset::cache::{MIN_FILES as SCAN_CACHE_MIN_FILES, scan_cache_dir, set_scan_cache_dir};
 pub use dataset::{
     CocoAnnotation, CocoGroundTruth, CocoImage, Dataset, FileDataset, Format, ImageEntry, InMemoryDataset,

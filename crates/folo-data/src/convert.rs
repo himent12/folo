@@ -184,11 +184,11 @@ pub fn convert(ds: &LoadedDataset, out: &Path, to: Format) -> Result<Converted> 
     Ok(Converted { root: out.to_path_buf(), format: to, splits, boxes })
 }
 
-fn mkdir(p: &Path) -> Result<()> {
+pub(crate) fn mkdir(p: &Path) -> Result<()> {
     std::fs::create_dir_all(p).map_err(|e| DataError::io(p, e))
 }
 
-fn copy(from: &Path, to: &Path) -> Result<()> {
+pub(crate) fn copy(from: &Path, to: &Path) -> Result<()> {
     crate::guard::check(from).map_err(|e| DataError::io(from, e))?;
     std::fs::copy(from, to).map(|_| ()).map_err(|e| DataError::io(from, e))
 }

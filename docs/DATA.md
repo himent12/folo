@@ -172,6 +172,22 @@ rebuilds its dataset indexes then). Nothing installs one by default; `folo mcp
 - `LoadedDataset::audit()` / `audit::audit_dataset(&loaded)` hashes every readable image in parallel with constant
   per-thread memory and returns an `AuditReport` with `duplicate_groups`, `split_leakage` (images whose exact bytes
   appear in two or more splits, with `has_train_val_leakage()`), `unreadable`, `stats`, and `empty_classes`.
+  `LoadedDataset::audit_with(&AuditOptions::perceptual(max_hamming_distance))` / `audit::audit_dataset_with` adds
+  64-bit difference-hash (`dHash`) perceptual near-duplicate detection (`dhash_image`, `dhash_file`,
+  `hamming_distance`) using anti-aliased `9x8` BT.601 luminance gradients and exact pigeonhole multi-index hashing,
+  populating `near_duplicate_groups` and `near_duplicate_leakage` so recompressed, resized, or lightly cropped
+  cross-split leaks are caught alongside exact byte duplicates.
+- `curate::remap_classes(&loaded, &RemapConfig)` / `LoadedDataset::remap_classes` renames, unifies, or drops classes
+  with `ClassNormalize::Exact` or `ClassNormalize::CaseAndWhitespace`, compacting surviving class ids to `0..n` and
+  optionally dropping images left empty.
+- `curate::filter_dataset(&loaded, &FilterConfig)` / `LoadedDataset::filter` (and `write_filtered`) carves clean
+  subsets by class whitelist/blacklist, split selection, normalised box area, pixel box/image dimensions (probing
+  headers when `verify_images` was off), and optional empty-image dropping.
+- `curate::merge_datasets(&[&a, &b, ...], &MergeConfig)`, `write_merged`, and `merge_paths` combine two or more
+  datasets (any mix of YOLO, COCO, and Pascal VOC) into a unified YOLO dataset (`data.yaml` + split dirs) with
+  automatic class-name unification, explicit class remap/drop mapping, split preservation / pooling / stratified
+  re-splitting (`MergeSplitPolicy`), and deterministic case-insensitive filename collision resolution
+  (`CollisionPolicy::PrefixOnCollision` or `AlwaysPrefix`).
 - `LoadedDataset::split_stratified(&cfg)` / `split::split_dataset(&loaded, &cfg)` (plus `split_indices` for any
   `Dataset` and `write_split` to materialise on disk) performs seeded iterative multi-label stratification across
   `train` / `val` / optional `test`, processing rarest classes first with relative-deficit scoring so rare classes and
