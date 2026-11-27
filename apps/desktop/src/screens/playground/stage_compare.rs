@@ -51,7 +51,11 @@ impl FoloApp {
             Load::Ready(p) => {
                 let b = self.visible_boxes(p, active_a);
                 let n = b.len();
-                (b, Some(n), Some(latency_text(p.timing.total_ms, sim)), self.play_pred_pending, None)
+                let mut lat = latency_text(p.timing.total_ms, sim);
+                if p.cold {
+                    lat.push_str(" (cold)");
+                }
+                (b, Some(n), Some(lat), self.play_pred_pending, None)
             }
             Load::Loading => (Vec::new(), None, None, true, None),
             Load::Failed(e) => (Vec::new(), None, None, false, Some(e.message.clone())),
@@ -61,13 +65,11 @@ impl FoloApp {
             Load::Ready(p) => {
                 let b = self.visible_boxes_b(p, active_b);
                 let n = b.len();
-                (
-                    b,
-                    Some(n),
-                    Some(latency_text(p.timing.total_ms, sim)),
-                    self.play_compare.pred_b_pending,
-                    None,
-                )
+                let mut lat = latency_text(p.timing.total_ms, sim);
+                if p.cold {
+                    lat.push_str(" (cold)");
+                }
+                (b, Some(n), Some(lat), self.play_compare.pred_b_pending, None)
             }
             Load::Loading => (Vec::new(), None, None, true, None),
             Load::Failed(e) => (Vec::new(), None, None, false, Some(e.message.clone())),
@@ -408,13 +410,18 @@ impl FoloApp {
                         cx.listener(|this, _, _, _| this.play_drag = None),
                     )
                     .on_mouse_move(cx.listener(move |this, ev: &MouseMoveEvent, _, cx| {
-                        if let Some((from, pan0)) = this.play_drag {
+                        if let Some(drag) = this.play_drag {
                             if ev.pressed_button == Some(folo_ui::MouseButton::Left) {
                                 if this.play_zoom > 1.0 {
-                                    this.play_pan = (
-                                        pan0.0 + f32::from(ev.position.x - from.x),
-                                        pan0.1 + f32::from(ev.position.y - from.y),
+                                    let (next_pan, next_drag) = super::stage::clamp_and_rebase_drag(
+                                        drag,
+                                        ev.position,
+                                        bounds_cell.get(),
+                                        dims,
+                                        this.play_zoom,
                                     );
+                                    this.play_pan = next_pan;
+                                    this.play_drag = Some(next_drag);
                                     cx.notify();
                                     return;
                                 }

@@ -324,6 +324,7 @@ impl FoloApp {
             self.bench.selected_entry_image = None;
         }
         self.bench.entry_image_reveal = None;
+        self.bench.entry_grid_min_h = None;
         if matches!(self.route, Route::Benches) {
             self.bench.list_stale = true;
         }

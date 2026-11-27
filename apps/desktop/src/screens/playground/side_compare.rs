@@ -353,9 +353,20 @@ impl FoloApp {
             Some(d) if d < 0 => Tone::Warning,
             _ => Tone::Neutral,
         };
-        let lat_a = summary.latency_a_ms.map_or("—".to_string(), |v| format!("{v:.1} ms"));
-        let lat_b = summary.latency_b_ms.map_or("—".to_string(), |v| format!("{v:.1} ms"));
+        let lat_a = summary.latency_a_ms.map_or("—".to_string(), |v| {
+            if summary.cold_a == Some(true) { format!("{v:.1} ms (cold)") } else { format!("{v:.1} ms") }
+        });
+        let lat_b = summary.latency_b_ms.map_or("—".to_string(), |v| {
+            if summary.cold_b == Some(true) { format!("{v:.1} ms (cold)") } else { format!("{v:.1} ms") }
+        });
         let lat_cmp = format_latency_comparison(summary);
+        let lat_cmp_color = if summary.latency_delta_ms.is_some()
+            && (summary.cold_a == Some(true) || summary.cold_b == Some(true))
+        {
+            t.warning_text
+        } else {
+            t.text_secondary
+        };
 
         let class_rows: Vec<AnyElement> = summary
             .classes
@@ -490,7 +501,7 @@ impl FoloApp {
                                     .font_weight(FontWeight::MEDIUM)
                                     .child("Latency"),
                             )
-                            .child(text(ty::SM, t.text_secondary).tnum().child(lat_cmp)),
+                            .child(text(ty::SM, lat_cmp_color).tnum().child(lat_cmp)),
                     )
                     .child(
                         div()

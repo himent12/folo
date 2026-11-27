@@ -491,13 +491,18 @@ impl FoloApp {
                         cx.listener(|this, _, _, _| this.play_drag = None),
                     )
                     .on_mouse_move(cx.listener(move |this, ev: &MouseMoveEvent, _, cx| {
-                        if let Some((from, pan0)) = this.play_drag {
+                        if let Some(drag) = this.play_drag {
                             if ev.pressed_button == Some(folo_ui::MouseButton::Left) {
                                 if this.play_zoom > 1.0 {
-                                    this.play_pan = (
-                                        pan0.0 + f32::from(ev.position.x - from.x),
-                                        pan0.1 + f32::from(ev.position.y - from.y),
+                                    let (next_pan, next_drag) = clamp_and_rebase_drag(
+                                        drag,
+                                        ev.position,
+                                        bounds_cell.get(),
+                                        dims,
+                                        this.play_zoom,
                                     );
+                                    this.play_pan = next_pan;
+                                    this.play_drag = Some(next_drag);
                                     cx.notify();
                                     return;
                                 }
@@ -587,4 +592,29 @@ impl FoloApp {
             )
             .into_any_element()
     }
+}
+
+/// Active Playground pointer drag anchor: `(origin_pointer, origin_pan)`.
+pub(super) type PlayDrag = (folo_ui::Point<folo_ui::Pixels>, (f32, f32));
+
+/// Applies a held-drag pointer move to Playground pan, clamps to the canvas bounds, and rebases
+/// any clamped axis so reversing direction past a pan limit moves immediately without a dead zone.
+pub(super) fn clamp_and_rebase_drag(
+    (from, pan0): PlayDrag,
+    pos: folo_ui::Point<folo_ui::Pixels>,
+    bounds: Option<Bounds<folo_ui::Pixels>>,
+    dims: (f32, f32),
+    zoom: f32,
+) -> ((f32, f32), PlayDrag) {
+    let raw = (pan0.0 + f32::from(pos.x - from.x), pan0.1 + f32::from(pos.y - from.y));
+    let next = match bounds {
+        Some(b) => crate::viz::clamp_pan(b, dims.0, dims.1, Fit::Contain, zoom, raw),
+        None => raw,
+    };
+    let clamped_x = (next.0 - raw.0).abs() > 1e-4;
+    let clamped_y = (next.1 - raw.1).abs() > 1e-4;
+    let next_from =
+        folo_ui::point(if clamped_x { pos.x } else { from.x }, if clamped_y { pos.y } else { from.y });
+    let next_pan0 = (if clamped_x { next.0 } else { pan0.0 }, if clamped_y { next.1 } else { pan0.1 });
+    (next, (next_from, next_pan0))
 }
