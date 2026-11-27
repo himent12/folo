@@ -177,6 +177,9 @@ impl FoloApp {
                 .max_h(px(420.));
             return div().flex_1().min_w_0().flex().flex_col().child(zone).into_any_element();
         }
+        if self.play_compare.enabled && !no_models {
+            return self.compare_stage(window, cx);
+        }
         let active = self.play_active(window, cx);
         let img = self.play_image.as_ref().unwrap();
         let dims = (img.width as f32, img.height as f32);

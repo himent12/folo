@@ -136,11 +136,16 @@ impl FoloApp {
         self.play_pred_pending = false;
         self.play_pred_dim = false;
         self.play_pred_for = None;
+        self.play_compare.pred_a_meta = None;
         self.clear_play_hover();
+        self.clear_play_pred_b();
         self.play_zoom = 1.0;
         self.play_pan = (0., 0.);
         self.play_drag = None;
         self.run_predict(cx);
+        if self.play_compare.enabled {
+            self.run_predict_b(cx);
+        }
     }
 
     /// Dataset `dataset`'s files changed ([`FoloApp::forget_dataset_contents`]): its image ids are
@@ -165,7 +170,9 @@ impl FoloApp {
             self.play_pred_pending = false;
             self.play_pred_dim = false;
             self.play_pred_for = None;
+            self.play_compare.pred_a_meta = None;
             self.clear_play_hover();
+            self.clear_play_pred_b();
             self.play_drag = None;
             self.play_image.take().map(|p| p.image)
         } else {
@@ -194,6 +201,14 @@ impl FoloApp {
             } else {
                 // An error (an OOM and its Retry) isn't left live during the fallback.
                 self.rerun_predict(cx);
+            }
+            if self.play_compare.enabled {
+                if matches!(self.play_compare.pred_b, Load::Ready(_)) {
+                    self.play_compare.pred_b_dim = true;
+                    self.run_predict_b(cx);
+                } else {
+                    self.rerun_predict_b(cx);
+                }
             }
         }
     }
@@ -272,6 +287,7 @@ impl FoloApp {
             self.drop_play_model(Some(name));
         }
         if self.play_model.is_some() {
+            self.reconcile_play_model_b(cx);
             return;
         }
         // The best model (not the newest checkpoint, which may have learned nothing yet).
@@ -289,6 +305,7 @@ impl FoloApp {
             self.play_model_run = run;
             self.run_predict(cx);
         }
+        self.reconcile_play_model_b(cx);
     }
 
     /// The Playground's model is gone (its run was deleted, here or elsewhere; `name` says which):
@@ -301,6 +318,7 @@ impl FoloApp {
         self.play_pred_seq += 1;
         self.play_pred = Load::Idle;
         self.play_pred_for = None;
+        self.play_compare.pred_a_meta = None;
         self.play_pred_pending = false;
         self.play_pred_dim = false;
         self.clear_play_hover();
@@ -311,6 +329,7 @@ impl FoloApp {
     /// rerun of the same image and model, an IoU change, keeps the old result up instead.
     pub fn rerun_predict(&mut self, cx: &mut Context<Self>) {
         self.play_pred_for = None;
+        self.play_compare.pred_a_meta = None;
         self.play_pred_dim = false;
         self.run_predict(cx);
     }
@@ -326,8 +345,12 @@ impl FoloApp {
     pub fn set_play_conf(&mut self, conf: f32, cx: &mut Context<Self>) {
         self.play_conf = conf;
         self.clear_play_hover();
+        self.play_compare.clear_hover();
         if conf < self.play_fetched_floor - 1e-6 {
             self.run_predict(cx);
+        }
+        if self.play_compare.enabled && conf < self.play_compare.fetched_floor_b - 1e-6 {
+            self.run_predict_b(cx);
         }
     }
 
@@ -345,10 +368,18 @@ impl FoloApp {
             max_det: 300,
         };
         self.play_fetched_floor = floor;
-        let key = (self.play_image_gen, model);
+        let key = (self.play_image_gen, model.clone());
+        let meta = crate::screens::playground::PlayPredMeta {
+            image_gen: self.play_image_gen,
+            model_id: model,
+            iou_bits: self.play_iou.to_bits(),
+            target: self.play_target,
+            floor,
+        };
         // Same image and model (an IoU change): keep showing the old boxes until the new ones land.
         if self.play_pred_for.as_ref() != Some(&key) {
             self.play_pred = Load::Loading;
+            self.play_compare.pred_a_meta = None;
             self.clear_play_hover();
         }
         self.play_pred_seq += 1;
@@ -366,14 +397,25 @@ impl FoloApp {
                 Some(t) => crate::local::predict(api, &req, t, generation, &ticket),
                 None => api.predict(&req),
             },
-            move |this, r, _| this.play_pred_answered(seq, key, r),
+            move |this, r, _| this.play_pred_answered_with_meta(seq, key, Some(meta), r),
         );
     }
 
     /// A prediction's answer: shown if it is still the latest asked for (`seq`). One that couldn't
     /// reach the server says so to the connection state too, so the next answer from the server
     /// (the 2 s refresh) counts as a reconnect and runs it again, however short the outage was.
+    #[cfg(test)]
     pub(super) fn play_pred_answered(&mut self, seq: u64, key: (u64, String), r: ApiResult<PredictResponse>) {
+        self.play_pred_answered_with_meta(seq, key, None, r);
+    }
+
+    fn play_pred_answered_with_meta(
+        &mut self,
+        seq: u64,
+        key: (u64, String),
+        meta: Option<crate::screens::playground::PlayPredMeta>,
+        r: ApiResult<PredictResponse>,
+    ) {
         if let Err(e) = &r
             && e.code == "server_unreachable"
         {
@@ -392,6 +434,7 @@ impl FoloApp {
             }
             p
         });
+        self.play_compare.pred_a_meta = if r.is_ok() { meta } else { None };
         self.play_pred = r.into();
         self.play_pred_for = Some(key);
         self.play_pred_pending = false;

@@ -83,13 +83,16 @@ impl FoloApp {
                     .and_then(|l| l.iter().find(|e| e.id == eid))
                     .is_some_and(|e| e.status == crate::api::BenchEntryStatus::Done)
                 && self.bench.results.get(&(bid.clone(), eid.clone())).is_some_and(|l| l.ready().is_some());
+            let filter = self.bench.entry_image_filter;
             let visible = entry_ready
-                && self
-                    .bench
-                    .entry_images
-                    .get(&(bid.clone(), eid))
-                    .and_then(|x| x.page.ready())
-                    .is_some_and(|p| p.images.iter().any(|im| im.image.id == img_id));
+                && self.bench.entry_images.get(&(bid.clone(), eid)).and_then(|x| x.page.ready()).is_some_and(
+                    |p| {
+                        p.images.iter().any(|im| {
+                            im.image.id == img_id
+                                && crate::screens::bench::entry_image_matches_filter(im, filter)
+                        })
+                    },
+                );
             if visible {
                 self.bench.entry_image_reveal = Some(crate::bench::EntryImageReveal::Tile(img_id.clone()));
                 let key = if self.bench_image_failed(&bid, &img_id, None) {

@@ -253,6 +253,12 @@ pub struct BenchState {
     pub entry_inspect_hide_truth: bool,
     /// Hide solid prediction boxes in the expanded Entry Image inspector.
     pub entry_inspect_hide_preds: bool,
+    /// Highlight only errors (missed GT / FN and false positives / FP) in the Entry Image inspector.
+    pub entry_inspect_errors_only: bool,
+    /// Error-analysis filter chip active on the Entry Images panel.
+    pub entry_image_filter: crate::screens::bench::EntryImageFilter,
+    /// Error-analysis sort order active on the Entry Images panel.
+    pub entry_image_order: crate::screens::bench::EntryImageOrder,
 }
 
 /// One-shot scroll reveal target for the Entry Images panel (works in pointer and keyboard mode).

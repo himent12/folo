@@ -190,6 +190,7 @@ impl FoloApp {
         self.play_boxes = true;
         self.play_labels = true;
         self.play_class = None;
+        self.play_compare.reset_for_backend();
         self.retry_all(cx);
     }
 
@@ -245,6 +246,11 @@ impl FoloApp {
         // The Playground's prediction that couldn't reach it runs again, as Retry would.
         if self.play_pred.error().is_some_and(|e| e.code == "server_unreachable") {
             self.rerun_predict(cx);
+        }
+        if self.play_compare.enabled
+            && self.play_compare.pred_b.error().is_some_and(|e| e.code == "server_unreachable")
+        {
+            self.rerun_predict_b(cx);
         }
         // A request still out now that fails later (`fetch`) failed while it was away too.
         self.reconnects += 1;

@@ -1,16 +1,21 @@
-//! An entry's images panel: sorted, paged, with clickable inline detail inspection of ground truth
-//! and detections.
+//! An entry's images panel: error-analysis filter chips (All, Missed GT / FN, False Positives / FP,
+//! Has errors), error-focused sorting, GT vs Prediction overlay toggles, per-image TP/FP/FN badges,
+//! and clickable inline detail inspection.
 
 use folo_ui::prelude::FluentBuilder;
 use folo_ui::{
-    AnyElement, Context, FontWeight, InteractiveElement, IntoElement, KeyDownEvent, ParentElement,
-    SharedString, StatefulInteractiveElement, Styled, Window, div, px,
+    AnyElement, Context, InteractiveElement, IntoElement, ParentElement, SharedString,
+    StatefulInteractiveElement, Styled, Window, div, px,
 };
 
+use super::error_analysis::{
+    EntryImageFilter, EntryImageOrder, ImageErrorStats, analyze_entry_image, count_analyzed_filters,
+    filter_and_sort_analyzed,
+};
 use super::format::images_shown;
-use crate::api::{Bench, BenchAccuracy, BenchEntry, BenchEntryImage};
+use crate::api::{Bench, BenchAccuracy, BenchEntry};
 use crate::app::{FoloApp, act};
-use crate::bench::{EntryImageReveal, ImageSort};
+use crate::bench::EntryImageReveal;
 use crate::controls::Btn;
 use crate::screens::image_canvas;
 use crate::store::Load;
@@ -19,8 +24,8 @@ use crate::ui::*;
 use crate::viz::{DrawBox, Fit};
 
 impl FoloApp {
-    /// An entry's images: the truth (dashed) and its detections at the confidence they were taken at (its
-    /// best-F1 one, or every detection without one), worst first or in the benchmark's order, a page at a time.
+    /// An entry's images: GT (dashed) and detections at operating confidence, with error-analysis
+    /// filter chips, sort controls, GT/Prediction overlay toggles, and per-image TP/FP/FN badges.
     pub(super) fn entry_images_panel(
         &mut self,
         t: &Theme,
@@ -31,22 +36,33 @@ impl FoloApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let t = *t;
+        let order = self.bench.entry_image_order;
+        self.bench.image_sort = order.server_sort();
         self.ensure_entry_images(&b.id, &e.id, cx);
-        let sort = self.bench.image_sort;
         let (bid, eid) = (b.id.clone(), e.id.clone());
-        let sorts = [ImageSort::Worst, ImageSort::Order];
+        let orders = [
+            EntryImageOrder::MostErrors,
+            EntryImageOrder::MostFn,
+            EntryImageOrder::MostFp,
+            EntryImageOrder::LowestIou,
+            EntryImageOrder::InOrder,
+        ];
         let seg = self.segmented(
             "entry-img-sort",
-            &["Worst first", "In order"],
-            sorts.iter().position(|s| *s == sort).unwrap_or(0),
+            &["Most errors", "Most FN", "Most FP", "Lowest IoU", "In order"],
+            orders.iter().position(|s| *s == order).unwrap_or(0),
             window,
             cx,
             std::rc::Rc::new(move |this, i, _, cx| {
-                let next = sorts[i.min(1)];
-                if this.bench.image_sort != next {
-                    this.bench.image_sort = next;
-                    this.bench.selected_entry_image = None;
-                    this.bench.entry_image_reveal = None;
+                let next = orders[i.min(orders.len() - 1)];
+                if this.bench.entry_image_order != next {
+                    this.bench.entry_image_order = next;
+                    let server = next.server_sort();
+                    if this.bench.image_sort != server {
+                        this.bench.image_sort = server;
+                        this.bench.selected_entry_image = None;
+                        this.bench.entry_image_reveal = None;
+                    }
                 }
                 this.ensure_entry_images(&bid, &eid, cx);
                 cx.notify();
@@ -100,6 +116,23 @@ impl FoloApp {
                     .into_any_element();
             }
         };
+
+        let analyzed: Vec<_> =
+            page.images.iter().enumerate().map(|(i, im)| (i, im, analyze_entry_image(im))).collect();
+        let counts = count_analyzed_filters(&analyzed);
+        let active_filter = self.bench.entry_image_filter;
+        let show_truth = !self.bench.entry_inspect_hide_truth;
+        let show_preds = !self.bench.entry_inspect_hide_preds;
+        let filter_bar =
+            self.entry_image_filter_bar(&t, active_filter, counts, show_truth, show_preds, window, cx);
+
+        // Reuse the single-pass error stats for filtering and client-side error sorting.
+        let filtered = if active_filter == EntryImageFilter::All && order == EntryImageOrder::MostErrors {
+            analyzed
+        } else {
+            filter_and_sort_analyzed(analyzed, active_filter, order)
+        };
+
         let selected_id: Option<String> = self
             .bench
             .selected_entry_image
@@ -107,9 +140,8 @@ impl FoloApp {
             .filter(|(sb, se, _)| sb == &b.id && se == &e.id)
             .map(|(_, _, img)| img.clone());
         let selected_idx =
-            selected_id.as_deref().and_then(|sid| page.images.iter().position(|im| im.image.id == sid));
-        let inspector =
-            selected_idx.map(|idx| self.entry_image_detail(&t, b, e, &page.images, idx, window, cx));
+            selected_id.as_deref().and_then(|sid| filtered.iter().position(|(_, im, _)| im.image.id == sid));
+        let inspector = selected_idx.map(|idx| self.entry_image_detail(&t, b, e, &filtered, idx, window, cx));
         let reveal_tile = match self.bench.entry_image_reveal.take() {
             Some(EntryImageReveal::Tile(id)) => Some(id),
             other => {
@@ -118,30 +150,32 @@ impl FoloApp {
             }
         };
         let page_scroll = self.page_scroll.clone();
-        let tiles: Vec<AnyElement> = page
-            .images
+        let tiles: Vec<AnyElement> = filtered
             .iter()
-            .map(|im| {
+            .map(|(_, im, stats)| {
                 let img = self.bench_image(&b.id, &im.image.id, None, cx);
-                let mut boxes: Vec<DrawBox> = im
-                    .image
-                    .boxes
-                    .iter()
-                    .map(|x| DrawBox { truth: true, ..DrawBox::new(x.class, x.x1, x.y1, x.x2, x.y2) })
-                    .collect();
-                boxes.extend(im.detections.iter().map(|d| DrawBox {
-                    label: b.classes.get(d.class as usize).cloned().map(Into::into),
-                    score: e.scored.then_some(d.score),
-                    ..DrawBox::new(d.class, d.x1, d.y1, d.x2, d.y2)
-                }));
+                let mut boxes: Vec<DrawBox> = Vec::new();
+                if show_truth {
+                    boxes.extend(
+                        im.image.boxes.iter().map(|x| DrawBox {
+                            truth: true,
+                            ..DrawBox::new(x.class, x.x1, x.y1, x.x2, x.y2)
+                        }),
+                    );
+                }
+                if show_preds {
+                    boxes.extend(im.detections.iter().map(|d| DrawBox {
+                        label: b.classes.get(d.class as usize).cloned().map(Into::into),
+                        score: e.scored.then_some(d.score),
+                        ..DrawBox::new(d.class, d.x1, d.y1, d.x2, d.y2)
+                    }));
+                }
                 let dims = (im.image.width as f32, im.image.height as f32);
-                // Failed, not loading: said on the frame, which is then a Retry (click, Enter, Space).
                 let failed = img.is_none() && self.bench_image_failed(&b.id, &im.image.id, None);
                 let is_selected = selected_id.as_deref() == Some(im.image.id.as_str());
                 let painted = image_canvas(&t, img, dims, boxes, Fit::Contain, true, false);
                 let painted =
                     if failed { crate::screens::unavailable_over(&t, painted, true) } else { painted };
-                // The image clips inside; the control itself doesn't, so its focus ring shows whole.
                 let frame = div()
                     .w(px(152.))
                     .h(px(152.))
@@ -196,10 +230,9 @@ impl FoloApp {
                     )
                     .into_any_element()
                 };
-                let ok = im.missed == 0 && im.wrong == 0;
-                let caption_text = entry_image_caption(im);
                 let should_reveal = reveal_tile.as_deref() == Some(im.image.id.as_str());
                 let tile_scroll = page_scroll.clone();
+                let badges = tile_error_badges(&t, stats);
                 div()
                     .id(SharedString::from(format!("eimg-{}", im.image.id)))
                     .relative()
@@ -214,7 +247,10 @@ impl FoloApp {
                         } else if is_selected {
                             format!("{} · Click to close preview", im.image.file)
                         } else {
-                            format!("{} · Click to inspect", im.image.file)
+                            format!(
+                                "{} · TP {} · FP {} · FN {} · Click to inspect",
+                                im.image.file, stats.tp, stats.fp, stats.fn_count
+                            )
                         },
                         None,
                     ))
@@ -234,16 +270,63 @@ impl FoloApp {
                     })
                     .child(frame)
                     .when_some(retry_stop, |d, fh| d.child(div().track_focus(&fh)))
-                    .child(
-                        text(ty::SM, if ok { t.text_tertiary } else { t.text_secondary })
-                            .tnum()
-                            .child(caption_text),
-                    )
+                    .child(badges)
                     .into_any_element()
             })
             .collect();
+
+        let empty_filter = tiles.is_empty().then(|| {
+            let clear = self.button(
+                "entry-img-clear-filter",
+                "Show all images",
+                Btn::Secondary,
+                None,
+                window,
+                cx,
+                act(|this, _, cx| {
+                    this.bench.entry_image_filter = EntryImageFilter::All;
+                    cx.notify();
+                }),
+            );
+            div()
+                .p(px(16.))
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .justify_between()
+                .gap(px(12.))
+                .child(
+                    text(ty::SM, t.text_tertiary)
+                        .whitespace_normal()
+                        .child("No loaded images match this error filter."),
+                )
+                .child(clear)
+        });
+
         let more = (page.images.len() as u64) < page.total;
         let (bid, eid) = (b.id.clone(), e.id.clone());
+        let shown_summary = if active_filter == EntryImageFilter::All && !order.is_client_subsort() {
+            format!("{} of {} images", int(page.images.len() as u64), int(page.total))
+        } else if active_filter == EntryImageFilter::All {
+            if more {
+                format!(
+                    "{} loaded images sorted (of {} total · Show more to scan remaining)",
+                    int(page.images.len() as u64),
+                    int(page.total)
+                )
+            } else {
+                format!("{} of {} images", int(page.images.len() as u64), int(page.total))
+            }
+        } else if more {
+            format!(
+                "{} matching in {} loaded ({} total · Show more to scan remaining)",
+                int(filtered.len() as u64),
+                int(page.images.len() as u64),
+                int(page.total)
+            )
+        } else {
+            format!("{} matching of {} images", int(filtered.len() as u64), int(page.total))
+        };
         let footer = div()
             .px(px(16.))
             .pb(px(12.))
@@ -254,9 +337,7 @@ impl FoloApp {
             .gap(px(12.))
             .child(text(ty::SM, t.text_tertiary).tnum().flex_1().min_w(px(220.)).whitespace_normal().child(
                 format!(
-                    "{} of {} images · click any image to inspect · dashed: truth · solid: detections{}",
-                    int(page.images.len() as u64),
-                    int(page.total),
+                    "{shown_summary} · click any image to inspect · dashed: GT · solid: predictions{}",
                     if e.scored { images_shown(&page, accuracy) } else { String::new() },
                 ),
             ))
@@ -287,124 +368,76 @@ impl FoloApp {
         panel(&t)
             .child(header)
             .children(retry_anchor)
+            .child(filter_bar)
             .children(inspector)
-            .child(div().p(px(16.)).flex().flex_wrap().gap(px(12.)).children(tiles))
+            .children(empty_filter)
+            .when(!tiles.is_empty(), |d| {
+                d.child(div().p(px(16.)).flex().flex_wrap().gap(px(12.)).children(tiles))
+            })
             .child(footer)
             .into_any_element()
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn entry_image_detail(
+    fn entry_image_filter_bar(
         &mut self,
         t: &Theme,
-        b: &Bench,
-        e: &BenchEntry,
-        images: &[BenchEntryImage],
-        idx: usize,
+        active: EntryImageFilter,
+        counts: super::error_analysis::FilterCounts,
+        show_truth: bool,
+        show_preds: bool,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let im = &images[idx];
-        let show_truth = !self.bench.entry_inspect_hide_truth;
-        let show_preds = !self.bench.entry_inspect_hide_preds;
-        let img = self.bench_image(&b.id, &im.image.id, None, cx);
-        let failed = img.is_none() && self.bench_image_failed(&b.id, &im.image.id, None);
-        let mut boxes = Vec::new();
-        if show_truth {
-            boxes.extend(
-                im.image
-                    .boxes
-                    .iter()
-                    .map(|x| DrawBox { truth: true, ..DrawBox::new(x.class, x.x1, x.y1, x.x2, x.y2) }),
-            );
-        }
-        if show_preds {
-            boxes.extend(im.detections.iter().map(|d| DrawBox {
-                label: b.classes.get(d.class as usize).cloned().map(Into::into),
-                score: e.scored.then_some(d.score),
-                ..DrawBox::new(d.class, d.x1, d.y1, d.x2, d.y2)
-            }));
-        }
-        let dims = (im.image.width as f32, im.image.height as f32);
-        let painted = image_canvas(t, img, dims, boxes, Fit::Contain, true, true);
-        let painted = if failed { crate::screens::unavailable_over(t, painted, true) } else { painted };
-        let stage = div()
-            .flex_1()
-            .min_w(px(320.))
-            .h(px(340.))
-            .rounded(px(radius::MD))
-            .overflow_hidden()
-            .bg(t.bg_inset)
-            .border_1()
-            .border_color(t.line_subtle)
-            .child(painted);
-
-        let n = images.len();
-        let prev_id = images[(idx + n - 1) % n].image.id.clone();
-        let next_id = images[(idx + 1) % n].image.id.clone();
-        let (bid1, eid1) = (b.id.clone(), e.id.clone());
-        let (bid2, eid2) = (b.id.clone(), e.id.clone());
-        let prev = self.icon_button(
-            "eimg-prev",
-            "icons/chevron-left.svg",
-            "Previous image",
-            window,
-            cx,
-            act(move |this, _, cx| {
-                this.bench.selected_entry_image = Some((bid1.clone(), eid1.clone(), prev_id.clone()));
-                this.bench.entry_inspect_scroll.set_offset(folo_ui::point(px(0.), px(0.)));
-                cx.notify();
-            }),
-        );
-        let next = self.icon_button(
-            "eimg-next",
-            "icons/chevron-right.svg",
-            "Next image",
-            window,
-            cx,
-            act(move |this, _, cx| {
-                this.bench.selected_entry_image = Some((bid2.clone(), eid2.clone(), next_id.clone()));
-                this.bench.entry_inspect_scroll.set_offset(folo_ui::point(px(0.), px(0.)));
-                cx.notify();
-            }),
-        );
-        let retry_btn = failed.then(|| {
-            let (bid, iid) = (b.id.clone(), im.image.id.clone());
-            self.button(
-                "eimg-detail-retry",
-                "Retry",
-                Btn::Secondary,
-                Some("icons/refresh-cw.svg"),
+        let chips = [
+            ("eimg-filter-all", "All", EntryImageFilter::All, counts.all as u64),
+            ("eimg-filter-fn", "Missed GT (FN)", EntryImageFilter::MissedGt, counts.missed_gt as u64),
+            (
+                "eimg-filter-fp",
+                "False Positives (FP)",
+                EntryImageFilter::FalsePositives,
+                counts.false_positives as u64,
+            ),
+            ("eimg-filter-err", "Has errors", EntryImageFilter::HasErrors, counts.has_errors as u64),
+        ]
+        .into_iter()
+        .map(|(key, label, filter, cnt)| {
+            self.chip(
+                key,
+                label,
+                active == filter,
+                None,
+                Some(cnt),
                 window,
                 cx,
-                act(move |this, _, cx| this.retry_bench_image(&bid, &iid, None, cx)),
+                act(move |this, _, cx| {
+                    this.bench.entry_image_filter = filter;
+                    if let Some((sb, se, sid)) = this.bench.selected_entry_image.clone() {
+                        let still_visible =
+                            this.bench.entry_images.get(&(sb, se)).and_then(|x| x.page.ready()).is_some_and(
+                                |p| {
+                                    p.images.iter().any(|im| {
+                                        im.image.id == sid
+                                            && super::error_analysis::entry_image_matches_filter(im, filter)
+                                    })
+                                },
+                            );
+                        if !still_visible {
+                            this.bench.selected_entry_image = None;
+                            this.bench.entry_image_reveal = None;
+                        }
+                    }
+                    cx.notify();
+                }),
             )
-        });
-        let close_bid = b.id.clone();
-        let close_img_id = im.image.id.clone();
-        let close = self.icon_button(
-            "eimg-close",
-            "icons/x.svg",
-            "Close preview",
-            window,
-            cx,
-            act(move |this, w, cx| {
-                this.bench.selected_entry_image = None;
-                this.bench.entry_image_reveal = Some(EntryImageReveal::Tile(close_img_id.clone()));
-                let key = if this.bench_image_failed(&close_bid, &close_img_id, None) {
-                    format!("eimg-retry-{close_img_id}")
-                } else {
-                    format!("eimg-open-{close_img_id}")
-                };
-                let fh = this.fh(key, cx);
-                w.focus(&fh);
-                cx.notify();
-            }),
-        );
-        let truth_chip = self
+            .into_any_element()
+        })
+        .collect::<Vec<_>>();
+
+        let gt_toggle = self
             .chip(
-                "eimg-toggle-truth",
-                format!("Truth ({})", im.image.boxes.len()),
+                "eimg-grid-gt",
+                "GT overlay",
                 show_truth,
                 None,
                 None,
@@ -415,11 +448,14 @@ impl FoloApp {
                     cx.notify();
                 }),
             )
-            .tooltip(crate::controls::tip("Toggle dashed ground-truth boxes", None));
-        let preds_chip = self
+            .tooltip(crate::controls::tip(
+                "Toggle dashed ground-truth boxes across tiles and inspector",
+                None,
+            ));
+        let pred_toggle = self
             .chip(
-                "eimg-toggle-preds",
-                format!("Detections ({})", im.detections.len()),
+                "eimg-grid-preds",
+                "Predictions",
                 show_preds,
                 None,
                 None,
@@ -430,215 +466,36 @@ impl FoloApp {
                     cx.notify();
                 }),
             )
-            .tooltip(crate::controls::tip("Toggle solid detection boxes", None));
+            .tooltip(crate::controls::tip("Toggle solid prediction boxes across tiles and inspector", None));
 
-        let mut dets: Vec<_> = im.detections.iter().collect();
-        dets.sort_by(|a, b| b.score.total_cmp(&a.score));
-        let class_name =
-            |cls: u32| b.classes.get(cls as usize).cloned().unwrap_or_else(|| format!("class {cls}"));
-        let det_rows: Vec<AnyElement> = dets
-            .into_iter()
-            .map(|d| {
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.))
-                    .py(px(3.))
-                    .child(class_swatch(t, d.class, 8.))
-                    .child(
-                        text(ty::SM, t.text_primary).flex_1().min_w_0().ellipsis().child(class_name(d.class)),
-                    )
-                    .when(e.scored, |el| {
-                        el.child(text(ty::SM, t.text_primary).tnum().child(format!("{:.2}", d.score)))
-                    })
-                    .child(text(ty::SM, t.text_tertiary).tnum().child(format!(
-                        "{:.0}×{:.0}",
-                        (d.x2 - d.x1).max(0.),
-                        (d.y2 - d.y1).max(0.)
-                    )))
-                    .into_any_element()
-            })
-            .collect();
-        let truth_rows: Vec<AnyElement> = im
-            .image
-            .boxes
-            .iter()
-            .map(|x| {
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.))
-                    .py(px(3.))
-                    .child(class_swatch(t, x.class, 8.))
-                    .child(
-                        text(ty::SM, t.text_secondary)
-                            .flex_1()
-                            .min_w_0()
-                            .ellipsis()
-                            .child(class_name(x.class)),
-                    )
-                    .child(text(ty::SM, t.text_tertiary).tnum().child(format!(
-                        "{:.0}×{:.0}",
-                        (x.x2 - x.x1).max(0.),
-                        (x.y2 - x.y1).max(0.)
-                    )))
-                    .into_any_element()
-            })
-            .collect();
-
-        let ok = im.missed == 0 && im.wrong == 0;
-        let side_fh = self.fh("eimg-detail-side", cx);
-        let side_ring = self.ring(&side_fh, window);
-        if side_ring {
-            self.hint_keys("↑ / ↓ or Page Up / Down scroll detections and ground truth");
-        }
-        let side_scroll = self.bench.entry_inspect_scroll.clone();
-        let side_chrome = self.scroll_chrome(side_scroll.clone(), t.bg_raised, 0., 0., cx);
-        let side_list = div()
-            .id("eimg-detail-side")
-            .track_focus(&side_fh)
-            .w_full()
-            .max_h(px(340.))
-            .pr(px(8.))
-            .overflow_y_scroll()
-            .track_scroll(&side_scroll)
-            .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _, cx| {
-                let m = &ev.keystroke.modifiers;
-                if m.control || m.alt || m.platform {
-                    return;
-                }
-                let s = &this.bench.entry_inspect_scroll;
-                let max = s.max_offset().height;
-                if max <= px(0.) {
-                    return;
-                }
-                let y = -s.offset().y;
-                let page = (s.bounds().size.height - px(32.)).max(px(32.));
-                let to = match ev.keystroke.key.as_str() {
-                    "down" => y + px(32.),
-                    "up" => y - px(32.),
-                    "pagedown" => y + page,
-                    "pageup" => y - page,
-                    "home" => px(0.),
-                    "end" => max,
-                    _ => return,
-                };
-                s.set_offset(folo_ui::point(s.offset().x, -to.clamp(px(0.), max)));
-                cx.stop_propagation();
-                cx.notify();
-            }))
-            .flex()
-            .flex_col()
-            .gap(px(10.))
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .items_center()
-                    .gap(px(6.))
-                    .child(badge(t, format!("{} × {}", im.image.width, im.image.height), Tone::Neutral))
-                    .child(badge(t, entry_image_caption(im), if ok { Tone::Success } else { Tone::Warning })),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(2.))
-                    .child(overline(t, "Detections"))
-                    .when(det_rows.is_empty(), |d| {
-                        d.child(text(ty::SM, t.text_tertiary).child("No detections above threshold."))
-                    })
-                    .children(det_rows),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(2.))
-                    .child(overline(t, "Ground truth"))
-                    .when(truth_rows.is_empty(), |d| {
-                        d.child(text(ty::SM, t.text_tertiary).child("No ground-truth labels."))
-                    })
-                    .children(truth_rows),
-            );
-        let side = div()
-            .relative()
-            .w(px(270.))
-            .flex_none()
-            .rounded(px(radius::SM))
-            .when(side_ring, |d| d.child(crate::app::focus_ring(t, radius::SM)))
-            .child(side_list)
-            .children(side_chrome);
-
-        let bar = div()
+        div()
+            .px(px(16.))
+            .py(px(8.))
+            .border_b_1()
+            .border_color(t.line_subtle)
             .flex()
             .flex_wrap()
             .items_center()
+            .justify_between()
             .gap(px(8.))
-            .child(prev)
-            .child(next)
-            .child(text(ty::SM, t.text_tertiary).tnum().child(format!("{} of {n}", idx + 1)))
-            .child(
-                text(ty::SM, t.text_primary)
-                    .font_family(crate::theme::MONO)
-                    .font_weight(FontWeight::MEDIUM)
-                    .flex_1()
-                    .min_w(px(120.))
-                    .ellipsis()
-                    .child(im.image.file.clone()),
-            )
-            .children(retry_btn)
-            .child(truth_chip)
-            .child(preds_chip)
-            .child(close);
-
-        let should_scroll = match self.bench.entry_image_reveal.take() {
-            Some(EntryImageReveal::Preview) => true,
-            other => {
-                self.bench.entry_image_reveal = other;
-                false
-            }
-        };
-        let page_scroll = self.page_scroll.clone();
-        div()
-            .relative()
-            .px(px(16.))
-            .py(px(12.))
-            .border_b_1()
-            .border_color(t.line_subtle)
-            .bg(t.bg_raised)
-            .flex()
-            .flex_col()
-            .gap(px(10.))
-            .when(should_scroll, |d| {
-                d.child(
-                    folo_ui::canvas(
-                        move |b, window, _| crate::app::reveal_bounds_in_scroll(b, &page_scroll, window),
-                        |_, _, _, _| {},
-                    )
-                    .absolute()
-                    .top_0()
-                    .left_0()
-                    .size_full(),
-                )
-            })
-            .child(bar)
-            .child(div().flex().flex_wrap().gap(px(16.)).child(stage).child(side))
+            .child(div().flex().flex_wrap().items_center().gap(px(6.)).children(chips))
+            .child(div().flex().items_center().gap(px(6.)).child(gt_toggle).child(pred_toggle))
             .into_any_element()
     }
 }
 
-fn entry_image_caption(im: &BenchEntryImage) -> String {
-    if im.missed == 0 && im.wrong == 0 {
-        "all right".to_string()
-    } else {
-        [(im.missed, "missed"), (im.wrong, "wrong")]
-            .iter()
-            .filter(|(n, _)| *n > 0)
-            .map(|(n, w)| format!("{n} {w}"))
-            .collect::<Vec<_>>()
-            .join(" · ")
-    }
+/// Compact per-tile TP / FP / FN badge strip computed directly from each image's error stats.
+fn tile_error_badges(t: &Theme, st: &ImageErrorStats) -> AnyElement {
+    div()
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .gap(px(4.))
+        .child(badge(t, format!("TP {}", st.tp), if st.tp > 0 { Tone::Success } else { Tone::Neutral }))
+        .when(st.fp > 0, |d| d.child(badge(t, format!("FP {}", st.fp), Tone::Danger)))
+        .when(st.fn_count > 0, |d| d.child(badge(t, format!("FN {}", st.fn_count), Tone::Warning)))
+        .when(!st.has_errors() && st.tp == 0, |d| d.child(badge(t, "Clean", Tone::Neutral)))
+        .into_any_element()
 }
 
 #[cfg(test)]
@@ -748,7 +605,6 @@ mod tests {
         app.frame(window.into());
         assert!(bottom_y > 400., "page overflows vertically at 960×620 (bottom_y={bottom_y})");
 
-        // Helper to send a real pointer click (leaves keyboard mode `kb == false`).
         let click_at = |app: &mut folo_ui::HeadlessApp, w: folo_ui::WindowHandle<FoloApp>, x: f32, y: f32| {
             let pos = point(px(x), px(y));
             app.simulate_input(
@@ -772,10 +628,6 @@ mod tests {
             );
         };
 
-        // Pointer-click the last tile in the bottom row (leaves keyboard mode `kb == false`):
-        // scan right-to-left across the bottom row so the first hit is the rightmost tile
-        // (`last_img`, since 12 tiles fill rows of 3 or 4 evenly), exercising the real tile click
-        // handler without manually mutating selection or reveal state.
         let mut clicked_tile = None;
         for &cy in &[460., 500., 420.] {
             for &cx_pos in &[840., 760., 680., 600., 520., 440., 360.] {
@@ -810,8 +662,6 @@ mod tests {
             "opening preview in pointer mode scrolls page up into view (before={bottom_y}, after={revealed_y})"
         );
 
-        // Focus the details rail and verify keyboard scrolling moves `entry_inspect_scroll` without
-        // moving `page_scroll`.
         let (side_max, page_before) = drive(&mut app, window, |this, w, cx| {
             this.kb = true;
             this.focus_key("eimg-detail-side", w, cx);
@@ -855,8 +705,6 @@ mod tests {
             drive(&mut app, window, |this, _, _| f32::from(-this.bench.entry_inspect_scroll.offset().y));
         assert_eq!(at_home, 0., "Home returns details rail to top");
 
-        // Closing the preview in pointer mode (via Esc while `kb == false`) must reveal the
-        // destination tile at the bottom of the gallery instead of leaving it offscreen.
         drive(&mut app, window, |this, _, _| this.kb = false);
         send_key(&mut app, window, "escape");
         drive(&mut app, window, |this, _, _| {
@@ -878,8 +726,6 @@ mod tests {
             "Esc in pointer mode scrolls page back down to destination tile (revealed={revealed_y}, after_esc={after_esc_y})"
         );
 
-        // Round-trip via pointer click on the tile again, then pointer-click on Close preview:
-        // must also reveal the destination tile at the bottom while staying in pointer mode.
         drive(&mut app, window, |this, _, cx| {
             let max_y = this.page_scroll.max_offset().height;
             this.page_scroll.set_offset(point(px(0.), -max_y));
@@ -896,9 +742,8 @@ mod tests {
                 "second pointer click reopens last tile preview"
             );
         });
-        // Click the Close preview icon button at the top-right of the revealed preview bar.
         let mut closed_by_click = false;
-        for &cy in &[76., 84., 92., 100.] {
+        for &cy in &[76., 84., 92., 100., 112., 120.] {
             for &cx_pos in &[900., 892., 884., 908., 914.] {
                 click_at(&mut app, window, cx_pos, cy);
                 if drive(&mut app, window, |this, _, _| this.bench.selected_entry_image.is_none()) {
@@ -923,8 +768,6 @@ mod tests {
             "Close preview click scrolls page back down to destination tile (revealed={revealed_y}, after_close={after_close_y})"
         );
 
-        // External deletion removes the entry from `bench.entries` while keeping cached `entry_images`:
-        // pressing Esc must clear the stale selection and navigate back to `Route::Bench(bid)`.
         drive(&mut app, window, |this, _, cx| {
             this.bench.selected_entry_image = Some((bid.into(), eid.clone(), last_img.clone()));
             if let Some(list) = this.bench.entries.get_mut(bid).and_then(|l| l.ready_mut()) {

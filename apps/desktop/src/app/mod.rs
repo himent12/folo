@@ -38,6 +38,9 @@ mod overlay_state;
 mod page;
 mod playground;
 #[cfg(test)]
+mod playground_ab_tests;
+mod playground_compare;
+#[cfg(test)]
 mod playground_tests;
 #[cfg(test)]
 mod playtest_ux_tests;
@@ -509,6 +512,8 @@ pub struct FoloApp {
     pub play_pred_dim: bool,
     /// Image generation and model the current `play_pred` belongs to.
     play_pred_for: Option<(u64, String)>,
+    /// Playground Model A/B comparison state (Model B selection, prediction, hover, and tabs).
+    pub play_compare: crate::screens::playground::PlayCompareState,
 
     // Settings
     pub server_mode: ServerMode,
@@ -849,6 +854,7 @@ impl FoloApp {
             play_pred_pending: false,
             play_pred_dim: false,
             play_pred_for: None,
+            play_compare: Default::default(),
             server_mode: ServerMode::Mock,
             server_url,
             saved_server_url: None,

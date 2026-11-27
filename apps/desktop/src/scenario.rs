@@ -68,6 +68,7 @@ pub const ALL: &[&str] = &[
     "model+table-focus",
     "model+bottom",
     "playground",
+    "playground+compare",
     "playground+nms",
     "playground+empty",
     "playground+light",
@@ -143,7 +144,7 @@ fn screen_modifiers(screen: &str) -> &'static [&'static str] {
         "delete-confirm" => &["dataset"],
         "new-run" => &["deleted", "amp"],
         "model" => &["bottom", "table-focus"],
-        "playground" => &["nms", "canvas-focus"],
+        "playground" => &["nms", "canvas-focus", "compare"],
         "settings" => &["reference", "bottom"],
         "bench-design" => &["proposal"],
         "bench-entry" => &["bottom"],
@@ -172,6 +173,7 @@ const ALL_SCREEN_MODIFIERS: &[&str] = &[
     "table-focus",
     "nms",
     "canvas-focus",
+    "compare",
     "reference",
     "proposal",
     "remote",
@@ -566,6 +568,9 @@ pub fn apply(app: &mut FoloApp, s: &Spec, window: &mut Window, cx: &mut Context<
         app.play_model = Some(if s.has("nms") { "m_31aa" } else { "m_44c0" }.into());
         app.play_conf = 0.35;
         app.play_hover = Some(0);
+        if s.has("compare") {
+            app.set_play_compare(true, cx);
+        }
         app.play_dataset_image("ds_3b91", "img_03417", cx);
     }
     if screen == "kb-focus" {
