@@ -238,7 +238,7 @@ impl FoloApp {
                     KPI_HEADLINE,
                     KPI_UNIT,
                 ))
-                .child(kpi_note(&t).child(if score.is_some_and(|s| s.partial) {
+                .child(kpi_note(&t).ellipsis().child(if score.is_some_and(|s| s.partial) {
                     "Partial: over what was measured"
                 } else {
                     "All five axes measured"

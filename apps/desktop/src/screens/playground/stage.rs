@@ -223,20 +223,26 @@ impl FoloApp {
         let mut measure = |s: &str| f32::from(crate::charts::text_width(window, s, ty::SM.size));
         // Always-present chrome: px(12) padding (24), 4 gaps between [icon, file, spacer, rule,
         // zoom_bar], image icon (14), spacer min (8), divider rule (1), zoom_bar (help 24 +
-        // zoom-out 32 + Fit 48 + zoom-in 32 + 3*2 gaps = 142), plus 8 px safety margin.
-        let base_chrome = 24. + 4. * bar_gap + 14. + 8. + 1. + 142. + 8.;
+        // zoom-out 28 + Fit 48 + zoom-in 28 + 3*2 gaps = 134), plus 8 px safety margin.
+        let base_chrome = 24. + 4. * bar_gap + 14. + 8. + 1. + 134. + 8.;
         let loading_cost = if loading { measure("Detecting…") + bar_gap } else { 0. };
         // Shed secondary readouts before the filename or zoom controls ever clip: count first
-        // (it already sits in the side rail), then latency if the stage is narrower still.
+        // (it already sits in the side rail), then latency (or loading on sub-minimum stages).
         let min_file = file_w.min(52.);
-        let mut avail = (stage_w - base_chrome - loading_cost).max(0.);
+        let mut avail = (stage_w - base_chrome).max(0.);
+        let show_loading = loading && avail - loading_cost >= min_file;
+        if show_loading {
+            avail -= loading_cost;
+        }
         let lat_cost = latency_label.as_deref().map_or(0., |s| measure(s) + 1. + 2. * bar_gap);
         let show_latency = latency_label.is_some() && avail - lat_cost >= min_file;
         if show_latency {
             avail -= lat_cost;
         }
         let cnt_cost = count_label.as_deref().map_or(0., |s| measure(s) + 1. + 2. * bar_gap);
-        let show_count = count_label.is_some() && avail - cnt_cost >= min_file;
+        let show_count = (show_latency || latency_label.is_none())
+            && count_label.is_some()
+            && avail - cnt_cost >= min_file;
         if show_count {
             avail -= cnt_cost;
         }
@@ -259,6 +265,9 @@ impl FoloApp {
         if !show_size {
             tip_parts.push(size_text.clone());
         }
+        if loading && !show_loading {
+            tip_parts.push("Detecting…".to_string());
+        }
         if !show_latency && let Some(lat) = latency_label.as_ref() {
             tip_parts.push(lat.clone());
         }
@@ -269,6 +278,7 @@ impl FoloApp {
         let file_tip = file_w > file_budget
             || !show_size
             || (prefix_all.is_some() && !show_prefix)
+            || (loading && !show_loading)
             || (latency_label.is_some() && !show_latency)
             || (count_label.is_some() && !show_count);
         let bounds_cell = self.play_view.clone();
@@ -405,7 +415,9 @@ impl FoloApp {
                         d.child(text(ty::SM, t.text_tertiary).flex_none().tnum().child(size_text.clone()))
                     })
                     .child(div().flex_1().min_w(px(8.)))
-                    .when(loading, |d| d.child(text(ty::SM, t.text_tertiary).flex_none().child("Detecting…")))
+                    .when(show_loading, |d| {
+                        d.child(text(ty::SM, t.text_tertiary).flex_none().child("Detecting…"))
+                    })
                     // The latency always reads here when it fits, beside the count (the rail's
                     // breakdown is below the fold at most window sizes).
                     // The built-in demo's number is simulated, and says so wherever it shows.

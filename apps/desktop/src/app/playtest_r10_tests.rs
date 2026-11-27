@@ -76,8 +76,8 @@ fn playground_toolbar_keeps_zoom_controls_unclipped_at_780x700() {
             );
         }
 
-        // Click `play-zoom-in` (rightmost 32 px control inside the toolbar's 12 px right padding).
-        let zoom_in_pt = point(px(stage_right - 12.0 - 16.0), px(bar_top + 20.0));
+        // Click `play-zoom-in` (rightmost 28 px CONTROL_MD control inside the toolbar's 12 px right padding).
+        let zoom_in_pt = point(px(stage_right - 12.0 - 14.0), px(bar_top + 20.0));
         let click = |app: &mut folo_ui::HeadlessApp, pt| {
             app.simulate_input(
                 window.into(),
@@ -113,8 +113,8 @@ fn playground_toolbar_keeps_zoom_controls_unclipped_at_780x700() {
             );
         });
 
-        // Click `play-fit` (48 px wide, 2 px left of the 32 px zoom-in button) to reset zoom.
-        let fit_pt = point(px(stage_right - 12.0 - 32.0 - 2.0 - 24.0), px(bar_top + 20.0));
+        // Click `play-fit` (48 px wide, 2 px left of the 28 px zoom-in button) to reset zoom.
+        let fit_pt = point(px(stage_right - 12.0 - 28.0 - 2.0 - 24.0), px(bar_top + 20.0));
         click(&mut app, fit_pt);
         drive(&mut app, window, |this, _, _| {
             assert!(
@@ -123,6 +123,41 @@ fn playground_toolbar_keeps_zoom_controls_unclipped_at_780x700() {
                 this.play_zoom
             );
         });
+    }
+
+    // Even while `Detecting…` is loading at a sub-minimum 630 px viewport, zoom controls never clip.
+    let (mut app, window) = open_at(630.0, 700.0);
+    drive(&mut app, window, |this, w, cx| {
+        this.navigate(Route::Playground, w, cx);
+        this.play_model = Some("m_44c0".into());
+        this.play_dataset_image("ds_3b91", "img_03417", cx);
+    });
+    settle(&mut app, window);
+    let stage_bounds = drive(&mut app, window, |this, _, cx| {
+        this.play_pred = crate::store::Load::Loading;
+        cx.notify();
+        this.play_view.get().expect("stage canvas bounds")
+    });
+    app.frame(window.into());
+    let scene = app.scene(window.into());
+    let stage_left = f32::from(stage_bounds.origin.x) - 16.0;
+    let stage_right = f32::from(stage_bounds.right()) + 16.0;
+    let bar_bottom = f32::from(stage_bounds.origin.y) - 16.0;
+    let bar_top = bar_bottom - 42.0;
+    for p in &scene.primitives {
+        if let Primitive::MonoSprite(s) = p
+            && sp(s.bounds.origin.y) >= bar_top
+            && sp(s.bounds.bottom()) <= bar_bottom + 2.0
+            && sp(s.bounds.origin.x) >= stage_left - 2.0
+            && sp(s.bounds.origin.x) <= stage_right + 2.0
+        {
+            assert!(
+                sp(s.bounds.right()) <= sp(s.clip.right()) + 1.0,
+                "loading playground toolbar sprite clipped at 630×700: bounds={:?}, clip={:?}",
+                s.bounds,
+                s.clip
+            );
+        }
     }
 }
 
@@ -282,6 +317,23 @@ fn bench_compare_headers_stay_single_line_and_unclipped_at_780x700() {
             this.navigate(Route::BenchCompare("bn_3c90".into()), w, cx);
         });
         settle(&mut app, window);
+
+        // Truncated Compare headers become keyboard-focusable disclosure stops at 780×700,
+        // while wide untruncated headers at 1440×900 do not mount unnecessary Tab stops.
+        drive(&mut app, window, |this, w, cx| {
+            let clipped_mounted = w.is_focus_mounted(&this.fh("bench-cmp-head-be_3c03", cx));
+            if width <= 800.0 {
+                assert!(
+                    clipped_mounted,
+                    "truncated Compare column header (`shapes-crowded-s-best`) must be keyboard-disclosed at {width}×{height}"
+                );
+            } else {
+                assert!(
+                    !clipped_mounted,
+                    "untruncated Compare column header should not mount an extra Tab stop at {width}×{height}"
+                );
+            }
+        });
 
         let scene = app.scene(window.into());
         // The 4 Side-by-side column header swatches are 12×4 rounded quads in the table header below

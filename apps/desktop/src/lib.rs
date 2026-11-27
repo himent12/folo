@@ -557,6 +557,7 @@ mod tests {
             "benchmarks",
             "bench:ID",
             "bench-entry:ID/ENTRY",
+            "bench-compare:ID",
             "playground",
             "labeling",
             "label:ID",
@@ -642,29 +643,9 @@ mod tests {
         assert!(window_state::remembers(false, bad_w.is_some()));
         // `--scenario --shot P`: the scenario has no value; --shot keeps its own.
         assert!(one(&["--scenario", "--shot", "a.png"]).starts_with("--scenario: missing"));
-        // Every option --help lists is known, and --open lists every screen including bench-compare:ID.
+        // Every option --help lists is known.
         for flag in VALUE_FLAGS.iter().chain(BARE_FLAGS) {
             assert!(USAGE.contains(flag), "{flag}");
-        }
-        for screen in [
-            "overview",
-            "datasets",
-            "dataset:ID",
-            "runs",
-            "run:ID",
-            "models",
-            "model:ID",
-            "benchmarks",
-            "bench:ID",
-            "bench-entry:ID/ENTRY",
-            "bench-compare:ID",
-            "playground",
-            "labeling",
-            "label:ID",
-            "settings",
-            "new-run",
-        ] {
-            assert!(USAGE.contains(screen), "USAGE missing --open screen `{screen}`");
         }
     }
 
@@ -677,6 +658,8 @@ mod tests {
             "run:",
             "model:",
             "bench:",
+            "bench-compare:",
+            "bench-compare:   ",
             "label:",
             "label:   ",
             "bench-entry:",
