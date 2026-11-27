@@ -184,6 +184,14 @@ impl FoloApp {
                 let (lo, hi, step) = crate::screens::runs::SAMPLE_CONF;
                 self.sample_conf = q(at(lo, hi), step).clamp(lo, hi);
             }
+            "model-cli-conf" => {
+                let (lo, hi, step) = crate::screens::models::MODEL_CLI_CONF;
+                self.model_cli.predict_conf = q(at(lo, hi), step).clamp(lo, hi);
+            }
+            "model-cli-iou" => {
+                let (lo, hi, step) = crate::screens::models::MODEL_CLI_IOU;
+                self.model_cli.predict_iou = q(at(lo, hi), step).clamp(lo, hi);
+            }
             _ => {
                 if let Some(f) = self.new_run.as_mut() {
                     match key {

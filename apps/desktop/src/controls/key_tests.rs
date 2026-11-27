@@ -257,6 +257,7 @@ fn modal_waiting_scrim_keeps_tab_focus_trapped() {
             dataset: "loading-ds".into(),
             index: 0,
             sample: None,
+            sample_snapshot: None,
             zoom: 1.0,
             pan: (0., 0.),
             boxes: true,

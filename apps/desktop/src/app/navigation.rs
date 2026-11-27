@@ -280,6 +280,7 @@ impl FoloApp {
             self.run_compare.select_mode = false;
         }
         self.export_open = false;
+        self.model_cli.onnx_head_o2m = false;
         self.pr_pin = None;
         self.pr_focus = None;
         self.class_table_sort = None;
@@ -289,6 +290,8 @@ impl FoloApp {
         self.overlay_return = None;
         self.verify_focus = None;
         self.run_x_fit = None;
+        self.sample_error_filter = crate::screens::runs::SampleErrorFilter::All;
+        self.sample_sort = crate::screens::runs::SampleSort::Default;
         self.log_filter = crate::app::LogFilter::All;
         self.log_search.update(cx, |i, cx| i.set_text("", cx));
         // An earlier epoch's samples were picked: the next run page starts on the latest again, and a

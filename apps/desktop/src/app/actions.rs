@@ -527,7 +527,17 @@ impl FoloApp {
     }
 
     pub fn export_model(&mut self, id: String, format: &'static str, cx: &mut Context<Self>) {
+        self.export_model_with_options(id, ModelExportOptions::plain(format), cx);
+    }
+
+    pub fn export_model_with_options(
+        &mut self,
+        id: String,
+        opts: ModelExportOptions,
+        cx: &mut Context<Self>,
+    ) {
         self.export_open = false;
+        let format = opts.format;
         // `fetch` is a no-op while a connection switch holds requests: don't strand an in-flight flag.
         if self.hold_loading || !self.exporting.insert((id.clone(), format)) {
             cx.notify();
@@ -538,11 +548,12 @@ impl FoloApp {
         self.fetch(
             cx,
             move |api| {
-                let res = api.export_model(&req_id, format)?;
+                let res = api.export_model_with_options(&req_id, opts)?;
                 // Only offer "Show in folder" when talking to a local server whose output path
                 // actually exists on this machine; remote or forwarded servers offer Download.
                 let local_file = !api.is_remote() && std::path::Path::new(&res.path).exists();
-                let download_url = (!local_file).then(|| api.export_download_url(&req_id, format)).flatten();
+                let download_url =
+                    (!local_file).then(|| api.export_download_url_with_options(&req_id, opts)).flatten();
                 Ok((res, local_file, download_url))
             },
             move |this, r, cx| {

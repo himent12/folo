@@ -10,6 +10,7 @@ mod detail;
 mod list;
 mod logs;
 mod per_class;
+pub(crate) mod sample_errors;
 mod samples;
 
 pub(crate) use charts::RunChartOpts;
@@ -21,6 +22,7 @@ pub(crate) use compare_table::compare_best_badge_label;
 #[cfg(test)]
 pub(crate) use list::filter_runs;
 pub(crate) use logs::LogFilterCache;
+pub(crate) use sample_errors::{SampleErrorFilter, SampleSort};
 pub(crate) use samples::SAMPLE_CONF;
 
 use crate::api::{Run, time};

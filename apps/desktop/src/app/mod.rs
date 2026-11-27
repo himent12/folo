@@ -65,6 +65,8 @@ mod select_driving;
 #[cfg(test)]
 mod select_tests;
 mod sidebar;
+#[cfg(test)]
+mod sprint14_tests;
 mod start_from;
 #[cfg(test)]
 pub(crate) mod tests;
@@ -213,6 +215,16 @@ pub struct Toast {
     pub action: Option<(SharedString, Action)>,
 }
 
+/// Frozen filtered/sorted run-sample list and epoch captured when the inspector opens from a
+/// run's Validation samples panel so stepping, counter, and overlays stay aligned with the gallery
+/// even across live refreshes.
+#[derive(Clone, Debug)]
+pub struct SampleSnapshot {
+    pub epoch: u32,
+    pub conf: f32,
+    pub samples: Vec<Sample>,
+}
+
 /// The image inspector over a dataset grid.
 pub struct Inspector {
     pub dataset: String,
@@ -239,6 +251,8 @@ pub struct Inspector {
     /// Opened from a run's samples: that run and the view it was in. Images that are among its
     /// samples show the epoch's predictions over the (dashed) labels, as the run page draws them.
     pub sample: Option<(String, SampleView)>,
+    /// Frozen filtered & sorted sample snapshot captured when opened from the samples panel.
+    pub sample_snapshot: Option<SampleSnapshot>,
 }
 
 pub struct PlayImage {
@@ -406,6 +420,9 @@ pub struct FoloApp {
     pub sample_view: SampleView,
     /// The validation samples' minimum confidence for a prediction to be drawn.
     pub sample_conf: f32,
+    /// Error-explorer filter pill and sort order on a run's Validation samples panel.
+    pub sample_error_filter: crate::screens::runs::SampleErrorFilter,
+    pub sample_sort: crate::screens::runs::SampleSort,
     pub log_filter: LogFilter,
     /// Live search input for a run's Logs panel.
     pub log_search: Entity<TextInput>,
@@ -445,6 +462,8 @@ pub struct FoloApp {
     pub export_open: bool,
     /// In-flight model exports `(model_id, format)` so triggers show progress and block duplicates.
     pub exporting: std::collections::HashSet<(String, &'static str)>,
+    /// Model Detail interactive Export & Inference CLI command builder state.
+    pub model_cli: crate::screens::models::ModelCliState,
     pub pr_hover: Option<f32>,
     /// The class isolated on the PR chart (hovered or focused in the per-class table).
     pub pr_focus: Option<u32>,
@@ -803,6 +822,8 @@ impl FoloApp {
             // Every prediction the server keeps for a sample (docs/API.md: score >= 0.25), the slider's
             // floor, as Studio starts (it started at 0.3 here, so Desktop drew fewer boxes than Studio).
             sample_conf: crate::screens::runs::SAMPLE_CONF.0,
+            sample_error_filter: crate::screens::runs::SampleErrorFilter::All,
+            sample_sort: crate::screens::runs::SampleSort::Default,
             log_filter: LogFilter::All,
             log_search,
             log_cache: crate::screens::runs::LogFilterCache::default(),
@@ -824,6 +845,7 @@ impl FoloApp {
             model_classes_expanded: Default::default(),
             export_open: false,
             exporting: Default::default(),
+            model_cli: Default::default(),
             pr_hover: None,
             pr_focus: None,
             pr_pin: None,

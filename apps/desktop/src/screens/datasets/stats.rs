@@ -214,6 +214,7 @@ impl FoloApp {
                                     counted(total, "box", "boxes")
                                 }),
                             ))
+                            .child(self.dataset_balance_strip(&t, ds, &s, window, cx))
                             .child(class_rows),
                     )
                     .child(

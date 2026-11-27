@@ -9,11 +9,16 @@ use folo_ui::{
     StatefulInteractiveElement, Styled, Window, div, px,
 };
 
+use super::sample_errors::{
+    SampleErrorFilter, SampleErrorStats, SampleSort, analyze_sample, count_sample_filters,
+    filter_and_sort_samples,
+};
 use crate::api::Run;
 use crate::app::{FoloApp, SampleView, act};
+use crate::controls::Btn;
 use crate::screens::image_canvas;
 use crate::store::{ImgKind, Load};
-use crate::theme::{radius, theme, ty};
+use crate::theme::{Theme, radius, theme, ty};
 use crate::ui::*;
 use crate::viz::{DrawBox, Fit};
 
@@ -111,14 +116,85 @@ impl FoloApp {
                 ))
                 .into_any_element(),
             Some(Load::Ready(s)) => {
-                let samples: Vec<crate::api::Sample> = s.samples.iter().take(8).cloned().collect();
-                let total = s.samples.len();
+                let all_samples = s.samples.clone();
+                let total = all_samples.len();
                 let epoch = s.epoch;
                 let view = self.sample_view;
-                let mut tiles: Vec<AnyElement> = samples
+                let active_filter = self.sample_error_filter;
+                let active_sort = self.sample_sort;
+                let analyzed: Vec<(usize, &crate::api::Sample, SampleErrorStats)> = all_samples
                     .iter()
                     .enumerate()
-                    .map(|(n, smp)| {
+                    .map(|(i, smp)| (i, smp, analyze_sample(smp, conf)))
+                    .collect();
+                let counts = count_sample_filters(&analyzed);
+                let matched = filter_and_sort_samples(analyzed, active_filter, active_sort);
+                let matched_total = matched.len();
+                let shown_samples: Vec<(crate::api::Sample, SampleErrorStats)> =
+                    matched.into_iter().take(8).map(|(_, smp, st)| (smp.clone(), st)).collect();
+
+                let filter_chips = [
+                    ("smp-filter-all", "All", SampleErrorFilter::All, counts.all as u64),
+                    ("smp-filter-fp", "FP", SampleErrorFilter::Fp, counts.fp as u64),
+                    ("smp-filter-fn", "FN", SampleErrorFilter::Fn, counts.fn_count as u64),
+                    ("smp-filter-tp", "TP", SampleErrorFilter::Tp, counts.tp as u64),
+                ]
+                .into_iter()
+                .map(|(key, label, filter, cnt)| {
+                    self.chip(
+                        key,
+                        label,
+                        active_filter == filter,
+                        None,
+                        Some(cnt),
+                        window,
+                        cx,
+                        act(move |this, _, cx| {
+                            this.sample_error_filter = filter;
+                            cx.notify();
+                        }),
+                    )
+                    .tooltip(crate::controls::tip(
+                        match filter {
+                            SampleErrorFilter::All => "Show all validation samples",
+                            SampleErrorFilter::Fp => "Samples with false-positive detections (FP > 0)",
+                            SampleErrorFilter::Fn => "Samples with missed ground-truth objects (FN > 0)",
+                            SampleErrorFilter::Tp => "Samples with matched true-positive detections (TP > 0)",
+                        },
+                        None,
+                    ))
+                    .into_any_element()
+                })
+                .collect::<Vec<_>>();
+                let sort_labels: Vec<&str> = SampleSort::ALL.iter().map(|s| s.label()).collect();
+                let sort_idx = SampleSort::ALL.iter().position(|&s| s == active_sort).unwrap_or(0);
+                let sort_seg = self.segmented(
+                    "smp-sort",
+                    &sort_labels,
+                    sort_idx,
+                    window,
+                    cx,
+                    Rc::new(|this, i, _, cx| {
+                        this.sample_sort = SampleSort::ALL[i.min(SampleSort::ALL.len() - 1)];
+                        cx.notify();
+                    }),
+                );
+                let error_bar = (!all_samples.is_empty()).then(|| {
+                    div()
+                        .pb(px(6.))
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(8.))
+                        .child(div().flex().flex_wrap().items_center().gap(px(6.)).children(filter_chips))
+                        .child(sort_seg)
+                });
+
+                let mut tiles: Vec<AnyElement> = shown_samples
+                    .iter()
+                    .enumerate()
+                    .map(|(n, (smp, stats))| {
                         let img = self.image(&smp.dataset_id, &smp.image_id, ImgKind::Thumb, cx);
                         let mut boxes: Vec<DrawBox> = Vec::new();
                         if view != SampleView::Predictions {
@@ -150,7 +226,19 @@ impl FoloApp {
                             .overflow_hidden()
                             .bg(t.bg_inset)
                             .child(painted)
-                            .when(failed, |s| s.child(crate::screens::unavailable_mark(&t, true)));
+                            .when(failed, |s| s.child(crate::screens::unavailable_mark(&t, true)))
+                            .child(
+                                div()
+                                    .absolute()
+                                    .left(px(5.))
+                                    .bottom(px(5.))
+                                    .max_w(folo_ui::relative(0.92))
+                                    .px(px(4.))
+                                    .py(px(2.))
+                                    .rounded(px(radius::SM))
+                                    .bg(crate::theme::alpha(t.bg_app, 0.84))
+                                    .child(sample_error_badges(&t, stats)),
+                            );
                         square.style().aspect_ratio = Some(1.0);
                         // Each sample is a Tab stop: click or Enter opens it in the inspector (the
                         // image in full, its labels, and the dataset to walk from it).
@@ -166,7 +254,13 @@ impl FoloApp {
                             .min_w(px(0.))
                             .rounded(px(radius::MD))
                             .cursor_pointer()
-                            .tooltip(crate::controls::tip("Open in the inspector", None))
+                            .tooltip(crate::controls::tip(
+                                format!(
+                                    "TP {} · FP {} · FN {} · Open in the inspector",
+                                    stats.tp, stats.fp, stats.fn_count
+                                ),
+                                None,
+                            ))
                             .child(
                                 square
                                     .relative()
@@ -203,9 +297,44 @@ impl FoloApp {
                         .into_any_element()
                     })
                     .collect();
+                let empty_filter = (tiles.is_empty() && total > 0).then(|| {
+                    let reset = self.button(
+                        "smp-filter-reset",
+                        "Show all samples",
+                        Btn::Secondary,
+                        None,
+                        window,
+                        cx,
+                        act(|this, w, cx| {
+                            this.sample_error_filter = SampleErrorFilter::All;
+                            // Move focus off the disappearing reset button onto the persistent All chip.
+                            let fh = this.fh("smp-filter-all", cx);
+                            w.focus(&fh);
+                            cx.notify();
+                        }),
+                    );
+                    div()
+                        .py(px(20.))
+                        .px(px(12.))
+                        .rounded(px(radius::MD))
+                        .bg(t.bg_inset)
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(12.))
+                        .child(
+                            text(ty::SM, t.text_tertiary)
+                                .whitespace_normal()
+                                .child(format!("No samples match this filter at confidence ≥ {conf:.2}.")),
+                        )
+                        .child(reset)
+                });
                 // A short last row keeps its tiles the grid's size.
-                while !tiles.len().is_multiple_of(PER_ROW) {
-                    tiles.push(div().flex_1().min_w(px(0.)).into_any_element());
+                if !tiles.is_empty() {
+                    while !tiles.len().is_multiple_of(PER_ROW) {
+                        tiles.push(div().flex_1().min_w(px(0.)).into_any_element());
+                    }
                 }
                 let mut rows = Vec::new();
                 let mut it = tiles.into_iter().peekable();
@@ -231,11 +360,23 @@ impl FoloApp {
                         .child(text(ty::SM, t.danger_text).child("Latest refresh failed"))
                         .child(retry)
                 });
+                let scope_note = if active_filter == SampleErrorFilter::All {
+                    shown_of(shown_samples.len(), total, images)
+                } else {
+                    format!(
+                        "{} of {} matching (from {})",
+                        shown_samples.len(),
+                        matched_total,
+                        shown_of(total, total, images)
+                    )
+                };
                 div()
                     .flex()
                     .flex_col()
                     .gap(px(8.))
                     .p(px(16.))
+                    .children(error_bar)
+                    .children(empty_filter)
                     .children(rows)
                     // The caption says what the tiles show, view by view (plus an inline Retry if
                     // a background Latest refresh failed while keeping the previous tiles mounted).
@@ -247,8 +388,7 @@ impl FoloApp {
                             .justify_between()
                             .gap(px(12.))
                             .child(text(ty::SM, t.text_tertiary).min_w_0().tnum().child(format!(
-                                "Epoch {epoch} · {} · {}",
-                                shown_of(samples.len(), total, images),
+                                "Epoch {epoch} · {scope_note} · {}",
                                 match view {
                                     SampleView::Predictions => format!("predictions with score ≥ {conf:.2}"),
                                     SampleView::Truth => "ground-truth labels".to_string(),
@@ -353,6 +493,22 @@ impl FoloApp {
             .child(body)
             .into_any_element()
     }
+}
+
+/// Compact per-sample TP / FP / FN badge strip overlaid inside each validation thumbnail.
+fn sample_error_badges(t: &Theme, st: &SampleErrorStats) -> AnyElement {
+    if !st.has_errors() && st.tp == 0 {
+        return div().flex().items_center().child(badge(t, "Clean", Tone::Neutral)).into_any_element();
+    }
+    div()
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .gap(px(4.))
+        .child(badge(t, format!("TP {}", st.tp), if st.tp > 0 { Tone::Success } else { Tone::Neutral }))
+        .when(st.fp > 0, |d| d.child(badge(t, format!("FP {}", st.fp), Tone::Danger)))
+        .when(st.fn_count > 0, |d| d.child(badge(t, format!("FN {}", st.fn_count), Tone::Warning)))
+        .into_any_element()
 }
 
 /// How many of the run's fixed evaluation images the tiles show: "8 of 16 fixed validation

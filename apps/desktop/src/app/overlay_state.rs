@@ -260,14 +260,16 @@ impl FoloApp {
             want: None,
             shown: None,
             sample: None,
+            sample_snapshot: None,
         });
         self.inspector_return = window.focused(cx);
         window.focus(&self.inspector_focus);
         cx.notify();
     }
 
-    /// Opens the inspector on one image of a dataset by id (a run's sample tile): it lands there
-    /// once the image list is in, and ←/→ then walk the dataset from it.
+    /// Opens the inspector on one image of a dataset by id (a run's sample tile): captures the
+    /// gallery's filtered & sorted sample snapshot and epoch so ←/→ step through the exact same
+    /// sequence and live refreshes never shift the inspected epoch.
     pub fn open_sample(
         &mut self,
         dataset: String,
@@ -277,10 +279,22 @@ impl FoloApp {
         cx: &mut Context<Self>,
     ) {
         let view = self.sample_view;
+        let snapshot = self.store.samples.get(&run).and_then(|l| l.ready()).map(|set| {
+            let ordered = crate::screens::runs::sample_errors::ordered_filtered_samples(
+                &set.samples,
+                self.sample_conf,
+                self.sample_error_filter,
+                self.sample_sort,
+            );
+            let samples =
+                if ordered.iter().any(|s| s.image_id == image) { ordered } else { set.samples.clone() };
+            super::SampleSnapshot { epoch: set.epoch, conf: self.sample_conf, samples }
+        });
         self.open_inspector(dataset.clone(), 0, window, cx);
         if let Some(i) = self.inspector.as_mut() {
             i.want = Some(image);
             i.sample = Some((run, view));
+            i.sample_snapshot = snapshot;
         }
         self.ensure_dataset(&dataset, cx);
     }

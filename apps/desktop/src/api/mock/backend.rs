@@ -77,6 +77,8 @@ impl Backend for MockBackend {
         let mut features = vec![
             "queue_control".into(),
             "weights_onnx".into(),
+            folo_api::FEATURE_EXPORT_ONNX_SWITCHES.into(),
+            "export_dynamic_axes".into(),
             "run_estimate".into(),
             "run_cli".into(),
             "throughput".into(),
@@ -235,17 +237,33 @@ impl Backend for MockBackend {
     }
 
     fn export_model(&self, id: &str, format: &str) -> ApiResult<ExportResult> {
+        let fmt = if format == "onnx" { "onnx" } else { "folo-f16" };
+        self.export_model_with_options(id, ModelExportOptions::plain(fmt))
+    }
+
+    fn export_model_with_options(&self, id: &str, opts: ModelExportOptions) -> ApiResult<ExportResult> {
         self.check()?;
         let m = self
             .models
             .iter()
             .find(|m| m.id == id)
             .ok_or_else(|| ApiError::new("model_not_found", format!("No model {id}")))?;
-        let (ext, bytes) = match format {
-            "onnx" => ("onnx", m.bytes + 120_000),
-            _ => ("f16.folo", m.bytes / 2),
+        let (suffix, bytes) = match opts.format {
+            "onnx" => {
+                let mut s = String::new();
+                if opts.decode {
+                    s.push_str("-decoded");
+                }
+                if opts.half {
+                    s.push_str("-f16");
+                }
+                s.push_str(".onnx");
+                let sz = if opts.half { (m.bytes / 2) + 80_000 } else { m.bytes + 120_000 };
+                (s, sz)
+            }
+            _ => ("-f16.folo".to_string(), m.bytes / 2),
         };
-        Ok(ExportResult { path: format!("D:/folo/models/{}.{ext}", m.name), bytes })
+        Ok(ExportResult { path: format!("D:/folo/models/{}{suffix}", m.name), bytes })
     }
 
     fn runs(&self) -> ApiResult<Vec<Run>> {

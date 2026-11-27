@@ -138,23 +138,34 @@ impl FoloApp {
         if let Some(i) = self.inspector.as_mut() {
             i.shown = Some((meta.id.clone(), class, empty, query, sort, loaded_len));
         }
-        // Opened from a run's samples: this image's predictions at that epoch, if it is one of them.
+        // Opened from a run's samples: prefer the frozen filtered/sorted snapshot captured when
+        // opening so live refreshes and filter/sort order stay consistent while inspecting.
         let sample_ctx = self.inspector.as_ref().and_then(|i| i.sample.clone());
-        let sample_set =
-            sample_ctx.as_ref().and_then(|(run, _)| self.store.samples.get(run)?.ready().cloned());
-        let sample_preds = sample_set.as_ref().and_then(|s| {
-            let smp = s.samples.iter().find(|x| x.image_id == meta.id)?;
-            Some((s.epoch, smp.pred.clone()))
+        let sample_snap = self.inspector.as_ref().and_then(|i| i.sample_snapshot.clone());
+        let sample_set: Option<(u32, f32, Vec<crate::api::Sample>)> = match sample_snap {
+            Some(snap) => Some((snap.epoch, snap.conf, snap.samples)),
+            None => sample_ctx.as_ref().and_then(|(run, _)| {
+                let s = self.store.samples.get(run)?.ready()?;
+                Some((s.epoch, self.sample_conf, s.samples.clone()))
+            }),
+        };
+        let sample_preds = sample_set.as_ref().and_then(|(epoch, _, samples)| {
+            let smp = samples.iter().find(|x| x.image_id == meta.id)?;
+            Some((*epoch, smp.pred.clone(), smp.truth.clone()))
         });
         let show_preds = sample_ctx.as_ref().is_some_and(|(_, v)| *v != crate::app::SampleView::Truth);
-        // Shown predictions (at the run page's minimum confidence, as it draws them). Box indices:
-        // the labels first (0..n), then these (n..), for hover, focus and the list rows alike.
-        let conf = self.sample_conf;
+        // Shown predictions (at the snapshot's minimum confidence, as the run page drew them). Box
+        // indices: the labels first (0..n), then these (n..), for hover, focus and list rows alike.
+        let conf = sample_set.as_ref().map_or(self.sample_conf, |(_, c, _)| *c);
         let preds: Option<Vec<crate::api::ScoredBox>> = sample_preds
             .as_ref()
             .filter(|_| show_preds)
-            .map(|(_, ps)| ps.iter().filter(|p| p.score >= conf).cloned().collect());
-        let n_labels = meta.boxes.len();
+            .map(|(_, ps, _)| ps.iter().filter(|p| p.score >= conf).cloned().collect());
+        // When opened from a run sample snapshot, prefer its truth boxes so GT matches the sample's
+        // evaluated epoch even if the dataset on disk changed later.
+        let truth_boxes: &[crate::api::BBox] =
+            sample_preds.as_ref().map_or(meta.boxes.as_slice(), |(_, _, truth)| truth.as_slice());
+        let n_labels = truth_boxes.len();
         // A keyboard-focused label row highlights its box like the pointer does; while the keyboard
         // is in use it wins over a pointer hover left behind on the image.
         let focused =
@@ -178,8 +189,7 @@ impl FoloApp {
             .image(&ds_id, &meta.id, ImgKind::Full, cx)
             .or_else(|| self.image(&ds_id, &meta.id, ImgKind::Thumb, cx));
         let dims = (meta.width as f32, meta.height as f32);
-        let mut boxes: Vec<DrawBox> = meta
-            .boxes
+        let mut boxes: Vec<DrawBox> = truth_boxes
             .iter()
             .enumerate()
             .map(|(i, b)| DrawBox {
@@ -206,11 +216,11 @@ impl FoloApp {
         let sample_line: Option<(String, String)> = sample_ctx.as_ref().map(|(run, _)| {
             let name = self.store.run(run).map_or(run.clone(), |r| r.name.clone());
             match (&sample_preds, show_preds) {
-                (Some((epoch, _)), true) => (
+                (Some((epoch, _, _)), true) => (
                     format!("{name} · epoch {epoch}"),
                     format!("Predictions ≥ {conf:.2} solid · labels dashed"),
                 ),
-                (Some((epoch, _)), false) => {
+                (Some((epoch, _, _)), false) => {
                     (format!("{name} · epoch {epoch}"), "Labels (the run page's view)".to_string())
                 }
                 (None, _) => (name, "Not one of this run's samples: labels only".to_string()),
@@ -230,9 +240,14 @@ impl FoloApp {
             window,
             cx,
         );
+        let side_meta = if sample_preds.is_some() {
+            crate::api::ImageInfo { boxes: truth_boxes.to_vec(), ..meta.clone() }
+        } else {
+            meta.clone()
+        };
         let side = self.inspector_sidebar(
             &t,
-            &meta,
+            &side_meta,
             dims,
             &classes,
             preds.as_deref(),
@@ -242,11 +257,11 @@ impl FoloApp {
             cx,
         );
         let sample_run = sample_ctx.as_ref().map(|(run, _)| run.as_str());
-        let counter = match sample_set.as_ref().and_then(|s| {
-            let at = s.samples.iter().position(|x| x.image_id == meta.id)?;
-            Some((at, s.samples.len(), s.epoch))
+        let counter = match sample_set.as_ref().and_then(|(epoch, _, samples)| {
+            let at = samples.iter().position(|x| x.image_id == meta.id)?;
+            Some((at, samples.len(), *epoch))
         }) {
-            // Opened from a run's samples: ← / → walk those.
+            // Opened from a run's samples: ← / → walk the filtered & sorted snapshot.
             Some((at, len, epoch)) => format!("Sample {} of {len} · epoch {epoch}", at + 1),
             None => format!("{} of {}", int(index as u64 + 1), int(n as u64)),
         };
@@ -549,15 +564,24 @@ impl FoloApp {
     pub fn step_inspector(&mut self, d: i32, cx: &mut Context<Self>) {
         // From the image on screen: the class filter may have changed since it was drawn.
         self.land_inspector(cx);
-        // Opened from a run's samples: the previous / next sample (the inspector lands on it by id).
+        // Opened from a run's samples: step through the frozen filtered/sorted snapshot (or fall
+        // back to the store's raw list when opened without a snapshot).
         let next_sample = self.inspector.as_ref().and_then(|i| {
-            let (run, _) = i.sample.as_ref()?;
-            let set = self.store.samples.get(run)?.ready()?;
+            let samples: &[crate::api::Sample] = match i.sample_snapshot.as_ref() {
+                Some(snap) => snap.samples.as_slice(),
+                None => {
+                    let (run, _) = i.sample.as_ref()?;
+                    self.store.samples.get(run)?.ready()?.samples.as_slice()
+                }
+            };
+            if samples.is_empty() {
+                return None;
+            }
             let cur =
                 i.want.clone().or_else(|| self.filtered_image(&i.dataset, i.index).map(|m| m.id.clone()));
-            let at = cur.and_then(|c| set.samples.iter().position(|x| x.image_id == c))?;
-            let len = set.samples.len() as i32;
-            Some(set.samples[(at as i32 + d).rem_euclid(len) as usize].image_id.clone())
+            let at = cur.and_then(|c| samples.iter().position(|x| x.image_id == c))?;
+            let len = samples.len() as i32;
+            Some(samples[(at as i32 + d).rem_euclid(len) as usize].image_id.clone())
         });
         if let (Some(id), Some(i)) = (next_sample, self.inspector.as_mut()) {
             i.want = Some(id);
