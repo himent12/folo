@@ -31,6 +31,7 @@ pub struct Cli {
 
 /// Top-level commands.
 #[derive(Debug, Subcommand)]
+#[allow(clippy::large_enum_variant)]
 pub enum Command {
     /// Run the HTTP API (docs/API.md) and serve FOLO Studio.
     Serve(ServeArgs),
@@ -262,14 +263,14 @@ pub struct TrainArgs {
     /// Architecture (folo-n, folo-s, folo-m, folo-l, folo-x, folo2-n, folo2-s, folo2-m, folo2-l, folo2-x), or .folo weights / a published name to fine-tune.
     #[arg(long, visible_alias = "arch", default_value = "folo-n")]
     pub model: String,
-    /// Start from these weights (transfer learning; the architecture is theirs): a .folo file or a published name
-    /// such as folo-n-coco (`folo weights list`; download with `folo weights pull`).
+    /// Start from these weights (transfer learning; the architecture is theirs): a .folo file (local training) or a
+    /// model id / published name in the store such as folo-n-coco (`folo weights list`; download with `folo weights pull`).
     #[arg(long, conflicts_with = "model")]
     pub weights: Option<String>,
     /// Distil from this frozen teacher (docs/MODEL.md §8.9): a .folo file or a published name such as folo-s-coco
     /// with the student's classes, reg_max and strides. Starts with distill.cls_gain 0.5, distill.dfl_gain 1.5,
     /// and distill.temperature 4; change them with --set distill.<key>=<value>.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "cloud")]
     pub teacher: Option<String>,
     /// Run name [default: <dataset>-<arch suffix>]; an existing run folder gets a numeric suffix.
     #[arg(long)]
@@ -282,20 +283,20 @@ pub struct TrainArgs {
     #[arg(long, value_name = "N|auto", default_value_t = BatchArg::Fixed(16))]
     pub batch: BatchArg,
     /// With `--batch auto`: target GPU VRAM utilization fraction [0.25..=0.95] [default: 0.80].
-    #[arg(long, value_name = "FRACTION")]
+    #[arg(long, value_name = "FRACTION", conflicts_with = "cloud")]
     pub auto_batch_target: Option<f64>,
     /// Square input size in pixels [64..=4096, multiple of 32].
     #[arg(long, default_value_t = 640)]
     pub imgsz: u32,
     /// Device: auto, cpu or gpu:<n>.
-    #[arg(long, default_value = "auto")]
+    #[arg(long, default_value = "auto", conflicts_with = "cloud")]
     pub device: String,
     /// Data loader worker threads [default: min(cores, 16)].
-    #[arg(long)]
+    #[arg(long, conflicts_with = "cloud")]
     pub workers: Option<usize>,
     /// Keep the training images between epochs: `ram` decodes each once and keeps it resized in memory (faster
     /// epochs for large JPEGs; refused up front when it does not fit). The batches are the same either way.
-    #[arg(long, value_enum, default_value_t = CacheArg::None)]
+    #[arg(long, value_enum, default_value_t = CacheArg::None, conflicts_with = "cloud")]
     pub cache: CacheArg,
     /// Optimizer.
     #[arg(long, value_enum, default_value_t = OptimizerArg::Auto)]
@@ -304,10 +305,10 @@ pub struct TrainArgs {
     #[arg(long, default_value_t = 0.01)]
     pub lr0: f32,
     /// Final learning rate as a fraction of lr0 in (0, 1].
-    #[arg(long, default_value_t = 0.01)]
+    #[arg(long, default_value_t = 0.01, conflicts_with = "cloud")]
     pub lrf: f64,
     /// Cosine instead of linear learning-rate decay.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "cloud")]
     pub cos_lr: bool,
     /// Mixed-precision training: f16 activations, convolutions and matrix products on the GPU's tensor cores, f32
     /// master weights, loss and BatchNorm statistics, dynamic loss scaling. Needs a GPU with tensor cores
@@ -320,10 +321,10 @@ pub struct TrainArgs {
     #[arg(long, value_enum)]
     pub head: Option<HeadArg>,
     /// Warmup length in epochs [>= 0].
-    #[arg(long, default_value_t = 3.0)]
+    #[arg(long, default_value_t = 3.0, conflicts_with = "cloud")]
     pub warmup_epochs: f64,
     /// Stop after this many epochs without a mAP@0.5:0.95 gain.
-    #[arg(long, default_value_t = 100)]
+    #[arg(long, default_value_t = 100, conflicts_with = "cloud")]
     pub patience: u32,
     /// RNG seed.
     #[arg(long, default_value_t = 0)]
@@ -353,10 +354,10 @@ pub struct TrainArgs {
     /// (docs/MODEL.md §8.1), nested ones dotted, e.g. `--set momentum=0.9 --set weight_decay=0.001
     /// --set loss.tal.topk=13 --set augment.degrees=5`. Applied after the other flags; an unknown key or a value of
     /// the wrong type is `invalid_config`.
-    #[arg(long = "set", value_name = "KEY=VALUE")]
+    #[arg(long = "set", value_name = "KEY=VALUE", conflicts_with = "cloud")]
     pub set: Vec<String>,
     /// Folder that run outputs (weights, metrics) go under.
-    #[arg(long, default_value = "runs")]
+    #[arg(long, default_value = "runs", conflicts_with = "cloud")]
     pub project: PathBuf,
     /// Continue an interrupted run from its checkpoint (runs/<name>/weights/last.folo). The run's stored settings
     /// are used: only --workers, --device, --data, --format, --cache, --project, --json-events, --teacher and
@@ -367,6 +368,53 @@ pub struct TrainArgs {
     /// Which records --json prints: all, or epoch (no per-batch step records).
     #[arg(long, value_enum, default_value_t = JsonEvents::All)]
     pub json_events: JsonEvents,
+    /// Train on a connected cloud provider instead of locally: the connection id (`cc_…`, `folo cloud connections`).
+    #[arg(
+        long,
+        value_name = "CONNECTION_ID",
+        conflicts_with = "resume",
+        value_parser = clap::builder::NonEmptyStringValueParser::new()
+    )]
+    pub cloud: Option<String>,
+    /// With --cloud: GPU offer id (`folo cloud offers CONNECTION_ID`) [default: cheapest available offer].
+    #[arg(
+        long,
+        value_name = "OFFER_ID",
+        requires = "cloud",
+        value_parser = clap::builder::NonEmptyStringValueParser::new()
+    )]
+    pub offer: Option<String>,
+    /// With --cloud: maximum wall-clock hours before the cloud instance is stopped [0.25..=720] [default: 12].
+    #[arg(long, value_name = "HOURS", requires = "cloud")]
+    pub max_hours: Option<f64>,
+    /// With --cloud: cloud instance disk size in GB [10..=4096] [default: sized for the dataset].
+    #[arg(long, value_name = "GB", requires = "cloud")]
+    pub disk_gb: Option<u32>,
+    /// With --cloud: maximum automatic spot-preemption retries [0..=20] [default: 3; 0 disables auto-resume].
+    #[arg(long, value_name = "N", requires = "cloud")]
+    pub max_preempt_retries: Option<u32>,
+    /// With --cloud: data dir holding cloud connections, datasets and runs [default: $FOLO_HOME or ~/.folo].
+    #[arg(long, env = "FOLO_DATA_DIR")]
+    pub data_dir: Option<PathBuf>,
+    /// With --cloud: submit the cloud run to this `folo serve` URL instead of the local data dir.
+    #[arg(
+        long,
+        env = "FOLO_SERVER",
+        value_name = "URL",
+        value_parser = clap::builder::NonEmptyStringValueParser::new()
+    )]
+    pub server: Option<String>,
+    /// With --cloud: bearer token for `--server` (`folo serve --token`).
+    #[arg(
+        long,
+        env = "FOLO_TOKEN",
+        hide_env_values = true,
+        value_parser = clap::builder::NonEmptyStringValueParser::new()
+    )]
+    pub token: Option<String>,
+    /// With --cloud: PEM CA certificate file for an https:// `--server`.
+    #[arg(long = "tls-ca", env = "FOLO_TLS_CA", value_name = "PATH")]
+    pub tls_ca: Option<PathBuf>,
     /// The arguments given on the command line (set by `main`, so --resume can tell them from defaults).
     #[arg(skip)]
     pub explicit: Vec<String>,

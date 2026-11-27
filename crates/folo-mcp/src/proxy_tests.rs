@@ -21,6 +21,12 @@ struct MockApi {
 
 impl MockApi {
     fn start(handler: impl Fn(&str, usize) -> (&'static str, String) + Send + 'static) -> MockApi {
+        Self::start_with_body(move |req, _body, idx| handler(req, idx))
+    }
+
+    fn start_with_body(
+        handler: impl Fn(&str, &str, usize) -> (&'static str, String) + Send + 'static,
+    ) -> MockApi {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let base = format!("http://{addr}");
@@ -35,9 +41,9 @@ impl MockApi {
                     break;
                 }
                 let Ok(mut s) = stream else { continue };
-                let Some(req) = read_request(&mut s) else { continue };
+                let Some((req, req_body)) = read_request_with_body(&mut s) else { continue };
                 recorded.lock().unwrap().push(req.clone());
-                let (status, body) = handler(&req, idx);
+                let (status, body) = handler(&req, &req_body, idx);
                 idx += 1;
                 let _ = write!(
                     s,
@@ -66,9 +72,8 @@ impl Drop for MockApi {
     }
 }
 
-/// Reads the HTTP request head, drains any `Content-Length` body so closing the socket never triggers a TCP
-/// `RST`, and returns `"METHOD /path"`.
-fn read_request(s: &mut TcpStream) -> Option<String> {
+/// Reads the HTTP request head and any `Content-Length` body so closing the socket never triggers a TCP `RST`.
+fn read_request_with_body(s: &mut TcpStream) -> Option<(String, String)> {
     let mut buf = Vec::new();
     let mut b = [0u8; 1];
     while !buf.ends_with(b"\r\n\r\n") {
@@ -89,13 +94,21 @@ fn read_request(s: &mut TcpStream) -> Option<String> {
             k.trim().eq_ignore_ascii_case("content-length").then(|| v.trim().parse::<usize>().ok())?
         })
         .unwrap_or(0);
+    let mut body = String::new();
     if content_length > 0 {
-        let mut body = vec![0u8; content_length];
-        let _ = s.read_exact(&mut body);
+        let mut raw = vec![0u8; content_length];
+        let _ = s.read_exact(&mut raw);
+        body = String::from_utf8_lossy(&raw).into_owned();
     }
     let first = head.lines().next().unwrap_or("");
     let mut parts = first.split_whitespace();
-    Some(format!("{} {}", parts.next().unwrap_or(""), parts.next().unwrap_or("")))
+    Some((format!("{} {}", parts.next().unwrap_or(""), parts.next().unwrap_or("")), body))
+}
+
+/// Reads the HTTP request head, drains any `Content-Length` body so closing the socket never triggers a TCP
+/// `RST`, and returns `"METHOD /path"`.
+fn read_request(s: &mut TcpStream) -> Option<String> {
+    read_request_with_body(s).map(|(head, _)| head)
 }
 
 fn system_json(features: &[&str]) -> String {
@@ -369,7 +382,11 @@ fn older_server_rejects_folo2_arch_and_proxy_reads_arch_header() {
 
     let older = HttpStore::new("http://127.0.0.1:1", None).assume_features(vec![]);
     let cfg: folo_api::TrainConfig = serde_json::from_str(r#"{"dataset_id":"ds_1"}"#).unwrap();
-    let v2_opts = RunOptions { auto_batch: Default::default(), arch: Some("folo2-n".into()) };
+    let v2_opts = RunOptions {
+        auto_batch: Default::default(),
+        arch: Some("folo2-n".into()),
+        max_preempt_retries: None,
+    };
 
     let e = older.create_run_with_options(cfg.clone(), v2_opts.clone()).unwrap_err();
     assert_eq!((e.status, e.body.code.as_str()), (StatusCode::NOT_IMPLEMENTED, "not_implemented"));
@@ -418,7 +435,11 @@ fn older_server_rejects_folo2_arch_and_proxy_reads_arch_header() {
     let v1_run = v1_proxy
         .create_run_with_options(
             v1_cfg,
-            RunOptions { auto_batch: Default::default(), arch: Some("folo-s".into()) },
+            RunOptions {
+                auto_batch: Default::default(),
+                arch: Some("folo-s".into()),
+                max_preempt_retries: None,
+            },
         )
         .unwrap();
     assert_eq!(v1_run.config.arch, folo_api::Arch::S);
@@ -649,4 +670,169 @@ fn older_server_rejects_folo2_arch_and_proxy_reads_arch_header() {
     old_stop.store(true, Ordering::SeqCst);
     let _ = TcpStream::connect(old_addr);
     old_handle.join().unwrap();
+}
+
+#[test]
+fn spot_resume_capability_gating_preemption_and_system_simd() {
+    use folo_server::store::{FEATURE_CLOUD_SPOT_RESUME, RunOptions};
+
+    let older = HttpStore::new("http://127.0.0.1:1", None).assume_features(vec![]);
+    let cloud_cfg: folo_api::TrainConfig =
+        serde_json::from_str(r#"{"dataset_id":"ds_1","compute":{"connection_id":"cc_1","offer_id":"o1"}}"#)
+            .unwrap();
+    let opts = RunOptions { max_preempt_retries: Some(5), ..Default::default() };
+    let e = older.create_run_with_options(cloud_cfg.clone(), opts.clone()).unwrap_err();
+    assert_eq!((e.status, e.body.code.as_str()), (StatusCode::NOT_IMPLEMENTED, "not_implemented"));
+
+    // Local run with max_preempt_retries fails with invalid_config before feature probe.
+    let local_cfg: folo_api::TrainConfig = serde_json::from_str(r#"{"dataset_id":"ds_1"}"#).unwrap();
+    let e = older.create_run_with_options(local_cfg, opts).unwrap_err();
+    assert_eq!((e.status, e.body.code.as_str()), (StatusCode::BAD_REQUEST, "invalid_config"));
+
+    // Resume with non-null max_preempt_retries against an older server fails with 501.
+    let resume_fields = serde_json::json!({ "max_preempt_retries": 4 }).as_object().unwrap().clone();
+    let e = older.resume_run("run_1", &resume_fields).unwrap_err();
+    assert_eq!((e.status, e.body.code.as_str()), (StatusCode::NOT_IMPLEMENTED, "not_implemented"));
+
+    // Resume with `max_preempt_retries: null` against an older server strips the key so it is accepted;
+    // against a current server (`cloud_spot_resume`) it preserves `"max_preempt_retries": null` so the server
+    // resets a stored per-run override back to its default (matching embedded `RealStore::resume_run`).
+    let saw_null_on_old = Arc::new(AtomicBool::new(false));
+    let saw_null_old_c = saw_null_on_old.clone();
+    let old_resume_server = MockApi::start_with_body(move |req, body, _| match req {
+        "POST /api/runs" => {
+            let v: serde_json::Value = serde_json::from_str(body).unwrap();
+            if v.get("max_preempt_retries").is_some() {
+                saw_null_old_c.store(true, Ordering::SeqCst);
+            }
+            (
+                "200 OK",
+                serde_json::json!({
+                    "id": "run_old",
+                    "name": "spot-run",
+                    "status": "queued",
+                    "config": { "dataset_id": "ds_1", "compute": { "connection_id": "cc_1", "offer_id": "o1" } },
+                    "created": "2026-11-27T00:00:00Z",
+                    "started": null,
+                    "finished": null,
+                    "epoch": 0,
+                    "epochs": 10,
+                    "step": 0,
+                    "steps_per_epoch": 0,
+                    "eta_s": null,
+                    "best": null,
+                    "device": "gpu:0",
+                    "model_id": null,
+                    "error": null
+                })
+                .to_string(),
+            )
+        }
+        other => panic!("unexpected request: {other}"),
+    });
+    let old_resume_proxy = HttpStore::new(&old_resume_server.base, None).assume_features(vec![]);
+    let null_fields = serde_json::json!({ "max_preempt_retries": null }).as_object().unwrap().clone();
+    old_resume_proxy.resume_run("run_old", &null_fields).unwrap();
+    assert!(!saw_null_on_old.load(Ordering::SeqCst), "older server must not receive max_preempt_retries");
+
+    let saw_null_on_new = Arc::new(AtomicBool::new(false));
+    let saw_null_new_c = saw_null_on_new.clone();
+    // A current server returns additive `cloud_preemption` on GET /api/runs/{id} and `cpu_simd` on GET /api/system.
+    let server = MockApi::start_with_body(move |req, body, _| match req {
+        "POST /api/runs" => {
+            let v: serde_json::Value = serde_json::from_str(body).unwrap();
+            if v.get("max_preempt_retries") == Some(&serde_json::Value::Null) {
+                saw_null_new_c.store(true, Ordering::SeqCst);
+            }
+            (
+                "200 OK",
+                serde_json::json!({
+                    "id": "run_c1",
+                    "name": "spot-run",
+                    "status": "queued",
+                    "config": { "dataset_id": "ds_1", "compute": { "connection_id": "cc_1", "offer_id": "o1" } },
+                    "created": "2026-11-27T00:00:00Z",
+                    "started": null,
+                    "finished": null,
+                    "epoch": 0,
+                    "epochs": 10,
+                    "step": 0,
+                    "steps_per_epoch": 0,
+                    "eta_s": null,
+                    "best": null,
+                    "device": "gpu:0",
+                    "model_id": null,
+                    "error": null
+                })
+                .to_string(),
+            )
+        }
+        "GET /api/runs/run_c1" => (
+            "200 OK",
+            serde_json::json!({
+                "id": "run_c1",
+                "name": "spot-run",
+                "status": "running",
+                "config": { "dataset_id": "ds_1", "compute": { "connection_id": "cc_1", "offer_id": "o1" } },
+                "created": "2026-11-27T00:00:00Z",
+                "started": "2026-11-27T00:00:01Z",
+                "finished": null,
+                "epoch": 2,
+                "epochs": 10,
+                "step": 4,
+                "steps_per_epoch": 2,
+                "eta_s": 10.0,
+                "best": null,
+                "device": "gpu:0",
+                "model_id": null,
+                "error": null,
+                "cloud_preemption": {
+                    "retries": 1,
+                    "max_retries": 5,
+                    "recovering": true,
+                    "preempted_instances": ["ci_old1"]
+                }
+            })
+            .to_string(),
+        ),
+        "GET /api/system" => (
+            "200 OK",
+            serde_json::json!({
+                "cpu": { "name": "Test CPU", "threads": 8, "util": 0.1 },
+                "memory": { "used_bytes": 1, "total_bytes": 2 },
+                "gpus": [],
+                "data_dir": "/tmp/folo",
+                "features": [FEATURE_CLOUD_SPOT_RESUME],
+                "capabilities": null,
+                "gpu_pool": null,
+                "cpu_simd": {
+                    "avx2": true,
+                    "avx_vnni": true,
+                    "avx512_vnni": true,
+                    "neon": false,
+                    "int8_fast": true,
+                    "int8_kernel": "AVX-512 VNNI (512-bit)"
+                }
+            })
+            .to_string(),
+        ),
+        other => panic!("unexpected request: {other}"),
+    });
+    let proxy = HttpStore::new(&server.base, None).assume_features(vec![FEATURE_CLOUD_SPOT_RESUME.into()]);
+    proxy.resume_run("run_c1", &null_fields).unwrap();
+    assert!(
+        saw_null_on_new.load(Ordering::SeqCst),
+        "current server must receive explicit max_preempt_retries: null to reset stored override"
+    );
+    let (run, pre) = proxy.get_run_with_preemption("run_c1").unwrap();
+    assert_eq!(run.id, "run_c1");
+    let pre = pre.expect("cloud_preemption parsed");
+    assert_eq!((pre.retries, pre.max_retries, pre.recovering), (1, 5, true));
+    assert_eq!(pre.preempted_instances, vec!["ci_old1"]);
+
+    let (sys, simd) = proxy.system_with_simd().unwrap();
+    assert_eq!(sys.system.cpu.threads, 8);
+    let simd = simd.expect("cpu_simd parsed");
+    assert!(simd.avx512_vnni && simd.int8_fast);
+    assert_eq!(simd.int8_kernel, "AVX-512 VNNI (512-bit)");
 }

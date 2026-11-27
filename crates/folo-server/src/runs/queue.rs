@@ -124,12 +124,23 @@ impl Runs {
         val_offset: u64,
         device: String,
         cloud: RunCloud,
+        max_preempt_retries: Option<u32>,
     ) -> Result<Arc<RunEntry>> {
-        self.register(config, dataset, weights, checkpoint, val_offset, device, Some(cloud))
+        self.register_with_options(
+            config,
+            dataset,
+            weights,
+            checkpoint,
+            val_offset,
+            device,
+            Some(cloud),
+            crate::store::RunOptions { max_preempt_retries, ..Default::default() },
+        )
     }
 
     /// Creates a run's folder and record and adds it to the registry; a cloud run (`cloud`) is claimed before
     /// anything can see it.
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn register(
         &self,
@@ -221,6 +232,7 @@ impl Runs {
             alive_at: None,
             auto_batch: options.auto_batch,
             arch_override: options.arch,
+            max_preempt_retries: options.max_preempt_retries,
         };
         let entry = Arc::new(RunEntry::new(id, dir, file));
         {

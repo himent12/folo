@@ -90,6 +90,11 @@ impl RunEntry {
         self.state.lock().unwrap().file.arch_override.clone()
     }
 
+    /// Optional per-run cloud spot preemption retry budget (`0..=20`) requested when the run was created or resumed.
+    pub fn max_preempt_retries(&self) -> Option<u32> {
+        self.state.lock().unwrap().file.max_preempt_retries
+    }
+
     pub(super) fn persist(&self, st: &RunState) {
         let bytes = serde_json::to_vec_pretty(&st.file).expect("runs serialize");
         let path = self.dir.join("run.json");

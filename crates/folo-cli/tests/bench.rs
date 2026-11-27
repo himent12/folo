@@ -482,3 +482,130 @@ fn bench_create_generated_is_deterministic_and_runs_model() {
     assert_eq!(s(&finished["status"]), "done");
     assert!(finished["result"]["score"].is_number(), "{finished}");
 }
+
+/// `folo bench compare`: table, markdown (and `md` alias), csv, `--json`, atomic `--out` (refusing overwrites),
+/// `--fail-on-regression` / `--min-delta` (including negative tolerances), both local store and `--server`, plus
+/// clean errors on unfinished or missing entries.
+#[test]
+fn bench_compare_formats_out_and_regression_gate() {
+    let t = TestDir::new("cli-bench-compare");
+    let home = t.join("home");
+    let d = ["--data-dir", home.to_str().unwrap()];
+
+    // Create a deterministic generated benchmark with one stress condition (`haze` severity 2).
+    let created = ok(
+        &[
+            "create",
+            "cmp-smoke",
+            "--generated",
+            "--images",
+            "4",
+            "--imgsz",
+            "64",
+            "--classes",
+            "circle,square",
+            "--seed",
+            "5",
+            "--plan",
+            PLAN,
+        ],
+        &d,
+    );
+    let bench_id = s(&created["id"]);
+
+    // Read frozen ground truth directly via `folo_server::bench::Benches` so we can write two deterministic
+    // prediction files with known distinct scores (candidate better than baseline).
+    use folo_server::Store as _;
+    let store = folo_server::RealStore::open(home.clone());
+    let imgs = store.benches().unwrap().images(bench_id, 0, 10, None).unwrap().images;
+    drop(store);
+
+    let base_preds = t.join("base.jsonl");
+    let cand_preds = t.join("cand.jsonl");
+    let mut base_lines = Vec::new();
+    let mut cand_lines = Vec::new();
+    for img in &imgs {
+        // Baseline: empty boxes on unchanged images (score 0).
+        base_lines.push(json!({ "image": img.id, "boxes": [] }).to_string());
+        // Candidate: exact truth boxes on unchanged and haze s2 (high score).
+        let boxes: Vec<_> = img
+            .boxes
+            .iter()
+            .map(|b| json!({ "class": b.class, "score": 0.95, "x1": b.x1, "y1": b.y1, "x2": b.x2, "y2": b.y2 }))
+            .collect();
+        cand_lines.push(json!({ "image": img.id, "boxes": boxes }).to_string());
+        cand_lines
+            .push(json!({ "image": img.id, "condition": "haze", "severity": 2, "boxes": boxes }).to_string());
+    }
+    std::fs::write(&base_preds, base_lines.join("\n") + "\n").unwrap();
+    std::fs::write(&cand_preds, cand_lines.join("\n") + "\n").unwrap();
+
+    let e_base =
+        ok(&["run", bench_id, "--predictions", base_preds.to_str().unwrap(), "--name", "base-empty"], &d);
+    let e_cand =
+        ok(&["run", bench_id, "--predictions", cand_preds.to_str().unwrap(), "--name", "cand-perfect"], &d);
+    let base_id = s(&e_base["entry_id"]);
+    let cand_id = s(&e_cand["entry_id"]);
+
+    // 1. Local `--json` + `--format table` (default).
+    let cmp = ok(&["compare", bench_id, base_id, cand_id], &d);
+    assert_eq!(s(&cmp["benchmark_id"]), bench_id);
+    assert_eq!(s(&cmp["format"]), "table");
+    assert!(cmp["score_delta"].as_f64().unwrap() > 10.0, "{cmp}");
+    assert_eq!(s(&cmp["conditions"][0]["condition"]), "haze");
+    assert_eq!(s(&cmp["conditions"][0]["match_kind"]), "candidate_only");
+
+    // 2. Markdown (`md` alias) written atomically via `--out`, and existing `--out` refused (`output_exists`).
+    let md_path = t.join("compare.md");
+    let cmp_md = ok(
+        &["compare", bench_id, base_id, cand_id, "--format", "md", "--out", md_path.to_str().unwrap()],
+        &d,
+    );
+    assert_eq!(s(&cmp_md["format"]), "markdown");
+    assert_eq!(s(&cmp_md["output_path"]), folo_api::json::path(&md_path));
+    let md_text = std::fs::read_to_string(&md_path).unwrap();
+    assert!(
+        md_text.contains("# Benchmark Comparison:") && md_text.contains("| Overall score |"),
+        "{md_text}"
+    );
+
+    let dup_err = error(
+        &["compare", bench_id, base_id, cand_id, "--format", "md", "--out", md_path.to_str().unwrap()],
+        &d,
+        1,
+    );
+    assert_eq!(s(&dup_err["code"]), "output_exists");
+
+    // 3. CSV output on stdout without `--json`.
+    let mut csv_cmd = folo();
+    csv_cmd.args(["bench", "compare", bench_id, base_id, cand_id, "--format", "csv"]).args(d);
+    let (code, stdout, stderr) = run(csv_cmd);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.starts_with("section,metric,status,baseline,candidate,delta,unit,notes\n"), "{stdout}");
+    assert!(stdout.contains("condition,haze,candidate_only"), "{stdout}");
+
+    // 4. `--fail-on-regression`: passes when candidate beats baseline, fails when reversed (even with negative
+    // `--min-delta -1.0`), and passes when `--min-delta -100.0` tolerates the drop.
+    let pass_gate = ok(&["compare", bench_id, base_id, cand_id, "--fail-on-regression"], &d);
+    assert_eq!(pass_gate["regression"], false);
+
+    let (fail_code, fail_rec, _) =
+        bench(&["compare", bench_id, cand_id, base_id, "--fail-on-regression", "--min-delta", "-1.0"], &d);
+    assert_eq!(fail_code, 1, "{fail_rec:?}");
+    assert_eq!(fail_rec[0]["regression"], true, "{fail_rec:?}");
+    assert_eq!(s(&fail_rec.last().unwrap()["error"]["code"]), "bench_entry_failed", "{fail_rec:?}");
+
+    let tol_pass =
+        ok(&["compare", bench_id, cand_id, base_id, "--fail-on-regression", "--min-delta", "-100.0"], &d);
+    assert_eq!(tol_pass["regression"], false);
+
+    // 5. Missing entry -> exit 3 `bench_entry_not_found`.
+    let missing = error(&["compare", bench_id, base_id, "be_nope"], &d, 3);
+    assert_eq!(s(&missing["code"]), "bench_entry_not_found");
+
+    // 6. Works identically via `--server`.
+    let (_serve, url, _client) = serve(&home, &[]);
+    let cmp_srv = ok(&["compare", bench_id, base_id, cand_id], &["--server", url.as_str()]);
+    assert_eq!(cmp_srv["score_delta"], cmp["score_delta"]);
+    assert_eq!(cmp_srv["conditions"], cmp["conditions"]);
+}

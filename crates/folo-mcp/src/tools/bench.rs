@@ -35,7 +35,7 @@ const GRACE: Duration = Duration::from_secs(5);
 /// Ends the summary of an entry whose text was cut: where the whole text is.
 const ENTRY_CUT: &str = " (long text cut; GET /api/bench/benchmarks/{id}/entries/{entry_id} has it whole)";
 /// The tools `--confine` refuses: all of them, see [`refuse_confined`].
-const BENCH_TOOLS: [&str; 8] = [
+const BENCH_TOOLS: [&str; 9] = [
     "bench_catalog",
     "list_benchmarks",
     "get_benchmark",
@@ -44,6 +44,7 @@ const BENCH_TOOLS: [&str; 8] = [
     "start_bench_entry",
     "bench_entry",
     "stop_bench_entry",
+    "compare_bench_entries",
 ];
 
 /// With `--confine`, refuses a benchmark tool. A benchmark's files (its frozen images, its entries, the weights a
@@ -257,6 +258,38 @@ impl Inner {
         let summary = entry_summary(&r);
         out(&BenchEntryBrief::from(r), summary)
     }
+
+    pub(super) async fn compare_bench_entries(&self, a: CompareBenchEntriesArgs) -> Result<Output, Error> {
+        let (bench_id, baseline_id, candidate_id) =
+            (a.benchmark_id, a.baseline_entry_id, a.candidate_entry_id);
+        let mut r = self.benchmarks(move |b| b.compare(&bench_id, &baseline_id, &candidate_id)).await?;
+        fit_compare(&mut r);
+        let shared = r.conditions.iter().filter(|c| c.match_kind == BenchConditionMatch::Shared).count();
+        let unmatched = r.conditions.len() - shared;
+        let mut summary = format!(
+            "{} '{}' vs {} '{}': score {:+.1} ({:.1} -> {:.1}), mAP50-95 {:+.3} ({:.3} -> {:.3})",
+            r.baseline.entry_id,
+            short(&r.baseline.name, 32),
+            r.candidate.entry_id,
+            short(&r.candidate.name, 32),
+            r.score_delta,
+            r.baseline.score,
+            r.candidate.score,
+            r.accuracy.map50_95_delta,
+            r.accuracy.baseline_map50_95,
+            r.accuracy.candidate_map50_95,
+        );
+        if shared > 0 || unmatched > 0 {
+            summary.push_str(&format!("; {shared} shared condition(s)"));
+            if unmatched > 0 {
+                summary.push_str(&format!(", {unmatched} unmatched"));
+            }
+        }
+        if !r.warnings.is_empty() {
+            summary.push_str(&format!("; {} warning(s)", r.warnings.len()));
+        }
+        out(&r, summary)
+    }
 }
 
 /// An entry's state once it has ended or `wait` has passed. Through a server, every request ends by `grace` after
@@ -346,6 +379,22 @@ pub(super) fn fit_state(r: &mut BenchEntryState) -> bool {
         cut = true;
     }
     cut
+}
+
+/// Fits a benchmark comparison within the result limit: shortens long names first, then drops per-severity
+/// arrays if needed while keeping per-condition summaries intact.
+fn fit_compare(r: &mut BenchCompareResult) {
+    if json_len(r) <= FIT {
+        return;
+    }
+    cut_to(&mut r.benchmark_name, 120);
+    cut_to(&mut r.baseline.name, 80);
+    cut_to(&mut r.candidate.name, 80);
+    if json_len(r) > FIT {
+        for c in &mut r.conditions {
+            c.severities.clear();
+        }
+    }
 }
 
 /// An entry's summary, keeping room for where the whole text is when `cut`.

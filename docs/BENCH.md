@@ -290,7 +290,9 @@ from"). It can still be run with a confidence set by hand; the entry's label cha
    with every missed and wrong box drawn.
 5. **Compare** two to four entries side by side: who wins under which condition and on which class, and whether
    the difference is larger than the intervals (`B` cycles the baseline, `1`–`4` pin or unpin an entry, and `Escape`
-   unpins).
+   unpins). From the command line or CI, `folo bench compare BENCH BASELINE CANDIDATE [--format table|markdown|csv] [--out PATH] [--fail-on-regression [--min-delta POINTS]]`
+   (and MCP `compare_bench_entries`) computes head-to-head overall score, per-axis, clean accuracy (with 95% CI
+   overlap), calibration, localization, speed, and per-condition deltas across both local stores and `--server`.
 6. **Loops → New loop** runs a self-improvement loop from a model of the server and shows each generation
    against the first teacher's interval.
 

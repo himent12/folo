@@ -66,6 +66,7 @@ impl Store for RealStore {
             folo_api::FEATURE_RUN_CURSORS,
             folo_api::FEATURE_RUN_CHECKPOINT,
             folo_api::FEATURE_CLOUD,
+            crate::store::FEATURE_CLOUD_SPOT_RESUME,
         ]
     }
 
@@ -87,7 +88,10 @@ impl Store for RealStore {
         config: TrainConfig,
         auto_batch: crate::store::AutoBatchOptions,
     ) -> Result<RunEstimate> {
-        self.estimate_run_with_options(config, crate::store::RunOptions { auto_batch, arch: None })
+        self.estimate_run_with_options(
+            config,
+            crate::store::RunOptions { auto_batch, arch: None, max_preempt_retries: None },
+        )
     }
 
     fn estimate_run_with_options(
@@ -433,6 +437,16 @@ impl Store for RealStore {
     }
 
     fn continue_run(&self, checkpoint: &str, config: TrainConfig) -> Result<Run> {
+        self.continue_run_with_options(checkpoint, config, crate::store::RunOptions::default())
+    }
+
+    fn continue_run_with_options(
+        &self,
+        checkpoint: &str,
+        config: TrainConfig,
+        options: crate::store::RunOptions,
+    ) -> Result<Run> {
+        crate::store::check_max_preempt_retries(options.max_preempt_retries, config.compute.is_some())?;
         if config.weights.is_some() {
             return Err(Error::new(
                 StatusCode::BAD_REQUEST,
@@ -529,14 +543,18 @@ impl Store for RealStore {
         self.start_run_with_options(
             config,
             Some(snapshot),
-            crate::store::RunOptions { auto_batch: ckpt_auto, arch: ckpt_arch },
+            crate::store::RunOptions {
+                auto_batch: ckpt_auto,
+                arch: ckpt_arch,
+                max_preempt_retries: options.max_preempt_retries,
+            },
         )
     }
 
     fn resume_run(&self, id: &str, fields: &serde_json::Map<String, serde_json::Value>) -> Result<Run> {
         // Shared with registration; a deletion of dataset files waits for it (see `RealStore::files`).
         let _files = self.files.read().unwrap_or_else(|p| p.into_inner());
-        let (entry, wanted) = self.runs.resume_config(id, fields)?;
+        let (entry, wanted, max_preempt_retries) = self.runs.resume_config(id, fields)?;
         let Some(compute) = wanted.compute.clone() else { return self.runs.resume(&entry, wanted) };
         if entry.auto_batch().enabled {
             return Err(Error::new(
@@ -561,12 +579,27 @@ impl Store for RealStore {
             .and_then(|e| self.fresh_index(&e))
             .ok()
             .map(|idx| upload_fingerprint(ds.format, &idx));
-        self.runs.resume_cloud(&entry, wanted, run_cloud(&compute, &connected, offer))?;
+        self.runs.resume_cloud(
+            &entry,
+            wanted,
+            run_cloud(&compute, &connected, offer),
+            max_preempt_retries,
+        )?;
         self.start_cloud(entry, connected, fingerprint)
     }
 
     fn get_run(&self, id: &str) -> Result<Run> {
         self.runs.snapshot(id)
+    }
+
+    fn get_run_with_preemption(
+        &self,
+        id: &str,
+    ) -> Result<(Run, Option<crate::store::CloudPreemptionStatus>)> {
+        let entry = self.runs.get(id)?;
+        let run = self.runs.snapshot(id)?;
+        let preemption = self.cloud.preemption_status(&entry);
+        Ok((run, preemption))
     }
 
     fn move_run(&self, id: &str, mv: QueueMove) -> Result<Run> {

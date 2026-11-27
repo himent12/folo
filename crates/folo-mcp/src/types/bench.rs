@@ -446,3 +446,187 @@ pub struct StartBenchEntryArgs {
     #[serde(default)]
     pub scored: Option<bool>,
 }
+
+/// `compare_bench_entries`: head-to-head comparison of two finished entries of one benchmark.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CompareBenchEntriesArgs {
+    /// Benchmark id.
+    pub benchmark_id: String,
+    /// Baseline entry id (reference, e.g. `be_91c2`).
+    pub baseline_entry_id: String,
+    /// Candidate entry id (compared against baseline; deltas are `candidate - baseline`, where higher is better
+    /// for score/accuracy/robustness/IoU and lower is better for `ece_delta` and `delta_ms_per_image`).
+    pub candidate_entry_id: String,
+}
+
+/// One side (baseline or candidate) of a [`BenchCompareResult`].
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct BenchCompareSide {
+    /// Entry id.
+    pub entry_id: String,
+    /// Leaderboard name.
+    pub name: String,
+    /// `model`, `agent` or `external`.
+    pub kind: String,
+    /// Overall score, `0..=100`.
+    pub score: f32,
+    /// True when an axis was not measured or the entry ran part of the images.
+    pub partial: bool,
+    /// Images run.
+    pub images: u64,
+    /// Whether the plan's stress conditions were run.
+    pub conditions: bool,
+    /// Graded on another version of the benchmark (fingerprint differs from the benchmark's current one).
+    pub stale: bool,
+    /// mAP@0.5:0.95 on the unchanged images.
+    pub map50_95: f32,
+    /// Its 95% bootstrap interval.
+    pub ci95: [f32; 2],
+    /// Milliseconds per image on the server's device (model entries only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ms_per_image: Option<f32>,
+}
+
+/// Accuracy deltas on the unchanged images (`candidate - baseline`).
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct BenchAccuracyDelta {
+    /// Baseline mAP@0.5:0.95.
+    pub baseline_map50_95: f32,
+    /// Candidate mAP@0.5:0.95.
+    pub candidate_map50_95: f32,
+    /// `candidate - baseline` for mAP@0.5:0.95.
+    pub map50_95_delta: f32,
+    /// True when the two 95% bootstrap confidence intervals overlap.
+    pub ci_overlap: bool,
+    /// `candidate - baseline` for mAP@0.5.
+    pub map50_delta: f32,
+    /// `candidate - baseline` for mAP@0.75.
+    pub map75_delta: f32,
+    /// `candidate - baseline` for class-mean precision at `best_conf`.
+    pub precision_delta: f32,
+    /// `candidate - baseline` for class-mean recall at `best_conf`.
+    pub recall_delta: f32,
+}
+
+/// One axis of a head-to-head comparison (`candidate - baseline`).
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct BenchAxisDelta {
+    /// The axis.
+    pub axis: BenchAxis,
+    /// Its share of the score.
+    pub weight: f32,
+    /// Baseline value `0..=1` (`null` when not measured).
+    pub baseline: Option<f32>,
+    /// Candidate value `0..=1` (`null` when not measured).
+    pub candidate: Option<f32>,
+    /// `candidate - baseline` (`null` when either side was not measured).
+    pub delta: Option<f32>,
+}
+
+/// Speed comparison for entries that measured wall time per image.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct BenchSpeedDelta {
+    /// Baseline ms/image (`null` if unmeasured).
+    pub baseline_ms_per_image: Option<f32>,
+    /// Candidate ms/image (`null` if unmeasured).
+    pub candidate_ms_per_image: Option<f32>,
+    /// `candidate - baseline` in ms/image (negative is faster).
+    pub delta_ms_per_image: Option<f32>,
+    /// `baseline / candidate` (> 1.0 means candidate is faster).
+    pub speedup: Option<f32>,
+    /// Device baseline ran on.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub baseline_device: Option<String>,
+    /// Device candidate ran on.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub candidate_device: Option<String>,
+}
+
+/// Whether a stress condition was run by both entries or only one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum BenchConditionMatch {
+    /// Run by both baseline and candidate.
+    Shared,
+    /// Run only by baseline.
+    BaselineOnly,
+    /// Run only by candidate.
+    CandidateOnly,
+}
+
+/// One severity level of a condition comparison (`candidate - baseline`).
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct BenchSeverityDelta {
+    /// Severity level (`1..=5`).
+    pub severity: u8,
+    /// Baseline mAP@0.5:0.95 under this severity.
+    pub baseline_map50_95: Option<f32>,
+    /// Candidate mAP@0.5:0.95 under this severity.
+    pub candidate_map50_95: Option<f32>,
+    /// `candidate - baseline` for mAP@0.5:0.95.
+    pub map50_95_delta: Option<f32>,
+    /// Baseline retention (`0..=1`).
+    pub baseline_retention: Option<f32>,
+    /// Candidate retention (`0..=1`).
+    pub candidate_retention: Option<f32>,
+    /// `candidate - baseline` for retention.
+    pub retention_delta: Option<f32>,
+}
+
+/// One stress condition in a head-to-head comparison.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct BenchConditionDelta {
+    /// Condition id.
+    pub condition: String,
+    /// Condition weight in the plan.
+    pub weight: f32,
+    /// Whether both entries ran this condition or only one did.
+    pub match_kind: BenchConditionMatch,
+    /// Baseline mean retention across its severities (`0..=1`).
+    pub baseline_retention: Option<f32>,
+    /// Candidate mean retention across its severities (`0..=1`).
+    pub candidate_retention: Option<f32>,
+    /// `candidate - baseline` for mean retention (`null` when unmatched).
+    pub retention_delta: Option<f32>,
+    /// Per-severity breakdown, ascending by severity.
+    pub severities: Vec<BenchSeverityDelta>,
+}
+
+/// Head-to-head comparison of two finished benchmark entries (`candidate - baseline`).
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct BenchCompareResult {
+    /// Benchmark id.
+    pub benchmark_id: String,
+    /// Benchmark name.
+    pub benchmark_name: String,
+    /// Reference entry.
+    #[schemars(with = "serde_json::Map<String, serde_json::Value>")]
+    pub baseline: BenchCompareSide,
+    /// Candidate entry.
+    #[schemars(with = "serde_json::Map<String, serde_json::Value>")]
+    pub candidate: BenchCompareSide,
+    /// `candidate.score - baseline.score` (score points in `-100..=100`).
+    pub score_delta: f32,
+    /// Clean-image accuracy deltas and CI overlap.
+    #[schemars(with = "serde_json::Map<String, serde_json::Value>")]
+    pub accuracy: BenchAccuracyDelta,
+    /// Every score axis in canonical order with `candidate - baseline` deltas.
+    #[schemars(with = "Vec<serde_json::Map<String, serde_json::Value>>")]
+    pub axes: Vec<BenchAxisDelta>,
+    /// `candidate - baseline` for expected calibration error (negative means better calibration).
+    pub ece_delta: Option<f32>,
+    /// `candidate - baseline` for mean IoU of correct detections.
+    pub mean_iou_delta: Option<f32>,
+    /// `candidate - baseline` for self-labeling recall.
+    pub self_labeling_recall_delta: f32,
+    /// Throughput comparison when at least one entry measured `ms_per_image`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Option<serde_json::Map<String, serde_json::Value>>")]
+    pub speed: Option<BenchSpeedDelta>,
+    /// Per-condition robustness deltas across shared and unmatched conditions.
+    #[schemars(with = "Vec<serde_json::Map<String, serde_json::Value>>")]
+    pub conditions: Vec<BenchConditionDelta>,
+    /// Comparability notes (e.g. partial scores, mismatched image counts or benchmark versions).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+}

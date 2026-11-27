@@ -40,6 +40,8 @@ pub(crate) struct OutputFile {
     command: &'static str,
     /// `--output`, or `None` for a free name next to the model.
     given: Option<PathBuf>,
+    /// True when the command can also pick a free name next to `--model` (controls the `output_exists` hint).
+    has_model: bool,
     /// The free name's parts: the model and the name's suffix and extension.
     model: PathBuf,
     suffix: &'static str,
@@ -70,22 +72,12 @@ impl OutputFile {
             if same(o, model) {
                 return Err(CliError::new(ExitCode::Usage, "usage", "--output must differ from --model"));
             }
-            match std::fs::symlink_metadata(o) {
-                // A folder: what main's `create_new` said (`output_exists` on Unix, access denied on Windows).
-                Ok(m) if m.is_dir() => {
-                    return Err(match std::fs::OpenOptions::new().write(true).create_new(true).open(o) {
-                        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => exists(command, o),
-                        Err(e) => io_error(o, e),
-                        Ok(_) => io_error(o, std::io::ErrorKind::IsADirectory.into()),
-                    });
-                }
-                Ok(_) => return Err(exists(command, o)),
-                Err(_) => {}
-            }
+            check_target(command, o, true)?;
         }
         let mut out = OutputFile {
             command,
             given: output,
+            has_model: true,
             model: model.to_path_buf(),
             suffix,
             ext,
@@ -99,6 +91,28 @@ impl OutputFile {
         out.tmp = tmp;
         out.file = Some(handle);
         Ok(out)
+    }
+
+    /// An explicit output file for a command without `--model` (e.g. `folo bench compare --out`).
+    /// Checked upfront and published atomically without overwriting an existing file.
+    pub(crate) fn new_explicit(command: &'static str, output: PathBuf) -> Result<OutputFile, CliError> {
+        if output.as_os_str().is_empty() {
+            return Err(CliError::new(ExitCode::Usage, "usage", "--out path must not be empty"));
+        }
+        check_target(command, &output, false)?;
+        let dir = output.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
+        let first_name = output.file_name().map(|n| n.to_string_lossy().to_lowercase());
+        let (tmp, handle) = create_temp_file(dir, first_name.as_deref()).map_err(|e| io_error(&output, e))?;
+        Ok(OutputFile {
+            command,
+            given: Some(output),
+            has_model: false,
+            model: PathBuf::new(),
+            suffix: "",
+            ext: "",
+            tmp,
+            file: Some(handle),
+        })
     }
 
     /// The path of the temporary file (for read-back verification after [`OutputFile::write_with`]).
@@ -139,7 +153,9 @@ impl OutputFile {
             None => folo_nn::io::publish_free(&self.tmp, |n| self.name(n)),
         };
         published.map_err(|e| match &self.given {
-            Some(o) if e.kind() == std::io::ErrorKind::AlreadyExists => exists(self.command, o),
+            Some(o) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                exists(self.command, o, self.has_model)
+            }
             _ => io_error(&self.name(1), e),
         })
     }
@@ -166,14 +182,32 @@ impl Drop for OutputFile {
     }
 }
 
+fn check_target(command: &str, o: &Path, has_model: bool) -> Result<(), CliError> {
+    match std::fs::symlink_metadata(o) {
+        // A folder: what main's `create_new` said (`output_exists` on Unix, access denied on Windows).
+        Ok(m) if m.is_dir() => Err(match std::fs::OpenOptions::new().write(true).create_new(true).open(o) {
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => exists(command, o, has_model),
+            Err(e) => io_error(o, e),
+            Ok(_) => io_error(o, std::io::ErrorKind::IsADirectory.into()),
+        }),
+        Ok(_) => Err(exists(command, o, has_model)),
+        Err(_) => Ok(()),
+    }
+}
+
 /// `output_exists` for `o`.
-fn exists(command: &str, o: &Path) -> CliError {
+fn exists(command: &str, o: &Path, has_model: bool) -> CliError {
+    let hint = if has_model {
+        "pass another --output, or leave it out for a free name next to --model"
+    } else {
+        "pass another --out path, or remove the existing file first"
+    };
     CliError::new(
         ExitCode::Runtime,
         "output_exists",
         format!("{} exists; {command} never overwrites", folo_api::json::path(o)),
     )
-    .hint("pass another --output, or leave it out for a free name next to --model")
+    .hint(hint)
 }
 
 /// `io_error` for the output `o`.

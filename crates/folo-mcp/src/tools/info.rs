@@ -34,12 +34,14 @@ impl Inner {
         let (cpu, gpus, data_dir, capabilities) = match &self.proxy {
             Some(p) => {
                 let p = p.clone();
-                let sys = tokio::task::spawn_blocking(move || p.system()).await.map_err(join)??;
+                let (sys, cpu_simd) =
+                    tokio::task::spawn_blocking(move || p.system_with_simd()).await.map_err(join)??;
                 let (data_dir, capabilities, sys) = (sys.data_dir, sys.capabilities, sys.system);
                 let cpu = CpuDevice {
                     name: sys.cpu.name,
                     threads: sys.cpu.threads,
                     memory_bytes: sys.memory.total_bytes,
+                    simd: cpu_simd.map(simd_info),
                 };
                 // The server's data dir: runs, models and exports live there, not under this process's default.
                 (cpu, sys.gpus, data_dir, capabilities)
@@ -52,6 +54,7 @@ impl Inner {
                         name: host.cpu_name,
                         threads: host.cpu_threads,
                         memory_bytes: host.memory_total_bytes,
+                        simd: Some(simd_info(folo_server::system::cpu_simd())),
                     };
                     // Capabilities first, as `/api/system` does: they create the GPU context, and `gpus()` (cached
                     // on first use) puts the context's adapter at ordinal 0 only once it exists.
@@ -89,6 +92,17 @@ impl Inner {
                 })
                 .collect(),
         })
+    }
+}
+
+fn simd_info(s: folo_server::system::CpuSimd) -> CpuSimdInfo {
+    CpuSimdInfo {
+        avx2: s.avx2,
+        avx_vnni: s.avx_vnni,
+        avx512_vnni: s.avx512_vnni,
+        neon: s.neon,
+        int8_fast: s.int8_fast,
+        int8_kernel: s.int8_kernel,
     }
 }
 

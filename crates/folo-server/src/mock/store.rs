@@ -75,7 +75,10 @@ impl Store for MockStore {
         config: TrainConfig,
         auto_batch: crate::store::AutoBatchOptions,
     ) -> Result<RunEstimate> {
-        self.estimate_run_with_options(config, crate::store::RunOptions { auto_batch, arch: None })
+        self.estimate_run_with_options(
+            config,
+            crate::store::RunOptions { auto_batch, arch: None, max_preempt_retries: None },
+        )
     }
 
     fn estimate_run_with_options(
@@ -461,7 +464,10 @@ impl Store for MockStore {
         config: TrainConfig,
         auto_batch: crate::store::AutoBatchOptions,
     ) -> Result<Run> {
-        self.create_run_with_options(config, crate::store::RunOptions { auto_batch, arch: None })
+        self.create_run_with_options(
+            config,
+            crate::store::RunOptions { auto_batch, arch: None, max_preempt_retries: None },
+        )
     }
 
     fn create_run_with_options(
@@ -470,6 +476,10 @@ impl Store for MockStore {
         mut options: crate::store::RunOptions,
     ) -> Result<Run> {
         crate::store::check_auto_batch_options(&options.auto_batch)?;
+        crate::store::check_max_preempt_retries(options.max_preempt_retries, config.compute.is_some())?;
+        if options.max_preempt_retries.is_some() {
+            return Err(Error::not_implemented("per-run cloud preemption retries"));
+        }
         if let Some(parsed) = crate::store::check_arch_override(options.arch.as_deref())? {
             config.arch = parsed;
             if !options.arch.as_deref().is_some_and(|a| a.starts_with("folo2-")) {

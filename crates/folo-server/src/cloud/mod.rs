@@ -381,6 +381,25 @@ impl Cloud {
         self.core.terminate_once(id)
     }
 
+    /// Spot preemption auto-resume status of a cloud run (`None` for local runs).
+    pub(crate) fn preemption_status(
+        &self,
+        entry: &crate::runs::RunEntry,
+    ) -> Option<crate::store::CloudPreemptionStatus> {
+        let run = entry.run();
+        if run.cloud.is_none() && run.config.compute.is_none() {
+            return None;
+        }
+        let priv_state = state::Private::load(entry.dir());
+        let max_retries = entry.max_preempt_retries().unwrap_or(self.core.tuning.max_preemption_retries);
+        Some(crate::store::CloudPreemptionStatus {
+            retries: priv_state.preemptions,
+            max_retries,
+            recovering: priv_state.recovering_preemption && run.status.is_active(),
+            preempted_instances: priv_state.prior_instance_ids,
+        })
+    }
+
     /// What a run with `compute` would execute on, checked as `POST /api/runs` checks it: the limits, the
     /// connection and the offer (read through the offers cache).
     pub(crate) fn target(&self, compute: &Compute) -> Result<(Connected, CloudOffer)> {

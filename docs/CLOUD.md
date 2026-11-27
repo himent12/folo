@@ -118,9 +118,14 @@ stopped run shows exactly where it stopped):
   checkpoint epoch, logs the preemption and retry attempt (`attempt N/3`), transitions `Run.cloud.phase` back to
   `provisioning`, waits with bounded exponential backoff (`preemption_backoff`, default `10 s`, scaling `1× / 2× / 4×`
   across retries), launches a replacement worker under the run's remaining `max_hours` deadline, and continues training
-  from `weights/last.folo`. Up to 3 automatic recoveries (`max_preemption_retries`) are attempted per run (persisted in
-  `runs/<id>/cloud.json` across restarts; a server crash during preemption recovery backoff resumes automatically on
-  restart). Automatic resume never runs after a manual termination (`DELETE /api/cloud/instances/{id}` / `folo cloud
+  from `weights/last.folo`. Up to 3 automatic recoveries (`max_preemption_retries`) are attempted per run by default,
+  and callers can override the per-run limit in `0..=20` (`0` disables automatic spot recovery) via
+  `folo train --cloud <CONNECTION_ID> --max-preempt-retries N`, MCP `train` (`max_preempt_retries`), or
+  `POST /api/runs` (`max_preempt_retries`, advertised by `cloud_spot_resume` in `/api/health` `features`; rejected on
+  local runs with `invalid_config`). Recovery state (`retries`, `max_retries`, `recovering`, `preempted_instances`) is
+  persisted in `runs/<id>/cloud.json` across restarts and surfaced as `cloud_preemption` on `GET /api/runs/{id}`, in
+  MCP `run_status`, and in `folo train --cloud` progress output; a server crash during preemption recovery backoff
+  resumes automatically on restart. Automatic resume never runs after a manual termination (`DELETE /api/cloud/instances/{id}` / `folo cloud
   terminate`), a user stop request (`POST /api/runs/{id}/stop` — a stop requested during recovery backoff cancels
   recovery immediately and ends the run `stopped` without launching a replacement), an expired `max_hours` deadline, on
   `remote` servers, or before any checkpoint has been synced. Once the retry budget is exhausted, the run fails with

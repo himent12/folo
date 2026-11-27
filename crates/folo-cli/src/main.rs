@@ -567,15 +567,19 @@ mod tests {
         let mut found = Vec::new();
         check_cmd(&Cli::command(), &mut found, "");
         assert!(found.contains(&"folo mcp".to_string()), "{found:?}");
+        assert!(found.contains(&"folo train".to_string()), "{found:?}");
         assert!(found.contains(&"folo bench catalog".to_string()), "{found:?}");
+        assert!(found.contains(&"folo bench compare".to_string()), "{found:?}");
         assert!(found.contains(&"folo label jobs".to_string()), "{found:?}");
-        // All 1 mcp + 8 bench + 12 label subcommands expose --server with FOLO_SERVER and --tls-ca with FOLO_TLS_CA.
-        assert_eq!(found.len(), 21, "{found:?}");
+        // All 1 mcp + 1 train + 9 bench + 12 label subcommands expose --server with FOLO_SERVER and --tls-ca with FOLO_TLS_CA.
+        assert_eq!(found.len(), 23, "{found:?}");
 
         // Explicit empty `--server ""` is rejected as a usage error.
         for argv in [
             &["folo", "mcp", "--server", ""][..],
+            &["folo", "train", "--data", "d", "--cloud", "cc_1", "--server", ""],
             &["folo", "bench", "catalog", "--server", ""],
+            &["folo", "bench", "compare", "bn_1", "be_1", "be_2", "--server", ""],
             &["folo", "label", "jobs", "--server", ""],
         ] {
             assert!(Cli::try_parse_from(argv).is_err(), "{argv:?} must fail");
@@ -768,6 +772,16 @@ mod tests {
             json!({ "minimum": 0, "maximum": 9_007_199_254_740_991u64 })
         );
         assert!(arg(&bench_create, "seed")["help"].as_str().unwrap().contains("[0..=9007199254740991]"));
+
+        let bench_compare =
+            describe::describe(&Cli::command(), &["bench".into(), "compare".into()], false).unwrap();
+        assert_eq!(arg(&bench_compare, "min_delta")["requires"], json!(["--fail-on-regression"]));
+
+        let train_desc = describe::describe(&Cli::command(), &["train".into()], false).unwrap();
+        assert_eq!(arg(&train_desc, "max_preempt_retries")["bounds"], json!({ "minimum": 0, "maximum": 20 }));
+        assert_eq!(arg(&train_desc, "max_preempt_retries")["requires"], json!(["--cloud"]));
+        assert_eq!(arg(&train_desc, "max_hours")["bounds"], json!({ "minimum": 0.25, "maximum": 720.0 }));
+        assert_eq!(arg(&train_desc, "disk_gb")["bounds"], json!({ "minimum": 10, "maximum": 4096 }));
     }
 
     /// Every entry in `cli::bounds::ARG_BOUNDS` matches a real numeric argument in the clap tree, has no

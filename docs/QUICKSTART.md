@@ -276,7 +276,7 @@ or, without WebGPU, on the wasm CPU (single-threaded, about 0.5 s) ([WASM.md](WA
 ## 9. From an agent
 
 Everything above is also available to agents in two ways:
-- **MCP**: `folo mcp`, with 44 tools, `folo://` resources and prompts. It keeps its datasets and runs in the same
+- **MCP**: `folo mcp`, with 45 tools, `folo://` resources and prompts. It keeps its datasets and runs in the same
   data dir as `folo serve` (`~/.folo` by default, `--data-dir` to change it), or forwards every tool to a running
   server with `--server http://127.0.0.1:7878` (or `FOLO_SERVER`). Pass `--read-only` to hide mutating tools and
   `--confine` to restrict local input paths to `--data-dir`. To register it:

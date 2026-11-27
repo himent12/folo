@@ -355,6 +355,202 @@ fn restart_during_preemption_recovery_continues_auto_resume() {
     store2.shutdown();
 }
 
+#[test]
+fn per_run_max_preempt_retries_override_and_status_surface() {
+    no_gpu();
+    let t = TestDir::new("cloud-spot-per-run");
+    let cloud = TestCloud::new(&t.join("workers"));
+    // Server default is 3, but per-run `max_preempt_retries` overrides it to 1 and 0.
+    let store = plane(&t.join("home"), &cloud, Tuning { max_preemption_retries: 3, ..fast() });
+    let ds = dataset(&store);
+    let conn = connect(&store);
+
+    // Local run rejects `max_preempt_retries`; out-of-range (> 20) is rejected too.
+    let local_cfg: TrainConfig = serde_json::from_value(serde_json::json!({
+        "dataset_id": ds.id, "epochs": 1, "imgsz": 64, "batch": 2, "device": "cpu"
+    }))
+    .unwrap();
+    let e = store
+        .create_run_with_options(
+            local_cfg,
+            folo_server::store::RunOptions { max_preempt_retries: Some(2), ..Default::default() },
+        )
+        .unwrap_err();
+    assert_eq!(e.body.code, "invalid_config");
+
+    let e = store
+        .create_run_with_options(
+            cloud_run(&ds, &conn.id, 3),
+            folo_server::store::RunOptions { max_preempt_retries: Some(21), ..Default::default() },
+        )
+        .unwrap_err();
+    assert_eq!(e.body.code, "invalid_config");
+
+    // Per-run `max_preempt_retries: Some(1)` recovers once then exhausts at attempt 1 (not server default 3).
+    cloud.hold_epochs(true);
+    let run1 = store
+        .create_run_with_options(
+            cloud_run(&ds, &conn.id, 4),
+            folo_server::store::RunOptions { max_preempt_retries: Some(1), ..Default::default() },
+        )
+        .unwrap();
+    until("run1 checkpoint synced", || run_of(&store, &run1.id).cloud.and_then(|c| c.synced));
+    let first_inst = run_of(&store, &run1.id).cloud.and_then(|c| c.instance_id).unwrap();
+    cloud.kill(0);
+
+    until("run1 replacement worker training", || {
+        (cloud.calls(Call::Launch) >= 2 && phase(&run_of(&store, &run1.id)) == CloudPhase::Training)
+            .then_some(())
+    });
+    let (_, pre1) = store.get_run_with_preemption(&run1.id).unwrap();
+    let pre1 = pre1.expect("cloud run reports preemption status");
+    assert_eq!((pre1.retries, pre1.max_retries, pre1.recovering), (1, 1, false));
+    assert_eq!(pre1.preempted_instances, vec![first_inst]);
+
+    // Second preemption exhausts the per-run limit of 1.
+    cloud.kill(1);
+    let done1 = finished(&store, &run1.id);
+    assert_eq!((done1.status, done1.error_code.as_deref()), (RunStatus::Failed, Some("cloud_instance_lost")));
+    assert!(done1.error.as_deref().unwrap().contains("exhausted all 1 attempt(s)"), "{:?}", done1.error);
+    assert_eq!(cloud.calls(Call::Launch), 2);
+
+    // Per-run `max_preempt_retries: Some(0)` disables automatic recovery on the very first preemption.
+    let run0 = store
+        .create_run_with_options(
+            cloud_run(&ds, &conn.id, 3),
+            folo_server::store::RunOptions { max_preempt_retries: Some(0), ..Default::default() },
+        )
+        .unwrap();
+    until("run0 checkpoint synced", || run_of(&store, &run0.id).cloud.and_then(|c| c.synced));
+    cloud.kill(2);
+    let done0 = finished(&store, &run0.id);
+    assert_eq!((done0.status, done0.error_code.as_deref()), (RunStatus::Failed, Some("cloud_instance_lost")));
+    let err0 = done0.error.as_deref().unwrap();
+    assert!(err0.contains("the weights copied so far stay") && !err0.contains("exhausted"), "{err0}");
+    assert_eq!(cloud.calls(Call::Launch), 3, "zero retries must not launch a replacement");
+    let (_, pre0) = store.get_run_with_preemption(&run0.id).unwrap();
+    assert_eq!(pre0.unwrap().max_retries, 0);
+
+    // HTTP `POST /api/runs` with `checkpoint` + `compute` + `max_preempt_retries: 0` forwards `0`
+    // (does not drop it back to server default 3), and `MockStore` neither advertises `cloud_spot_resume`
+    // nor accepts `max_preempt_retries`.
+    let models_dir = t.join("home").join("models");
+    std::fs::create_dir_all(&models_dir).unwrap();
+    std::fs::copy(
+        t.join("home").join("runs").join(&run0.id).join("weights").join("last.folo"),
+        models_dir.join("ckpt-spot.folo"),
+    )
+    .unwrap();
+    let ckpt_model = store
+        .list_models()
+        .unwrap()
+        .into_iter()
+        .find(|m| m.name == "ckpt-spot")
+        .expect("copied checkpoint discovered as model");
+
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let app = folo_server::Server::new(store.clone(), folo_server::Options::default()).router();
+    let (status, body) = rt.block_on(async {
+        use axum::body::Body;
+        use axum::http::Request;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let offer_id = cloud_run(&ds, &conn.id, 3).compute.unwrap().offer_id;
+        let req_body = serde_json::json!({
+            "checkpoint": ckpt_model.id,
+            "dataset_id": ds.id,
+            "epochs": 3,
+            "imgsz": 64,
+            "batch": 2,
+            "device": "auto",
+            "compute": { "connection_id": conn.id, "offer_id": offer_id },
+            "max_preempt_retries": 0
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/runs")
+            .header("host", "127.0.0.1")
+            .header("content-type", "application/json")
+            .body(Body::from(req_body.to_string()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        (status, serde_json::from_slice::<serde_json::Value>(&bytes).unwrap())
+    });
+    assert_eq!(status, axum::http::StatusCode::CREATED, "{body}");
+    let cont_id = body["id"].as_str().unwrap().to_string();
+    let (_, cont_pre) = store.get_run_with_preemption(&cont_id).unwrap();
+    assert_eq!(
+        cont_pre.unwrap().max_retries,
+        0,
+        "checkpoint continuation must preserve max_preempt_retries: 0"
+    );
+    until("continued run training", || {
+        (cloud.calls(Call::Launch) >= 4 && phase(&run_of(&store, &cont_id)) == CloudPhase::Training)
+            .then_some(())
+    });
+    cloud.kill(3);
+    let cont_done = finished(&store, &cont_id);
+    assert_eq!(
+        (cont_done.status, cont_done.error_code.as_deref()),
+        (RunStatus::Failed, Some("cloud_instance_lost"))
+    );
+    assert_eq!(
+        cloud.calls(Call::Launch),
+        4,
+        "checkpoint continuation with 0 retries must not launch a replacement"
+    );
+
+    let mock_app = folo_server::Server::new(
+        std::sync::Arc::new(folo_server::MockStore::new()),
+        folo_server::Options::default(),
+    )
+    .router();
+    let (h_body, m_status, m_body) = rt.block_on(async {
+        use axum::body::Body;
+        use axum::http::Request;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let h_req =
+            Request::builder().uri("/api/health").header("host", "127.0.0.1").body(Body::empty()).unwrap();
+        let h_resp = mock_app.clone().oneshot(h_req).await.unwrap();
+        let h_bytes = h_resp.into_body().collect().await.unwrap().to_bytes();
+        let h_body: serde_json::Value = serde_json::from_slice(&h_bytes).unwrap();
+
+        let r_body = serde_json::json!({
+            "dataset_id": "ds_001",
+            "epochs": 1,
+            "imgsz": 64,
+            "batch": 2,
+            "compute": { "connection_id": "cc_1", "offer_id": "o1" },
+            "max_preempt_retries": 0
+        });
+        let r_req = Request::builder()
+            .method("POST")
+            .uri("/api/runs")
+            .header("host", "127.0.0.1")
+            .header("content-type", "application/json")
+            .body(Body::from(r_body.to_string()))
+            .unwrap();
+        let r_resp = mock_app.oneshot(r_req).await.unwrap();
+        let m_status = r_resp.status();
+        let m_bytes = r_resp.into_body().collect().await.unwrap().to_bytes();
+        (h_body, m_status, serde_json::from_slice::<serde_json::Value>(&m_bytes).unwrap())
+    });
+    let mock_features: Vec<&str> =
+        h_body["features"].as_array().unwrap().iter().filter_map(|v| v.as_str()).collect();
+    assert!(
+        !mock_features.contains(&folo_server::store::FEATURE_CLOUD_SPOT_RESUME),
+        "MockStore must not advertise cloud_spot_resume: {mock_features:?}"
+    );
+    assert_eq!(m_status, axum::http::StatusCode::NOT_IMPLEMENTED, "{m_body}");
+    assert_eq!(m_body["error"]["code"], "not_implemented");
+    store.shutdown();
+}
+
 fn copy_dir_without_locks(src: &std::path::Path, dst: &std::path::Path) {
     std::fs::create_dir_all(dst).unwrap();
     for entry in std::fs::read_dir(src).unwrap() {

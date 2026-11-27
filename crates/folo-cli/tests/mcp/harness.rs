@@ -248,7 +248,7 @@ pub(super) fn tmp_dir(name: &str) -> TestDir {
     TestDir::new(&format!("mcp-test-{name}"))
 }
 
-pub(super) const ALL_TOOLS: [&str; 44] = [
+pub(super) const ALL_TOOLS: [&str; 45] = [
     "folo_info",
     "list_datasets",
     "get_dataset",
@@ -293,11 +293,12 @@ pub(super) const ALL_TOOLS: [&str; 44] = [
     "start_bench_entry",
     "bench_entry",
     "stop_bench_entry",
+    "compare_bench_entries",
 ];
 
 /// The most `tools/list` may take, and the benchmark tools of it, in bytes (docs/MCP.md states what they take).
-const TOTAL_BYTES: usize = 108 * 1024;
-const BENCH_BYTES: usize = 11 * 1024;
+const TOTAL_BYTES: usize = 116 * 1024;
+const BENCH_BYTES: usize = 13 * 1024;
 
 /// `tools/list` with schema checks; returns `name -> outputSchema`.
 pub(super) fn check_tools(c: &mut Client, expected: &[&str]) -> std::collections::HashMap<String, Value> {

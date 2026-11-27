@@ -39,6 +39,14 @@ pub const FEATURE_FOLO2_ARCH: &str = "folo2_arch";
 /// Server capability flag advertised on `/api/health` and `/api/system` when `POST /api/val` returns calibrated
 /// per-class F1 thresholds (`thresholds`) and `POST /api/predict` honours `per_class_conf` / `conf_inclusive`.
 pub const FEATURE_THRESHOLD_CALIBRATION: &str = "threshold_calibration";
+/// Server capability flag advertised on `/api/health` and `/api/system` when `POST /api/runs` honours per-run
+/// cloud spot preemption retry limits (`max_preempt_retries`) and `GET /api/runs/{id}` reports `cloud_preemption`.
+pub const FEATURE_CLOUD_SPOT_RESUME: &str = "cloud_spot_resume";
+
+/// Default maximum automatic spot preemption recovery attempts per cloud run.
+pub const DEFAULT_MAX_PREEMPT_RETRIES: u32 = 3;
+/// Upper bound on per-run `max_preempt_retries` (`0..=20`, where `0` disables automatic preemption recovery).
+pub const MAX_PREEMPT_RETRIES: u32 = 20;
 
 /// Maximum SAHI tiles permitted in a single server/MCP `predict` call (prevents resource exhaustion on tiny tiles).
 pub const MAX_PREDICT_TILES: usize = 256;
@@ -192,13 +200,52 @@ pub struct RunOptions {
     pub auto_batch: AutoBatchOptions,
     /// Optional architecture override when training a FOLO v2-Iso model (`"folo2-n"`..`"folo2-x"`).
     pub arch: Option<String>,
+    /// Optional per-run override for cloud spot/preemption auto-resume attempts (`0..=20`, cloud runs only).
+    pub max_preempt_retries: Option<u32>,
 }
 
 impl RunOptions {
-    /// True when neither auto-batch nor a `folo2-*` architecture override is set.
+    /// True when no extra run options (auto-batch, `folo2-*` arch, or `max_preempt_retries`) are set.
     pub fn is_default(&self) -> bool {
-        self.auto_batch.is_default() && self.arch.is_none()
+        self.auto_batch.is_default() && self.arch.is_none() && self.max_preempt_retries.is_none()
     }
+}
+
+/// Spot preemption auto-resume status of a cloud training run, reported alongside [`folo_api::Run`] on
+/// `GET /api/runs/{id}` and MCP `run_status` without altering `folo-api` wire types.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CloudPreemptionStatus {
+    /// Automatic preemption recovery attempts already started for this run.
+    pub retries: u32,
+    /// Configured maximum automatic preemption recovery attempts for this run (`0` disables auto-resume).
+    pub max_retries: u32,
+    /// True while the run has released a preempted worker and is waiting to provision its replacement.
+    pub recovering: bool,
+    /// Ledger ids of earlier instances replaced after preemption, oldest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub preempted_instances: Vec<String>,
+}
+
+/// Validates `max_preempt_retries` (`0..=20`, cloud compute only; `400 invalid_config` otherwise).
+pub fn check_max_preempt_retries(retries: Option<u32>, has_compute: bool) -> Result<()> {
+    let Some(n) = retries else { return Ok(()) };
+    if !has_compute {
+        return Err(Error::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_config",
+            "max_preempt_retries is only valid for cloud runs (set `compute` alongside it)",
+        )
+        .hint("omit `max_preempt_retries` for local training, or pass `compute` to train on cloud"));
+    }
+    if n > MAX_PREEMPT_RETRIES {
+        return Err(Error::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_config",
+            format!("max_preempt_retries must be in 0..={MAX_PREEMPT_RETRIES}, got {n}"),
+        )
+        .hint("pick a value in 0..=20 (0 disables automatic preemption recovery)"));
+    }
+    Ok(())
 }
 
 /// Parses an architecture name accepted by `POST /api/runs`, `POST /api/runs/estimate`, and MCP `train`:

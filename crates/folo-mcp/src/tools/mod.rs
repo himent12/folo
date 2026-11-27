@@ -72,7 +72,7 @@ impl SchemaCache {
 /// Every tool, in the order of docs/MCP.md.
 pub static TOOLS: &[ToolDef] = &TOOL_TABLE;
 
-static TOOL_TABLE: [ToolDef; 44] = [
+static TOOL_TABLE: [ToolDef; 45] = [
     ToolDef {
         name: "folo_info",
         description: "FOLO version, compute devices (CPU, GPUs), data dir, read-only flag and the model scales \
@@ -451,6 +451,16 @@ static TOOL_TABLE: [ToolDef; 44] = [
         output: terse_output::<BenchEntryBrief>,
         schemas: SchemaCache::new(),
     },
+    ToolDef {
+        name: "compare_bench_entries",
+        description: "Compares two finished entries of a benchmark head-to-head: overall score delta, \
+                      per-axis deltas, accuracy deltas with 95% CI overlap, speed delta, and per-condition \
+                      robustness deltas.",
+        mutating: false,
+        input: terse_input::<CompareBenchEntriesArgs>,
+        output: terse_output::<BenchCompareResult>,
+        schemas: SchemaCache::new(),
+    },
 ];
 
 impl ToolDef {
@@ -517,6 +527,8 @@ pub fn describe() -> Value {
     )
 }
 
+#[cfg(test)]
+mod bench_compare_tests;
 #[cfg(test)]
 mod bench_tests;
 #[cfg(test)]

@@ -16,15 +16,16 @@ use super::entry::status_event;
 use super::{RunEntry, RunState, Runs, add_paused, mark_resume};
 
 impl Runs {
-    /// What `POST /api/runs` with `resume_run_id` asks of a `stopped` or `failed` run: the run, and its config with
-    /// the request's `fields` (the body's other fields), which must each equal the run's config (an empty `name`
-    /// counts as omitted), except `device` and `compute`, which may change. Nothing changes yet: [`Runs::resume`]
-    /// (on this machine) or [`Runs::resume_cloud`] does.
+    /// What `POST /api/runs` with `resume_run_id` asks of a `stopped` or `failed` run: the run, its config with
+    /// the request's `fields` (the body's other fields), and any optional `max_preempt_retries` override.
+    /// Every field must equal the run's config (an empty `name` counts as omitted), except `device`, `compute`,
+    /// and `max_preempt_retries`, which may change. Nothing changes yet: [`Runs::resume`] (on this machine) or
+    /// [`Runs::resume_cloud`] does.
     pub fn resume_config(
         &self,
         id: &str,
         fields: &serde_json::Map<String, serde_json::Value>,
-    ) -> Result<(Arc<RunEntry>, TrainConfig)> {
+    ) -> Result<(Arc<RunEntry>, TrainConfig, Option<Option<u32>>)> {
         self.check_open()?;
         let e = self.get(id)?;
         let st = e.state.lock().unwrap();
@@ -35,6 +36,7 @@ impl Runs {
             crate::store::effective_arch(stored.arch, st.file.arch_override.as_deref()).to_string();
         let mut merged = serde_json::to_value(&stored).expect("configs serialize");
         let mut extra_differ: Vec<&str> = Vec::new();
+        let mut max_preempt_retries_update: Option<Option<u32>> = None;
         let auto_batch_flag = match fields.get("auto_batch").filter(|v| !v.is_null()) {
             None => None,
             Some(v) => Some(v.as_bool().ok_or_else(|| {
@@ -48,6 +50,21 @@ impl Runs {
         }
         for (k, v) in fields {
             if k == "resume_run_id" || k == "auto_batch" || (k == "name" && v.as_str() == Some("")) {
+                continue;
+            }
+            if k == "max_preempt_retries" {
+                if v.is_null() {
+                    max_preempt_retries_update = Some(None);
+                    continue;
+                }
+                let Some(n) = v.as_u64().and_then(|n| u32::try_from(n).ok()) else {
+                    return Err(Error::new(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        "invalid_body",
+                        "max_preempt_retries: expected a non-negative integer",
+                    ));
+                };
+                max_preempt_retries_update = Some(Some(n));
                 continue;
             }
             if k == "arch" {
@@ -131,8 +148,11 @@ impl Runs {
             return Err(Error::not_found("dataset", &st.file.dataset.id)
                 .hint(format!("the run's dataset is gone from {}", st.file.dataset.path)));
         }
+        if let Some(Some(n)) = max_preempt_retries_update {
+            crate::store::check_max_preempt_retries(Some(n), wanted.compute.is_some())?;
+        }
         drop(st);
-        Ok((e, wanted))
+        Ok((e, wanted, max_preempt_retries_update))
     }
 
     /// Resumes run `e` on this machine with `wanted` ([`Runs::resume_config`]): from `weights/last.folo` when it
@@ -153,7 +173,7 @@ impl Runs {
             );
             return Err(err);
         }
-        let (_, attempt) = self.restart(e, wanted, None)?;
+        let (_, attempt) = self.restart(e, wanted, None, Some(None))?;
         self.enqueue(e, attempt)?;
         self.record(e)
     }
@@ -165,8 +185,9 @@ impl Runs {
         e: &Arc<RunEntry>,
         wanted: TrainConfig,
         cloud: RunCloud,
+        max_preempt_retries: Option<Option<u32>>,
     ) -> Result<Run> {
-        let (run, _) = self.restart(e, wanted, Some(cloud))?;
+        let (run, _) = self.restart(e, wanted, Some(cloud), max_preempt_retries)?;
         Ok(run)
     }
 
@@ -177,6 +198,7 @@ impl Runs {
         e: &Arc<RunEntry>,
         wanted: TrainConfig,
         cloud: Option<RunCloud>,
+        max_preempt_retries: Option<Option<u32>>,
     ) -> Result<(Run, u64)> {
         let mut st = e.state.lock().unwrap();
         resumable(&st, &e.id)?;
@@ -223,7 +245,10 @@ impl Runs {
             }
             file.resumed_at = Some(at);
         }
-        let r = &mut st.file.run;
+        if let Some(updated_retries) = max_preempt_retries {
+            file.max_preempt_retries = updated_retries;
+        }
+        let r = &mut file.run;
         r.epoch = resume_epoch;
         r.step = if resume_epoch == 0 {
             0
@@ -457,7 +482,7 @@ mod tests {
         let cfg: TrainConfig =
             serde_json::from_value(serde_json::json!({ "dataset_id": "ds_1", "batch": 24 })).unwrap();
         let ab = AutoBatchOptions { enabled: true, target_utilization: Some(0.75) };
-        let opts = crate::store::RunOptions { auto_batch: ab, arch: None };
+        let opts = crate::store::RunOptions { auto_batch: ab, arch: None, max_preempt_retries: None };
         let entry =
             runs.register_with_options(cfg, dataset, None, None, 0, "cpu".into(), None, opts).unwrap();
         {
@@ -540,7 +565,7 @@ mod tests {
             format: ds.format,
             classes: ds.classes.clone(),
         };
-        let opts = crate::store::RunOptions { auto_batch: ab, arch: None };
+        let opts = crate::store::RunOptions { auto_batch: ab, arch: None, max_preempt_retries: None };
         let unqueued = store
             .runs_for_test()
             .register_with_options(cfg.clone(), dataset, None, None, 0, "cpu".into(), None, opts)

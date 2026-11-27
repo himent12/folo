@@ -272,6 +272,13 @@ pub const TRAIN_LR0: NumericBounds = NumericBounds::float_range(0.0, false, 10.0
 pub const TRAIN_LRF: NumericBounds = NumericBounds::float_range(0.0, false, 1.0, true);
 /// `folo train --scale`.
 pub const TRAIN_SCALE: NumericBounds = NumericBounds::float_range(0.0, true, 1.0, false);
+/// `folo train --cloud --max-hours`.
+pub const CLOUD_MAX_HOURS: NumericBounds = NumericBounds::float_range(0.25, true, 720.0, true);
+/// `folo train --cloud --disk-gb`.
+pub const CLOUD_DISK_GB: NumericBounds = NumericBounds::int_range(10, 4096);
+/// `folo train --cloud --max-preempt-retries`.
+pub const CLOUD_MAX_PREEMPT_RETRIES: NumericBounds =
+    NumericBounds::int_range(0, folo_server::store::MAX_PREEMPT_RETRIES as u64);
 
 /// `folo quantize --tail` (open interval `(0, 0.5)`).
 pub const QUANTIZE_TAIL: NumericBounds = NumericBounds::float_range(0.0, false, 0.5, false);
@@ -327,6 +334,9 @@ pub const ARG_BOUNDS: &[(&str, &str, NumericBounds)] = &[
     ("folo train", "fliplr", UNIT_INTERVAL),
     ("folo train", "scale", TRAIN_SCALE),
     ("folo train", "translate", NON_NEGATIVE_FLOAT),
+    ("folo train", "max_hours", CLOUD_MAX_HOURS),
+    ("folo train", "disk_gb", CLOUD_DISK_GB),
+    ("folo train", "max_preempt_retries", CLOUD_MAX_PREEMPT_RETRIES),
     // `folo val`
     ("folo val", "batch", POSITIVE_INT),
     ("folo val", "imgsz", VAL_IMGSZ),
@@ -433,6 +443,11 @@ pub const ARG_REQUIRES: &[(&str, &str, &[&str])] = &[
     ("folo bench create", "classes", &["generated"]),
     ("folo bench create", "imgsz", &["generated"]),
     ("folo bench create", "vary_aspect", &["generated"]),
+    ("folo bench compare", "min_delta", &["fail_on_regression"]),
+    ("folo train", "offer", &["cloud"]),
+    ("folo train", "max_hours", &["cloud"]),
+    ("folo train", "disk_gb", &["cloud"]),
+    ("folo train", "max_preempt_retries", &["cloud"]),
 ];
 
 /// Looks up the peer argument ids required whenever `(cmd_path, arg_id)` is supplied.

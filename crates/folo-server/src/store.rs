@@ -24,16 +24,17 @@ use crate::error::Result;
 #[path = "store_diag.rs"]
 mod diag;
 pub use diag::{
-    AutoBatchOptions, ClassThreshold, DEFAULT_TTA_SCALES, DEFAULT_VAL_DIAG_BG_IOU, DEFAULT_VAL_DIAG_CONF,
-    DEFAULT_VAL_DIAG_TP_IOU, DEFAULT_VAL_DIAG_WORST, DynamicAxes, FEATURE_BENCH_GENERATED_SOURCE,
-    FEATURE_BENCH_UPLOAD_SAFE, FEATURE_EXPORT_DYNAMIC_AXES, FEATURE_FOLO2_ARCH, FEATURE_PREDICT_OPTIONS,
-    FEATURE_THRESHOLD_CALIBRATION, FEATURE_TRAIN_AUTO_BATCH, FEATURE_VAL_DIAGNOSTICS, ImageDiagnostics,
-    MAX_PREDICT_CROP_BYTES, MAX_PREDICT_TILE_BATCH, MAX_PREDICT_TILES, MAX_PREDICT_TTA_VIEWS,
+    AutoBatchOptions, ClassThreshold, CloudPreemptionStatus, DEFAULT_MAX_PREEMPT_RETRIES, DEFAULT_TTA_SCALES,
+    DEFAULT_VAL_DIAG_BG_IOU, DEFAULT_VAL_DIAG_CONF, DEFAULT_VAL_DIAG_TP_IOU, DEFAULT_VAL_DIAG_WORST,
+    DynamicAxes, FEATURE_BENCH_GENERATED_SOURCE, FEATURE_BENCH_UPLOAD_SAFE, FEATURE_CLOUD_SPOT_RESUME,
+    FEATURE_EXPORT_DYNAMIC_AXES, FEATURE_FOLO2_ARCH, FEATURE_PREDICT_OPTIONS, FEATURE_THRESHOLD_CALIBRATION,
+    FEATURE_TRAIN_AUTO_BATCH, FEATURE_VAL_DIAGNOSTICS, ImageDiagnostics, MAX_PREDICT_CROP_BYTES,
+    MAX_PREDICT_TILE_BATCH, MAX_PREDICT_TILES, MAX_PREDICT_TTA_VIEWS, MAX_PREEMPT_RETRIES,
     MAX_VAL_DIAG_WORST, OperatingPoint, PredictOptions, RunOptions, ThresholdCalibration, TileConfig,
     TileMergeMetric, TtaConfig, ValDiagConfig, ValDiagnostics, ValDiagnosticsSummary, ValExtended,
-    check_arch_override, check_auto_batch_options, check_export_axes, check_per_class_conf,
-    check_predict_options, check_predict_workload, check_val_diag_config, default_run_name_for_arch,
-    effective_arch, parse_arch_override, validate_per_class_conf,
+    check_arch_override, check_auto_batch_options, check_export_axes, check_max_preempt_retries,
+    check_per_class_conf, check_predict_options, check_predict_workload, check_val_diag_config,
+    default_run_name_for_arch, effective_arch, parse_arch_override, validate_per_class_conf,
 };
 
 /// Filter and page of `GET /api/datasets/{id}/images`.
@@ -645,20 +646,23 @@ pub trait Store: Send + Sync + 'static {
         }
         Err(crate::error::Error::not_implemented("auto-batch training"))
     }
-    /// Starts a run with optional auto-batch and `folo2-*` architecture override (`options`).
-    /// When `options.arch` is `None` (or a v1 `folo-*` scale), delegates to [`Store::create_run_with_auto_batch`].
+    /// Starts a run with optional auto-batch, `folo2-*` architecture override, and cloud spot preemption retries.
     fn create_run_with_options(&self, mut config: TrainConfig, mut options: RunOptions) -> Result<Run> {
         check_auto_batch_options(&options.auto_batch)?;
+        check_max_preempt_retries(options.max_preempt_retries, config.compute.is_some())?;
         if let Some(parsed) = check_arch_override(options.arch.as_deref())? {
             config.arch = parsed;
             if !options.arch.as_deref().is_some_and(|a| a.starts_with("folo2-")) {
                 options.arch = None;
             }
         }
-        if options.arch.is_none() {
+        if options.arch.is_none() && options.max_preempt_retries.is_none() {
             return self.create_run_with_auto_batch(config, options.auto_batch);
         }
-        Err(crate::error::Error::not_implemented("folo2 architectures"))
+        if options.arch.is_some() {
+            return Err(crate::error::Error::not_implemented("folo2 architectures"));
+        }
+        Err(crate::error::Error::not_implemented("per-run cloud preemption retries"))
     }
     /// Resumes a `stopped` or `failed` run (same id) from its last checkpoint: `POST /api/runs` with
     /// `resume_run_id`. `fields` are the body's other fields, which must match the run's config (`device` may
@@ -675,8 +679,26 @@ pub trait Store: Send + Sync + 'static {
         let _ = (checkpoint, config);
         Err(crate::error::Error::not_implemented("continuing a checkpoint"))
     }
+    /// Like [`Store::continue_run`], forwarding per-run [`RunOptions`] such as `max_preempt_retries` for cloud
+    /// checkpoint continuations.
+    fn continue_run_with_options(
+        &self,
+        checkpoint: &str,
+        config: TrainConfig,
+        options: RunOptions,
+    ) -> Result<Run> {
+        check_max_preempt_retries(options.max_preempt_retries, config.compute.is_some())?;
+        if options.max_preempt_retries.is_some() {
+            return Err(crate::error::Error::not_implemented("per-run cloud preemption retries"));
+        }
+        self.continue_run(checkpoint, config)
+    }
     /// One run.
     fn get_run(&self, id: &str) -> Result<Run>;
+    /// One run together with its cloud spot preemption auto-resume status, if it is a cloud run.
+    fn get_run_with_preemption(&self, id: &str) -> Result<(Run, Option<CloudPreemptionStatus>)> {
+        Ok((self.get_run(id)?, None))
+    }
     /// `GET /api/runs/{id}/cli`: the `folo train` command of the run's config on this machine
     /// ([`crate::cli::train_command`]). Stores without one answer `501 not_implemented` (the default).
     fn run_cli(&self, id: &str) -> Result<CliCommand> {

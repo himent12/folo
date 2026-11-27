@@ -65,7 +65,14 @@ fn features(st: &AppState) -> Vec<String> {
         .collect()
 }
 
-pub(super) async fn system(State(st): State<AppState>) -> Result<Json<SystemResponse>> {
+#[derive(Debug, serde::Serialize)]
+pub(super) struct SystemWithSimd {
+    #[serde(flatten)]
+    base: SystemResponse,
+    cpu_simd: crate::system::CpuSimd,
+}
+
+pub(super) async fn system(State(st): State<AppState>) -> Result<Json<SystemWithSimd>> {
     let prepare = st.clone();
     st.system_ready.ready(move || prepare_system(prepare)).await?;
     let probe = st.probe.clone();
@@ -79,13 +86,14 @@ pub(super) async fn system(State(st): State<AppState>) -> Result<Json<SystemResp
     .map_err(|e| Error::internal(format!("task failed: {e}")))?;
     let data_dir = st.store.data_dir().map(folo_api::json::path);
     let features = features(&st);
-    Ok(Json(SystemResponse {
+    let base = SystemResponse {
         system: SystemInfo { cpu, memory, gpus },
         data_dir,
         features,
         capabilities,
         gpu_pool,
-    }))
+    };
+    Ok(Json(SystemWithSimd { base, cpu_simd: crate::system::cpu_simd() }))
 }
 
 /// The slow parts of the first `/api/system`, side by side, each a blocking task of its own: creating the GPU device
@@ -251,7 +259,8 @@ mod tests {
             .expect("every call answers");
             for a in answers {
                 let Json(r) = a.unwrap_or_else(|e| panic!("{e:?}"));
-                assert!(r.system.cpu.threads >= 1 && r.capabilities.is_some());
+                assert!(r.base.system.cpu.threads >= 1 && r.base.capabilities.is_some());
+                assert!(!r.cpu_simd.int8_kernel.is_empty());
             }
             assert_eq!(st.probe.warm_ups.load(Ordering::SeqCst), 1);
             for _ in 0..3 {
@@ -282,7 +291,8 @@ mod tests {
             .expect("second call answered")
             .unwrap()
             .unwrap_or_else(|e| panic!("{e:?}"));
-        assert!(r.system.cpu.threads >= 1 && r.capabilities.is_some());
+        assert!(r.base.system.cpu.threads >= 1 && r.base.capabilities.is_some());
+        assert!(!r.cpu_simd.int8_kernel.is_empty());
         assert_eq!(st.probe.warm_ups.load(Ordering::SeqCst), 1, "prepared once");
     }
 
