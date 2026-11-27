@@ -139,16 +139,55 @@ fn duration(secs: f64) -> String {
     }
 }
 
+/// Structured JSON summary of auto-batch sizing (`Some` whenever `cfg.auto_batch` is enabled, covering live GPU
+/// probing, checkpoint resume reuse, and CPU fallback).
+pub(super) fn auto_batch_json(
+    cfg: &TrainConfig,
+    plan: Option<&folo_vision::train::AutoBatchPlan>,
+    accumulate: usize,
+    resumed: bool,
+) -> Option<serde_json::Value> {
+    if !cfg.auto_batch {
+        return None;
+    }
+    if let Some(plan) = plan {
+        let mut v = serde_json::to_value(plan).expect("AutoBatchPlan serializes");
+        if let Some(obj) = v.as_object_mut() {
+            obj.insert("probed".into(), json!(true));
+        }
+        Some(v)
+    } else if resumed {
+        Some(json!({
+            "probed": false,
+            "resumed": true,
+            "chosen_batch": cfg.batch,
+            "grad_accum": accumulate,
+            "effective_batch": cfg.batch.saturating_mul(accumulate),
+            "target_utilization": cfg.auto_batch_target,
+        }))
+    } else {
+        Some(json!({
+            "probed": false,
+            "fallback": "cpu",
+            "chosen_batch": cfg.batch,
+            "grad_accum": accumulate,
+            "effective_batch": cfg.batch.saturating_mul(accumulate),
+            "target_utilization": cfg.auto_batch_target,
+        }))
+    }
+}
+
 pub(super) fn finish(
     s: &TrainSummary,
     run_dir: &Path,
     cfg: &TrainConfig,
     resolved: &folo_api::ResolvedTrain,
+    auto_batch: Option<&serde_json::Value>,
     out: Out,
 ) {
     let best_metrics = recover_best_metrics(s, run_dir);
     let path = |p: &Option<PathBuf>| p.as_ref().map(folo_api::json::path);
-    out.record(&json!({
+    let mut done = json!({
         "event": "done",
         "status": s.status,
         "run_dir": folo_api::json::path(run_dir),
@@ -159,7 +198,11 @@ pub(super) fn finish(
         "best_metrics": best_metrics,
         "weights": { "best": path(&s.best_weights), "last": path(&s.last) },
         "resolved": resolved,
-    }));
+    });
+    if let (Some(ab), Some(obj)) = (auto_batch, done.as_object_mut()) {
+        obj.insert("auto_batch".into(), ab.clone());
+    }
+    out.record(&done);
     let verb = match s.status {
         RunStatus::Stopped => "Stopped",
         _ if s.early_stopped => "Stopped early",
@@ -376,5 +419,33 @@ mod tests {
         // Missing `metrics.jsonl` falls back to the trainer's summary cleanly.
         let empty = TestDir::new("cli-recover-best-metrics-missing");
         assert!(recover_best_metrics(&summary, empty.path()).unwrap().per_class.is_empty());
+    }
+
+    #[test]
+    fn auto_batch_json_distinguishes_resume_from_cpu_fallback() {
+        let mut cfg = TrainConfig::default();
+        assert!(auto_batch_json(&cfg, None, 1, false).is_none());
+        cfg.auto_batch = true;
+        cfg.batch = 8;
+        cfg.auto_batch_target = 0.75;
+
+        let cpu = auto_batch_json(&cfg, None, 8, false).unwrap();
+        assert_eq!(cpu["probed"], false);
+        assert_eq!(cpu["fallback"], "cpu");
+        assert!(cpu.get("resumed").is_none());
+        assert_eq!(cpu["chosen_batch"], 8);
+        assert_eq!(cpu["grad_accum"], 8);
+        assert_eq!(cpu["effective_batch"], 64);
+
+        let resumed = auto_batch_json(&cfg, None, 8, true).unwrap();
+        assert_eq!(resumed["probed"], false);
+        assert_eq!(resumed["resumed"], true);
+        assert!(
+            resumed.get("fallback").is_none(),
+            "resumed auto-batch must not claim CPU fallback: {resumed}"
+        );
+        assert_eq!(resumed["chosen_batch"], 8);
+        assert_eq!(resumed["grad_accum"], 8);
+        assert_eq!(resumed["effective_batch"], 64);
     }
 }

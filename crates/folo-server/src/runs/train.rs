@@ -52,11 +52,11 @@ impl Measure {
 
 /// Trains one run on the worker thread.
 pub(super) fn execute(e: &Arc<RunEntry>, throughput: &Arc<Throughput>, hold: &Arc<EpochHold>) {
-    let (config, dataset, weights) = {
+    let (config, dataset, weights, auto_batch) = {
         let st = e.state.lock().unwrap();
-        (st.file.run.config.clone(), st.file.dataset.clone(), st.file.weights.clone())
+        (st.file.run.config.clone(), st.file.dataset.clone(), st.file.weights.clone(), st.file.auto_batch)
     };
-    let trainer = build(e, &config, &dataset, weights, hold);
+    let trainer = build(e, &config, &dataset, weights, auto_batch, hold);
     let mut trainer = match trainer {
         Ok(t) => t,
         Err((code, msg)) => {
@@ -70,6 +70,7 @@ pub(super) fn execute(e: &Arc<RunEntry>, throughput: &Arc<Throughput>, hold: &Ar
             return;
         }
     };
+    let actual_batch = trainer.config().batch as u32;
     {
         let mut st = e.state.lock().unwrap();
         st.file.run.steps_per_epoch = trainer.batches_per_epoch() as u64;
@@ -90,7 +91,7 @@ pub(super) fn execute(e: &Arc<RunEntry>, throughput: &Arc<Throughput>, hold: &Ar
             device: engine::device_id(device),
             arch: config.arch,
             imgsz: config.imgsz,
-            batch: config.batch,
+            batch: actual_batch,
             amp: config.amp,
         },
         train_images,
@@ -119,6 +120,7 @@ fn build(
     config: &TrainConfig,
     dataset: &DatasetRef,
     weights: Option<PathBuf>,
+    auto_batch: crate::store::AutoBatchOptions,
     hold: &Arc<EpochHold>,
 ) -> std::result::Result<Trainer, (String, String)> {
     let device =
@@ -160,6 +162,12 @@ fn build(
         cfg.device = device.to_string();
         cfg.dataset = dataset.id.clone();
         cfg.data_format = format;
+        if auto_batch.enabled {
+            cfg.auto_batch = true;
+            if let Some(target) = auto_batch.target_utilization {
+                cfg.auto_batch_target = target;
+            }
+        }
         Trainer::new(cfg, data, opts)
     };
     t.map_err(|err| (err.code().to_string(), err.summary()))

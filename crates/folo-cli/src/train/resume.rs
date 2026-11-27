@@ -198,7 +198,36 @@ pub(super) fn check_resume_flags(args: &TrainArgs, stored: &TrainConfig) -> Resu
             "model" => (field("arch"), json!(args.model)),
             "name" => (field("name"), json!(args.name)),
             "epochs" => (field("epochs"), json!(args.epochs)),
-            "batch" => (field("batch"), json!(args.batch)),
+            "batch" => match args.batch {
+                crate::cli::BatchArg::Auto => {
+                    if stored.auto_batch {
+                        (json!("auto"), json!("auto"))
+                    } else {
+                        (field("batch"), json!("auto"))
+                    }
+                }
+                crate::cli::BatchArg::Fixed(n) => (field("batch"), json!(n)),
+            },
+            "auto_batch_target" => {
+                if let Some(t) = args.auto_batch_target
+                    && !crate::cli::bounds::TRAIN_AUTO_BATCH_TARGET.contains_f64(t)
+                {
+                    return Err(CliError::new(
+                        ExitCode::Usage,
+                        "invalid_config",
+                        format!(
+                            "--auto-batch-target must be finite in {}..={}, got {t}",
+                            folo_vision::train::MIN_AUTO_BATCH_UTILIZATION,
+                            folo_vision::train::MAX_AUTO_BATCH_UTILIZATION
+                        ),
+                    ));
+                }
+                if !stored.auto_batch {
+                    (json!(null), json!(args.auto_batch_target))
+                } else {
+                    (field("auto_batch_target"), json!(args.auto_batch_target))
+                }
+            }
             "imgsz" => (field("imgsz"), json!(args.imgsz)),
             "optimizer" => (field("optimizer"), json!(format!("{:?}", args.optimizer).to_lowercase())),
             "lr0" => (field("lr0"), json!(folo_vision::train::f32_decimal(args.lr0))),
@@ -226,8 +255,9 @@ pub(super) fn check_resume_flags(args: &TrainArgs, stored: &TrainConfig) -> Resu
             }
             _ => continue,
         };
-        // `--lrf` and `--warmup-epochs` are f64 settings: compared exactly; the rest are integers or f32s.
-        let f32_setting = !matches!(id.as_str(), "lrf" | "warmup_epochs");
+        // `--lrf`, `--warmup-epochs`, and `--auto-batch-target` are f64 settings: compared exactly; the rest are
+        // integers or f32s.
+        let f32_setting = !matches!(id.as_str(), "lrf" | "warmup_epochs" | "auto_batch_target");
         if !same(&stored_value, &given, f32_setting) {
             let flag = format!("--{}", id.replace('_', "-"));
             return Err(CliError::new(

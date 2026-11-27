@@ -404,7 +404,11 @@ mod tests {
         let Command::Train(t) = cli.command else { panic!() };
         let c: folo_server::api::TrainConfig = serde_json::from_str(r#"{"dataset_id":"d"}"#).unwrap();
         assert_eq!(t.model, c.arch.as_str());
-        assert_eq!((t.epochs, t.batch, t.imgsz, t.seed), (c.epochs, c.batch, c.imgsz, c.seed));
+        assert_eq!(
+            (t.epochs, t.batch.fixed_or_default(), t.imgsz, t.seed),
+            (c.epochs, c.batch, c.imgsz, c.seed)
+        );
+        assert!(!t.batch.is_auto());
         assert_eq!((t.device.as_str(), t.lr0), (c.device.as_str(), c.lr0));
         let a = c.augment;
         assert_eq!(
@@ -635,12 +639,27 @@ mod tests {
                 "name": "source",
                 "required": true,
                 "exclusive": true,
-                "args": ["--dataset", "--data", "--label-job"]
+                "args": ["--dataset", "--data", "--label-job", "--generated"]
             }])
         );
-        assert_eq!(arg(&bcreate, "dataset")["conflicts_with"], json!(["--data", "--label-job"]));
-        assert_eq!(arg(&bcreate, "data")["conflicts_with"], json!(["--dataset", "--label-job"]));
-        assert_eq!(arg(&bcreate, "label_job")["conflicts_with"], json!(["--data", "--dataset"]));
+        assert_eq!(
+            arg(&bcreate, "dataset")["conflicts_with"],
+            json!(["--data", "--generated", "--label-job"])
+        );
+        assert_eq!(
+            arg(&bcreate, "data")["conflicts_with"],
+            json!(["--dataset", "--generated", "--label-job"])
+        );
+        assert_eq!(
+            arg(&bcreate, "label_job")["conflicts_with"],
+            json!(["--data", "--dataset", "--generated", "--split"])
+        );
+        assert_eq!(
+            arg(&bcreate, "generated")["conflicts_with"],
+            json!(["--data", "--dataset", "--label-job", "--split"])
+        );
+        assert_eq!(arg(&bcreate, "split")["conflicts_with"], json!(["--generated", "--label-job"]));
+        assert_eq!(arg(&bcreate, "generated")["aliases"], json!(["--synthetic"]));
 
         // `dataset check`: `warn` alias on `warning` enum value.
         let dcheck = describe::describe(&Cli::command(), &["dataset".into(), "check".into()], false).unwrap();
@@ -711,7 +730,8 @@ mod tests {
 
         let train = describe::describe(&Cli::command(), &["train".into()], false).unwrap();
         assert_eq!(arg(&train, "epochs")["bounds"], json!({ "minimum": 1, "maximum": 10_000 }));
-        assert_eq!(arg(&train, "batch")["bounds"], json!({ "minimum": 1, "maximum": 1024 }));
+        assert_eq!(arg(&train, "batch")["default"], json!("16"));
+        assert_eq!(arg(&train, "auto_batch_target")["bounds"], json!({ "minimum": 0.25, "maximum": 0.95 }));
         assert_eq!(
             arg(&train, "imgsz")["bounds"],
             json!({ "minimum": 64, "maximum": 4096, "multiple_of": 32 })
@@ -736,9 +756,12 @@ mod tests {
         );
         assert_eq!(arg(&quantize, "images")["bounds"], json!({ "minimum": 1 }));
         assert_eq!(arg(&quantize, "batch")["bounds"], json!({ "minimum": 1 }));
+        assert_eq!(arg(&quantize, "max_f32_macs")["bounds"], json!({ "minimum": 0.0, "maximum": 1.0 }));
 
         let bench_create =
             describe::describe(&Cli::command(), &["bench".into(), "create".into()], false).unwrap();
+        assert_eq!(arg(&bench_create, "images")["bounds"], json!({ "minimum": 1, "maximum": 5000 }));
+        assert_eq!(arg(&bench_create, "imgsz")["bounds"], json!({ "minimum": 32, "maximum": 4096 }));
         assert_eq!(arg(&bench_create, "max_images")["bounds"], json!({ "minimum": 1, "maximum": 5000 }));
         assert_eq!(
             arg(&bench_create, "seed")["bounds"],

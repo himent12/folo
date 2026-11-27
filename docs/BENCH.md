@@ -11,9 +11,9 @@ predictions.
 ```
 labeled images ──► benchmark ──► entries ──► leaderboard, charts
  (a dataset split,   (frozen images     (FOLO models,      (score, five axes,
-  or a reviewed       + truth, a plan    agents, external    per condition, per class,
-  labeling job)       of conditions)     predictions)        per image)
-                                              │
+  a labeling job,     + truth, a plan    agents, external    per condition, per class,
+  or generated        of conditions)     predictions)        per image)
+  scenes)                                     │
                                               └──► self-improvement loop: the model labels a pool,
                                                    a student trains on those labels, the benchmark
                                                    grades the student
@@ -24,8 +24,11 @@ grades what a model sees.
 
 ## What a benchmark is
 - **Images and truth, frozen.** A benchmark copies its images and their true boxes when it is made, from a split of
-  a dataset or from the labeled images of a labeling job ([LABELING.md](LABELING.md)). They never change after
-  that, whatever happens to the source. Up to 5000 images; when the source has more, a seeded sample.
+  a dataset, from the labeled images of a labeling job ([LABELING.md](LABELING.md)), or directly from FOLO's
+  deterministic generated-image source (`folo_bench::generate_images`, backed by `folo-data`'s procedural shapes
+  generator — same spec and seed yields byte-identical images and boxes with no external dataset download). They
+  never change after that, whatever happens to the source. Up to 5000 images; when a dataset or labeling job has
+  more, a seeded sample.
 - **A plan of conditions.** Each condition is a deterministic change to every image that keeps its size (the
   catalog is below), at severities 1 to 5. The plan says which conditions run, at which severities, and how much
   each counts. It can change only while the benchmark has no finished (`done`) and no active entry: from the first

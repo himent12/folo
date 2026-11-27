@@ -133,6 +133,21 @@ pub(super) fn train_input() -> JsonObject {
     if let Some(Value::Object(name)) = s.get_mut("properties").and_then(|p| p.get_mut("name")) {
         name.insert("maxLength".into(), json!(folo_server::store::MAX_RUN_NAME_CHARS));
     }
+    if let Some(Value::Object(batch)) = s.get_mut("properties").and_then(|p| p.get_mut("batch")) {
+        let desc = batch.get("description").cloned();
+        batch.clear();
+        if let Some(d) = desc {
+            batch.insert("description".into(), d);
+        }
+        batch.insert("default".into(), json!(16));
+        batch.insert(
+            "anyOf".into(),
+            json!([
+                { "type": "integer", "minimum": 1, "maximum": 1024 },
+                { "type": "string", "const": "auto" }
+            ]),
+        );
+    }
     if let Some(Value::Array(required)) = s.get_mut("required") {
         required.retain(|r| r != "dataset_id");
         if required.is_empty() {

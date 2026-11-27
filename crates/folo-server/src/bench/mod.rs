@@ -38,8 +38,13 @@ use folo_api::{Bench, BenchCatalog, BenchEvent, BenchLoop, BenchLoopStatus, Benc
 use sha2::{Digest, Sha256};
 use tokio::sync::broadcast;
 
-pub use benchmarks::check_create;
+pub use benchmarks::{CreateGeneratedBench, GENERATED_SOURCE_ID, check_create};
 pub use external::{MAX_BOXES, RETRY_PART_HINT};
+pub use folo_bench::{
+    DEFAULT_CLASSES as GENERATED_DEFAULT_CLASSES, DEFAULT_IMAGES as GENERATED_DEFAULT_IMAGES,
+    DEFAULT_IMGSZ as GENERATED_DEFAULT_IMGSZ, GeneratedSourceSpec, MAX_IMGSZ as GENERATED_MAX_IMGSZ,
+    MIN_IMGSZ as GENERATED_MIN_IMGSZ,
+};
 pub use model::InferenceGuard;
 
 use crate::error::{Error, Result};

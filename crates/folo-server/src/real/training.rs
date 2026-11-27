@@ -37,9 +37,28 @@ impl RealStore {
     /// validated `checkpoint` snapshot when there is one (it becomes the run's `weights/last.folo`).
     pub(super) fn start_run(
         &self,
-        mut config: TrainConfig,
+        config: TrainConfig,
         checkpoint: Option<CheckpointSnapshot<'_>>,
     ) -> Result<Run> {
+        self.start_run_with_auto_batch(config, checkpoint, crate::store::AutoBatchOptions::default())
+    }
+
+    /// Like [`RealStore::start_run`], with optional GPU VRAM-budget auto-batch sizing (`auto_batch`).
+    pub(super) fn start_run_with_auto_batch(
+        &self,
+        mut config: TrainConfig,
+        checkpoint: Option<CheckpointSnapshot<'_>>,
+        auto_batch: crate::store::AutoBatchOptions,
+    ) -> Result<Run> {
+        crate::store::check_auto_batch_options(&auto_batch)?;
+        if auto_batch.enabled && config.compute.is_some() {
+            return Err(Error::new(
+                StatusCode::BAD_REQUEST,
+                "invalid_config",
+                "auto_batch is not supported for cloud runs yet (pass an explicit integer `batch` for cloud compute)",
+            )
+            .hint("pick an integer `batch` for cloud runs, or omit `compute` to use auto-batch locally"));
+        }
         // Shared with registration; a deletion of dataset files waits until the run is in the registry (see
         // `RealStore::files`).
         let _files = self.files.read().unwrap_or_else(|p| p.into_inner());
@@ -64,9 +83,15 @@ impl RealStore {
                     self.runs.create_cloud(config, ds, weights, checkpoint, val_offset, device, cloud)?;
                 self.start_cloud(entry, connected, Some(fingerprint))
             }
-            RunTarget::Local(device) => {
-                self.runs.create(config, ds, weights, checkpoint, val_offset, engine::describe(device))
-            }
+            RunTarget::Local(device) => self.runs.create_with_auto_batch(
+                config,
+                ds,
+                weights,
+                checkpoint,
+                val_offset,
+                engine::describe(device),
+                auto_batch,
+            ),
         }
     }
 

@@ -6,6 +6,10 @@
 use std::time::{Duration, Instant};
 
 use folo_api::{BenchEntryStatus, BenchSource, CreateBench};
+use folo_server::bench::{
+    CreateGeneratedBench, GENERATED_DEFAULT_CLASSES, GENERATED_DEFAULT_IMAGES, GENERATED_DEFAULT_IMGSZ,
+    GeneratedSourceSpec,
+};
 use http::StatusCode;
 
 use super::results::{
@@ -118,21 +122,67 @@ impl Inner {
     }
 
     pub(super) async fn create_benchmark(&self, a: CreateBenchmarkArgs) -> Result<Output, Error> {
-        let source = match (a.dataset_id, a.label_job_id) {
-            (Some(dataset_id), None) => BenchSource::Dataset { dataset_id, split: a.split },
-            (None, Some(job_id)) if a.split.is_none() => BenchSource::LabelJob { job_id },
-            (None, Some(_)) => return Err(invalid_arguments("split is for a dataset, not for label_job_id")),
-            _ => return Err(invalid_arguments("give one source: dataset_id (with split) or label_job_id")),
+        let r = match (a.dataset_id, a.label_job_id, a.generated) {
+            (Some(dataset_id), None, None) => {
+                let req = CreateBench {
+                    name: a.name,
+                    description: a.description,
+                    source: BenchSource::Dataset { dataset_id, split: a.split },
+                    max_images: a.max_images,
+                    seed: a.seed,
+                    plan: a.plan.map(Into::into),
+                };
+                self.benchmarks(move |b| b.create(req)).await?
+            }
+            (None, Some(job_id), None) => {
+                if a.split.is_some() {
+                    return Err(invalid_arguments("split is for a dataset, not for label_job_id"));
+                }
+                let req = CreateBench {
+                    name: a.name,
+                    description: a.description,
+                    source: BenchSource::LabelJob { job_id },
+                    max_images: a.max_images,
+                    seed: a.seed,
+                    plan: a.plan.map(Into::into),
+                };
+                self.benchmarks(move |b| b.create(req)).await?
+            }
+            (None, None, Some(generated)) => {
+                if a.split.is_some() {
+                    return Err(invalid_arguments("split is for a dataset, not for generated"));
+                }
+                let images = match (generated.images, a.max_images) {
+                    (Some(g), Some(m)) if g != m => {
+                        return Err(invalid_arguments(format!(
+                            "generated.images ({g}) and max_images ({m}) disagree: pass one or the same count"
+                        )));
+                    }
+                    (Some(n), _) | (_, Some(n)) => n,
+                    (None, None) => GENERATED_DEFAULT_IMAGES,
+                };
+                let req = CreateGeneratedBench {
+                    name: a.name,
+                    description: a.description,
+                    source: GeneratedSourceSpec {
+                        images,
+                        classes: generated.classes.unwrap_or_else(|| {
+                            GENERATED_DEFAULT_CLASSES.iter().map(|s| (*s).to_string()).collect()
+                        }),
+                        imgsz: generated.imgsz.unwrap_or(GENERATED_DEFAULT_IMGSZ),
+                        seed: a.seed,
+                        vary_aspect: generated.vary_aspect,
+                    },
+                    plan: a.plan.map(Into::into),
+                };
+                self.benchmarks(move |b| b.create_generated(req)).await?
+            }
+            _ => {
+                return Err(invalid_arguments(
+                    "give one source: dataset_id (with split), label_job_id, or generated",
+                ));
+            }
         };
-        let req = CreateBench {
-            name: a.name,
-            description: a.description,
-            source,
-            max_images: a.max_images,
-            seed: a.seed,
-            plan: a.plan.map(Into::into),
-        };
-        let r = self.benchmarks(move |b| b.create(req)).await?;
         let summary = format!(
             "{}: {} images, {} boxes, {} conditions; start_bench_entry runs a model on it",
             r.id,

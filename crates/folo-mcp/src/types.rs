@@ -114,7 +114,7 @@ fn default_imgsz() -> u32 {
     640
 }
 
-/// `train`: a `TrainConfig` (docs/API.md) plus `resume_run_id`.
+/// `train`: a `TrainConfig` (docs/API.md) plus `resume_run_id` and VRAM auto-batch controls.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct TrainArgs {
     /// The training configuration; only `dataset_id` is required (and not even that when resuming).
@@ -124,6 +124,15 @@ pub struct TrainArgs {
     /// other fields must then match the run's config or be omitted (`device` may change).
     #[serde(default)]
     pub resume_run_id: Option<String>,
+    /// Probe GPU VRAM at startup and pick the largest batch size that fits (with gradient accumulation to reach
+    /// the target effective batch). Equivalent to passing `batch: "auto"`.
+    #[serde(default)]
+    pub auto_batch: Option<bool>,
+    /// Target VRAM utilization fraction for auto-batch probing in `0.25..=0.95` (default `0.80`; requires
+    /// `batch: "auto"` or `auto_batch: true`).
+    #[serde(default)]
+    #[schemars(range(min = 0.25, max = 0.95))]
+    pub auto_batch_target: Option<f64>,
 }
 
 /// `train` result.

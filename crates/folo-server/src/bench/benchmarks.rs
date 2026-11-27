@@ -2,14 +2,14 @@
 //! serving its images.
 
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use axum::http::StatusCode;
 use folo_api::{
     Bench, BenchDesign, BenchImage, BenchImagePage, BenchSource, CreateBench, DesignBench, Split, UpdateBench,
 };
-use folo_bench::{Condition, conditions};
+use folo_bench::{Condition, GeneratedSourceSpec, conditions};
 use rayon::prelude::*;
 
 use crate::error::{Error, Result};
@@ -24,6 +24,23 @@ use super::{
     Benches, DEFAULT_IMAGES, MAX_CLASSES, MAX_DESCRIPTION_CHARS, MAX_IMAGES, MAX_SEED, design, images,
     invalid, io_error, sha256, source, state,
 };
+
+/// Synthetic `dataset_id` persisted in `BenchSource::Dataset` for benchmarks built from a deterministic
+/// [`GeneratedSourceSpec`].
+pub const GENERATED_SOURCE_ID: &str = "generated";
+
+/// Request to create a benchmark directly from deterministic generated scenes (docs/BENCH.md).
+#[derive(Clone, Debug)]
+pub struct CreateGeneratedBench {
+    /// Benchmark name.
+    pub name: String,
+    /// Optional description.
+    pub description: String,
+    /// Deterministic scene generator parameters (count, classes, resolution, seed, aspect mode).
+    pub source: GeneratedSourceSpec,
+    /// Optional stress-condition plan (`None` uses the catalog default plan).
+    pub plan: Option<folo_api::BenchPlan>,
+}
 
 /// Validates the non-source fields of [`CreateBench`] (`name`, `description`, `max_images`, `seed`, `plan`).
 /// Shared by [`Benches::create`] and `folo bench create` so invalid CLI arguments fail before registering `--data`.
@@ -137,9 +154,41 @@ impl Benches {
             other => other,
         };
         let order = source::sample_order(source.images.len(), max as usize, req.seed);
-        // The id is claimed by its folder, so two requests never share one. It is random and long, so a deleted
-        // benchmark's id never comes back: its image URLs are served as immutable.
-        let (id, dir) = loop {
+        let (id, dir) = self.claim_bench_dir(&name)?;
+        let made = self.fill(&dir, &id, name, description, source_split, req.seed, plan, &source, &order);
+        self.commit_bench(dir, made)
+    }
+
+    /// `POST /api/bench/benchmarks` with `source.kind == "generated"`: renders deterministic synthetic scenes in
+    /// bounded parallel chunks via `folo-bench::GeneratedSource` (backed by `folo-data::synthetic`) without
+    /// registering a dataset or buffering all encoded JPEGs in RAM.
+    pub fn create_generated(&self, req: CreateGeneratedBench) -> Result<Bench> {
+        let (name, description, _max, plan) = check_create(
+            &req.name,
+            &req.description,
+            Some(req.source.images),
+            req.source.seed,
+            req.plan.as_ref(),
+        )?;
+        let generated = folo_bench::GeneratedSource::new(&req.source).map_err(invalid)?;
+        if generated.classes().len() > MAX_CLASSES {
+            return Err(source::empty(
+                format!(
+                    "generated source has {} classes; a benchmark takes at most {MAX_CLASSES}",
+                    generated.classes().len()
+                ),
+                "make the benchmark from a source with fewer classes",
+            ));
+        }
+        let (id, dir) = self.claim_bench_dir(&name)?;
+        let made = self.fill_generated(&dir, &id, name, description, req.source, plan, &generated);
+        self.commit_bench(dir, made)
+    }
+
+    /// Claims a fresh benchmark id and directory on disk. The id is random and long so a deleted benchmark's id
+    /// never comes back and its image URLs stay immutable.
+    fn claim_bench_dir(&self, name: &str) -> Result<(String, PathBuf)> {
+        loop {
             let id = {
                 let list = self.benches.read().unwrap();
                 let taken = |id: &str| list.iter().any(|b| b.id == id) || self.root.join(id).exists();
@@ -151,12 +200,24 @@ impl Benches {
             };
             std::fs::create_dir_all(&self.root).map_err(|e| io_error("creating", &self.root, e))?;
             match std::fs::create_dir(self.root.join(&id)) {
-                Ok(()) => break (id.clone(), self.root.join(&id)),
+                Ok(()) => return Ok((id.clone(), self.root.join(&id))),
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
                 Err(e) => return Err(io_error("creating", &self.root.join(&id), e)),
             }
-        };
-        let made = self.fill(&dir, &id, name, description, source_split, req.seed, plan, &source, &order);
+        }
+    }
+
+    /// Returns a millisecond-precision creation timestamp strictly later than every existing benchmark's so list
+    /// ordering survives restarts.
+    fn next_created(&self) -> String {
+        let list = self.benches.read().unwrap();
+        let last = list.iter().filter_map(|b| parse_rfc3339_millis(&b.lock().file.created)).max();
+        let now = (unix_now() * 1000.0) as i64;
+        rfc3339_millis(last.map_or(now, |l| now.max(l + 1)))
+    }
+
+    /// Finalizes a newly written benchmark folder, cleaning up `dir` if writing failed.
+    fn commit_bench(&self, dir: PathBuf, made: Result<BenchFile>) -> Result<Bench> {
         let file = match made {
             Ok(file) => file,
             Err(e) => {
@@ -172,6 +233,68 @@ impl Benches {
         let bench = slot.lock().bench();
         self.benches.write().unwrap().push(slot);
         Ok(bench)
+    }
+
+    /// Renders and writes deterministically generated JPEG scenes into `dir/images/` in bounded chunks (retaining
+    /// only lightweight [`ImageRecord`] metadata between chunks) and persists `bench.json` last.
+    #[allow(clippy::too_many_arguments)]
+    fn fill_generated(
+        &self,
+        dir: &Path,
+        id: &str,
+        name: String,
+        description: String,
+        spec: GeneratedSourceSpec,
+        plan: folo_api::BenchPlan,
+        generated: &folo_bench::GeneratedSource,
+    ) -> Result<BenchFile> {
+        let images_dir = dir.join("images");
+        std::fs::create_dir_all(&images_dir).map_err(|e| io_error("creating", &images_dir, e))?;
+        let classes = generated.classes().to_vec();
+        let n_classes = classes.len();
+        let total = generated.len();
+        let chunk_size = generated.chunk_size();
+        let mut images = Vec::with_capacity(total);
+        for start in (0..total).step_by(chunk_size) {
+            let end = (start + chunk_size).min(total);
+            let batch = generated.render_range(start..end).map_err(invalid)?;
+            let records = batch
+                .par_iter()
+                .enumerate()
+                .map(|(offset, im)| {
+                    let k = start + offset;
+                    let to = images_dir.join(&im.file);
+                    std::fs::write(&to, &im.jpeg).map_err(|e| io_error("writing", &to, e))?;
+                    Ok(ImageRecord {
+                        id: (k + 1).to_string(),
+                        file: im.file.clone(),
+                        width: im.width,
+                        height: im.height,
+                        bytes: im.jpeg.len() as u64,
+                        sha256: sha256(&im.jpeg),
+                        boxes: source::clip_truth(&im.boxes, n_classes, (im.width, im.height)),
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            images.extend(records);
+        }
+        let file = BenchFile {
+            version: VERSION,
+            id: id.to_string(),
+            name,
+            description,
+            classes,
+            created: self.next_created(),
+            source: BenchSource::Dataset { dataset_id: GENERATED_SOURCE_ID.into(), split: None },
+            source_name: spec.display_name(),
+            seed: spec.seed,
+            plan,
+            images,
+        };
+        let bytes = serde_json::to_vec(&file).expect("benchmarks serialize");
+        let path = dir.join("bench.json");
+        crate::index::write_atomic(&path, &bytes).map_err(|e| io_error("writing", &path, e))?;
+        Ok(file)
     }
 
     /// Copies the sampled images into the new benchmark's folder and writes its `bench.json` (last: without it,
@@ -287,14 +410,7 @@ impl Benches {
             name,
             description,
             classes: gathered.classes.clone(),
-            // To the millisecond and later than every other benchmark's: the list is in the order they were made
-            // in, also after a restart.
-            created: {
-                let list = self.benches.read().unwrap();
-                let last = list.iter().filter_map(|b| parse_rfc3339_millis(&b.lock().file.created)).max();
-                let now = (unix_now() * 1000.0) as i64;
-                rfc3339_millis(last.map_or(now, |l| now.max(l + 1)))
-            },
+            created: self.next_created(),
             source,
             source_name: gathered.name.clone(),
             seed,
@@ -533,5 +649,74 @@ mod tests {
         assert_eq!(err.body.code, "bench_frozen");
         assert!(err.body.message.contains("active loop"), "{}", err.body.message);
         benches.shutdown();
+    }
+
+    #[test]
+    fn create_generated_is_deterministic_persists_and_renders_conditions() {
+        let dir = TestDir::new("bench-generated");
+        let benches = Benches::open(dir.path(), None);
+        let plan = Some(BenchPlan {
+            conditions: vec![BenchPlanCondition {
+                condition: "haze".into(),
+                severities: vec![2],
+                weight: 1.0,
+                why: None,
+            }],
+            rationale: None,
+            designed_by: None,
+        });
+        let spec = GeneratedSourceSpec {
+            images: 4,
+            classes: vec!["circle".into(), "square".into()],
+            imgsz: 64,
+            seed: 17,
+            vary_aspect: false,
+        };
+        let b1 = benches
+            .create_generated(CreateGeneratedBench {
+                name: "gen-a".into(),
+                description: "synthetic check".into(),
+                source: spec.clone(),
+                plan: plan.clone(),
+            })
+            .unwrap();
+        let b2 = benches
+            .create_generated(CreateGeneratedBench {
+                name: "gen-b".into(),
+                description: String::new(),
+                source: spec.clone(),
+                plan: plan.clone(),
+            })
+            .unwrap();
+        assert_eq!(b1.images, 4);
+        assert_eq!(b1.classes, ["circle", "square"]);
+        assert_eq!(b1.source, BenchSource::Dataset { dataset_id: GENERATED_SOURCE_ID.into(), split: None });
+        assert!(b1.source_name.starts_with("generated (4×64px"), "{}", b1.source_name);
+        assert_eq!(b1.fingerprint, b2.fingerprint, "same spec and seed must produce identical fingerprint");
+        assert!(b1.boxes > 0, "generated scenes must carry ground-truth boxes");
+
+        // Stress condition rendering works directly on generated benchmark images.
+        let img = benches.image(&b1.id, "1", Some((Condition::Haze, 2)), None).unwrap();
+        assert!(!img.bytes.is_empty());
+        assert_eq!(img.content_type, "image/jpeg");
+
+        // Different seed produces a different fingerprint.
+        let b3 = benches
+            .create_generated(CreateGeneratedBench {
+                name: "gen-c".into(),
+                description: String::new(),
+                source: GeneratedSourceSpec { seed: 18, ..spec },
+                plan,
+            })
+            .unwrap();
+        assert_ne!(b1.fingerprint, b3.fingerprint);
+        benches.shutdown();
+
+        // Reloading from disk preserves the generated benchmark cleanly.
+        let reopened = Benches::open(dir.path(), None);
+        let reloaded = reopened.get(&b1.id).unwrap();
+        assert_eq!(reloaded.fingerprint, b1.fingerprint);
+        assert_eq!(reloaded.source_name, b1.source_name);
+        reopened.shutdown();
     }
 }

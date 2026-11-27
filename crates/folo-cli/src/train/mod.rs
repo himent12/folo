@@ -60,6 +60,15 @@ pub fn train(args: TrainArgs, out: Out) -> Result<(), CliError> {
     };
     watch_stop_file(&run_dir, stop);
     nb.store(trainer.batches_per_epoch() as u64, Ordering::Relaxed);
+    let auto_batch_info =
+        progress::auto_batch_json(trainer.config(), trainer.auto_batch_plan(), trainer.accumulate(), !fresh);
+    if let Some(ab) = &auto_batch_info {
+        let mut rec = ab.clone();
+        if let Some(obj) = rec.as_object_mut() {
+            obj.insert("event".into(), serde_json::json!("auto_batch"));
+        }
+        out.record(&rec);
+    }
     if !out.json {
         out.human(format!("Run folder: {}", folo_api::json::path(&run_dir)));
     }
@@ -74,7 +83,7 @@ pub fn train(args: TrainArgs, out: Out) -> Result<(), CliError> {
             return Err(engine_error("train", e));
         }
     };
-    finish(&summary, &run_dir, trainer.config(), &trainer.resolved_train(), out);
+    finish(&summary, &run_dir, trainer.config(), &trainer.resolved_train(), auto_batch_info.as_ref(), out);
     Ok(())
 }
 
@@ -172,6 +181,27 @@ fn start(
         base.distill = Some(folo_vision::DistillConfig::new(teacher_setting(t)));
     }
     let mut cfg = apply_sets(base, &args.set)?;
+    if let Some(target) = args.auto_batch_target {
+        if !crate::cli::bounds::TRAIN_AUTO_BATCH_TARGET.contains_f64(target) {
+            return Err(CliError::new(
+                ExitCode::Usage,
+                "invalid_config",
+                format!(
+                    "--auto-batch-target must be finite in {}..={}, got {target}",
+                    folo_vision::train::MIN_AUTO_BATCH_UTILIZATION,
+                    folo_vision::train::MAX_AUTO_BATCH_UTILIZATION
+                ),
+            ));
+        }
+        if !cfg.auto_batch {
+            return Err(CliError::new(
+                ExitCode::Usage,
+                "invalid_config",
+                "--auto-batch-target requires `--batch auto` (or `--set auto_batch=true`)",
+            )
+            .hint("pass `--batch auto` alongside `--auto-batch-target`"));
+        }
+    }
     // Validate before creating the run folder, so a typo leaves nothing behind.
     cfg.validate().map_err(|e| engine_error("train", e))?;
     let data = train_data(&ds)?;

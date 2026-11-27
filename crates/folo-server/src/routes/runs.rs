@@ -67,7 +67,7 @@ const TRAIN_CONFIG_FIELDS: &[&str] = &[
     "compute",
 ];
 /// Extra top-level control keys accepted only by `POST /api/runs` (not `/api/runs/estimate`).
-const RUN_CONTROL_FIELDS: &[&str] = &["checkpoint", "resume_run_id"];
+const RUN_CONTROL_FIELDS: &[&str] = &["checkpoint", "resume_run_id", "auto_batch", "auto_batch_target"];
 /// Allowed keys of [`folo_api::Augment`].
 const AUGMENT_FIELDS: &[&str] = &["mosaic", "mixup", "hsv", "fliplr", "scale", "translate", "close_mosaic"];
 /// Allowed keys of [`folo_api::Compute`].
@@ -123,6 +123,47 @@ fn run_fields(
     Ok(fields)
 }
 
+/// Extracts optional `batch: "auto"`, `auto_batch`, and `auto_batch_target` from a `POST /api/runs` body
+/// before deserializing `folo_api::TrainConfig`.
+fn extract_auto_batch(
+    fields: &mut serde_json::Map<String, serde_json::Value>,
+) -> Result<crate::store::AutoBatchOptions> {
+    let mut batch_auto = false;
+    if let Some(val) = fields.get("batch")
+        && let Some(s) = val.as_str()
+    {
+        if s.eq_ignore_ascii_case("auto") {
+            batch_auto = true;
+            fields.remove("batch");
+        } else {
+            return Err(body_error(format!(
+                "batch: expected a positive integer in 1..=1024 or \"auto\", got {s:?}"
+            )));
+        }
+    }
+    let auto_flag = match fields.remove("auto_batch").filter(|v| !v.is_null()) {
+        None => None,
+        Some(v) => Some(v.as_bool().ok_or_else(|| body_error("auto_batch: expected a boolean"))?),
+    };
+    let target = match fields.remove("auto_batch_target").filter(|v| !v.is_null()) {
+        None => None,
+        Some(v) => Some(v.as_f64().ok_or_else(|| body_error("auto_batch_target: expected a number"))?),
+    };
+    if batch_auto && auto_flag == Some(false) {
+        return Err(Error::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_config",
+            "`batch: \"auto\"` conflicts with `auto_batch: false`",
+        ));
+    }
+    let opts = crate::store::AutoBatchOptions {
+        enabled: batch_auto || auto_flag.unwrap_or(false),
+        target_utilization: target,
+    };
+    crate::store::check_auto_batch_options(&opts)?;
+    Ok(opts)
+}
+
 /// `POST /api/runs`: a `TrainConfig` starts a new run (`201`); with `resume_run_id` it resumes that run instead
 /// (`200`, same id); with `checkpoint` the new run continues that model's training state.
 pub(super) async fn create_run(
@@ -154,10 +195,21 @@ pub(super) async fn create_run(
         let run = blocking(&st, move |s| s.resume_run(&rid, &fields)).await?;
         return Ok(Json(run).into_response());
     }
+    let auto_batch = extract_auto_batch(&mut fields)?;
+    if checkpoint.is_some() && auto_batch.enabled {
+        return Err(Error::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_config",
+            "auto_batch cannot be combined with `checkpoint` (a continued checkpoint keeps its batch and schedule)",
+        ));
+    }
     let config: TrainConfig =
         serde_json::from_value(serde_json::Value::Object(fields)).map_err(body_error)?;
     let run = match checkpoint {
         Some(model) => blocking(&st, move |s| s.continue_run(&model, config)).await?,
+        None if auto_batch.enabled => {
+            blocking(&st, move |s| s.create_run_with_auto_batch(config, auto_batch)).await?
+        }
         None => blocking(&st, move |s| s.create_run(config)).await?,
     };
     Ok((StatusCode::CREATED, Json(run)).into_response())
@@ -505,5 +557,45 @@ mod tests {
         for k in comp.keys() {
             assert!(COMPUTE_FIELDS.contains(&k.as_str()), "missing Compute field `{k}`");
         }
+    }
+
+    #[test]
+    fn extract_auto_batch_handles_batch_auto_flags_and_conflicts() {
+        let mut obj = serde_json::json!({ "dataset_id": "ds_1", "batch": "auto", "auto_batch_target": 0.75 })
+            .as_object()
+            .unwrap()
+            .clone();
+        let ab = extract_auto_batch(&mut obj).unwrap();
+        assert!(ab.enabled);
+        assert_eq!(ab.target_utilization, Some(0.75));
+        assert!(!obj.contains_key("batch"));
+        assert!(!obj.contains_key("auto_batch_target"));
+
+        // `batch: "auto"` + `auto_batch: false` conflicts.
+        let mut conflict = serde_json::json!({ "dataset_id": "ds_1", "batch": "auto", "auto_batch": false })
+            .as_object()
+            .unwrap()
+            .clone();
+        assert_eq!(extract_auto_batch(&mut conflict).unwrap_err().body.code, "invalid_config");
+
+        // Non-auto string batch is rejected as invalid JSON body type.
+        let mut bad_str =
+            serde_json::json!({ "dataset_id": "ds_1", "batch": "huge" }).as_object().unwrap().clone();
+        assert_eq!(extract_auto_batch(&mut bad_str).unwrap_err().body.code, "invalid_body");
+
+        // `auto_batch_target` without auto-batch enabled is rejected.
+        let mut no_ab = serde_json::json!({ "dataset_id": "ds_1", "auto_batch_target": 0.75 })
+            .as_object()
+            .unwrap()
+            .clone();
+        assert_eq!(extract_auto_batch(&mut no_ab).unwrap_err().body.code, "invalid_config");
+
+        // Out-of-range `auto_batch_target` is rejected.
+        let mut oob =
+            serde_json::json!({ "dataset_id": "ds_1", "auto_batch": true, "auto_batch_target": 0.99 })
+                .as_object()
+                .unwrap()
+                .clone();
+        assert_eq!(extract_auto_batch(&mut oob).unwrap_err().body.code, "invalid_config");
     }
 }

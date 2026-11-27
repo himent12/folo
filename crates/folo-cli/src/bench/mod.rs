@@ -133,7 +133,44 @@ fn create(a: BenchCreateArgs, out: Out) -> Result<(), CliError> {
     if a.split.is_some() && a.label_job.is_some() {
         return Err(usage("--split is for a dataset (--dataset or --data), not for --label-job"));
     }
+    if a.split.is_some() && a.generated {
+        return Err(usage("--split is for a dataset (--dataset or --data), not for --generated"));
+    }
     let plan = a.plan.as_deref().map(plan).transpose()?;
+    if a.generated {
+        let images = match (a.images, a.max_images) {
+            (Some(i), Some(m)) if i != m => {
+                return Err(usage(format!(
+                    "--images ({i}) and --max-images ({m}) disagree: pass one or the same count"
+                )));
+            }
+            (Some(n), _) | (_, Some(n)) => n,
+            (None, None) => folo_server::bench::GENERATED_DEFAULT_IMAGES,
+        };
+        let spec = folo_server::bench::GeneratedSourceSpec {
+            images,
+            classes: a.classes.unwrap_or_else(|| {
+                folo_server::bench::GENERATED_DEFAULT_CLASSES.iter().map(|s| (*s).to_string()).collect()
+            }),
+            imgsz: a.imgsz.unwrap_or(folo_server::bench::GENERATED_DEFAULT_IMGSZ),
+            seed: a.seed,
+            vary_aspect: a.vary_aspect,
+        };
+        spec.to_synthetic_config().map_err(usage)?;
+        folo_server::bench::check_create(&a.name, &a.description, Some(images), a.seed, plan.as_ref())
+            .map_err(api_error)?;
+        let s = open(&a.conn, None)?;
+        let req = folo_server::bench::CreateGeneratedBench {
+            name: a.name,
+            description: a.description,
+            source: spec,
+            plan,
+        };
+        let r = s.benchmarks.create_generated_bench(req).map_err(api_error)?;
+        out.record(&r);
+        print::detail(&r, out);
+        return Ok(());
+    }
     // Validate benchmark arguments before opening the store or registering `--data`, so invalid flags or plans
     // never leave a newly registered dataset behind.
     folo_server::bench::check_create(&a.name, &a.description, a.max_images, a.seed, plan.as_ref())

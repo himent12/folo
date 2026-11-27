@@ -16,9 +16,10 @@ use folo_api::{
 };
 use folo_client::{Client, encode};
 use folo_server::store::{
-    DynamicAxes, FEATURE_EXPORT_DYNAMIC_AXES, FEATURE_VAL_DIAGNOSTICS, ImageData, ImageQuery, IssueQuery,
-    LogsQuery, MetricsQuery, PredictInput, PredictSource, QueueMove, Store, Subscription, ValDiagConfig,
-    ValDiagnostics, check_export_axes, check_val_diag_config,
+    AutoBatchOptions, DynamicAxes, FEATURE_EXPORT_DYNAMIC_AXES, FEATURE_TRAIN_AUTO_BATCH,
+    FEATURE_VAL_DIAGNOSTICS, ImageData, ImageQuery, IssueQuery, LogsQuery, MetricsQuery, PredictInput,
+    PredictSource, QueueMove, Store, Subscription, ValDiagConfig, ValDiagnostics, check_auto_batch_options,
+    check_export_axes, check_val_diag_config,
 };
 use http::StatusCode;
 use serde::Serialize;
@@ -512,11 +513,56 @@ impl Store for HttpStore {
         self.post("/runs", &config)
     }
 
+    fn create_run_with_auto_batch(
+        &self,
+        config: TrainConfig,
+        auto_batch: AutoBatchOptions,
+    ) -> Result<Run, Error> {
+        check_auto_batch_options(&auto_batch)?;
+        if !auto_batch.enabled {
+            return self.create_run(config);
+        }
+        if !self.has_feature(FEATURE_TRAIN_AUTO_BATCH)? {
+            return Err(Error::new(
+                StatusCode::NOT_IMPLEMENTED,
+                "not_implemented",
+                format!(
+                    "the folo serve at {} is too old for GPU VRAM auto-batch (`batch: \"auto\"` / `auto_batch`)",
+                    self.base()
+                ),
+            )
+            .hint("update folo serve, or pass an explicit integer `batch`"));
+        }
+        let mut body = serde_json::to_value(config).map_err(|e| Error::internal(e.to_string()))?;
+        body["auto_batch"] = serde_json::json!(true);
+        if let Some(target) = auto_batch.target_utilization {
+            body["auto_batch_target"] = serde_json::json!(target);
+        }
+        self.post("/runs", &body)
+    }
+
     fn resume_run(
         &self,
         id: &str,
         fields: &serde_json::Map<String, serde_json::Value>,
     ) -> Result<Run, Error> {
+        let wants_auto_batch = fields
+            .get("batch")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|s| s.eq_ignore_ascii_case("auto"))
+            || fields.get("auto_batch").is_some_and(|v| !v.is_null())
+            || fields.get("auto_batch_target").is_some_and(|v| !v.is_null());
+        if wants_auto_batch && !self.has_feature(FEATURE_TRAIN_AUTO_BATCH)? {
+            return Err(Error::new(
+                StatusCode::NOT_IMPLEMENTED,
+                "not_implemented",
+                format!(
+                    "the folo serve at {} is too old for GPU VRAM auto-batch (`batch: \"auto\"` / `auto_batch`)",
+                    self.base()
+                ),
+            )
+            .hint("update folo serve, or omit auto-batch fields when resuming"));
+        }
         let mut body = fields.clone();
         body.insert("resume_run_id".into(), id.into());
         self.post("/runs", &serde_json::Value::Object(body))

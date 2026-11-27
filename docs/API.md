@@ -94,8 +94,8 @@ CLI's exit code; a test keeps the sources in line with it). Messages that wrap a
   (`path` on `GET /api/label/jobs/{id}/images`; older servers ignore it), `uploads` (`/api/uploads`),
   `run_cursors` (`after_step` / `after_epoch` on `/metrics`, `after` and `total` on `/logs`, `Range` on `/weights`),
   `run_checkpoint` (`checkpoint` on `POST /api/runs`; these three are what a cloud worker needs, docs/CLOUD.md),
-  `cloud` (`/api/cloud`, `TrainConfig.compute`, `Run.cloud` and `cloud` events), `vision_bench` (the `/api/bench` endpoints, Vision benchmarks below), `bench_upload_safe` (client-chosen `?entry_id=` on `POST /api/bench/benchmarks/{id}/entries` and atomic conditional `?only_if_open=true[&delete=true]` on `POST .../stop`), `predict_options` (optional `tile` / `tta` fields on `POST /api/predict`), `val_diagnostics` (optional `diagnostics` / `worst` / `diag_*` fields on `POST /api/val`), and `export_dynamic_axes` (optional independent `dynamic_batch` / `dynamic_hw` fields on `POST /api/models/{id}/export`). `folo mcp --server` refuses the
-  export switches without `export_onnx_switches` (and split dynamic axes without `export_dynamic_axes`, validation diagnostics without `val_diagnostics`, and `tile`/`tta` without `predict_options`).) In real mode `gpus` comes from folo-gpu
+  `cloud` (`/api/cloud`, `TrainConfig.compute`, `Run.cloud` and `cloud` events), `vision_bench` (the `/api/bench` endpoints, Vision benchmarks below), `bench_upload_safe` (client-chosen `?entry_id=` on `POST /api/bench/benchmarks/{id}/entries` and atomic conditional `?only_if_open=true[&delete=true]` on `POST .../stop`), `bench_generated_source` (`source: { "kind": "generated", ... }` on `POST /api/bench/benchmarks`), `train_auto_batch` (`batch: "auto"`, `auto_batch`, and `auto_batch_target` on `POST /api/runs`), `predict_options` (optional `tile` / `tta` fields on `POST /api/predict`), `val_diagnostics` (optional `diagnostics` / `worst` / `diag_*` fields on `POST /api/val`), and `export_dynamic_axes` (optional independent `dynamic_batch` / `dynamic_hw` fields on `POST /api/models/{id}/export`). `folo mcp --server` refuses the
+  export switches without `export_onnx_switches` (and split dynamic axes without `export_dynamic_axes`, validation diagnostics without `val_diagnostics`, `tile`/`tta` without `predict_options`, auto-batch training without `train_auto_batch`, and generated benchmarks without `bench_generated_source`).) In real mode `gpus` comes from folo-gpu
   (wgpu): every physical adapter once, through its preferred backend (software adapters are left out), best first,
   so ordinal 0 is the adapter `gpu:0` and `device: auto` use. `memory_bytes` is the adapter's largest device-local
   memory heap on Vulkan (an RTX 4080 SUPER reports 15.7 GiB), and `0` through DX12 or Metal, where wgpu cannot say; wgpu
@@ -450,6 +450,14 @@ CLI's exit code; a test keeps the sources in line with it). Messages that wrap a
   `folo train --teacher` only, refused here so that a request for a teacher never trains without one. A run that
   continues a distillation run's checkpoint keeps its teacher (it is part of the checkpoint's `folo.train`), and
   `GET /api/runs/{id}/cli` of such a run adds `--teacher` and its `--set distill.*` values.
+  **GPU VRAM-budget auto-batch** (feature `train_auto_batch`, local runs only): `POST /api/runs` accepts
+  `"batch": "auto"` (equivalent to `"auto_batch": true` with the default batch upper bound) or `"auto_batch": true`
+  with an optional `"auto_batch_target"` fraction in `0.25..=0.95` (default `0.80`). `auto_batch_target` without
+  auto-batch enabled, `batch: "auto"` paired with `auto_batch: false`, `auto_batch` combined with `checkpoint`, and
+  `auto_batch` combined with cloud `compute` (on creation or resume) are refused with `400 invalid_config`; bad
+  JSON types are `422 invalid_body`. `GET /api/runs/{id}/cli` emits `--batch auto` (or preserves a non-default
+  integer `--batch <N>` with `--set auto_batch=true`) and `--auto-batch-target` when non-default, both while queued
+  and once started.
   With `"resume_run_id": "<run id>"` in the body, the request **resumes** that `stopped` or `failed` run instead →
   `200 Run` (same id, status `queued` again): from its `weights/last.folo` with the full checkpoint state
   (docs/FORMAT.md: epoch, optimizer, schedule, EMA, RNG), or from scratch when no epoch had finished. The run keeps
@@ -1152,7 +1160,13 @@ The types are `folo_api::bench` (`crates/folo-api/src/bench/`), field for field.
 - `GET /api/bench/benchmarks` → `{ "benchmarks": [Bench] }` (newest first)
 - `POST /api/bench/benchmarks` body `CreateBench` → `201 Bench`:
   `{ "name", "description"?: "", "source": { "kind": "dataset", "dataset_id", "split"?: "val" } | { "kind":
-  "label_job", "job_id" }, "max_images"?: 500, "seed"?: 0, "plan"?: BenchPlan }`. The new benchmark's `id` is
+  "label_job", "job_id" } | { "kind": "generated", "images"?: 64, "classes"?: ["circle","square","triangle"],
+  "imgsz"?: 640, "seed"?: 0, "vary_aspect"?: false }, "max_images"?: 500, "seed"?: 0, "plan"?: BenchPlan }`.
+  The `"generated"` source (feature `bench_generated_source`) renders deterministic procedural shape scenes via
+  `folo-data`'s synthetic generator (`images` in `1..=5000`, `imgsz` in `32..=4096`, 1 to 8 class names) without
+  registering a dataset; the persisted `Bench.source` reports `{ "kind": "dataset", "dataset_id": "generated",
+  "split": null }` with `source_name: "generated (<images>×<imgsz>px..., seed <seed>)"` for wire compatibility with
+  existing clients. The new benchmark's `id` is
   `bn_` and 12 random hex digits, never reused (its image URLs are served as immutable). Copies the source's images
   (byte for byte) and true boxes into the benchmark: a dataset split's images (every image of the split; one
   without boxes is a background image), or a labeling job's `labeled` images with their boxes. The classes are

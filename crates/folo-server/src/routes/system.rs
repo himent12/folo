@@ -41,6 +41,7 @@ fn features(st: &AppState) -> Vec<String> {
         crate::store::FEATURE_PREDICT_OPTIONS,
         crate::store::FEATURE_VAL_DIAGNOSTICS,
         crate::store::FEATURE_EXPORT_DYNAMIC_AXES,
+        crate::store::FEATURE_TRAIN_AUTO_BATCH,
     ];
     let labeling = st.store.labeler().is_ok();
     let optional = [
@@ -51,6 +52,7 @@ fn features(st: &AppState) -> Vec<String> {
         (labeling, folo_api::FEATURE_LABEL_IMAGE_PATH),
         (st.store.benches().is_ok(), folo_api::FEATURE_VISION_BENCH),
         (st.store.benches().is_ok(), crate::store::FEATURE_BENCH_UPLOAD_SAFE),
+        (st.store.benches().is_ok(), crate::store::FEATURE_BENCH_GENERATED_SOURCE),
     ];
     always
         .iter()

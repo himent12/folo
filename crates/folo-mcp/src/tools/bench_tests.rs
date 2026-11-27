@@ -750,3 +750,83 @@ async fn start_bench_entry_preserves_score_when_result_fetch_fails() {
     assert_eq!(res["status"], "done", "{res}");
     assert!((res["score"].as_f64().unwrap() - 78.4).abs() < 1e-4, "{res}");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn create_benchmark_generated_embedded_proxy_and_old_server() {
+    let home = TestDir::new("mcp-bench-generated");
+    let store = Arc::new(RealStore::open(home.path().to_path_buf()).device("cpu"));
+    let embedded = FoloMcp::new(store.clone(), None, options(home.path()));
+
+    let plan = json!({ "conditions": [{ "condition": "haze", "severities": [2] }] });
+    // Conflicting `generated.images` vs `max_images` and `split` with `generated` are rejected.
+    let e = err(
+        &embedded,
+        "create_benchmark",
+        json!({ "name": "bad1", "generated": { "images": 4 }, "max_images": 6 }),
+    )
+    .await;
+    assert_eq!(e.body.code, "invalid_arguments");
+    let e = err(
+        &embedded,
+        "create_benchmark",
+        json!({ "name": "bad2", "generated": { "images": 4 }, "split": "val" }),
+    )
+    .await;
+    assert_eq!(e.body.code, "invalid_arguments");
+
+    // Embedded generated benchmark creation.
+    let g1 = ok(
+        &embedded,
+        "create_benchmark",
+        json!({
+            "name": "gen-embedded",
+            "generated": { "images": 4, "classes": ["circle", "square"], "imgsz": 64 },
+            "seed": 11,
+            "plan": plan
+        }),
+    )
+    .await;
+    assert_eq!((g1["images"].as_u64(), g1["num_classes"].as_u64()), (Some(4), Some(2)), "{g1}");
+    let d1 = ok(&embedded, "get_benchmark", json!({ "benchmark_id": g1["id"] })).await;
+
+    // Proxy mode through a real `folo serve` produces the exact same fingerprint for the same spec & seed.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let server = folo_server::Server::new(store.clone(), folo_server::Options::default());
+    let serving = tokio::spawn(server.serve(listener, async move {
+        let _ = stopped.await;
+    }));
+    let http = Arc::new(HttpStore::new(&url, None));
+    let proxied = FoloMcp::new(http.clone(), Some(http), options(home.path()));
+    let g2 = ok(
+        &proxied,
+        "create_benchmark",
+        json!({
+            "name": "gen-proxied",
+            "generated": { "images": 4, "classes": ["circle", "square"], "imgsz": 64 },
+            "seed": 11,
+            "plan": plan
+        }),
+    )
+    .await;
+    let d2 = ok(&proxied, "get_benchmark", json!({ "benchmark_id": g2["id"] })).await;
+    assert_eq!(d1["fingerprint"], d2["fingerprint"], "embedded and proxied generated benchmarks must match");
+    let _ = stop.send(());
+    serving.await.unwrap().unwrap();
+
+    // Older proxied server without `bench_generated_source` fails cleanly with `not_implemented`.
+    let old_http = Arc::new(
+        HttpStore::new("http://127.0.0.1:9", None)
+            .assume_features(vec![folo_api::FEATURE_VISION_BENCH.to_string()]),
+    );
+    let old_mcp = FoloMcp::new(old_http.clone(), Some(old_http), options(home.path()));
+    let e = err(
+        &old_mcp,
+        "create_benchmark",
+        json!({ "name": "gen-old", "generated": { "images": 4, "imgsz": 64 } }),
+    )
+    .await;
+    assert_eq!(e.body.code, "not_implemented");
+    store.shutdown();
+}

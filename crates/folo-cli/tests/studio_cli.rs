@@ -86,7 +86,7 @@ fn studio_train_commands_parse() {
             (None, None) => panic!("{name}: neither model nor weights"),
         }
         assert_eq!(t.epochs as u64, x["epochs"].as_u64().unwrap(), "{name}");
-        assert_eq!(t.batch as u64, x["batch"].as_u64().unwrap(), "{name}");
+        assert_eq!(t.batch.fixed_or_default() as u64, x["batch"].as_u64().unwrap(), "{name}");
         assert_eq!(t.imgsz as u64, x["imgsz"].as_u64().unwrap(), "{name}");
         assert_eq!(t.device, x["device"].as_str().unwrap(), "{name}");
         let optimizer = match t.optimizer {

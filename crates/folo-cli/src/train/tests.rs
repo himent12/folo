@@ -90,6 +90,30 @@ fn resume_refuses_weights() {
     assert!(e.message.contains("--weights"), "{}", e.message);
 }
 
+/// `--auto-batch-target NaN` / `Infinity` / out-of-range on `--resume` is rejected with `invalid_config` even on a
+/// fixed-batch checkpoint (where `serde_json::json!(NaN)` would otherwise turn into `null` and silently match).
+#[test]
+fn resume_rejects_nonfinite_and_oob_auto_batch_target() {
+    use clap::Parser;
+    for stored_auto in [false, true] {
+        let stored = TrainConfig { auto_batch: stored_auto, ..TrainConfig::default() };
+        for bad in ["NaN", "inf", "-inf", "0.99", "0.1"] {
+            let flag = format!("--auto-batch-target={bad}");
+            let cli =
+                crate::cli::Cli::try_parse_from(["folo", "train", "--resume", "r/weights/last.folo", &flag])
+                    .unwrap();
+            let crate::cli::Command::Train(mut args) = cli.command else { panic!("not train") };
+            args.explicit = vec!["resume".into(), "auto_batch_target".into()];
+            let e = super::resume::check_resume_flags(&args, &stored).unwrap_err();
+            assert_eq!(
+                (e.code.as_str(), e.exit),
+                ("invalid_config", crate::output::ExitCode::Usage),
+                "stored_auto={stored_auto}, bad={bad}"
+            );
+        }
+    }
+}
+
 /// `--teacher` parses; it stores a file as an absolute path and a published name as given, and `--set distill.*`
 /// changes the starting values only once a teacher is set.
 #[test]

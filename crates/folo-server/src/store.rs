@@ -24,9 +24,11 @@ use crate::error::Result;
 #[path = "store_diag.rs"]
 mod diag;
 pub use diag::{
-    DEFAULT_VAL_DIAG_BG_IOU, DEFAULT_VAL_DIAG_CONF, DEFAULT_VAL_DIAG_TP_IOU, DEFAULT_VAL_DIAG_WORST,
-    DynamicAxes, FEATURE_EXPORT_DYNAMIC_AXES, FEATURE_VAL_DIAGNOSTICS, ImageDiagnostics, MAX_VAL_DIAG_WORST,
-    ValDiagConfig, ValDiagnostics, ValDiagnosticsSummary, check_export_axes, check_val_diag_config,
+    AutoBatchOptions, DEFAULT_VAL_DIAG_BG_IOU, DEFAULT_VAL_DIAG_CONF, DEFAULT_VAL_DIAG_TP_IOU,
+    DEFAULT_VAL_DIAG_WORST, DynamicAxes, FEATURE_BENCH_GENERATED_SOURCE, FEATURE_EXPORT_DYNAMIC_AXES,
+    FEATURE_TRAIN_AUTO_BATCH, FEATURE_VAL_DIAGNOSTICS, ImageDiagnostics, MAX_VAL_DIAG_WORST, ValDiagConfig,
+    ValDiagnostics, ValDiagnosticsSummary, check_auto_batch_options, check_export_axes,
+    check_val_diag_config,
 };
 pub use folo_vision::tta::DEFAULT_TTA_SCALES;
 pub use folo_vision::{PredictOptions, TileConfig, TileMergeMetric, TtaConfig};
@@ -695,6 +697,15 @@ pub trait Store: Send + Sync + 'static {
     fn list_runs(&self) -> Result<Vec<Run>>;
     /// Starts a run.
     fn create_run(&self, config: TrainConfig) -> Result<Run>;
+    /// Starts a run with optional GPU VRAM-budget auto-batch sizing (`batch: "auto"` / `auto_batch: true`).
+    /// When `auto_batch` is disabled, delegates to [`Store::create_run`].
+    fn create_run_with_auto_batch(&self, config: TrainConfig, auto_batch: AutoBatchOptions) -> Result<Run> {
+        check_auto_batch_options(&auto_batch)?;
+        if !auto_batch.enabled {
+            return self.create_run(config);
+        }
+        Err(crate::error::Error::not_implemented("auto-batch training"))
+    }
     /// Resumes a `stopped` or `failed` run (same id) from its last checkpoint: `POST /api/runs` with
     /// `resume_run_id`. `fields` are the body's other fields, which must match the run's config (`device` may
     /// change). Stores without resumable runs answer `501 not_implemented`.

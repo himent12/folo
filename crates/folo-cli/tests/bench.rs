@@ -406,3 +406,79 @@ fn invalid_server_urls_fail_with_usage_error() {
         }
     }
 }
+
+/// `folo bench create --generated` (and `--synthetic` alias) builds a deterministic benchmark directly from
+/// `folo-data`'s procedural shapes generator without registering any dataset, rejects `--split` and conflicting
+/// `--images`/`--max-images`, and runs a model entry end to end with stress conditions.
+#[test]
+fn bench_create_generated_is_deterministic_and_runs_model() {
+    let t = TestDir::new("cli-bench-generated");
+    let home = t.join("home");
+    let mut m = folo_vision::FoloModel::with_rng(
+        folo_nn::io::ModelConfig::new("n", 2).unwrap(),
+        &mut folo_core::rng::Rng::seed(2),
+    )
+    .unwrap();
+    m.set_classes(vec!["circle".into(), "square".into()]).unwrap();
+    m.set_imgsz(64);
+    std::fs::create_dir_all(home.join("models")).unwrap();
+    m.save(home.join("models").join("shapes.folo")).unwrap();
+    let d = ["--data-dir", home.to_str().unwrap()];
+
+    // `--split` and conflicting `--images` / `--max-images` are rejected upfront.
+    let e = error(&["create", "bad-split", "--generated", "--split", "val"], &d, 2);
+    assert_eq!(s(&e["code"]), "usage");
+    let e = error(&["create", "bad-count", "--generated", "--images", "4", "--max-images", "6"], &d, 2);
+    assert_eq!(s(&e["code"]), "usage");
+
+    // Create two generated benchmarks with identical spec & seed (`--generated` and `--synthetic` alias).
+    let b1 = ok(
+        &[
+            "create",
+            "synth-a",
+            "--generated",
+            "--images",
+            "4",
+            "--imgsz",
+            "64",
+            "--classes",
+            "circle,square",
+            "--seed",
+            "9",
+            "--plan",
+            PLAN,
+        ],
+        &d,
+    );
+    let b2 = ok(
+        &[
+            "create",
+            "synth-b",
+            "--synthetic",
+            "--images",
+            "4",
+            "--imgsz",
+            "64",
+            "--classes",
+            "circle,square",
+            "--seed",
+            "9",
+            "--plan",
+            PLAN,
+        ],
+        &d,
+    );
+    assert_eq!(b1["images"], 4);
+    assert_eq!(b1["classes"], json!(["circle", "square"]));
+    assert_eq!(b1["source"]["dataset_id"], "generated");
+    assert_eq!(b1["fingerprint"], b2["fingerprint"], "same spec & seed must yield identical fingerprint");
+
+    // Run a model entry against the generated benchmark (unchanged + haze severity 2 = 8 total passes).
+    let (code, events, err) = bench(&["run", s(&b1["id"]), "--model", "shapes", "--device", "cpu"], &d);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!((s(&events[0]["event"]), events[0]["total"].as_u64()), ("started", Some(8)));
+    let finished = events.last().unwrap();
+    assert_eq!(s(&finished["event"]), "finished");
+    assert_eq!(s(&finished["status"]), "done");
+    assert!(finished["result"]["score"].is_number(), "{finished}");
+}

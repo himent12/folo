@@ -281,6 +281,51 @@ pub fn with_distill(mut cmd: CliCommand, distill: Option<folo_vision::DistillCon
     cmd
 }
 
+/// Auto-batch sizing recorded in a run's `config.json` / checkpoint (`auto_batch`, `auto_batch_target`),
+/// `None` when disabled or unrecorded.
+pub fn recorded_auto_batch(run_dir: &std::path::Path) -> Option<crate::store::AutoBatchOptions> {
+    let train = recorded_train(run_dir)?;
+    let enabled = train.get("auto_batch").and_then(serde_json::Value::as_bool).unwrap_or(false);
+    if !enabled {
+        return None;
+    }
+    let target = train.get("auto_batch_target").and_then(serde_json::Value::as_f64);
+    Some(crate::store::AutoBatchOptions { enabled: true, target_utilization: target })
+}
+
+/// `cmd` with auto-batch flags (`--batch auto`, or `--batch <N> --set auto_batch=true` when a non-default
+/// integer batch was requested alongside `auto_batch: true`, plus `--auto-batch-target` when non-default) if the
+/// run used GPU VRAM-budget auto-batch sizing.
+pub fn with_auto_batch(
+    mut cmd: CliCommand,
+    config: &TrainConfig,
+    auto_batch: Option<crate::store::AutoBatchOptions>,
+) -> CliCommand {
+    let Some(opts) = auto_batch.filter(|o| o.enabled) else { return cmd };
+    let default_batch: u32 = serde_json::from_value::<TrainConfig>(serde_json::json!({ "dataset_id": "" }))
+        .expect("TrainConfig has defaults")
+        .batch;
+    if config.batch == default_batch {
+        if let Some(pos) = cmd.argv.iter().position(|a| a == "--batch") {
+            if pos + 1 < cmd.argv.len() {
+                cmd.argv[pos + 1] = "auto".into();
+            }
+        } else {
+            cmd.argv.extend(["--batch".to_string(), "auto".to_string()]);
+        }
+    } else {
+        cmd.argv.extend(["--set".to_string(), "auto_batch=true".to_string()]);
+    }
+    let default_target = folo_vision::train::DEFAULT_AUTO_BATCH_UTILIZATION;
+    if let Some(t) = opts.target_utilization
+        && (t - default_target).abs() > 1e-12
+    {
+        cmd.argv.extend(["--auto-batch-target".to_string(), t.to_string()]);
+    }
+    cmd.cli = shell_join(&cmd.argv);
+    cmd
+}
+
 /// `argv` as one command line, quoted for PowerShell (as Studio shows commands): an argument with characters a shell
 /// treats specially is single-quoted, with each quote inside doubled (`'O''Brien'`; PowerShell also reads the
 /// typographic quotes U+2018 to U+201B as single quotes, so they are doubled too). POSIX shells read the same words
@@ -462,6 +507,25 @@ mod tests {
         assert_eq!(
             cmd.cli,
             "folo train --data D:/coco --format coco --teacher folo-s-coco --set distill.temperature=2"
+        );
+    }
+
+    #[test]
+    fn auto_batch_cli_preserves_nondefault_batch_and_target() {
+        let default_cfg: TrainConfig =
+            serde_json::from_value(serde_json::json!({ "dataset_id": "ds_1" })).unwrap();
+        let base = train_command(&default_cfg, "D:/coco", DatasetFormat::Coco, None);
+        let opts = crate::store::AutoBatchOptions { enabled: true, target_utilization: Some(0.75) };
+        let cmd = with_auto_batch(base, &default_cfg, Some(opts));
+        assert_eq!(cmd.cli, "folo train --data D:/coco --format coco --batch auto --auto-batch-target 0.75");
+
+        let mut custom_cfg = default_cfg.clone();
+        custom_cfg.batch = 24;
+        let base_custom = train_command(&custom_cfg, "D:/coco", DatasetFormat::Coco, None);
+        let cmd_custom = with_auto_batch(base_custom, &custom_cfg, Some(opts));
+        assert_eq!(
+            cmd_custom.cli,
+            "folo train --data D:/coco --format coco --batch 24 --set auto_batch=true --auto-batch-target 0.75"
         );
     }
 

@@ -30,9 +30,61 @@ impl Runs {
         let st = e.state.lock().unwrap();
         resumable(&st, id)?;
         let stored = st.file.run.config.clone();
+        let stored_auto = st.file.auto_batch;
         let mut merged = serde_json::to_value(&stored).expect("configs serialize");
+        let mut extra_differ: Vec<&str> = Vec::new();
+        let auto_batch_flag = match fields.get("auto_batch").filter(|v| !v.is_null()) {
+            None => None,
+            Some(v) => Some(v.as_bool().ok_or_else(|| {
+                Error::new(StatusCode::UNPROCESSABLE_ENTITY, "invalid_body", "auto_batch: expected a boolean")
+            })?),
+        };
+        if let Some(b) = auto_batch_flag
+            && b != stored_auto.enabled
+        {
+            extra_differ.push("auto_batch");
+        }
         for (k, v) in fields {
-            if k == "resume_run_id" || (k == "name" && v.as_str() == Some("")) {
+            if k == "resume_run_id" || k == "auto_batch" || (k == "name" && v.as_str() == Some("")) {
+                continue;
+            }
+            if k == "batch" {
+                if let Some(s) = v.as_str() {
+                    if s.eq_ignore_ascii_case("auto") {
+                        if !stored_auto.enabled {
+                            extra_differ.push("batch");
+                        }
+                        continue;
+                    }
+                    return Err(Error::new(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        "invalid_body",
+                        format!("batch: expected a positive integer in 1..=1024 or \"auto\", got {s:?}"),
+                    ));
+                }
+                // An explicit integer `batch` on an auto-batch run only matches when `auto_batch: true` is
+                // also supplied (and the integer equals `stored.batch`, checked below).
+                if stored_auto.enabled && auto_batch_flag != Some(true) {
+                    extra_differ.push("batch");
+                }
+            }
+            if k == "auto_batch_target" {
+                if v.is_null() {
+                    continue;
+                }
+                let Some(t) = v.as_f64() else {
+                    return Err(Error::new(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        "invalid_body",
+                        "auto_batch_target: expected a number",
+                    ));
+                };
+                let have_t = stored_auto
+                    .target_utilization
+                    .unwrap_or(folo_vision::train::DEFAULT_AUTO_BATCH_UTILIZATION);
+                if !stored_auto.enabled || (t - have_t).abs() > 1e-12 {
+                    extra_differ.push("auto_batch_target");
+                }
                 continue;
             }
             merged[k.as_str()] = v.clone();
@@ -40,13 +92,18 @@ impl Runs {
         let wanted: TrainConfig = serde_json::from_value(merged)
             .map_err(|err| Error::new(StatusCode::UNPROCESSABLE_ENTITY, "invalid_body", err.to_string()))?;
         let (a, b) = (serde_json::to_value(&stored).unwrap(), serde_json::to_value(&wanted).unwrap());
-        let differ: Vec<&str> = a
+        let mut differ: Vec<&str> = a
             .as_object()
             .unwrap()
             .iter()
             .filter(|(k, v)| !matches!(k.as_str(), "device" | "compute") && b.get(k.as_str()) != Some(v))
             .map(|(k, _)| k.as_str())
             .collect();
+        for k in extra_differ {
+            if !differ.contains(&k) {
+                differ.push(k);
+            }
+        }
         if !differ.is_empty() {
             return Err(Error::new(
                 StatusCode::BAD_REQUEST,
@@ -343,7 +400,15 @@ impl RunEntry {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::remove_samples_after;
+    use crate::Store as _;
+    use crate::runs::{DatasetRef, Runs};
+    use crate::store::AutoBatchOptions;
+    use crate::throughput::Throughput;
+    use axum::http::StatusCode;
+    use folo_api::{DatasetFormat, RunStatus, SyntheticDataset, TrainConfig};
     use folo_test_support::TestDir;
 
     #[test]
@@ -359,5 +424,113 @@ mod tests {
         assert!(!samples.join("epoch_002.json").exists());
         assert!(!samples.join("epoch_003.json").exists());
         assert!(samples.join("notes.txt").is_file());
+    }
+
+    #[test]
+    fn resume_config_validates_auto_batch_fields_and_nulls() {
+        let dir = TestDir::new("resume-auto-batch-config");
+        let runs = Runs::open(dir.to_path_buf(), Arc::new(Throughput::in_memory(Default::default())));
+        let ds_dir = dir.join("ds");
+        std::fs::create_dir_all(&ds_dir).unwrap();
+        let dataset = DatasetRef {
+            id: "ds_1".into(),
+            name: "d".into(),
+            path: ds_dir.to_string_lossy().into_owned(),
+            format: DatasetFormat::Yolo,
+            classes: vec!["c".into()],
+        };
+        let cfg: TrainConfig =
+            serde_json::from_value(serde_json::json!({ "dataset_id": "ds_1", "batch": 24 })).unwrap();
+        let ab = AutoBatchOptions { enabled: true, target_utilization: Some(0.75) };
+        let entry =
+            runs.register_with_auto_batch(cfg, dataset, None, None, 0, "cpu".into(), None, ab).unwrap();
+        {
+            let mut st = entry.state.lock().unwrap();
+            st.file.run.status = RunStatus::Stopped;
+        }
+        let id = entry.id();
+
+        // Explicit `null` for `auto_batch` and `auto_batch_target` counts as omitted.
+        let nulls =
+            serde_json::json!({ "auto_batch": null, "auto_batch_target": null }).as_object().unwrap().clone();
+        runs.resume_config(id, &nulls).unwrap();
+
+        // Matching `batch: 24` + `auto_batch: true` + `auto_batch_target: 0.75` succeeds.
+        let same = serde_json::json!({ "batch": 24, "auto_batch": true, "auto_batch_target": 0.75 })
+            .as_object()
+            .unwrap()
+            .clone();
+        runs.resume_config(id, &same).unwrap();
+
+        // Explicit integer `batch: 24` WITHOUT `auto_batch: true` is rejected as a `batch` mismatch.
+        let fixed = serde_json::json!({ "batch": 24 }).as_object().unwrap().clone();
+        let err = runs.resume_config(id, &fixed).err().unwrap();
+        assert_eq!(err.body.code, "invalid_config");
+        assert!(err.body.message.contains("batch"), "{}", err.body.message);
+
+        // Non-auto string `batch` is 422 `invalid_body`.
+        let bad = serde_json::json!({ "batch": "huge" }).as_object().unwrap().clone();
+        let err = runs.resume_config(id, &bad).err().unwrap();
+        assert_eq!(err.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(err.body.code, "invalid_body");
+
+        runs.shutdown(None);
+    }
+
+    #[test]
+    fn queued_auto_batch_run_cli_and_cloud_resume_rejection() {
+        let dir = TestDir::new("real-store-auto-batch-cli-cloud");
+        let store = crate::RealStore::open(dir.to_path_buf()).device("cpu");
+        let ds = store
+            .create_synthetic(SyntheticDataset {
+                name: "ab".into(),
+                images: 4,
+                classes: vec!["circle".into()],
+                imgsz: 64,
+                seed: 1,
+            })
+            .unwrap();
+        let cfg: TrainConfig = serde_json::from_value(serde_json::json!({
+            "dataset_id": ds.id,
+            "epochs": 1,
+            "batch": 24,
+            "imgsz": 64,
+            "device": "cpu"
+        }))
+        .unwrap();
+        let ab = AutoBatchOptions { enabled: true, target_utilization: Some(0.75) };
+        let run = store.create_run_with_auto_batch(cfg, ab).unwrap();
+
+        // Immediately (even while queued before `config.json` exists), `run_cli` preserves `--batch 24`,
+        // `--set auto_batch=true`, and `--auto-batch-target 0.75`.
+        let cli = store.run_cli(&run.id).unwrap();
+        assert!(cli.cli.contains("--batch 24"), "{}", cli.cli);
+        assert!(cli.cli.contains("--set auto_batch=true"), "{}", cli.cli);
+        assert!(cli.cli.contains("--auto-batch-target 0.75"), "{}", cli.cli);
+
+        // Stop the run (or wait briefly if it finished) so we can test cloud resume rejection.
+        let _ = store.stop_run(&run.id);
+        for _ in 0..100 {
+            if !store.get_run(&run.id).unwrap().status.is_active() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        // Force stopped if the tiny 1-epoch CPU run completed before stop took effect.
+        if store.get_run(&run.id).unwrap().status == RunStatus::Completed {
+            let entry = store.runs_for_test().get(&run.id).unwrap();
+            entry.state.lock().unwrap().file.run.status = RunStatus::Stopped;
+        }
+        let cloud_fields = serde_json::json!({
+            "device": "auto",
+            "compute": { "connection_id": "cc_missing", "offer_id": "off_1", "max_hours": 1.0 }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let err = store.resume_run(&run.id, &cloud_fields).unwrap_err();
+        assert_eq!(err.body.code, "invalid_config");
+        assert!(err.body.message.contains("auto_batch"), "{}", err.body.message);
+        store.shutdown();
     }
 }

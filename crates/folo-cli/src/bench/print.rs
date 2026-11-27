@@ -68,6 +68,9 @@ pub(super) fn list(list: &[BenchSummary], out: Out) {
 
 pub(super) fn detail(b: &BenchDetail, out: Out) {
     let source = match &b.source {
+        BenchSource::Dataset { dataset_id, .. } if dataset_id == folo_server::bench::GENERATED_SOURCE_ID => {
+            b.source_name.clone()
+        }
         BenchSource::Dataset { split, .. } => {
             format!("the {} split of '{}'", split.map_or("val", |s| s.as_str()), b.source_name)
         }

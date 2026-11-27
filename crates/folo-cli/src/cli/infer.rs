@@ -125,6 +125,19 @@ pub enum QuantMethodArg {
     Mse,
 }
 
+/// Selective-`f32` layer-skip policy for `folo quantize` (docs/MODEL.md §9.6).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+pub enum F32PolicyArg {
+    /// Sensitivity-ranked selection within `--max-f32-macs` and `--sqnr-threshold` (default).
+    #[default]
+    Auto,
+    /// Keep the P5 neck tail (`neck.out5.*`) in `f32` regardless of sensitivity thresholds.
+    #[value(name = "p5-tail")]
+    P5Tail,
+    /// Quantize every eligible conv to int8 unless named with `--f32-conv`.
+    None,
+}
+
 /// `folo quantize`.
 #[derive(Debug, Args)]
 pub struct QuantizeArgs {
@@ -149,6 +162,27 @@ pub struct QuantizeArgs {
     /// With --method percentile: the mass cut from each tail in (0, 0.5).
     #[arg(long, default_value_t = 1e-4)]
     pub tail: f64,
+    /// Selective-`f32` layer-skip policy: `auto` (sensitivity-ranked within MAC budget), `p5-tail`
+    /// (`neck.out5.*`), or `none` (quantize every eligible conv unless named with `--f32-conv`).
+    #[arg(long, value_enum, default_value_t = F32PolicyArg::Auto)]
+    pub f32_policy: F32PolicyArg,
+    /// With `--f32-policy auto`: maximum fraction of backbone+neck MACs kept in `f32` [0..=1] [default: 0.05].
+    #[arg(long, value_name = "FRACTION")]
+    pub max_f32_macs: Option<f64>,
+    /// With `--f32-policy auto`: promote convs whose folded-weight SQNR is below this threshold in dB
+    /// [default: 35.0].
+    #[arg(long, value_name = "DB", allow_negative_numbers = true)]
+    pub sqnr_threshold: Option<f64>,
+    /// With `--f32-policy auto`: do not force the head-facing `neck.out5.cv2` conv to stay in `f32`.
+    #[arg(long)]
+    pub no_p5_head_out: bool,
+    /// With `--f32-policy auto`: allow promoting one conv of a residual bottleneck without its partner.
+    #[arg(long)]
+    pub no_pair_bottlenecks: bool,
+    /// Keep this int8-eligible conv in `f32` (repeatable or comma-separated, e.g.
+    /// `neck.out5.cv2,backbone.stage4.cv1`).
+    #[arg(long = "f32-conv", value_name = "NAME", value_delimiter = ',')]
+    pub f32_conv: Vec<String>,
     /// Square input size of the calibration images [32..=8192, multiple of 32] [default: the model's training size].
     #[arg(long)]
     pub imgsz: Option<u32>,

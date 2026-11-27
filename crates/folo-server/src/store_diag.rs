@@ -15,6 +15,51 @@ pub const FEATURE_VAL_DIAGNOSTICS: &str = "val_diagnostics";
 /// Server capability flag advertised on `/api/health` and `/api/system` when `POST /api/models/{id}/export`
 /// honours independent `dynamic_batch` and `dynamic_hw` ONNX axes.
 pub const FEATURE_EXPORT_DYNAMIC_AXES: &str = "export_dynamic_axes";
+/// Server capability flag advertised on `/api/health` and `/api/system` when `POST /api/runs` honours GPU
+/// VRAM-budget auto-batch sizing (`batch: "auto"` / `auto_batch: true` and `auto_batch_target`).
+pub const FEATURE_TRAIN_AUTO_BATCH: &str = "train_auto_batch";
+/// Server capability flag advertised on `/api/health` and `/api/system` when `POST /api/bench/benchmarks`
+/// honours deterministic generated-image sources (`source: { kind: "generated", ... }`).
+pub const FEATURE_BENCH_GENERATED_SOURCE: &str = "bench_generated_source";
+
+/// Opt-in GPU VRAM-budget auto-batch settings carried alongside [`folo_api::TrainConfig`] on `POST /api/runs` and
+/// the MCP `train` tool.
+#[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct AutoBatchOptions {
+    /// Whether GPU VRAM-budget auto-batch sizing (`folo_vision::TrainConfig::auto_batch`) is enabled.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Optional target VRAM utilization fraction in `0.25..=0.95` (`None` = engine default `0.80`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_utilization: Option<f64>,
+}
+
+impl AutoBatchOptions {
+    /// True when auto-batch is disabled and no target utilization is set.
+    pub fn is_default(&self) -> bool {
+        !self.enabled && self.target_utilization.is_none()
+    }
+}
+
+/// Validates [`AutoBatchOptions`] (`400 invalid_config` on out-of-range `target_utilization` or setting
+/// `target_utilization` without enabling auto-batch).
+pub fn check_auto_batch_options(opts: &AutoBatchOptions) -> Result<()> {
+    let bad = |msg: String| Error::new(StatusCode::BAD_REQUEST, "invalid_config", msg);
+    if let Some(target) = opts.target_utilization {
+        let min = folo_vision::train::MIN_AUTO_BATCH_UTILIZATION;
+        let max = folo_vision::train::MAX_AUTO_BATCH_UTILIZATION;
+        if !(target.is_finite() && (min..=max).contains(&target)) {
+            return Err(bad(format!("auto_batch_target must be finite in {min}..={max}, got {target}")));
+        }
+        if !opts.enabled {
+            return Err(bad(
+                "auto_batch_target requires auto-batch sizing (`batch: \"auto\"` or `auto_batch: true`)"
+                    .into(),
+            ));
+        }
+    }
+    Ok(())
+}
 
 /// Default number of worst failing images returned when validation diagnostics are enabled.
 pub const DEFAULT_VAL_DIAG_WORST: usize = 10;
