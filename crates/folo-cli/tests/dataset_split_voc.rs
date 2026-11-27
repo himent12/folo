@@ -319,6 +319,42 @@ fn dataset_split_val_plus_test_one_has_zero_train_and_voc_unreadable_split_fails
         folo_one(&["dataset", "split", s(&voc), "--out", s(&split_out), "--val", "0.2", "--json"]);
     assert_eq!((code, err["error"]["code"].as_str()), (1, Some("invalid_dataset")), "{err}");
     assert!(!split_out.exists(), "failed split must not create output dir");
+
+    // A dangling symlink at `ImageSets/Main/val.txt` must also fail both `convert` and `split` before writing
+    // output (always on Unix; on Windows when file symlinks are enabled).
+    let val_txt = voc.join("ImageSets/Main/val.txt");
+    std::fs::remove_file(&val_txt).unwrap();
+    let linked = {
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(dir.join("missing_val.txt"), &val_txt).unwrap();
+            true
+        }
+        #[cfg(windows)]
+        {
+            match std::os::windows::fs::symlink_file(dir.join("missing_val.txt"), &val_txt) {
+                Ok(()) => true,
+                Err(e) if e.raw_os_error() == Some(1314) => false,
+                Err(e) => panic!("symlink_file: {e}"),
+            }
+        }
+    };
+    if linked {
+        let conv_link_out = dir.join("voc_conv_link_fail");
+        let (code, err, _) =
+            folo_one(&["dataset", "convert", s(&voc), s(&conv_link_out), "--to", "yolo", "--json"]);
+        assert_eq!((code, err["error"]["code"].as_str()), (1, Some("invalid_dataset")), "{err}");
+        assert!(
+            !conv_link_out.exists(),
+            "failed convert on dangling VOC manifest must not create output dir"
+        );
+
+        let split_link_out = dir.join("voc_split_link_fail");
+        let (code, err, _) =
+            folo_one(&["dataset", "split", s(&voc), "--out", s(&split_link_out), "--val", "0.2", "--json"]);
+        assert_eq!((code, err["error"]["code"].as_str()), (1, Some("invalid_dataset")), "{err}");
+        assert!(!split_link_out.exists(), "failed split on dangling VOC manifest must not create output dir");
+    }
 }
 
 #[test]

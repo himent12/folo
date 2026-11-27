@@ -32,6 +32,8 @@ pub const FEATURE_PREDICT_OPTIONS: &str = "predict_options";
 pub const MAX_PREDICT_TILES: usize = 256;
 /// Maximum cropped tiles predicted in a single batch in server/MCP `predict`.
 pub const MAX_PREDICT_TILE_BATCH: usize = 32;
+/// Maximum peak RGB crop bytes allocated per tiled batch chunk in server/MCP `predict` (256 MiB).
+pub const MAX_PREDICT_CROP_BYTES: u64 = 256 * 1024 * 1024;
 /// Maximum TTA views permitted in a single server/MCP `predict` call (`unique_scales * (hflip ? 2 : 1)`).
 pub const MAX_PREDICT_TTA_VIEWS: usize = 16;
 
@@ -105,6 +107,23 @@ pub fn check_predict_workload(
                     tile.tile_width, tile.tile_height
                 ),
                 "use a larger tile size or lower overlap",
+            ));
+        }
+        let crop_w = tile.tile_width.min(w) as u64;
+        let crop_h = tile.tile_height.min(h) as u64;
+        let chunk = tiles.min(tile.tile_batch) as u64;
+        let crop_bytes = chunk.saturating_mul(crop_w).saturating_mul(crop_h).saturating_mul(3);
+        if crop_bytes > MAX_PREDICT_CROP_BYTES {
+            return Err(bad(
+                format!(
+                    "tiled prediction on {w}x{h} with {}x{} tiles and tile_batch {} needs {:.1} MiB of crop buffers per batch chunk, exceeding the server limit of {} MiB",
+                    tile.tile_width,
+                    tile.tile_height,
+                    tile.tile_batch,
+                    crop_bytes as f64 / (1024.0 * 1024.0),
+                    MAX_PREDICT_CROP_BYTES / (1024 * 1024),
+                ),
+                "reduce `tile_batch` or use a smaller tile size",
             ));
         }
     }
@@ -899,5 +918,55 @@ mod tests {
         assert_eq!(page.counts.by_kind.get("broken_label"), Some(&1));
         assert_eq!(page.counts.by_kind.get("clipped_box"), Some(&3));
         assert_eq!(page.counts.by_kind.get("empty_image"), Some(&1));
+    }
+
+    #[test]
+    fn check_predict_workload_caps_tile_count_and_crop_bytes() {
+        // High tile count rejected.
+        let many = PredictOptions {
+            tile: Some(TileConfig {
+                tile_width: 32,
+                tile_height: 32,
+                overlap_x: 0.0,
+                overlap_y: 0.0,
+                ..Default::default()
+            }),
+            tta: None,
+        };
+        assert_eq!(
+            check_predict_workload(&many, 640, Some((640, 640))).unwrap_err().body.code,
+            "invalid_config"
+        );
+
+        // Large overlapping crops with high tile_batch exceed MAX_PREDICT_CROP_BYTES (256 MiB):
+        // 8192x8192 with 4096x4096 tiles at 0.5 overlap -> 3x3 = 9 tiles; 9 * 4096 * 4096 * 3 = 432 MiB.
+        let heavy = PredictOptions {
+            tile: Some(TileConfig {
+                tile_width: 4096,
+                tile_height: 4096,
+                overlap_x: 0.5,
+                overlap_y: 0.5,
+                tile_batch: 9,
+                ..Default::default()
+            }),
+            tta: None,
+        };
+        let err = check_predict_workload(&heavy, 640, Some((8192, 8192))).unwrap_err();
+        assert_eq!(err.body.code, "invalid_config");
+        assert!(err.body.message.contains("MiB"), "{}", err.body.message);
+
+        // Reducing tile_batch to 4 keeps peak chunk bytes at 192 MiB <= 256 MiB.
+        let bounded = PredictOptions {
+            tile: Some(TileConfig {
+                tile_width: 4096,
+                tile_height: 4096,
+                overlap_x: 0.5,
+                overlap_y: 0.5,
+                tile_batch: 4,
+                ..Default::default()
+            }),
+            tta: None,
+        };
+        check_predict_workload(&bounded, 640, Some((8192, 8192))).unwrap();
     }
 }

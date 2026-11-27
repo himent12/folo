@@ -283,7 +283,10 @@ impl Inner {
                         json!({ "path": shown, "image": r.image, "boxes": r.boxes, "timing": r.timing }),
                     );
                 }
-                Err(e) if matches!(e.body.code.as_str(), "not_implemented" | "invalid_config") => {
+                // `not_implemented` (older server without `predict_options`) applies to the whole batch; per-image
+                // `invalid_config` (e.g. an oversized image exceeding the tile grid budget) is recorded in `failed`
+                // so valid images before and after it are preserved.
+                Err(e) if e.body.code == "not_implemented" => {
                     return Err(e);
                 }
                 Err(e) => {

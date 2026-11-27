@@ -539,7 +539,7 @@ async fn proxied_predict_gates_and_forwards_tile_and_tta_options() {
         .inner
         .predict_batch(
             PredictBatchArgs {
-                model_id,
+                model_id: model_id.clone(),
                 paths: Some(vec!["does-not-exist.png".into()]),
                 glob: None,
                 conf: 0.25,
@@ -557,6 +557,54 @@ async fn proxied_predict_gates_and_forwards_tile_and_tta_options() {
         .err()
         .unwrap();
     assert_eq!(batch_bad.body.code, "invalid_arguments");
+
+    // Mixed `predict_batch`: one oversized image triggering per-image `invalid_config` (tile limit) is recorded
+    // in `failed` without discarding valid images before or after it.
+    let small_a = home.join("small_a.png");
+    let huge = home.join("huge.png");
+    let small_b = home.join("small_b.png");
+    let small_png =
+        folo_data::encode(&folo_data::Image::new(32, 32, [64, 64, 64]), folo_data::ImageFormat::Png).unwrap();
+    let huge_png =
+        folo_data::encode(&folo_data::Image::new(640, 640, [64, 64, 64]), folo_data::ImageFormat::Png)
+            .unwrap();
+    std::fs::write(&small_a, &small_png).unwrap();
+    std::fs::write(&huge, &huge_png).unwrap();
+    std::fs::write(&small_b, &small_png).unwrap();
+    let mixed = live_mcp
+        .inner
+        .predict_batch(
+            PredictBatchArgs {
+                model_id,
+                paths: Some(vec![
+                    small_a.to_string_lossy().into_owned(),
+                    huge.to_string_lossy().into_owned(),
+                    small_b.to_string_lossy().into_owned(),
+                ]),
+                glob: None,
+                conf: 0.25,
+                iou: 0.7,
+                tile: Some(32),
+                tile_overlap: Some(0.0),
+                tile_full_image: Some(false),
+                tta: false,
+                tta_scales: None,
+                tta_hflip: None,
+            },
+            &mut Progress::none(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(mixed.value["processed"], 2, "{}", mixed.value);
+    assert_eq!(mixed.value["failed_total"], 1, "{}", mixed.value);
+    assert_eq!(mixed.value["failed"][0]["code"], "invalid_config", "{}", mixed.value);
+    let uri = mixed.value["details_uri"].as_str().unwrap();
+    let batch_id = uri.strip_prefix("folo://predictions/").unwrap();
+    let parsed = live_mcp.inner.batches.lock().unwrap().get(batch_id).unwrap();
+    let imgs = parsed["images"].as_array().unwrap();
+    assert_eq!(imgs.len(), 3);
+    assert!(imgs[0]["error"].is_null() && imgs[2]["error"].is_null(), "{parsed}");
+    assert_eq!(imgs[1]["error"]["code"], "invalid_config", "{parsed}");
 
     let _ = stop_tx.send(());
     let _ = task.await;

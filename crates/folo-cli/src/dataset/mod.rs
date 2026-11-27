@@ -477,16 +477,32 @@ pub(super) fn unreadable_split_manifests(ds: &LoadedDataset, input: &Path) -> Ve
             }
             bad
         }
-        Format::Voc => ds
-            .report
-            .issues
-            .iter()
-            .filter(|i| {
-                i.kind == folo_data::IssueKind::Other
-                    && i.message.starts_with("cannot read ImageSets split file:")
-            })
-            .map(|i| (i.path.clone(), i.message.clone()))
-            .collect(),
+        Format::Voc => {
+            let mut bad: Vec<(PathBuf, String)> = ds
+                .report
+                .issues
+                .iter()
+                .filter(|i| {
+                    i.kind == folo_data::IssueKind::Other
+                        && i.message.starts_with("cannot read ImageSets split file:")
+                })
+                .map(|i| (i.path.clone(), i.message.clone()))
+                .collect();
+            for rel in ["ImageSets/Main", "imagesets/main", "ImageSets/main", "imagesets/Main"] {
+                let dir = ds.root.join(rel);
+                if !dir.is_dir() {
+                    continue;
+                }
+                for name in ["train.txt", "val.txt", "trainval.txt", "test.txt"] {
+                    let p = dir.join(name);
+                    if let Some(msg) = check::dangling_link_message(&p) {
+                        bad.push((p, msg));
+                    }
+                }
+                break;
+            }
+            bad
+        }
         _ => Vec::new(),
     }
 }
