@@ -10,7 +10,7 @@ import CircleStop from '$icons/circle-stop';
 import Play from '$icons/play';
 import Scan from '$icons/scan';
 import Square from '$icons/square';
-import { css, effect, signal } from 'fw';
+import { css, effect, onCleanup, signal } from 'fw';
 import Button from '$lib/ui/Button';
 import Slider from '$lib/ui/Slider';
 import Switch from '$lib/ui/Switch';
@@ -22,27 +22,70 @@ export interface MediaBarProps {
   predicting: boolean;
 }
 
+type VideoAction = 'step-back' | 'step-fwd' | 'detect';
+
 export default function MediaBar(props: MediaBarProps) {
   const m = props.media;
   const barEl = signal<HTMLDivElement | undefined>(undefined);
-  let refocusAction: 'step-back' | 'step-fwd' | 'detect' | null = null;
+  let pendingFocus: { action: VideoAction; url: string | null; sawDisabled: boolean } | null = null;
+  let focusSeq = 0;
+
+  function onUserNav(e: Event) {
+    if (!pendingFocus) return;
+    // Ignore events targeting the currently armed button itself while it is still focused/activated,
+    // and ignore focusin on document.body (user clicks on background fire pointerdown; Tab moves focus to controls).
+    const t = e.target as Element | null;
+    if (e.type === 'focusin' && t === document.body) return;
+    if (t?.closest?.(`button[data-video-action="${pendingFocus.action}"]`)) return;
+    cancelPendingFocus();
+  }
+
+  function detachNavListeners() {
+    document.removeEventListener('pointerdown', onUserNav, true);
+    document.removeEventListener('focusin', onUserNav, true);
+  }
+
+  function cancelPendingFocus() {
+    focusSeq++;
+    pendingFocus = null;
+    detachNavListeners();
+  }
+
+  function armPendingFocus(action: VideoAction, sawDisabled: boolean): number {
+    const seq = ++focusSeq;
+    pendingFocus = { action, url: m.videoUrl.peek(), sawDisabled };
+    document.addEventListener('pointerdown', onUserNav, true);
+    document.addEventListener('focusin', onUserNav, true);
+    return seq;
+  }
+
+  onCleanup(() => cancelPendingFocus());
 
   // Restore focus after a transient seek or inference cycle clears `disabled` on the activated video transport button,
-  // provided focus fell to `body` rather than moving intentionally to another control.
+  // canceled automatically on clip replacement, mode exit, or any user pointer/focus navigation elsewhere.
   effect(() => {
-    if (m.mode.get() !== 'video') {
-      refocusAction = null;
-      return;
-    }
+    const mode = m.mode.get();
+    const url = m.videoUrl.get();
     const ready = m.videoReady.get();
     const seeking = m.seeking.get();
     const predicting = props.predicting;
-    if (!refocusAction || !ready) return;
-    const isEnabled = refocusAction === 'detect' ? !seeking && !predicting : !seeking;
-    if (!isEnabled) return;
-    const action = refocusAction;
-    refocusAction = null;
+    if (!pendingFocus) return;
+    if (mode !== 'video' || !ready || url !== pendingFocus.url) {
+      cancelPendingFocus();
+      return;
+    }
+    const isEnabled = pendingFocus.action === 'detect' ? !seeking && !predicting : !seeking;
+    if (!isEnabled) {
+      pendingFocus.sawDisabled = true;
+      return;
+    }
+    if (!pendingFocus.sawDisabled) return;
+    const { action, url: expectedUrl } = pendingFocus;
+    const seq = ++focusSeq;
+    pendingFocus = null;
+    detachNavListeners();
     queueMicrotask(() => {
+      if (seq !== focusSeq || m.mode.peek() !== 'video' || m.videoUrl.peek() !== expectedUrl) return;
       const active = document.activeElement;
       if (active && active !== document.body) return;
       const btn = barEl.peek()?.querySelector<HTMLButtonElement>(`button[data-video-action="${action}"]:not(:disabled)`);
@@ -90,8 +133,9 @@ export default function MediaBar(props: MediaBarProps) {
                 data-video-action="step-back"
                 disabled={!m.videoReady.get() || m.seeking.get()}
                 onclick={(e) => {
-                  if (document.activeElement === e.currentTarget) refocusAction = 'step-back';
+                  const hadFocus = document.activeElement === e.currentTarget;
                   m.stepFrame(-1);
+                  if (hadFocus && m.seeking.peek()) armPendingFocus('step-back', true);
                 }}
               >
                 −1f
@@ -104,8 +148,9 @@ export default function MediaBar(props: MediaBarProps) {
                 data-video-action="step-fwd"
                 disabled={!m.videoReady.get() || m.seeking.get()}
                 onclick={(e) => {
-                  if (document.activeElement === e.currentTarget) refocusAction = 'step-fwd';
+                  const hadFocus = document.activeElement === e.currentTarget;
                   m.stepFrame(1);
+                  if (hadFocus && m.seeking.peek()) armPendingFocus('step-fwd', true);
                 }}
               >
                 +1f
@@ -139,9 +184,28 @@ export default function MediaBar(props: MediaBarProps) {
                 icon={Scan}
                 data-video-action="detect"
                 disabled={!m.videoReady.get() || m.seeking.get() || props.predicting}
+                onblur={(e) => {
+                  if (pendingFocus?.action === 'detect' && !(e.currentTarget as HTMLButtonElement).disabled) {
+                    cancelPendingFocus();
+                  }
+                }}
                 onclick={(e) => {
-                  if (document.activeElement === e.currentTarget) refocusAction = 'detect';
-                  m.detectCurrentFrame();
+                  if (document.activeElement === e.currentTarget) {
+                    const seq = armPendingFocus('detect', false);
+                    void m.detectCurrentFrame().then((sent) => {
+                      if (!sent) {
+                        if (pendingFocus && seq === focusSeq) cancelPendingFocus();
+                        return;
+                      }
+                      queueMicrotask(() => {
+                        if (pendingFocus && !pendingFocus.sawDisabled && seq === focusSeq && !props.predicting) {
+                          cancelPendingFocus();
+                        }
+                      });
+                    });
+                  } else {
+                    void m.detectCurrentFrame();
+                  }
                 }}
               >
                 Detect frame

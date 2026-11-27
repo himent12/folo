@@ -32,6 +32,7 @@ export default function BatchFilmstrip(props: BatchFilmstripProps) {
   // Keep the active thumbnail visible inside the horizontal filmstrip without scrolling ancestor containers (`window`).
   effect(() => {
     const idx = b.activeIndex.get();
+    void b.items.get();
     const root = stripEl.get();
     if (!root) return;
     const btn = root.querySelector<HTMLButtonElement>(`button[data-batch-idx="${idx}"]`);
@@ -39,18 +40,24 @@ export default function BatchFilmstrip(props: BatchFilmstripProps) {
     const rr = root.getBoundingClientRect();
     const br = btn.getBoundingClientRect();
     if (rr.width <= 0 || br.width <= 0) return;
-    if (br.left < rr.left) root.scrollLeft += br.left - rr.left - 2;
-    else if (br.right > rr.right) root.scrollLeft += br.right - rr.right + 2;
+    if (br.left < rr.left + 2) root.scrollLeft += br.left - rr.left - 2;
+    else if (br.right > rr.right - 2) root.scrollLeft += br.right - rr.right + 2;
   });
 
   // When Run all completes and disables the run button while it held focus, move focus cleanly to an enabled batch action.
   effect(() => {
     const running = b.runningAll.get();
+    const hasModel = props.hasModel;
     const s = b.summary.get();
     const allDone = !running && s.total > 0 && s.done >= s.total;
+    if (!running && !hasModel && !allDone) {
+      runBtnFocused = false;
+      return;
+    }
     if (!allDone || !runBtnFocused) return;
     runBtnFocused = false;
     queueMicrotask(() => {
+      if (!b.active.peek()) return;
       const active = document.activeElement;
       const runBtn = actionsEl.peek()?.querySelector<HTMLButtonElement>('button[data-batch-run]');
       if (active && active !== document.body && active !== runBtn) return;
@@ -131,11 +138,11 @@ export default function BatchFilmstrip(props: BatchFilmstripProps) {
                   : 'Stop batch run'
                 : b.summary.get().done < b.summary.get().total
                   ? props.compare
-                    ? 'Run all images on Model A'
+                    ? 'Run all A (Model A)'
                     : 'Run all images'
                   : props.compare
-                    ? 'All Model A batch images run'
-                    : 'All batch images run'
+                    ? 'All A run (Model A)'
+                    : 'All run'
             }
             onfocus={() => {
               runBtnFocused = true;
@@ -174,7 +181,7 @@ export default function BatchFilmstrip(props: BatchFilmstripProps) {
               variant="ghost"
               icon={FileJson}
               data-batch-export="json"
-              aria-label={props.compare ? 'Export Model A batch JSON' : 'Export batch JSON'}
+              aria-label={props.compare ? 'A JSON — export Model A batch' : 'Export batch JSON'}
               disabled={b.runningAll.get() || b.summary.get().done === 0}
               onclick={() => b.onExportJson()}
             >
@@ -195,7 +202,7 @@ export default function BatchFilmstrip(props: BatchFilmstripProps) {
               variant="ghost"
               icon={Download}
               data-batch-export="csv"
-              aria-label={props.compare ? 'Export Model A batch CSV' : 'Export batch CSV'}
+              aria-label={props.compare ? 'A CSV — export Model A batch' : 'Export batch CSV'}
               disabled={b.runningAll.get() || b.summary.get().done === 0}
               onclick={() => b.onExportCsv()}
             >

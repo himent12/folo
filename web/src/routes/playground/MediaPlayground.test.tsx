@@ -551,14 +551,25 @@ describe('Playground: Local Video Frame Scrubber & Live Webcam', () => {
       flushSync();
       expect(bar.textContent).toContain('f 1 / 11');
 
-      // Playtest R20 P3-3: focusing +1f or Detect frame and activating restores focus once transient disabled clears.
+      // Playtest R20 P3-3: boundary no-op -1f at t=0 must NOT arm stale focus restoration for later seeks.
+      const stepBackBtn = bar.querySelector<HTMLButtonElement>('button[aria-label="Step back 1 frame"]')!;
       const stepFwdBtn = bar.querySelector<HTMLButtonElement>('button[aria-label="Step forward 1 frame"]')!;
+      stepBackBtn.focus();
+      stepBackBtn.click();
+      flushSync();
+      expect(stepBackBtn.disabled).toBe(false);
+      document.body.focus();
+      expect(document.activeElement).toBe(document.body);
+
+      // Focusing +1f and activating restores focus once transient disabled clears after seeked.
       stepFwdBtn.focus();
       expect(document.activeElement).toBe(stepFwdBtn);
       stepFwdBtn.click();
       flushSync();
-      // Simulate browser blur-to-body when button becomes disabled while seeking
-      stepFwdBtn.blur();
+      expect(stepFwdBtn.disabled).toBe(true);
+      // Simulate browser dropping focus to body when button becomes disabled while seeking
+      document.body.focus();
+      expect(document.activeElement).toBe(document.body);
       decoder.dispatchEvent(new Event('seeked'));
       flushSync();
       await until(() => document.activeElement === stepFwdBtn, 'focus restored to +1f button after seek');
@@ -573,9 +584,10 @@ describe('Playground: Local Video Frame Scrubber & Live Webcam', () => {
       const detectBtn = bar.querySelector<HTMLButtonElement>('button[data-video-action="detect"]')!;
       detectBtn.focus();
       detectBtn.click();
-      flushSync();
-      detectBtn.blur();
-      await until(() => typeof resolveDetect === 'function', 'detect prediction in flight');
+      await until(() => detectBtn.disabled && typeof resolveDetect === 'function', 'detect button disabled while predicting');
+      // Simulate browser dropping focus to body once disabled flips to true
+      document.body.focus();
+      expect(document.activeElement).toBe(document.body);
       resolveDetect({
         model_id: 'm_hard_s',
         image: { width: 320, height: 180 },
@@ -584,6 +596,38 @@ describe('Playground: Local Video Frame Scrubber & Live Webcam', () => {
         device: 'cpu',
       });
       await until(() => document.activeElement === detectBtn, 'focus restored to Detect frame button after predict');
+
+      // Clicking the page background during a pending seek cancels focus restoration (never reclaims focus from body).
+      stepFwdBtn.focus();
+      stepFwdBtn.click();
+      flushSync();
+      expect(stepFwdBtn.disabled).toBe(true);
+      document.body.focus();
+      expect(document.activeElement).toBe(document.body);
+      document.body.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+      decoder.dispatchEvent(new Event('seeked'));
+      flushSync();
+      await Promise.resolve();
+      expect(document.activeElement).toBe(document.body);
+
+      // Replacing the video clip during a pending seek cancels focus restoration from the old clip.
+      let urlCount = 1;
+      URL.createObjectURL = vi.fn(() => `blob:mock-10fps-${++urlCount}`);
+      stepBackBtn.focus();
+      stepBackBtn.click();
+      flushSync();
+      expect(stepBackBtn.disabled).toBe(true);
+      document.body.focus();
+      expect(document.activeElement).toBe(document.body);
+      const clip2 = new File([webmBytes], 'ten-fps-2.webm', { type: 'video/webm' });
+      Object.defineProperty(videoInput, 'files', { configurable: true, value: [clip2] });
+      videoInput.dispatchEvent(new Event('change', { bubbles: true }));
+      flushSync();
+      decoder.dispatchEvent(new Event('loadedmetadata'));
+      decoder.dispatchEvent(new Event('loadeddata'));
+      flushSync();
+      await Promise.resolve();
+      expect(document.activeElement).toBe(document.body);
     } finally {
       URL.createObjectURL = origCreateUrl;
       URL.revokeObjectURL = origRevokeUrl;
