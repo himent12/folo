@@ -1,11 +1,13 @@
 //! Boundary grid metadata, fast FNV-1a hashing, and packed conv/stem/bias cache keys for [`super::exec`].
 
 use std::hash::{BuildHasher, Hash, Hasher};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use folo_core::Tensor;
-use folo_core::cpu::q8::{Grid, QConv, QStem};
+use folo_core::cpu::q8::{Grid, PIXEL_SCALE, QConv, QStem};
 use folo_nn::{Activation, ConvBnAct, Result};
+
+use super::ConvView;
 
 const BIAS_CACHE_KEY: u64 = 0x666f_6c6f_6269_6173; // "folobias"
 
@@ -192,6 +194,12 @@ impl BoundaryGrids {
         let s = &self.grids[offset..offset + len];
         (hash_grids(s), max_scale_of(s))
     }
+
+    /// Static 12-channel `[Grid { scale: 1/255, zero: 0 }; 12]` boundary for `folo2`'s direct `u8` `SPD(2×2)` stem.
+    pub(crate) fn pixel_12() -> &'static Self {
+        static PIXEL_12: OnceLock<BoundaryGrids> = OnceLock::new();
+        PIXEL_12.get_or_init(|| BoundaryGrids::new(vec![Grid { scale: PIXEL_SCALE, zero: 0 }; 12]))
+    }
 }
 
 /// Everything a conv's packed weights are made from besides the weights' elements, kept with the packing so a
@@ -323,8 +331,8 @@ pub(crate) struct PackedStem {
 
 /// Load or pack `conv`'s int8 weights for input `parts`, caching the result on `conv.conv.weight` via
 /// [`Tensor::derived_f32`]. Zero heap allocations and O(parts) FNV-1a hashing on cache hit.
-pub(crate) fn load_qconv(
-    conv: &ConvBnAct,
+pub(crate) fn load_qconv_view(
+    conv: ConvView<'_>,
     parts: &[PartKeyRef<'_>],
     allow_decouple: bool,
 ) -> Result<Arc<QConv>> {

@@ -2,8 +2,9 @@
 
 use std::borrow::Borrow;
 
+use folo_core::cpu::gemm::{Strided, gemm};
 use folo_core::rng::Rng;
-use folo_core::{Tensor, UnaryOp};
+use folo_core::{DType, Tensor, UnaryOp, is_grad_enabled};
 
 use crate::init;
 use crate::module::{Forward, Module, TensorKind};
@@ -61,21 +62,57 @@ impl Forward for Linear {
             )));
         }
         let rows = x.numel() / i.max(1);
+        let mut out_shape = x.dims().to_vec();
+        *out_shape.last_mut().expect("rank >= 1") = o;
+        if !is_grad_enabled()
+            && rows > 0
+            && i > 0
+            && o > 0
+            && x.device().is_cpu()
+            && x.dtype() == DType::F32
+            && self.weight.device().is_cpu()
+            && self.weight.dtype() == DType::F32
+            && !x.same_storage(&self.weight)
+            && self.bias.as_ref().is_none_or(|b| {
+                b.device().is_cpu()
+                    && b.dtype() == DType::F32
+                    && b.dims() == [o]
+                    && !b.same_storage(x)
+                    && !b.same_storage(&self.weight)
+            })
+        {
+            let mut out = folo_core::cpu::take_buffer(rows * o);
+            x.with_f32_slice(|xs| {
+                self.weight.with_f32_slice(|ws| {
+                    let lhs = Strided::lhs(xs, 0, i, 1);
+                    let rhs = Strided::rhs(ws, 0, 1, i);
+                    gemm(rows, o, i, &lhs, &rhs, &mut out, o, false, true);
+                })
+            })??;
+            if let Some(b) = &self.bias {
+                b.with_f32_slice(|bs| {
+                    for row in out.chunks_exact_mut(o) {
+                        for (dst, &bv) in row.iter_mut().zip(bs) {
+                            *dst += bv;
+                        }
+                    }
+                })?;
+            }
+            return Ok(Tensor::from_vec(out, out_shape)?);
+        }
         let mut y = x.reshape([rows, i])?.matmul(&self.weight.t()?)?;
         if let Some(b) = &self.bias {
-            let b = if b.dtype() == folo_core::DType::F32
-                && y.dtype() == folo_core::DType::F16
-                && folo_core::autocast_dtype() == Some(folo_core::DType::F16)
+            let b = if b.dtype() == DType::F32
+                && y.dtype() == DType::F16
+                && folo_core::autocast_dtype() == Some(DType::F16)
             {
-                b.to_dtype(folo_core::DType::F16)?
+                b.to_dtype(DType::F16)?
             } else {
                 b.clone()
             };
             y = y.add(&b)?;
         }
-        let mut out = x.dims().to_vec();
-        *out.last_mut().expect("rank >= 1") = o;
-        Ok(y.reshape(out)?)
+        Ok(y.reshape(out_shape)?)
     }
 }
 

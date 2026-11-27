@@ -135,6 +135,21 @@ impl Detector {
         }
     }
 
+    /// Load a fused CPU `F32` detector (`folo-*` or `folo2-*`) from `file` and attach its stored `folo.quant`
+    /// int8 calibration plan.
+    pub fn from_file_int8(file: &ModelFile) -> Result<Self> {
+        if file.metadata().config.is_v2() {
+            Ok(Detector::V2(Box::new(FoloV2Model::from_file_int8(file)?)))
+        } else {
+            Ok(Detector::V1(Box::new(FoloModel::from_file_int8(file)?)))
+        }
+    }
+
+    /// Open a quantized `.folo` file (`folo-*` or `folo2-*`) for CPU int8 inference.
+    pub fn open_int8(path: impl AsRef<Path>) -> Result<Self> {
+        Self::from_file_int8(&ModelFile::open(path)?)
+    }
+
     /// Borrow the underlying FOLO v1 model, if this is `Detector::V1`.
     pub fn as_v1(&self) -> Option<&FoloModel> {
         match self {
@@ -331,19 +346,27 @@ impl Detector {
         }
     }
 
-    /// Enable or disable CPU int8 calibration plan (`None` is a no-op on `V2`).
+    /// Enable or disable CPU int8 calibration plan (`folo-*` and `folo2-*`).
     pub fn set_int8(&mut self, cal: Option<quant::Calibration>) -> Result<()> {
         match self {
             Detector::V1(m) => m.set_int8(cal),
-            Detector::V2(_) => {
-                if cal.is_some() {
-                    Err(folo_nn::Error::Invalid(
-                        "int8 calibration plan is not yet supported for folo2".into(),
-                    ))
-                } else {
-                    Ok(())
-                }
-            }
+            Detector::V2(m) => m.set_int8(cal),
+        }
+    }
+
+    /// The calibration of the active int8 plan, if enabled.
+    pub fn int8(&self) -> Option<&quant::Calibration> {
+        match self {
+            Detector::V1(m) => m.int8(),
+            Detector::V2(m) => m.int8(),
+        }
+    }
+
+    /// Whether CPU int8 inference with the direct `u8` stem is active.
+    pub(crate) fn int8_u8_stem_active(&self) -> bool {
+        match self {
+            Detector::V1(m) => m.int8_u8_stem_active(),
+            Detector::V2(m) => m.int8_u8_stem_active(),
         }
     }
 

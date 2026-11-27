@@ -14,8 +14,9 @@ use serde::{Deserialize, Serialize};
 
 use super::QParam;
 use super::walk::{self, Exec};
-use crate::model::FoloModel;
 use crate::model::blocks::{C3k2, C3k2Block};
+use crate::model::v2::{FoloV2Model, StemV2, WsQARepConv3x3, space_to_depth_2x2};
+use crate::model::{Detector, FoloModel};
 
 /// Per-tensor histogram bins per boundary.
 pub const BINS: usize = 2048;
@@ -160,6 +161,47 @@ impl Calibration {
         }
         Ok(self)
     }
+
+    /// Adds the sensitivity-default P5 tail (`neck.out5.*`) conv names of a [`FoloV2Model`] to `f32_convs`
+    /// (deduplicated).
+    pub fn with_p5_tail_f32_v2(mut self, model: &FoloV2Model) -> Self {
+        for name in default_sensitivity_f32_convs_v2(model) {
+            if !self.is_f32(&name) {
+                self.f32_convs.push(name);
+            }
+        }
+        self
+    }
+
+    /// Selects and appends sensitivity-ranked `f32_convs` for a [`FoloV2Model`] under `policy` (folded-weight
+    /// SQNR vs MAC budget, deduplicated, preserving existing entries and counting their MAC share against the
+    /// budget).
+    pub fn with_sensitivity_f32_v2(
+        mut self,
+        model: &FoloV2Model,
+        policy: super::SensitivityPolicy,
+    ) -> Result<Self> {
+        let extra =
+            super::sensitivity::select_f32_convs_v2_with_existing(model, &self, policy, &self.f32_convs)?;
+        for name in extra {
+            if !self.is_f32(&name) {
+                self.f32_convs.push(name);
+            }
+        }
+        Ok(self)
+    }
+
+    /// Selects and appends sensitivity-ranked `f32_convs` for any [`Detector`] (`folo-*` or `folo2-*`).
+    pub fn with_sensitivity_f32_detector(
+        self,
+        model: &Detector,
+        policy: super::SensitivityPolicy,
+    ) -> Result<Self> {
+        match model {
+            Detector::V1(m) => self.with_sensitivity_f32(m, policy),
+            Detector::V2(m) => self.with_sensitivity_f32_v2(m, policy),
+        }
+    }
 }
 
 /// Sensitivity + cost-model default `f32_convs`: the P5 neck tail (`neck.out5.*`), which both has the lowest
@@ -168,6 +210,17 @@ impl Calibration {
 pub fn default_sensitivity_f32_convs(model: &FoloModel) -> Vec<String> {
     let mut out = Vec::new();
     collect_c3k2_names("neck.out5", &model.neck.out5, &mut out);
+    out
+}
+
+/// Sensitivity + cost-model default `f32_convs` for [`FoloV2Model`]: the P5 neck tail (`neck.out5.*`).
+pub fn default_sensitivity_f32_convs_v2(model: &FoloV2Model) -> Vec<String> {
+    let mut out = Vec::with_capacity(2 + model.neck.out5.reps.len());
+    out.push("neck.out5.cv1".into());
+    for j in 0..model.neck.out5.reps.len() {
+        out.push(format!("neck.out5.rep{j}"));
+    }
+    out.push("neck.out5.cv2".into());
     out
 }
 
@@ -339,6 +392,26 @@ impl Calibrator {
         r.map(|_| ())
     }
 
+    /// Run the `f32` [`FoloV2Model`] on `x` (`[B, C, H, W]`, `f32`, on the CPU) and record every boundary.
+    pub fn observe_v2(&mut self, model: &FoloV2Model, x: &Tensor) -> Result<()> {
+        let _g = folo_core::no_grad();
+        let mut e = Observe { cal: self };
+        let r = folo_core::cpu::in_pool(|| walk::features_v2(model, &mut e, x));
+        match r {
+            Ok(_) => self.images[self.pass as usize] += x.dims()[0],
+            Err(_) => self.failed = true,
+        }
+        r.map(|_| ())
+    }
+
+    /// Run a unified [`Detector`] (`folo-*` or `folo2-*`) on `x` and record every boundary.
+    pub fn observe_detector(&mut self, model: &Detector, x: &Tensor) -> Result<()> {
+        match model {
+            Detector::V1(m) => self.observe(m, x),
+            Detector::V2(m) => self.observe_v2(m, x),
+        }
+    }
+
     /// Start the histogram pass.
     pub fn next_pass(&mut self) {
         self.pass = 1;
@@ -423,6 +496,12 @@ impl Exec for Observe<'_> {
         Ok(y)
     }
 
+    fn stem_v2(&mut self, name: &str, stem: &StemV2, x: &Tensor) -> Result<Tensor> {
+        let y = stem.forward(x)?;
+        self.cal.record(name, &y)?;
+        Ok(y)
+    }
+
     fn conv(
         &mut self,
         name: &str,
@@ -431,6 +510,12 @@ impl Exec for Observe<'_> {
         res: Option<&Tensor>,
     ) -> Result<Tensor> {
         let y = conv_f32(conv, parts, res)?;
+        self.cal.record(name, &y)?;
+        Ok(y)
+    }
+
+    fn rep_conv(&mut self, name: &str, rep: &WsQARepConv3x3, x: &Tensor, _out_f32: bool) -> Result<Tensor> {
+        let y = rep.forward(x)?;
         self.cal.record(name, &y)?;
         Ok(y)
     }
@@ -458,6 +543,12 @@ impl Exec for Observe<'_> {
 
     fn upsample2(&mut self, x: &Tensor) -> Result<Tensor> {
         Ok(x.upsample_nearest2d(2)?)
+    }
+
+    fn space_to_depth2_parts(&mut self, x: &Tensor, _consumer_is_f32: bool) -> Result<[Tensor; 4]> {
+        let c = x.dims4()?.1;
+        let spd = space_to_depth_2x2(x)?;
+        Ok([spd.narrow(1, 0, c)?, spd.narrow(1, c, c)?, spd.narrow(1, 2 * c, c)?, spd.narrow(1, 3 * c, c)?])
     }
 
     fn dims(&self, x: &Tensor) -> [usize; 4] {
@@ -519,6 +610,94 @@ pub fn calibrate_sample(
     let cal = calibrate(model, batches, method)?
         .with_sensitivity_f32(model, super::SensitivityPolicy::default())?;
     Ok((cal, n))
+}
+
+/// Calibrate a [`FoloV2Model`] (fused, eval mode, `f32` on the CPU) on `batches`, which is called twice and
+/// must yield the same images both times.
+pub fn calibrate_v2<I>(
+    model: &FoloV2Model,
+    mut batches: impl FnMut() -> I,
+    method: Method,
+) -> Result<Calibration>
+where
+    I: Iterator<Item = Result<Tensor>>,
+{
+    validate_method(method)?;
+    let mut c = Calibrator::new();
+    for x in batches() {
+        c.observe_v2(model, &x?)?;
+    }
+    c.next_pass();
+    for x in batches() {
+        c.observe_v2(model, &x?)?;
+    }
+    let mut cal = c.finish(method)?;
+    cal.weights = Some(super::fingerprint_v2(model)?);
+    Ok(cal)
+}
+
+/// Calibrate any [`Detector`] (`folo-*` or `folo2-*`, fused, eval mode, `f32` on the CPU) on `batches`.
+pub fn calibrate_detector<I>(
+    model: &Detector,
+    batches: impl FnMut() -> I,
+    method: Method,
+) -> Result<Calibration>
+where
+    I: Iterator<Item = Result<Tensor>>,
+{
+    match model {
+        Detector::V1(m) => calibrate(m, batches, method),
+        Detector::V2(m) => calibrate_v2(m, batches, method),
+    }
+}
+
+/// [`calibrate_v2`] on `images` images of `part` drawn at random by `seed`, applying sensitivity-aware
+/// selective-`f32` selection ([`Calibration::with_sensitivity_f32_v2`] with
+/// [`super::SensitivityPolicy::default`]).
+pub fn calibrate_sample_v2(
+    model: &FoloV2Model,
+    part: &folo_data::FileDataset,
+    images: usize,
+    seed: u64,
+    (imgsz, batch, workers): (u32, usize, usize),
+    method: Method,
+) -> Result<(Calibration, usize)> {
+    use folo_data::{DataLoader, Dataset, FileDataset, LoaderConfig};
+    let mut entries = part.entries().to_vec();
+    folo_core::rng::Rng::seed(seed).shuffle(&mut entries);
+    entries.truncate(images);
+    let n = entries.len();
+    let sample = FileDataset::new(part.split(), part.class_names().to_vec(), entries);
+    let data = |e: folo_data::DataError| folo_nn::Error::Invalid(format!("calibration images: {e}"));
+    let loader = DataLoader::new(
+        std::sync::Arc::new(sample),
+        LoaderConfig { workers, ..LoaderConfig::val(batch, imgsz) },
+    )
+    .map_err(data)?;
+    let batches = || {
+        loader.epoch(0).map(|b| {
+            let mut b = b.map_err(data)?;
+            Ok(Tensor::from_vec(std::mem::take(&mut b.images), b.shape)?)
+        })
+    };
+    let cal = calibrate_v2(model, batches, method)?
+        .with_sensitivity_f32_v2(model, super::SensitivityPolicy::default())?;
+    Ok((cal, n))
+}
+
+/// [`calibrate_sample`] / [`calibrate_sample_v2`] for any unified [`Detector`] (`folo-*` or `folo2-*`).
+pub fn calibrate_sample_detector(
+    model: &Detector,
+    part: &folo_data::FileDataset,
+    images: usize,
+    seed: u64,
+    sizes: (u32, usize, usize),
+    method: Method,
+) -> Result<(Calibration, usize)> {
+    match model {
+        Detector::V1(m) => calibrate_sample(m, part, images, seed, sizes, method),
+        Detector::V2(m) => calibrate_sample_v2(m, part, images, seed, sizes, method),
+    }
 }
 
 #[cfg(test)]

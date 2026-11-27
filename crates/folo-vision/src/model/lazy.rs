@@ -17,7 +17,6 @@ use rayon::prelude::*;
 use super::FoloModel;
 use super::head::{HeadLevel, HeadMode};
 use super::predict::{CPU_DECODE_BLOCK, DflWants, Found, dfl_box, finish_candidates, single_label_block};
-use crate::decode::Anchors;
 use crate::nms::{Candidate, Detection, DflInputs, NmsConfig, class_allowed};
 
 /// One image's candidates from [`FoloModel::predict_candidates`], in anchor order.
@@ -48,7 +47,7 @@ fn conv_at(c: &ConvBnAct, x: &Tensor, at: &Tensor) -> Result<Tensor> {
 
 /// The single-label candidates of one image's level map `cl` (`[nc, a]`), in anchor order, in blocks of
 /// [`CPU_DECODE_BLOCK`] anchors on the rayon pool (the dense path's split, so the same result).
-fn level_candidates(cl: &[f32], a: usize, conf: f32) -> Vec<Found> {
+pub(super) fn level_candidates(cl: &[f32], a: usize, conf: f32) -> Vec<Found> {
     let blocks = a.div_ceil(CPU_DECODE_BLOCK);
     let parts: Vec<Vec<Found>> = (0..blocks)
         .into_par_iter()
@@ -72,7 +71,7 @@ fn level_candidates(cl: &[f32], a: usize, conf: f32) -> Vec<Found> {
 /// [`finish_candidates`] can keep. `o2m`: every candidate of an allowed class (NMS drops the others first).
 /// `o2o`: of the `max_det` best by score, then anchor (§6.6, ties by anchor), those of an allowed class (the
 /// class filter runs after the selection). `offsets[level]` is the level's first anchor.
-fn needing_boxes(
+pub(super) fn needing_boxes(
     found: [Vec<Found>; 3],
     offsets: [usize; 3],
     mode: HeadMode,
@@ -143,9 +142,9 @@ impl FoloModel {
         }
         folo_core::cpu::in_pool(|| {
             let _g = no_grad();
-            let (h, w) = self.check_input(x)?;
+            let _ = self.check_input(x)?;
             let feats = self.features(x, None)?;
-            self.predict_candidates_from_features(feats, x.dims()[0], h, w, nms)
+            self.predict_candidates_from_features(feats, x.dims()[0], nms)
         })
     }
 
@@ -172,7 +171,7 @@ impl FoloModel {
             let _g = no_grad();
             self.check_hw(b, h, w)?;
             let feats = super::quant::exec::features_rgb0_u8(self, plan, rgb0, b, h, w)?;
-            self.predict_candidates_from_features(feats, b, h, w, nms)
+            self.predict_candidates_from_features(feats, b, nms)
         })
     }
 
@@ -180,8 +179,6 @@ impl FoloModel {
         &self,
         feats: [Tensor; 3],
         b: usize,
-        h: usize,
-        w: usize,
         nms: &NmsConfig,
     ) -> Result<Vec<ImageCandidates>> {
         let mode = self.head_mode;
@@ -192,8 +189,11 @@ impl FoloModel {
             (HeadMode::O2o, Some(o2o)) => o2o,
             _ => &self.head.levels,
         };
-        let anchors = self.anchors(h, w);
-        let hw: Vec<usize> = feats.iter().map(|f| f.dims()[2] * f.dims()[3]).collect();
+        let hw = [
+            feats[0].dims()[2] * feats[0].dims()[3],
+            feats[1].dims()[2] * feats[1].dims()[3],
+            feats[2].dims()[2] * feats[2].dims()[3],
+        ];
         let offsets = [0, hw[0], hw[0] + hw[1]];
         // The class branches and the candidates of every level (side by side, like the dense head).
         let found: Vec<Vec<Vec<Found>>> = (0..3)
@@ -209,12 +209,23 @@ impl FoloModel {
                 need[l].push(v);
             }
         }
+        // Fast exit when no level has any surviving candidates (zero rayon join or box-branch work).
+        if need.iter().all(|lv| lv.iter().all(Vec::is_empty)) {
+            let empty = ImageCandidates {
+                cands: Vec::new(),
+                precisions: wants.side.then(Vec::new),
+                bin_precisions: wants.bin.then(Vec::new),
+                entropies: wants.ent.then(Vec::new),
+                strides: want_strides.then(Vec::new),
+            };
+            return Ok(vec![empty; b]);
+        }
         // Their boxes, level by level (side by side), then every image's records in anchor order.
         let boxed: Vec<Vec<ImageCandidates>> = (0..3)
             .into_par_iter()
             .map(|l| {
                 with_no_grad(|| {
-                    self.boxes_at(&levels[l], &feats[l], &need[l], &anchors, offsets[l], wants, want_strides)
+                    self.boxes_at(&levels[l], &feats[l], &need[l], offsets[l], wants, want_strides)
                 })
             })
             .collect::<Result<_>>()?;
@@ -291,13 +302,13 @@ impl FoloModel {
         level: &HeadLevel,
         x: &Tensor,
         need: &[Vec<Found>],
-        anchors: &Anchors,
         offset: usize,
         wants: DflWants,
         want_strides: bool,
     ) -> Result<Vec<ImageCandidates>> {
         let (b, _, h, w) = x.dims4()?;
         let (hw, rm) = (h * w, self.head.reg_max);
+        let st = level.stride as f32;
         if need.iter().all(Vec::is_empty) {
             let empty = ImageCandidates {
                 cands: Vec::new(),
@@ -338,12 +349,18 @@ impl FoloModel {
         }
         let field: Vec<u32> = (0..b * hw).filter(|&p| field[p]).map(|p| p as u32).collect();
         let (n1, n0) = (sites.len(), field.len());
-        let (sites, field) = (Tensor::from_vec(sites, [n1])?, Tensor::from_vec(field, [n0])?);
-        let h0 = conv_at(&bx.conv0, x, &field)?;
-        let h1 = conv_at(&bx.conv1, &h0, &sites)?;
-        drop(h0);
-        let p = bx.out.config().params();
-        let raw = h1.conv2d_act_at(&bx.out.weight, bx.out.bias.as_ref(), &p, None, &sites)?;
+        // When >= 2/3 of `conv0`'s receptive field is active (e.g. crowded scenes or low-conf validation),
+        // running dense `BoxBranch` avoids sparse-tile index overhead and is bit-identical to dense forward.
+        let raw = if n0 * 3 >= 2 * b * hw {
+            bx.forward(x)?
+        } else {
+            let (sites, field) = (Tensor::from_vec(sites, [n1])?, Tensor::from_vec(field, [n0])?);
+            let h0 = conv_at(&bx.conv0, x, &field)?;
+            let h1 = conv_at(&bx.conv1, &h0, &sites)?;
+            drop(h0);
+            let p = bx.out.config().params();
+            h1.conv2d_act_at(&bx.out.weight, bx.out.bias.as_ref(), &p, None, &sites)?
+        };
         let per = 4 * rm * hw;
         Ok(raw.with_f32_slice(|rg| {
             need.iter()
@@ -360,7 +377,7 @@ impl FoloModel {
                     };
                     for &(j, class, score) in v {
                         let (j, k) = (j as usize, offset + j as usize);
-                        let (point, st) = (anchors.points[k], anchors.strides[k]);
+                        let point = [(j % w) as f32 + 0.5, (j / w) as f32 + 0.5];
                         let (bbox, p, bp, ent) = dfl_box(&mut bins, |r| rg[r * hw + j], point, st, wants);
                         out.cands.push(Candidate { anchor: k as u32, class, score, bbox });
                         out.precisions.iter_mut().zip(p).for_each(|(v, p)| v.push(p));
@@ -414,15 +431,7 @@ mod tests {
                 })
                 .collect();
             let got = m
-                .boxes_at(
-                    &m.head.levels[l],
-                    &feats[l],
-                    &need,
-                    &out.anchors,
-                    lv.start,
-                    DflWants::default(),
-                    false,
-                )
+                .boxes_at(&m.head.levels[l], &feats[l], &need, lv.start, DflWants::default(), false)
                 .unwrap();
             for (i, (g, n)) in got.iter().zip(&need).enumerate() {
                 assert_eq!(g.cands.len(), n.len());
@@ -468,9 +477,8 @@ mod tests {
             m.head.levels[0].box_branch.conv0 = conv0;
             let feat = Tensor::rand_uniform([1, c_in, h, w], -1.0, 1.0, &mut rng);
             let dense_raw = m.head.levels[0].box_branch.forward(&feat).unwrap();
-            let got = m
-                .boxes_at(&m.head.levels[0], &feat, &need, &anchors, lv.start, DflWants::default(), false)
-                .unwrap();
+            let got =
+                m.boxes_at(&m.head.levels[0], &feat, &need, lv.start, DflWants::default(), false).unwrap();
             assert_eq!(got[0].cands.len(), pts.len());
             dense_raw
                 .with_f32_slice(|rg| {

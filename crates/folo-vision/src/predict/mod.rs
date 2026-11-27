@@ -263,6 +263,12 @@ impl Predictor {
         Self::from_detector(Detector::open(path)?, cfg)
     }
 
+    /// Load a quantized `.folo` file (`folo-*` or `folo2-*`) carrying `folo.quant` metadata for CPU int8
+    /// inference.
+    pub fn open_int8(path: impl AsRef<Path>, cfg: PredictConfig) -> Result<Self> {
+        Self::from_detector(Detector::open_int8(path)?, cfg)
+    }
+
     /// Load `.folo` weights (`folo-*` or `folo2-*`) onto `device` at `precision`
     /// ([`Detector::from_file_for_inference`]: an f16 export goes to the GPU as f16, other files are fused in f32
     /// and converted). When f16 cannot run on `device` the model is loaded in f32 and [`Predictor::fallback`] says
@@ -562,10 +568,8 @@ impl Predictor {
         imgsz: u32,
         conf_override: Option<f32>,
     ) -> Result<Vec<Prediction>> {
-        if let Some(m) = self.model.as_v1()
-            && m.int8_u8_stem_active()
-        {
-            return self.run_here_rgb0_u8_with_imgsz(m, imgs, rect, imgsz, conf_override);
+        if self.model.int8_u8_stem_active() {
+            return self.run_here_rgb0_u8_with_imgsz(imgs, rect, imgsz, conf_override);
         }
         let t0 = Instant::now();
         let batch = self.prepare_with_imgsz(imgs, rect, imgsz)?;
@@ -587,6 +591,15 @@ impl Predictor {
             let t2 = Instant::now();
             let dets = cands.into_par_iter().map(|c| m.finish_candidates(&c, &nms)).collect();
             (self.finish_detections(&batch, dets), inf, ms(t2))
+        } else if let Some(m) = self.model.as_v2()
+            && m.candidates_first_applies(batch.input.device(), &nms)
+        {
+            let t1 = Instant::now();
+            let cands = m.predict_candidates(&batch.input, &nms)?;
+            let inf = ms(t1);
+            let t2 = Instant::now();
+            let dets = cands.into_par_iter().map(|c| m.finish_candidates(&c, &nms)).collect();
+            (self.finish_detections(&batch, dets), inf, ms(t2))
         } else {
             let t1 = Instant::now();
             let out = self.forward_detector(&batch)?;
@@ -601,11 +614,11 @@ impl Predictor {
         Ok(batch.predictions(dets, Timing::new(pre / n, inf / n, post / n)))
     }
 
-    /// Direct `u8` RGB0 path for CPU int8 models: letterboxes directly into packed `[R, G, B, 0]` `u32` words
-    /// (zero `f32` canvas materialisation, bit-exact with `apply_planar_f32` + `pack_f32_to_rgb0_u8`).
+    /// Direct `u8` RGB0 path for CPU int8 models (`folo-*` and `folo2-*`): letterboxes directly into packed
+    /// `[R, G, B, 0]` `u32` words (zero `f32` canvas materialisation, bit-exact with `apply_planar_f32` +
+    /// `pack_f32_to_rgb0_u8`).
     fn run_here_rgb0_u8_with_imgsz(
         &self,
-        model: &FoloModel,
         imgs: &[&Image],
         rect: bool,
         s: u32,
@@ -631,23 +644,47 @@ impl Predictor {
             nms.conf = c;
         }
         let b = imgs.len();
-        let (dets, inf, post) = if model.candidates_first_applies(Device::Cpu, &nms) {
-            let t1 = Instant::now();
-            let cands = model.predict_candidates_rgb0_u8(&rgb0, b, h, w, &nms)?;
-            let inf = ms(t1);
-            let t2 = Instant::now();
-            let dets = cands.into_par_iter().map(|c| model.finish_candidates(&c, &nms)).collect();
-            (dets, inf, ms(t2))
-        } else {
-            let t1 = Instant::now();
-            let out = {
-                let _g = no_grad();
-                model.forward_rgb0_u8(&rgb0, b, h, w)?
-            };
-            let inf = ms(t1);
-            let t2 = Instant::now();
-            let dets = out.detections(&nms)?;
-            (dets, inf, ms(t2))
+        let (dets, inf, post) = match &self.model {
+            Detector::V1(model) => {
+                if model.candidates_first_applies(Device::Cpu, &nms) {
+                    let t1 = Instant::now();
+                    let cands = model.predict_candidates_rgb0_u8(&rgb0, b, h, w, &nms)?;
+                    let inf = ms(t1);
+                    let t2 = Instant::now();
+                    let dets = cands.into_par_iter().map(|c| model.finish_candidates(&c, &nms)).collect();
+                    (dets, inf, ms(t2))
+                } else {
+                    let t1 = Instant::now();
+                    let out = {
+                        let _g = no_grad();
+                        model.forward_rgb0_u8(&rgb0, b, h, w)?
+                    };
+                    let inf = ms(t1);
+                    let t2 = Instant::now();
+                    let dets = out.detections(&nms)?;
+                    (dets, inf, ms(t2))
+                }
+            }
+            Detector::V2(model) => {
+                if model.candidates_first_applies(Device::Cpu, &nms) {
+                    let t1 = Instant::now();
+                    let cands = model.predict_candidates_rgb0_u8(&rgb0, b, h, w, &nms)?;
+                    let inf = ms(t1);
+                    let t2 = Instant::now();
+                    let dets = cands.into_par_iter().map(|c| model.finish_candidates(&c, &nms)).collect();
+                    (dets, inf, ms(t2))
+                } else {
+                    let t1 = Instant::now();
+                    let out = {
+                        let _g = no_grad();
+                        model.forward_rgb0_u8(&rgb0, b, h, w)?
+                    };
+                    let inf = ms(t1);
+                    let t2 = Instant::now();
+                    let dets = out.detections(&nms, DEFAULT_IOU_FUSION_ALPHA)?;
+                    (dets, inf, ms(t2))
+                }
+            }
         };
         folo_core::cpu::q8::recycle(rgb0);
         let t_unmap = Instant::now();

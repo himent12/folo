@@ -419,9 +419,20 @@ impl Attention {
             return Ok(None);
         }
 
-        // Snapshot small depthwise PE weights/bias before locking `qkv` storage (avoids any aliasing lock issue).
-        let pe_w = self.pe.conv.weight.to_vec::<f32>()?;
-        let pe_b = self.pe.conv.bias.as_ref().map(|bias| bias.to_vec::<f32>()).transpose()?;
+        // Borrow PE weight/bias zero-copy when distinct from `qkv` storage (snapshot only if aliased).
+        let weight_aliased = self.pe.conv.weight.same_storage(qkv);
+        let bias_aliased = self
+            .pe
+            .conv
+            .bias
+            .as_ref()
+            .is_some_and(|bias| bias.same_storage(qkv) || bias.same_storage(&self.pe.conv.weight));
+        let pe_w_owned = if weight_aliased { Some(self.pe.conv.weight.to_vec::<f32>()?) } else { None };
+        let pe_b_owned = if bias_aliased {
+            self.pe.conv.bias.as_ref().map(|bias| bias.to_vec::<f32>()).transpose()?
+        } else {
+            None
+        };
         let scale = (kd as f64).powf(-0.5) as f32;
         let head_stride = (2 * kd + hd) * n;
         let batch_stride = heads * head_stride;
@@ -429,7 +440,7 @@ impl Attention {
         let mut out = folo_core::cpu::take_buffer(b * c * n);
         let mut scores = folo_core::cpu::take_buffer(n * n);
 
-        qkv.with_f32_slice(|qkv_s| {
+        let mut run_body = |qkv_s: &[f32], pe_w: &[f32], pe_b: Option<&[f32]>| {
             for bi in 0..b {
                 for hi in 0..heads {
                     let base = bi * batch_stride + hi * head_stride;
@@ -505,7 +516,7 @@ impl Attention {
                 let v_off = bi * batch_stride + hi * head_stride + (2 * kd + d) * n;
                 let v_plane = &qkv_s[v_off..v_off + n];
                 let w9 = &pe_w[ch * 9..ch * 9 + 9];
-                let bias = pe_b.as_ref().map_or(0.0, |bs| bs[ch]);
+                let bias = pe_b.map_or(0.0, |bs| bs[ch]);
                 let (w00, w01, w02) = (w9[0], w9[1], w9[2]);
                 let (w10, w11, w12) = (w9[3], w9[4], w9[5]);
                 let (w20, w21, w22) = (w9[6], w9[7], w9[8]);
@@ -568,7 +579,28 @@ impl Attention {
             } else {
                 out.chunks_mut(n).enumerate().for_each(add_pe_plane);
             }
-        })?;
+        };
+
+        let mut run_with_w = |qkv_s: &[f32], pe_w: &[f32]| -> folo_core::Result<()> {
+            match (&pe_b_owned, &self.pe.conv.bias) {
+                (Some(b_vec), _) => {
+                    run_body(qkv_s, pe_w, Some(b_vec));
+                    Ok(())
+                }
+                (None, Some(b_t)) => b_t.with_f32_slice(|bs| run_body(qkv_s, pe_w, Some(bs))),
+                (None, None) => {
+                    run_body(qkv_s, pe_w, None);
+                    Ok(())
+                }
+            }
+        };
+
+        qkv.with_f32_slice(|qkv_s| -> folo_core::Result<()> {
+            match &pe_w_owned {
+                Some(w_vec) => run_with_w(qkv_s, w_vec),
+                None => self.pe.conv.weight.with_f32_slice(|ws| run_with_w(qkv_s, ws))?,
+            }
+        })??;
 
         // Return `scores` to folo-core's CPU buffer cache.
         let _ = Tensor::from_vec(scores, [n * n]);

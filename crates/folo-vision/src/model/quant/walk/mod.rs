@@ -1,20 +1,27 @@
-//! The quantised forward of layers 0–22 (docs/MODEL.md §9.6), written once over an executor so calibration, the
-//! fake-quant reference and the int8 plan run the same graph with the same boundaries.
+//! The quantised forward of FOLO v1 (layers 0–22) and FOLO v2-Iso (backbone + SPD-PAN neck, docs/MODEL.md
+//! §9.6), written once over an executor so calibration, the fake-quant reference and the int8 plan run the same
+//! graph with the same boundaries.
 //!
 //! Every tensor an [`Exec`] holds as an activation (`E::A`) is a quantised one: the output of a conv's epilogue
-//! (activation, then the optional residual add), the stem's output, the input of each attention block's `proj`,
-//! and the channel slices, max pools and upsamples of those, which keep their source's grid. What stays `f32`:
-//! the network input (unless the direct `u8` stem runs), each attention block's `qkv` output, its two matmuls,
-//! its softmax and its depthwise `pe`, any `f32_convs` subgraph (including int8 producers whose sole consumer
-//! runs in `f32`, writing `QOut::F32` directly), and the head (P3, P4 and P5 are dequantised for it).
+//! (activation, then the optional residual add), the stem's output, the input of each attention / hyper-context
+//! output projection, and the channel slices, max pools, space-to-depth parts, and upsamples of those, which
+//! keep their source's grid. What stays `f32`: the network input (unless the direct `u8` stem runs), attention
+//! `qkv` / `HyperContext` `av_proj` outputs and their matmuls/softmax/FFN/`pe`, any `f32_convs` subgraph
+//! (including int8 producers whose sole consumer runs in `f32`, writing `QOut::F32` directly), relocated
+//! `FullPadGate` head modulation, and the head (P3, P4 and P5 are dequantised for it).
+
+mod v2;
+
+pub use v2::features_v2;
 
 use std::fmt::Write as _;
 
 use folo_core::Tensor;
-use folo_nn::{ConvBnAct, Result};
+use folo_nn::{ConvBnAct, Forward, Result};
 
 use crate::model::FoloModel;
 use crate::model::blocks::{Attention, Bottleneck, C2Psa, C3k, C3k2, C3k2Block, PsaBlock, Sppf};
+use crate::model::v2::{FullPadGate, HyperContext, StemV2, WsQARepConv3x3};
 
 /// The ops of the quantised graph. Names are the conv's `.folo` prefix (`backbone.stage2.cv1`), or that of the
 /// `proj` conv plus `.in` for its quantised input; they identify a boundary's range in a [`super::Calibration`].
@@ -24,6 +31,15 @@ pub trait Exec {
 
     /// The stem: an `f32` or direct `u8` conv of the network input, quantised in its epilogue.
     fn stem(&mut self, name: &str, conv: &ConvBnAct, x: &Tensor) -> Result<Self::A>;
+    /// FOLO v2 stem (`SPD(2×2) + Conv1×1(12 → c0)` or `Conv3×3 s=2`).
+    fn stem_v2(&mut self, name: &str, stem: &StemV2, x: &Tensor) -> Result<Self::A> {
+        if !stem.spd {
+            self.stem(name, &stem.conv, x)
+        } else {
+            let s = crate::model::v2::space_to_depth_2x2(x)?;
+            self.stem(name, &stem.conv, &s)
+        }
+    }
     /// `q(act(conv(cat(parts))) + residual)`: a conv over the channel concatenation of `parts`, each part on its
     /// own grid, with the residual (on its own grid) added after the activation.
     fn conv(
@@ -44,12 +60,35 @@ pub trait Exec {
     ) -> Result<Self::A> {
         self.conv(name, conv, parts, res)
     }
-    /// `act(conv(x))` dequantised: `qkv`, whose output stays `f32`.
+    /// FOLO v2 `WS-QARepConv3x3`: runs as a fused dense `3×3` int8 conv when fused and eligible (or in `f32`
+    /// otherwise), writing `QOut::F32` directly when `out_f32` is true.
+    fn rep_conv(&mut self, name: &str, rep: &WsQARepConv3x3, x: &Self::A, _out_f32: bool) -> Result<Self::A> {
+        let xf = self.dequantize(x)?;
+        let y = rep.forward(&xf)?;
+        self.quantize(name, &y)
+    }
+    /// `act(conv(x))` dequantised: `qkv` / `av_proj`, whose output stays `f32`.
     fn conv_f32(&mut self, name: &str, conv: &ConvBnAct, x: &Self::A) -> Result<Tensor>;
     /// Attention matmuls + positional encoding (`o + pe(v)` from `qkv`). Symbolic executors override this to
     /// avoid running `pe` (which would mutate BatchNorm running stats on unfused training-mode models).
     fn attend_and_pe(&mut self, a: &Attention, qkv: &Tensor, b: usize, h: usize, w: usize) -> Result<Tensor> {
         a.attend_and_pe(qkv, b, h, w)
+    }
+    /// FOLO v2 `HyperContext` gather + FFN + scene pooling + broadcast from `av`. Symbolic executors override
+    /// this to avoid running tensor ops during sensitivity analysis.
+    fn hyper_attend_and_scene(
+        &mut self,
+        h_ctx: &HyperContext,
+        av: &Tensor,
+        b: usize,
+        h: usize,
+        w: usize,
+    ) -> Result<(Tensor, Tensor)> {
+        h_ctx.attend_and_scene(av, b, h, w)
+    }
+    /// FOLO v2 relocated `FullPadGate` modulation on `f32` head inputs (`P3_head`/`P4_head`).
+    fn fullpad_gate(&mut self, gate: &FullPadGate, feat: &Tensor, g_scene: &Tensor) -> Result<Tensor> {
+        gate.forward(feat, g_scene)
     }
     /// `act(conv(cat(parts)))` directly as `f32`: used for the head-only P5 output (`neck.out5.cv2`) so an int8
     /// conv writes `f32` directly without a `u8` round-trip, and an `f32` conv skips requantisation.
@@ -73,6 +112,13 @@ pub trait Exec {
     fn upsample2_for(&mut self, x: &Self::A, _consumer_is_f32: bool) -> Result<Self::A> {
         self.upsample2(x)
     }
+    /// Lossless `2×2` space-to-depth split into its 4 spatial phase parts `[tl, tr, bl, br]` (`[N, C, H/2, W/2]`
+    /// each, keeping `x`'s exact per-channel grids), with a hint of whether the downstream `p2_proj` runs in
+    /// `f32`.
+    fn space_to_depth2_parts(&mut self, x: &Self::A, _consumer_is_f32: bool) -> Result<[Self::A; 4]> {
+        let _ = x;
+        Err(folo_nn::Error::Invalid("space_to_depth2_parts not implemented for this Exec".into()))
+    }
     /// Hint to materialise a deferred `f32` activation to `u8` once before multiple int8 consumers (such as
     /// `narrow` + `cv2`, or `SPPF`'s 3 chained `max_pool`s) read it, avoiding redundant quantisation passes.
     fn ensure_u8(&mut self, _x: &Self::A) -> Result<()> {
@@ -83,27 +129,31 @@ pub trait Exec {
     fn wants_f32(&self, _name: &str, _conv: &ConvBnAct) -> bool {
         false
     }
+    /// Whether `rep` (`WsQARepConv3x3`) named `name` will execute in `f32`.
+    fn wants_f32_rep(&self, _name: &str, _rep: &WsQARepConv3x3) -> bool {
+        false
+    }
     /// `[N, C, H, W]` of an activation.
     fn dims(&self, x: &Self::A) -> [usize; 4];
 }
 
 /// Reusable dotted path buffer (`backbone.stage4.block0.block1.cv2`, ≤ 48 bytes) eliminating ~75 `format!`
 /// heap allocations per forward pass.
-struct NameBuf(String);
+pub(super) struct NameBuf(String);
 
 impl NameBuf {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self(String::with_capacity(64))
     }
 
     #[inline]
-    fn set(&mut self, s: &str) {
+    pub(super) fn set(&mut self, s: &str) {
         self.0.clear();
         self.0.push_str(s);
     }
 
     #[inline]
-    fn push_field(&mut self, field: &str) -> usize {
+    pub(super) fn push_field(&mut self, field: &str) -> usize {
         let len = self.0.len();
         self.0.push('.');
         self.0.push_str(field);
@@ -111,19 +161,26 @@ impl NameBuf {
     }
 
     #[inline]
-    fn push_block(&mut self, idx: usize) -> usize {
+    pub(super) fn push_block(&mut self, idx: usize) -> usize {
         let len = self.0.len();
         let _ = write!(self.0, ".block{idx}");
         len
     }
 
     #[inline]
-    fn restore(&mut self, len: usize) {
+    pub(super) fn push_rep(&mut self, idx: usize) -> usize {
+        let len = self.0.len();
+        let _ = write!(self.0, ".rep{idx}");
+        len
+    }
+
+    #[inline]
+    pub(super) fn restore(&mut self, len: usize) {
         self.0.truncate(len);
     }
 
     #[inline]
-    fn as_str(&self) -> &str {
+    pub(super) fn as_str(&self) -> &str {
         &self.0
     }
 }
@@ -184,7 +241,7 @@ impl<A> BlockOuts<A> {
 
 /// Dispatch `conv` or `conv_f32_out` depending on whether every consumer of its output runs in `f32`.
 #[inline]
-fn run_conv<E: Exec>(
+pub(super) fn run_conv<E: Exec>(
     e: &mut E,
     name: &str,
     conv: &ConvBnAct,
@@ -249,8 +306,6 @@ fn c3k<E: Exec>(e: &mut E, nb: &mut NameBuf, b: &C3k, x: &E::A, out_f32: bool) -
     let cv3_f32 = e.wants_f32(nb.as_str(), &b.cv3);
     nb.restore(l3);
 
-    // Determine whether `cv1`'s output feeds only f32 consumers (`block0.cv1` and, if residual, `block0.cv2`,
-    // or `cv3` when there are no inner blocks).
     let cv1_out_f32 = match b.blocks.items().first() {
         Some(first) => {
             let lb = nb.push_block(0);
@@ -311,8 +366,6 @@ fn c3k<E: Exec>(e: &mut E, nb: &mut NameBuf, b: &C3k, x: &E::A, out_f32: bool) -
     Ok(out)
 }
 
-/// [`C3k2::forward_cat`] body: `cv1` over the parts and the block chain on its second half, returning `(y, outs)`
-/// for `cv2`.
 fn c3k2_parts<E: Exec>(
     e: &mut E,
     nb: &mut NameBuf,
@@ -337,8 +390,6 @@ fn c3k2_parts<E: Exec>(
     let y = run_conv(e, nb.as_str(), &b.cv1, xs, None, cv2_f32 && first_blk_f32)?;
     nb.restore(l1);
 
-    // If `y` is deferred `f32` and `cv2` needs `u8` anyway, quantise `y` once before narrowing so the narrow slice
-    // reuses `y`'s C4 buffer instead of quantising the second half separately.
     if !cv2_f32 {
         e.ensure_u8(&y)?;
     }
@@ -376,7 +427,6 @@ fn c3k2_parts<E: Exec>(
     Ok((y, outs))
 }
 
-/// [`C3k2::forward_cat`]: `cv1` over the parts, the chain on its second half, `cv2` over `y` and the chain.
 fn c3k2<E: Exec>(e: &mut E, nb: &mut NameBuf, b: &C3k2, xs: &[&E::A], out_f32: bool) -> Result<E::A> {
     let (y, outs) = c3k2_parts(e, nb, b, xs)?;
     let l2 = nb.push_field("cv2");
@@ -398,7 +448,6 @@ fn c3k2<E: Exec>(e: &mut E, nb: &mut NameBuf, b: &C3k2, xs: &[&E::A], out_f32: b
     res
 }
 
-/// [`c3k2`] whose final `cv2` outputs `f32` directly (for `neck.out5`, which only feeds the `f32` head).
 fn c3k2_f32<E: Exec>(e: &mut E, nb: &mut NameBuf, b: &C3k2, xs: &[&E::A]) -> Result<Tensor> {
     let (y, outs) = c3k2_parts(e, nb, b, xs)?;
     let l2 = nb.push_field("cv2");
@@ -420,7 +469,7 @@ fn c3k2_f32<E: Exec>(e: &mut E, nb: &mut NameBuf, b: &C3k2, xs: &[&E::A]) -> Res
     res
 }
 
-fn sppf<E: Exec>(e: &mut E, nb: &mut NameBuf, b: &Sppf, x: &E::A, out_f32: bool) -> Result<E::A> {
+pub(super) fn sppf<E: Exec>(e: &mut E, nb: &mut NameBuf, b: &Sppf, x: &E::A, out_f32: bool) -> Result<E::A> {
     let l2 = nb.push_field("cv2");
     let cv2_f32 = e.wants_f32(nb.as_str(), &b.cv2);
     nb.restore(l2);
@@ -429,8 +478,6 @@ fn sppf<E: Exec>(e: &mut E, nb: &mut NameBuf, b: &Sppf, x: &E::A, out_f32: bool)
     let y0 = run_conv(e, nb.as_str(), &b.cv1, &[x], None, cv2_f32)?;
     nb.restore(l1);
 
-    // When `sppf.cv2` runs in int8 and `y0` is deferred `f32`, quantise `y0` once so all three chained max-pools
-    // run on C4 `u8` codes (monotone, bit-exact, 4× less quantisation work and bandwidth).
     if !cv2_f32 {
         e.ensure_u8(&y0)?;
     }
@@ -445,8 +492,6 @@ fn sppf<E: Exec>(e: &mut E, nb: &mut NameBuf, b: &Sppf, x: &E::A, out_f32: bool)
     Ok(out)
 }
 
-/// [`Attention::forward`] with `x` quantised: `qkv` dequantised, the attention and `pe` in `f32`, `proj`'s input
-/// quantised (lazily deferred if `proj` runs in `f32`), and the block's residual (`x`) added in `proj`'s epilogue.
 fn attention<E: Exec>(e: &mut E, nb: &mut NameBuf, a: &Attention, x: &E::A, out_f32: bool) -> Result<E::A> {
     let [b, _, h, w] = e.dims(x);
     let lq = nb.push_field("qkv");

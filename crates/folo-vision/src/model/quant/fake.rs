@@ -10,8 +10,12 @@ use folo_core::{Tensor, TensorId};
 use folo_nn::{ConvBnAct, Forward, Result};
 
 use super::walk::{self, Exec};
-use super::{Calibration, QParam, int8_able, quantize_weights, static_int8_able, stem_int8_able};
+use super::{
+    Calibration, ConvView, QParam, int8_able_view, quantize_weights, spd_stem_int8_able, static_int8_able,
+    static_int8_able_rep, stem_int8_able,
+};
 use crate::model::FoloModel;
+use crate::model::v2::{FoloV2Model, StemV2, WsQARepConv3x3, space_to_depth_2x2};
 
 /// A fake-quantised activation: its values (on the grid, or raw `f32` until an int8 consumer reads it) and its
 /// per-tensor fallback grid.
@@ -96,6 +100,17 @@ impl<'a> FakeQuant<'a> {
         res
     }
 
+    /// Backbone and SPD-PAN neck of a [`FoloV2Model`] on `x` with fake quantisation: the head's three inputs.
+    pub fn features_v2(&mut self, model: &FoloV2Model, x: &Tensor) -> Result<[Tensor; 3]> {
+        self.ch_grids.clear();
+        self.f32_acts.clear();
+        let _g = folo_core::no_grad();
+        let res = folo_core::cpu::in_pool(|| walk::features_v2(model, self, x));
+        self.ch_grids.clear();
+        self.f32_acts.clear();
+        res
+    }
+
     fn grids_of(&self, a: &Fq) -> Vec<QParam> {
         if let Some(gs) = self.ch_grids.get(&a.t.id()) {
             return gs.clone();
@@ -124,12 +139,12 @@ impl<'a> FakeQuant<'a> {
         }
     }
 
-    fn is_f32_conv(&self, name: &str, conv: &ConvBnAct, parts: &[&Fq], res: Option<&Fq>) -> bool {
+    fn is_f32_conv_view(&self, name: &str, conv: ConvView<'_>, parts: &[&Fq], res: Option<&Fq>) -> bool {
         let d = parts[0].t.dims();
         let c: usize = parts.iter().map(|p| p.t.dims()[1]).sum();
         self.cal.is_f32(name)
             || !parts.iter().all(|p| p.t.dims()[1].is_multiple_of(4))
-            || int8_able(conv, [d[0], c, d[2], d[3]], res.map(|r| dims4(&r.t))).is_none()
+            || int8_able_view(conv, [d[0], c, d[2], d[3]], res.map(|r| dims4(&r.t))).is_none()
     }
 
     fn run(
@@ -139,9 +154,19 @@ impl<'a> FakeQuant<'a> {
         parts: &[&Fq],
         res: Option<&Fq>,
     ) -> Result<(Tensor, bool)> {
+        self.run_view(name, ConvView::from_cba(conv), parts, res)
+    }
+
+    fn run_view(
+        &mut self,
+        name: &str,
+        conv: ConvView<'_>,
+        parts: &[&Fq],
+        res: Option<&Fq>,
+    ) -> Result<(Tensor, bool)> {
         let c: usize = parts.iter().map(|p| p.t.dims()[1]).sum();
         let p = conv.conv.config().params();
-        if self.is_f32_conv(name, conv, parts, res) {
+        if self.is_f32_conv_view(name, conv, parts, res) {
             let ts: Vec<&Tensor> = parts.iter().map(|p| &p.t).collect();
             let y = Tensor::conv2d_act_cat(
                 &ts,
@@ -284,6 +309,74 @@ impl Exec for FakeQuant<'_> {
         self.cal.is_f32(name) || !static_int8_able(conv)
     }
 
+    fn wants_f32_rep(&self, name: &str, rep: &WsQARepConv3x3) -> bool {
+        self.cal.is_f32(name) || !static_int8_able_rep(rep)
+    }
+
+    fn stem_v2(&mut self, name: &str, stem: &StemV2, x: &Tensor) -> Result<Fq> {
+        if !stem.spd {
+            return self.stem(name, &stem.conv, x);
+        }
+        let conv = &stem.conv;
+        let q = self.cal.param(name)?;
+        let o = conv.conv.config().out_channels;
+        let grids = self.cal.channel_params(name, o)?;
+        if self.cal.u8_stem && !self.cal.is_f32(name) && spd_stem_int8_able(conv, dims4(x)).is_some() {
+            let xq_vec: Vec<f32> = x
+                .to_vec::<f32>()?
+                .into_iter()
+                .map(|v| (v * 255.0).clamp(0.0, 255.0).round_ties_even())
+                .collect();
+            let xq = space_to_depth_2x2(&Tensor::from_vec(xq_vec, x.dims().to_vec())?)?;
+            let orig_w = conv.conv.weight.to_vec::<f32>()?;
+            let taps = conv.conv.config().kernel * conv.conv.config().kernel;
+            let pixel_grids = [QParam { scale: PIXEL_SCALE, zero: 0 }; 12];
+            let (qw, sc) = quantized_folded_weight(&orig_w, o, 12, taps, 0, &pixel_grids)?;
+            let bias_v: Vec<f32> = match &conv.conv.bias {
+                Some(b) => b.to_vec::<f32>()?,
+                None => vec![0.0; o],
+            };
+            let p = conv.conv.config().params();
+            let raw = Tensor::conv2d_act_cat(&[&xq], &qw, None, &p, None)?;
+            let (n, oc_n, oh, ow) = raw.dims4()?;
+            let hw = oh * ow;
+            let mut rv = raw.to_vec::<f32>()?;
+            let is_silu = conv.act == folo_nn::Activation::Silu;
+            for img in 0..n {
+                for oc in 0..oc_n {
+                    let (s, b) = (sc[oc], bias_v[oc]);
+                    let base = (img * oc_n + oc) * hw;
+                    for v in &mut rv[base..base + hw] {
+                        let y = v.round_ties_even().mul_add(s, b);
+                        *v = if is_silu { silu_q8(y) } else { y };
+                    }
+                }
+            }
+            let y = Tensor::from_vec(rv, [n, oc_n, oh, ow])?;
+            let t = fake_quantize_per_channel(&y, &grids)?;
+            Ok(self.wrap_u8(t, q, grids))
+        } else {
+            let y = stem.forward(x)?;
+            Ok(self.wrap_f32(y, q, grids))
+        }
+    }
+
+    fn rep_conv(&mut self, name: &str, rep: &WsQARepConv3x3, x: &Fq, out_f32: bool) -> Result<Fq> {
+        let q = self.cal.param(name)?;
+        let grids = self.cal.channel_params(name, rep.out_channels)?;
+        let Some(view) = ConvView::from_rep(rep) else {
+            let y = rep.forward(&x.t)?;
+            return Ok(self.wrap_f32(y, q, grids));
+        };
+        let (y, ran_f32) = self.run_view(name, view, &[x], None)?;
+        if ran_f32 || out_f32 {
+            Ok(self.wrap_f32(y, q, grids))
+        } else {
+            let t = fake_quantize_per_channel(&y, &grids)?;
+            Ok(self.wrap_u8(t, q, grids))
+        }
+    }
+
     fn stem(&mut self, name: &str, conv: &ConvBnAct, x: &Tensor) -> Result<Fq> {
         let q = self.cal.param(name)?;
         let o = conv.conv.config().out_channels;
@@ -418,6 +511,18 @@ impl Exec for FakeQuant<'_> {
         } else {
             Ok(self.wrap_u8(t, x.q, gs))
         }
+    }
+
+    fn space_to_depth2_parts(&mut self, x: &Fq, _consumer_is_f32: bool) -> Result<[Fq; 4]> {
+        let c = x.t.dims4()?.1;
+        let spd = space_to_depth_2x2(&x.t)?;
+        let gs = self.grids_of(x);
+        let is_f32 = self.f32_acts.contains(&x.t.id());
+        let mut mk = |phase: usize| -> Result<Fq> {
+            let t = spd.narrow(1, phase * c, c)?;
+            if is_f32 { Ok(self.wrap_f32(t, x.q, gs.clone())) } else { Ok(self.wrap_u8(t, x.q, gs.clone())) }
+        };
+        Ok([mk(0)?, mk(1)?, mk(2)?, mk(3)?])
     }
 
     fn dims(&self, x: &Fq) -> [usize; 4] {

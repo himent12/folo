@@ -416,13 +416,48 @@ impl LazyAlignHead {
         } else {
             feats
         };
-        let cls_parts: Vec<Tensor> = (0..3)
-            .map(|i| {
+        let run_o2o_cls = |i: usize| -> Result<Tensor> {
+            let x = cls_feats[i];
+            let (b, _, h, w) = x.dims4()?;
+            Ok(o2o_levels[i].forward_o2o_cls(x)?.reshape([b, self.num_classes, h * w])?)
+        };
+        let cpu_eval = feats.iter().all(|x| x.device().is_cpu()) && !is_grad_enabled();
+        if shared_box.is_none() && cpu_eval {
+            let run_box = |i: usize| -> Result<(Tensor, Option<Tensor>)> {
                 let x = cls_feats[i];
                 let (b, _, h, w) = x.dims4()?;
-                Ok(o2o_levels[i].forward_o2o_cls(x)?.reshape([b, self.num_classes, h * w])?)
-            })
-            .collect::<Result<_>>()?;
+                let (bx, iou) = self.levels[i].box_branch.forward_box_iou(x)?;
+                let bx = bx.reshape([b, 4 * self.reg_max, h * w])?;
+                let iou = iou.map(|t| t.reshape([b, 1, h * w])).transpose()?;
+                Ok((bx, iou))
+            };
+            let (box_outs, cls_parts) = rayon::join(
+                || (0..3).into_par_iter().map(|i| with_no_grad(|| run_box(i))).collect::<Result<Vec<_>>>(),
+                || {
+                    (0..3)
+                        .into_par_iter()
+                        .map(|i| with_no_grad(|| run_o2o_cls(i)))
+                        .collect::<Result<Vec<_>>>()
+                },
+            );
+            let box_outs = box_outs?;
+            let cls_parts = cls_parts?;
+            let boxes: Vec<Tensor> = box_outs.iter().map(|(b, _)| b.clone()).collect();
+            let box_raw = Tensor::cat(&boxes, 2)?;
+            let cls_raw = Tensor::cat(&cls_parts, 2)?;
+            let iou_raw = if self.has_iou_head {
+                let ious: Vec<Tensor> = box_outs.into_iter().map(|(_, t)| t.expect("iou_out")).collect();
+                Some(Tensor::cat(&ious, 2)?)
+            } else {
+                None
+            };
+            return Ok(Some((box_raw, cls_raw, iou_raw)));
+        }
+        let cls_parts: Vec<Tensor> = if cpu_eval {
+            (0..3).into_par_iter().map(|i| with_no_grad(|| run_o2o_cls(i))).collect::<Result<_>>()?
+        } else {
+            (0..3).map(run_o2o_cls).collect::<Result<_>>()?
+        };
         let cls_raw = Tensor::cat(&cls_parts, 2)?;
         let (box_raw, iou_raw) = match (shared_box, detach_feats) {
             (Some(b), false) => (b.clone(), None),

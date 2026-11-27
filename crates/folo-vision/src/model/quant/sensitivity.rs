@@ -14,9 +14,10 @@ use folo_core::cpu::q8::{self, Grid, quantize_weights, should_decouple_parts};
 use folo_nn::{ConvBnAct, Result};
 
 use super::walk::{self, Exec};
-use super::{Calibration, VERSION_V2, int8_able};
-use crate::model::FoloModel;
+use super::{Calibration, ConvView, VERSION_V2, int8_able_view};
 use crate::model::blocks::Attention;
+use crate::model::v2::{FoloV2Model, FullPadGate, HyperContext, StemV2, WsQARepConv3x3};
+use crate::model::{Detector, FoloModel};
 
 /// Reference input resolution (`640×640`) used to compute relative per-conv MAC fractions during sensitivity
 /// analysis.
@@ -113,6 +114,16 @@ impl Analyzer<'_> {
         parts: &[&SymAct],
         res: Option<&SymAct>,
     ) -> Result<Option<(usize, usize)>> {
+        self.inspect_conv_view(name, ConvView::from_cba(conv), parts, res)
+    }
+
+    fn inspect_conv_view(
+        &mut self,
+        name: &str,
+        conv: ConvView<'_>,
+        parts: &[&SymAct],
+        res: Option<&SymAct>,
+    ) -> Result<Option<(usize, usize)>> {
         let [n, _, h, w] = parts[0].dims;
         let c: usize = parts.iter().map(|a| a.dims[1]).sum();
         let cfg = conv.conv.config();
@@ -120,7 +131,7 @@ impl Analyzer<'_> {
         let able = parts
             .iter()
             .all(|a| a.dims[1].is_multiple_of(4))
-            .then(|| int8_able(conv, [n, c, h, w], res.map(|r| r.dims)))
+            .then(|| int8_able_view(conv, [n, c, h, w], res.map(|r| r.dims)))
             .flatten();
         let Some((oh, ow)) = able else {
             let wd = conv.conv.weight.dims();
@@ -261,6 +272,17 @@ impl Exec for Analyzer<'_> {
         Ok(SymAct { dims: [n, cfg.out_channels, oh, ow], grids })
     }
 
+    fn stem_v2(&mut self, name: &str, stem: &StemV2, x: &Tensor) -> Result<SymAct> {
+        let n = x.dims()[0];
+        let (h, w) = self.input_hw;
+        let cfg = stem.conv.conv.config();
+        let (in_h, in_w) = if stem.spd { (h / 2, w / 2) } else { (h, w) };
+        let (oh, ow) =
+            q8::out_size(in_h, in_w, cfg.kernel, cfg.stride, cfg.padding).unwrap_or((h / 2, w / 2));
+        let grids = self.cal.channel_params(name, cfg.out_channels)?;
+        Ok(SymAct { dims: [n, cfg.out_channels, oh, ow], grids })
+    }
+
     fn conv(
         &mut self,
         name: &str,
@@ -280,6 +302,16 @@ impl Exec for Analyzer<'_> {
         Ok(SymAct { dims: [n, cfg.out_channels, oh, ow], grids })
     }
 
+    fn rep_conv(&mut self, name: &str, rep: &WsQARepConv3x3, x: &SymAct, _out_f32: bool) -> Result<SymAct> {
+        let [n, _, h, w] = x.dims;
+        let (oh, ow) = match ConvView::from_rep(rep) {
+            Some(view) => self.inspect_conv_view(name, view, &[x], None)?.unwrap_or((h, w)),
+            None => (h, w),
+        };
+        let grids = self.cal.channel_params(name, rep.out_channels)?;
+        Ok(SymAct { dims: [n, rep.out_channels, oh, ow], grids })
+    }
+
     fn conv_f32(&mut self, name: &str, conv: &ConvBnAct, x: &SymAct) -> Result<Tensor> {
         let _ = self.inspect_conv(name, conv, &[x], None)?;
         Ok(Tensor::zeros([0]))
@@ -296,6 +328,22 @@ impl Exec for Analyzer<'_> {
         // Shape-only bypass: never invokes `a.pe.forward`, so unfused training-mode BatchNorm stats stay
         // untouched and GPU/non-F32 models do not run tensor ops during sensitivity analysis.
         self.pending_attn_dims = Some([b, a.proj.conv.config().in_channels, h, w]);
+        Ok(Tensor::zeros([0]))
+    }
+
+    fn hyper_attend_and_scene(
+        &mut self,
+        h_ctx: &HyperContext,
+        _av: &Tensor,
+        b: usize,
+        h: usize,
+        w: usize,
+    ) -> Result<(Tensor, Tensor)> {
+        self.pending_attn_dims = Some([b, h_ctx.c_g, h, w]);
+        Ok((Tensor::zeros([0]), Tensor::zeros([0])))
+    }
+
+    fn fullpad_gate(&mut self, _gate: &FullPadGate, _feat: &Tensor, _g_scene: &Tensor) -> Result<Tensor> {
         Ok(Tensor::zeros([0]))
     }
 
@@ -336,9 +384,35 @@ impl Exec for Analyzer<'_> {
         Ok(SymAct { dims: [n, c, 2 * h, 2 * w], grids: x.grids.clone() })
     }
 
+    fn space_to_depth2_parts(&mut self, x: &SymAct, _consumer_is_f32: bool) -> Result<[SymAct; 4]> {
+        let [n, c, h, w] = x.dims;
+        let part = SymAct { dims: [n, c, h / 2, w / 2], grids: x.grids.clone() };
+        Ok([part.clone(), part.clone(), part.clone(), part])
+    }
+
     fn dims(&self, x: &SymAct) -> [usize; 4] {
         x.dims
     }
+}
+
+fn finish_sensitivity_entries(
+    mut entries: Vec<ConvSensitivity>,
+    input_hw: (usize, usize),
+) -> Vec<ConvSensitivity> {
+    let mut total_macs = 0u64;
+    for e in &entries {
+        total_macs = total_macs.saturating_add(e.macs);
+    }
+    let total_f = (total_macs.max(1)) as f64;
+    let input_area = (input_hw.0.saturating_mul(input_hw.1)).max(1) as f64;
+    for e in &mut entries {
+        e.mac_fraction = e.macs as f64 / total_f;
+        let distortion = (42.0 - e.folded_weight_sqnr_db).max(0.0);
+        let spatial_cost = (e.out_hw.0.saturating_mul(e.out_hw.1)) as f64 / input_area;
+        e.score = distortion * boundary_priority(&e.name) / (e.mac_fraction + spatial_cost + 0.015);
+    }
+    entries.sort_by(|a, b| b.score.total_cmp(&a.score).then_with(|| a.name.cmp(&b.name)));
+    entries
 }
 
 /// Analyse per-conv quantisation sensitivity across `model`'s int8-eligible backbone and neck convolutions using
@@ -367,21 +441,41 @@ pub fn analyze_sensitivity_at(
     let x = Tensor::zeros([1, model.config().in_channels, 1, 1]);
     let mut analyzer = Analyzer { cal, input_hw, pending_attn_dims: None, entries: Vec::new() };
     let _ = walk::features(model, &mut analyzer, &x)?;
+    Ok(finish_sensitivity_entries(analyzer.entries, input_hw))
+}
 
-    let mut total_macs = 0u64;
-    for e in &analyzer.entries {
-        total_macs = total_macs.saturating_add(e.macs);
+/// Analyse per-conv quantisation sensitivity across a [`FoloV2Model`]'s int8-eligible backbone and neck
+/// convolutions at the `640×640` reference resolution (purely symbolic).
+pub fn analyze_sensitivity_v2(model: &FoloV2Model, cal: &Calibration) -> Result<Vec<ConvSensitivity>> {
+    analyze_sensitivity_v2_at(model, cal, (REF_IMGSZ, REF_IMGSZ))
+}
+
+/// Like [`analyze_sensitivity_v2`], evaluating exact per-conv spatial geometry and MACs at `input_hw = (h, w)`.
+pub fn analyze_sensitivity_v2_at(
+    model: &FoloV2Model,
+    cal: &Calibration,
+    input_hw: (usize, usize),
+) -> Result<Vec<ConvSensitivity>> {
+    cal.check_version()?;
+    if input_hw.0 == 0 || input_hw.1 == 0 {
+        return Err(folo_nn::Error::Invalid(format!(
+            "sensitivity analysis input_hw must be positive, got {}x{}",
+            input_hw.0, input_hw.1
+        )));
     }
-    let total_f = (total_macs.max(1)) as f64;
-    let input_area = (input_hw.0.saturating_mul(input_hw.1)).max(1) as f64;
-    for e in &mut analyzer.entries {
-        e.mac_fraction = e.macs as f64 / total_f;
-        let distortion = (42.0 - e.folded_weight_sqnr_db).max(0.0);
-        let spatial_cost = (e.out_hw.0.saturating_mul(e.out_hw.1)) as f64 / input_area;
-        e.score = distortion * boundary_priority(&e.name) / (e.mac_fraction + spatial_cost + 0.015);
+    let _g = folo_core::no_grad();
+    let x = Tensor::zeros([1, model.config().in_channels, 1, 1]);
+    let mut analyzer = Analyzer { cal, input_hw, pending_attn_dims: None, entries: Vec::new() };
+    let _ = walk::features_v2(model, &mut analyzer, &x)?;
+    Ok(finish_sensitivity_entries(analyzer.entries, input_hw))
+}
+
+/// Analyse per-conv quantisation sensitivity for any unified [`Detector`] (`folo-*` or `folo2-*`).
+pub fn analyze_sensitivity_detector(model: &Detector, cal: &Calibration) -> Result<Vec<ConvSensitivity>> {
+    match model {
+        Detector::V1(m) => analyze_sensitivity(m, cal),
+        Detector::V2(m) => analyze_sensitivity_v2(m, cal),
     }
-    analyzer.entries.sort_by(|a, b| b.score.total_cmp(&a.score).then_with(|| a.name.cmp(&b.name)));
-    Ok(analyzer.entries)
 }
 
 /// Select `f32_convs` for `model` and `cal` under `policy` (sensitivity-ranked, MAC-budgeted, with atomic residual
@@ -394,6 +488,27 @@ pub fn select_f32_convs(
     select_f32_convs_with_existing(model, cal, policy, &[])
 }
 
+/// Select `f32_convs` for a [`FoloV2Model`] and `cal` under `policy`.
+pub fn select_f32_convs_v2(
+    model: &FoloV2Model,
+    cal: &Calibration,
+    policy: SensitivityPolicy,
+) -> Result<Vec<String>> {
+    select_f32_convs_v2_with_existing(model, cal, policy, &[])
+}
+
+/// Select `f32_convs` for any unified [`Detector`] (`folo-*` or `folo2-*`) under `policy`.
+pub fn select_f32_convs_detector(
+    model: &Detector,
+    cal: &Calibration,
+    policy: SensitivityPolicy,
+) -> Result<Vec<String>> {
+    match model {
+        Detector::V1(m) => select_f32_convs(m, cal, policy),
+        Detector::V2(m) => select_f32_convs_v2(m, cal, policy),
+    }
+}
+
 /// Like [`select_f32_convs`], accounting for `existing` `f32_convs` against `policy.max_f32_mac_fraction` and
 /// returning only the newly selected conv names that still fit within the remaining budget.
 pub(crate) fn select_f32_convs_with_existing(
@@ -404,11 +519,35 @@ pub(crate) fn select_f32_convs_with_existing(
 ) -> Result<Vec<String>> {
     policy.validate()?;
     cal.check_version()?;
-    let budget = policy.max_f32_mac_fraction;
-    if budget <= 0.0 {
+    if policy.max_f32_mac_fraction <= 0.0 {
         return Ok(Vec::new());
     }
     let ranked = analyze_sensitivity(model, cal)?;
+    select_from_ranked(&ranked, policy, existing)
+}
+
+/// Like [`select_f32_convs_v2`], accounting for `existing` `f32_convs` against `policy.max_f32_mac_fraction`.
+pub(crate) fn select_f32_convs_v2_with_existing(
+    model: &FoloV2Model,
+    cal: &Calibration,
+    policy: SensitivityPolicy,
+    existing: &[String],
+) -> Result<Vec<String>> {
+    policy.validate()?;
+    cal.check_version()?;
+    if policy.max_f32_mac_fraction <= 0.0 {
+        return Ok(Vec::new());
+    }
+    let ranked = analyze_sensitivity_v2(model, cal)?;
+    select_from_ranked(&ranked, policy, existing)
+}
+
+fn select_from_ranked(
+    ranked: &[ConvSensitivity],
+    policy: SensitivityPolicy,
+    existing: &[String],
+) -> Result<Vec<String>> {
+    let budget = policy.max_f32_mac_fraction;
     let by_name: std::collections::HashMap<&str, &ConvSensitivity> =
         ranked.iter().map(|e| (e.name.as_str(), e)).collect();
 
@@ -457,7 +596,7 @@ pub(crate) fn select_f32_convs_with_existing(
     // 2. Greedily promote the highest-sensitivity convs whose folded-weight SQNR falls below `sqnr_threshold_db`.
     //    Residual bottleneck pairs `(cv1, cv2)` are promoted atomically when `pair_residual_bottlenecks` is set so
     //    we never introduce a redundant internal `u8 <-> f32` conversion between `cv1` and `cv2`.
-    for entry in &ranked {
+    for entry in ranked {
         if entry.folded_weight_sqnr_db.is_nan() || entry.folded_weight_sqnr_db >= policy.sqnr_threshold_db {
             continue;
         }
