@@ -39,13 +39,15 @@ export default function Toaster() {
     from = null;
   });
 
-  // Publish the active toast stack's height as --toast-h (same pattern as shell/dock.ts's --dock-h) so mobile `main`
-  // scroll clearance and `scroll-padding-bottom` keep the bottom-most control tappable above a visible toast.
+  // Publish the rendered toast stack's height as --toast-h (same pattern as shell/dock.ts's --dock-h) so mobile `main`
+  // scroll clearance and `scroll-padding-bottom` keep the bottom-most control tappable above a visible toast —
+  // including through its 160 ms exit animation until the last rendered toast leaves the DOM.
   let ro: ResizeObserver | null = null;
+  let mo: MutationObserver | null = null;
   let mounted = true;
   const syncToastHeight = () => {
     if (typeof document === 'undefined') return;
-    if (!mounted || !toast.items.length || !el) {
+    if (!mounted || !el || !el.querySelector('[data-toast]')) {
       document.documentElement.style.removeProperty('--toast-h');
       return;
     }
@@ -55,11 +57,7 @@ export default function Toaster() {
   };
 
   effect(() => {
-    const count = toast.items.length;
-    if (count === 0) {
-      document.documentElement.style.removeProperty('--toast-h');
-      return;
-    }
+    void toast.items.length;
     syncToastHeight();
     queueMicrotask(syncToastHeight);
   });
@@ -67,8 +65,11 @@ export default function Toaster() {
   const bindHost = (node: HTMLElement) => {
     el = node;
     ro?.disconnect();
+    mo?.disconnect();
     ro = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(syncToastHeight);
     ro?.observe(node);
+    mo = typeof MutationObserver === 'undefined' ? null : new MutationObserver(syncToastHeight);
+    mo?.observe(node, { childList: true, subtree: true });
     syncToastHeight();
   };
 
@@ -76,6 +77,8 @@ export default function Toaster() {
     mounted = false;
     ro?.disconnect();
     ro = null;
+    mo?.disconnect();
+    mo = null;
     if (typeof document !== 'undefined') document.documentElement.style.removeProperty('--toast-h');
     from = null;
     if (hovered || focused) {

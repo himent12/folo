@@ -193,7 +193,7 @@ export default function MediaCaptureDialog(props: MediaCaptureDialogProps) {
       }
       camActive.set(true);
     } catch (e) {
-      if (!alive || seq !== camSeq) return;
+      if (!alive || seq !== camSeq || !open.peek() || mode.peek() !== 'camera') return;
       const msg = e instanceof Error && e.message ? e.message : 'Camera permission was denied or no camera was found.';
       camErr.set(msg);
     } finally {

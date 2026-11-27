@@ -241,6 +241,7 @@ describe('Playground: Compare A/B and Export', () => {
     hub.mode = 'mock';
     target = document.createElement('div');
     document.body.appendChild(target);
+    history.replaceState(history.state, '', '#/playground');
     router.route = parse('#/playground');
     handle = render(() => <Playground />, target);
 
@@ -327,7 +328,10 @@ describe('Playground: Compare A/B and Export', () => {
     flushSync();
     expect(selectA.value).toBe('m_shapes_s');
     expect(document.activeElement).toBe(selectA);
-    await until(() => readKpi()[2] === 'B 1', 'B car stays hidden after Model A switch to model without car');
+    await until(
+      () => readKpi()[0] === 'A 1' && readKpi()[2] === 'B 1',
+      'Model A settled and B car stayed hidden after Model A switch to model without car',
+    );
     expect(readKpi()).toEqual(['A 1', 'vs', 'B 1', 'Δ 0']);
 
     // Switching Model A to a model that includes 'car' clears the now-shared B-only hidden name so 'car' is never stuck hidden.

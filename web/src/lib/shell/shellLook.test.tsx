@@ -132,9 +132,12 @@ describe('the Runs badge', () => {
 describe('root scroll padding', () => {
   it('clears the sticky topbar and fixed phone tab bar without double-counting --size-topbar in section scroll-margin-top', () => {
     const baseCss = readFileSync(resolve(import.meta.dirname, '../design/base.css'), 'utf8');
+    expect(baseCss).toContain('--toast-h: 0px;');
     expect(baseCss).toContain('scroll-padding-top: calc(var(--size-topbar) + var(--space-3));');
     expect(baseCss).toContain('scroll-padding-bottom: calc(var(--dock-h) + var(--space-4));');
-    expect(baseCss).toMatch(/@media \(max-width: 767px\)\s*\{\s*html\s*\{[^}]*scroll-padding-bottom:\s*calc\(var\(--tabbar-h\) \+ var\(--dock-h\) \+ var\(--space-4\) \+ env\(safe-area-inset-bottom\)\);/);
+    expect(baseCss).toMatch(
+      /@media \(max-width: 767px\)\s*\{\s*html\s*\{[^}]*scroll-padding-bottom:\s*calc\(var\(--tabbar-h\) \+ var\(--dock-h\) \+ var\(--toast-h\) \+ var\(--space-4\) \+ env\(safe-area-inset-bottom\)\);/,
+    );
     // Section jump targets add only extra strip clearance beyond html's scroll-padding-top.
     for (const rel of ['../../routes/Settings.tsx', '../../routes/BenchEntry.tsx', '../../routes/Model.tsx']) {
       const src = readFileSync(resolve(import.meta.dirname, rel), 'utf8');
