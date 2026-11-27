@@ -285,4 +285,67 @@ describe('openEventStream', () => {
     expect(listeners.get('w:online')?.size ?? 0).toBe(0);
     expect(listeners.get('d:visibilitychange')?.size ?? 0).toBe(0);
   });
+
+  it('does not flag reachability failed on non-outage HTTP errors (404, 501), while 500/503 still do', async () => {
+    const ok = vi.fn();
+    const failed = vi.fn();
+    const close = openEventStream<RunEventMap>('/e', RUN_EVENTS, {}, { delay: () => 100 }, STREAM_SILENCE_MS, { reach: { ok, failed } });
+    // 404 (deleted resource): live server answered, must not call reach.failed().
+    Conn.all[0]!.open(404, 'application/json');
+    await settle();
+    expect(ok).toHaveBeenCalledTimes(1);
+    expect(failed).not.toHaveBeenCalled();
+
+    // 501 (not implemented): live server answered, must not call reach.failed().
+    await vi.advanceTimersByTimeAsync(100);
+    Conn.all[1]!.open(501, 'application/json');
+    await settle();
+    expect(ok).toHaveBeenCalledTimes(2);
+    expect(failed).not.toHaveBeenCalled();
+
+    // 500 (Vite dev proxy when backend is down) and 503 (gateway outage): call reach.failed().
+    await vi.advanceTimersByTimeAsync(100);
+    Conn.all[2]!.open(500, 'text/plain');
+    await settle();
+    expect(failed).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(100);
+    Conn.all[3]!.open(503, 'text/plain');
+    await settle();
+    expect(failed).toHaveBeenCalledTimes(2);
+    close();
+  });
+
+  it('wakes immediately from long backoff via watch.onRecover and unsubscribes on close', async () => {
+    const subs = new Set<() => void>();
+    const reconnect = vi.fn();
+    const close = openEventStream<RunEventMap>(
+      '/e',
+      RUN_EVENTS,
+      { reconnect },
+      { delay: () => 15_000 },
+      STREAM_SILENCE_MS,
+      {
+        onRecover: (fn) => {
+          subs.add(fn);
+          return () => void subs.delete(fn);
+        },
+      },
+    );
+    expect(subs.size).toBe(1);
+    Conn.all[0]!.fail();
+    await settle();
+    expect(Conn.all).toHaveLength(1);
+
+    // Server/access recovery wakes the stream immediately instead of waiting 15s.
+    for (const fn of subs) fn();
+    await settle();
+    expect(Conn.all).toHaveLength(2);
+    Conn.all[1]!.open();
+    await settle();
+    expect(reconnect).toHaveBeenCalledOnce();
+
+    close();
+    expect(subs.size).toBe(0);
+  });
 });

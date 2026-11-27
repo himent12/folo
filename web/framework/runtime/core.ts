@@ -586,13 +586,6 @@ export function swapOwner(next: Owner | null): Owner | null {
   return prev;
 }
 
-/** Internal: a component's own owner (context scope), attached to the current owner. */
-export function componentOwner(): Owner {
-  const o = new Owner();
-  attach(owner, o);
-  return o;
-}
-
 // ---------------------------------------------------------------------------------------------------------------------
 // Context (extracted to ./context.ts, re-exported here for callers importing from ./core)
 
@@ -889,28 +882,6 @@ export function effectNow(fn: () => void | Cleanup): void {
 /** The component being created (`undefined` when inactive) and the effects its body asked for (lazily allocated). */
 let deferredOwner: Owner | null | undefined = undefined;
 let deferredFns: (() => void | Cleanup)[] | null = null;
-
-/**
- * Internal: runs a component's function (in its owner) and then creates the effects its body asked for, after what it
- * rendered (Svelte's `pop()`).
- */
-export function deferEffects<T>(fn: () => T): T {
-  const prevOwner = deferredOwner;
-  const prevFns = deferredFns;
-  deferredOwner = owner;
-  deferredFns = null;
-  let out: T;
-  let fns: (() => void | Cleanup)[] | null;
-  try {
-    out = fn();
-    fns = deferredFns as (() => void | Cleanup)[] | null;
-  } finally {
-    deferredOwner = prevOwner;
-    deferredFns = prevFns;
-  }
-  if (fns !== null) for (let i = 0; i < fns.length; i++) effectNow(fns[i]!);
-  return out;
-}
 
 /** Internal: `[stableOwner, siteKey, runId, computedKey]` for `propJsx`. */
 export function propScope(): readonly [Owner | null, object | null, number, object | null] {

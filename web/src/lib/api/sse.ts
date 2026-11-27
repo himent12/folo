@@ -80,6 +80,8 @@ export function sseParser(emit: (name: string, data: string) => void): (chunk: s
 export interface StreamWatch {
   reach?: Reachability;
   access?: AccessWatch;
+  /** Subscribes to server/access recovery so streams waiting in backoff reconnect immediately. */
+  onRecover?: (fn: () => void) => () => void;
 }
 
 /**
@@ -164,6 +166,7 @@ export function openEventStream<M>(
   };
   if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') window.addEventListener('online', wake);
   if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') document.addEventListener('visibilitychange', onVisible);
+  const offRecover = watch?.onRecover?.(wake);
 
   const connect = async () => {
     if (closed) return;
@@ -189,8 +192,16 @@ export function openEventStream<M>(
       watch?.access?.refused(seen);
       return drop(false);
     }
-    // An error status, or an answer that is not an event stream (a proxy's page): as EventSource, a failed connection.
-    if (!res.ok || !res.body || !(res.headers.get('content-type') ?? '').includes('text/event-stream')) {
+    // Only 500 (Vite's dev proxy when nothing is behind it) and 502-504 (gateway outages) mean the server may be
+    // unreachable; other error statuses (404 on a deleted resource, 400, 501) came from a live server.
+    if (!res.ok) {
+      res.body?.cancel().catch(() => {});
+      const outage = res.status === 500 || (res.status >= 502 && res.status <= 504);
+      if (!outage) watch?.reach?.ok();
+      return drop(outage);
+    }
+    // An answer that is not an event stream (e.g. a proxy's HTML error page): as EventSource, a failed connection.
+    if (!res.body || !(res.headers.get('content-type') ?? '').includes('text/event-stream')) {
       res.body?.cancel().catch(() => {});
       return drop();
     }
@@ -232,6 +243,7 @@ export function openEventStream<M>(
     watchdog = undefined;
     if (typeof window !== 'undefined' && typeof window.removeEventListener === 'function') window.removeEventListener('online', wake);
     if (typeof document !== 'undefined' && typeof document.removeEventListener === 'function') document.removeEventListener('visibilitychange', onVisible);
+    offRecover?.();
     const old = ctrl;
     ctrl = null;
     old?.abort();

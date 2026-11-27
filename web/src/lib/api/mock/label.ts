@@ -51,7 +51,7 @@ import { buildDatasetSpec, callUsage, draftBoxes, runSummary, serializeImage, se
 import { renderImage } from './render';
 import { hash, hashBytes } from './rng';
 
-export { BATCH_MS, DEFAULT_BATCH, checkMockModel, mockAgents, resolveAgentRequest } from './labelAgents';
+export { BATCH_MS, checkMockModel, mockAgents, resolveAgentRequest } from './labelAgents';
 
 export class MockLabeling {
   #jobs: Job[] = [];

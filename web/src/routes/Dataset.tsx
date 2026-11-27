@@ -121,6 +121,7 @@ export default function Dataset() {
 
   /** Changes query params (null removes one): `push` adds a history entry, anything else replaces this one. */
   function setQuery(patch: Record<string, string | null>, push = false) {
+    if (router.location.name !== 'dataset' || router.location.params.id !== id.peek()) return;
     const before = router.route.query.toString();
     const q = new URLSearchParams(router.route.query);
     for (const [k, v] of Object.entries(patch)) {
@@ -576,6 +577,7 @@ export default function Dataset() {
               onnavigate={(im) => setQuery({ image: im })}
               onclose={() => setQuery({ image: null })}
               onmissing={(im) => {
+                if (router.location.name !== 'dataset' || router.location.params.id !== id.peek()) return;
                 // page-level: a linked image that is not in this view; the inspector closes on the next line.
                 toast.info('Image not in this view', `${im} does not match the current filters, or is no longer in the folder.`);
                 setQuery({ image: null });

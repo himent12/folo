@@ -84,18 +84,15 @@ export {
   agentEntryName,
   loopName,
   studentName,
-  MIN_LABELED_IMAGES,
   poolLabels,
   starvedError,
   noThresholdError,
-  OPEN_IDLE_MS,
   OPEN_BOXES_MAX,
   setOpenBoxesMax,
-  SEED_MAX,
   labelsPerImage,
   missingClasses,
 } from './benchRecords';
-export type { BenchImg, MBench, MEntry, MLoop, BenchHost } from './benchRecords';
+export type { MBench, MEntry, MLoop } from './benchRecords';
 
 export class MockBench extends MockBenchState {
   #urls = new Map<string, Promise<string>>();

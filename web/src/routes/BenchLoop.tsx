@@ -152,46 +152,71 @@ export default function BenchLoop() {
   const stopping = signal(false);
   const stopBusy = signal(false);
   const stopStatus = new DialogStatus();
-  let mounted = true;
-  onCleanup(() => (mounted = false));
-  async function stop() {
-    const l = loop.peek();
-    if (!l || stopBusy.peek()) return;
-    stopBusy.set(true);
-    const mark = live.mark();
-    try {
-      live.putLoop(await hub.api.stopBenchLoop(id.peek(), l.id), mark);
-      if (mounted) stopping.set(false);
-    } catch (e) {
-      if (mounted && stopping.peek()) stopStatus.error(e, 'Could not stop the loop');
-      // page-level: the stop confirm is closed or unmounted.
-      else toast.error(e, 'Could not stop the loop');
-    } finally {
-      stopBusy.set(false);
-    }
-  }
   const removing = signal(false);
   const removeBusy = signal(false);
   const removeStatus = new DialogStatus();
+  let mounted = true;
+  let stopSeq = 0;
+  let removeSeq = 0;
+  onCleanup(() => (mounted = false));
+  // Reset confirmation dialogs and in-flight busy guards when switching server, benchmark, or loop.
+  effect(() => {
+    void id.get();
+    void loopId.get();
+    void hub.epoch;
+    stopSeq++;
+    removeSeq++;
+    stopping.set(false);
+    removing.set(false);
+    stopBusy.set(false);
+    removeBusy.set(false);
+    stopStatus.clear();
+    removeStatus.clear();
+  });
+  async function stop() {
+    const l = loop.peek();
+    if (!l || stopBusy.peek() || router.location.path !== router.route.path) return;
+    const bid = id.peek(), targetId = l.id, epoch = hub.epoch, mark = live.mark(), seq = ++stopSeq;
+    stopBusy.set(true);
+    try {
+      const stopped = await hub.api.stopBenchLoop(bid, targetId);
+      const same = mounted && id.peek() === bid && loopId.peek() === targetId && hub.epoch === epoch && hub.mode !== 'connecting';
+      if (same) {
+        live.putLoop(stopped, mark);
+        stopping.set(false);
+      }
+    } catch (e) {
+      const same = mounted && id.peek() === bid && loopId.peek() === targetId && hub.epoch === epoch && hub.mode !== 'connecting';
+      if (same && stopping.peek()) stopStatus.error(e, 'Could not stop the loop');
+      // page-level: the stop confirm is closed, unmounted, or on another loop.
+      else if (hub.epoch === epoch && hub.mode !== 'connecting') toast.error(e, 'Could not stop the loop');
+    } finally {
+      if (seq === stopSeq) stopBusy.set(false);
+    }
+  }
   async function remove() {
     const l = loop.peek();
-    if (!l || removeBusy.peek()) return;
-    const bid = id.peek();
-    const startPath = router.location.path;
+    if (!l || removeBusy.peek() || router.location.path !== router.route.path) return;
+    const bid = id.peek(), targetId = l.id, epoch = hub.epoch, seq = ++removeSeq;
+    const startPath = router.route.path;
     removeBusy.set(true);
     try {
-      await hub.api.deleteBenchLoop(bid, l.id);
-      live.dropLoop(l.id);
-      if (mounted) removing.set(false);
-      // page-level: its confirm dialog has closed on the line above.
-      toast.success(`Deleted ${l.name}`, 'Its datasets, runs, models and entries stay.');
-      if (mounted && router.location.path === startPath) router.go(`/benchmarks/${bid}?tab=loops`, { replace: true });
+      await hub.api.deleteBenchLoop(bid, targetId);
+      const same = mounted && id.peek() === bid && loopId.peek() === targetId && hub.epoch === epoch && hub.mode !== 'connecting';
+      if (same) {
+        live.dropLoop(targetId);
+        removing.set(false);
+      }
+      // page-level: its confirm dialog has closed above or moved off this loop.
+      if (hub.epoch === epoch && hub.mode !== 'connecting') toast.success(`Deleted ${l.name}`, 'Its datasets, runs, models and entries stay.');
+      if (same && router.location.path === startPath) router.go(`/benchmarks/${bid}?tab=loops`, { replace: true });
     } catch (e) {
-      if (mounted && removing.peek()) removeStatus.error(e, 'Could not delete the loop');
-      // page-level: the delete confirm is closed or unmounted.
-      else toast.error(e, 'Could not delete the loop');
+      const same = mounted && id.peek() === bid && loopId.peek() === targetId && hub.epoch === epoch && hub.mode !== 'connecting';
+      if (same && removing.peek()) removeStatus.error(e, 'Could not delete the loop');
+      // page-level: the delete confirm is closed, unmounted, or on another loop.
+      else if (hub.epoch === epoch && hub.mode !== 'connecting') toast.error(e, 'Could not delete the loop');
     } finally {
-      removeBusy.set(false);
+      if (seq === removeSeq) removeBusy.set(false);
     }
   }
   const menu = computed<MenuItem[]>(() => {

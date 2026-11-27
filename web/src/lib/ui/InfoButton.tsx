@@ -138,8 +138,13 @@ export default function InfoButton(props: InfoButtonProps) {
     }
     const own = ctl || !native;
     const region = () => (controls.peek() ? document.getElementById(controls.peek()!) : pop.peek());
+    const occluded = () => {
+      const dialogs = document.querySelectorAll('dialog[open]');
+      const top = dialogs[dialogs.length - 1];
+      return !!top && !top.contains(btn);
+    };
     const onkey = (e: KeyboardEvent) => {
-      if (e.key !== 'Escape') return;
+      if (e.key !== 'Escape' || e.defaultPrevented || e.isComposing || occluded()) return;
       const r = region();
       const inside = btn.contains(document.activeElement) || !!r?.contains(document.activeElement);
       hide();
@@ -147,6 +152,7 @@ export default function InfoButton(props: InfoButtonProps) {
       e.stopPropagation();
     };
     const ondown = (e: PointerEvent) => {
+      if (occluded()) return;
       const r = region();
       if (e.target instanceof Node && (btn.contains(e.target) || r?.contains(e.target))) return;
       hide();

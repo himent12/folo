@@ -103,9 +103,6 @@ function prCurve(ap: number, recall: number, r: () => number): number[] {
   return solve((l) => curve(K_MAX, l), 0, 1, false);
 }
 
-/** The AP of a curve on the recall grid: the mean of its precisions, rounded as `/eval` rounds it. */
-export const apOf = (precision: readonly number[]) => r4(precision.reduce((a, b) => a + b, 0) / Math.max(1, precision.length));
-
 /** Precision of a curve at recall `x` (step interpolation; 0 past the curve's end). */
 function at(curve: { x: number; y: number }[], x: number): number {
   const last = curve[curve.length - 1];

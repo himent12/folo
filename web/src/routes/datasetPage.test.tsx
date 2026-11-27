@@ -348,4 +348,29 @@ describe('Dataset page history', () => {
     expect(target.querySelector('button[aria-label="Clear filters"]')).toBeNull();
     expect(document.activeElement).toBe(target.querySelector('.ds-toolbar .picker .trigger'));
   });
+
+  it('does not hijack navigation if an async missing-image callback resolves after router.location moved away', async () => {
+    let releaseImages!: () => void;
+    const gate = new Promise<void>((r) => (releaseImages = r));
+    vi.spyOn(api, 'datasetImages').mockImplementation(async () => {
+      await gate;
+      return { total: 0, images: [] };
+    });
+    const info = vi.spyOn(toast, 'info');
+    const hold = router.holdWhile((to) => to.name === 'runs');
+    try {
+      open('/datasets/ds_shapes?image=img_missing');
+      await until(() => target.querySelector('h1'), 'dataset loaded');
+      // User clicks away to /runs while the /runs chunk is loading (router.location moved, router.route held on dataset).
+      router.go('/runs');
+      expect(router.location.path).toBe('/runs');
+      releaseImages();
+      await new Promise((r) => setTimeout(r, 20));
+      flushSync();
+      expect(router.location.path).toBe('/runs');
+      expect(info).not.toHaveBeenCalled();
+    } finally {
+      hold();
+    }
+  });
 });

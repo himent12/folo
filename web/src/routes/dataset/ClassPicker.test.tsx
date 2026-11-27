@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { flush as flushSync } from 'fw';
+import { flush as flushSync, tick } from 'fw';
 import { render } from '../../../framework/testing';
 import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 import ClassPicker from './ClassPicker';
@@ -59,5 +59,61 @@ describe('ClassPicker', () => {
     flushSync();
     target.querySelector<HTMLElement>('[role="listbox"]')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'p', bubbles: true }));
     expect(focused()).toBe('person');
+  });
+
+  it('opens on ArrowDown, closes on Escape from the trigger without leaking to window, and closes on outside focus', async () => {
+    target = document.createElement('div');
+    const outside = document.createElement('button');
+    outside.textContent = 'Outside';
+    document.body.append(target, outside);
+    c = render(() => <ClassPicker classes={['circle', 'square']} value={undefined} onchange={() => {}} />, target);
+    const trigger = target.querySelector<HTMLButtonElement>('button[aria-haspopup="listbox"]')!;
+    const winEsc = vi.fn();
+    const onWin = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') winEsc(e);
+    };
+    window.addEventListener('keydown', onWin);
+    try {
+      trigger.focus();
+      trigger.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }));
+      flushSync();
+      await tick();
+      expect(target.querySelector('[role="listbox"]')).not.toBeNull();
+
+      // ArrowDown from the trigger while already open moves focus into the listbox.
+      trigger.focus();
+      trigger.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }));
+      flushSync();
+      expect(document.activeElement?.getAttribute('role')).toBe('option');
+
+      // Escape while focus is back on trigger closes listbox, refocuses trigger, and stops propagation.
+      trigger.focus();
+      trigger.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+      flushSync();
+      expect(target.querySelector('[role="listbox"]')).toBeNull();
+      expect(document.activeElement).toBe(trigger);
+      expect(winEsc).not.toHaveBeenCalled();
+
+      // Moving focus to an element outside the picker closes the listbox.
+      trigger.click();
+      flushSync();
+      await tick();
+      expect(target.querySelector('[role="listbox"]')).not.toBeNull();
+      target.querySelector('.picker')!.dispatchEvent(new FocusEvent('focusout', { bubbles: true, relatedTarget: outside }));
+      flushSync();
+      expect(target.querySelector('[role="listbox"]')).toBeNull();
+
+      // Unmounting before tick() resolves after opening does not steal focus.
+      outside.focus();
+      trigger.click();
+      c.unmount();
+      c = undefined;
+      outside.focus();
+      await tick();
+      expect(document.activeElement).toBe(outside);
+    } finally {
+      window.removeEventListener('keydown', onWin);
+      outside.remove();
+    }
   });
 });

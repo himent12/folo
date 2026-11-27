@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { highlight, rank, type Rankable } from './commands';
-import { groupResults, highlightItem } from './commandPalette/scoring';
+import { groupResults, highlight, highlightItem, rank, type Rankable } from './commandPalette/scoring';
 import type { Item } from './commandPalette/types';
 
 const items: (Rankable & { id: string })[] = [

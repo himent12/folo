@@ -479,4 +479,58 @@ describe('hub.refused with the server', () => {
     await vi.advanceTimersByTimeAsync(PROBE_DELAYS[0]!);
     expect([hub.offline, hub.refused]).toEqual([false, null]);
   });
+
+  it('immediately wakes open SSE streams out of long backoff when outage or 401 refusal recovers', async () => {
+    let up = true;
+    let token = true;
+    let streamCalls = 0;
+    vi.stubGlobal('fetch', async (url: string, init?: RequestInit) => {
+      if (!up) throw new TypeError('Failed to fetch');
+      if (url.endsWith('/api/health')) return Response.json(HEALTH);
+      if (init?.method === 'HEAD') return new Response(null, { status: token ? 200 : 401 });
+      if (url.endsWith('/events')) {
+        streamCalls++;
+        if (!token) return new Response('', { status: 401 });
+        return new Response(new ReadableStream({ start: () => {} }), { headers: { 'content-type': 'text/event-stream' } });
+      }
+      return token ? Response.json({ datasets: [] }) : UNAUTHORIZED();
+    });
+    await hub.connect();
+
+    // 1. Auth refusal: stream enters long backoff (1s, 2s, 4s, 8s -> 15s), then token recovers at PROBE_DELAYS[1].
+    token = false;
+    const reconnect = vi.fn();
+    const close = hub.api.runEvents('r1', { reconnect });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(hub.refused).toBe(TOKEN_WALL);
+    // Advance past a few SSE backoffs so SSE is in a long backoff window.
+    await vi.advanceTimersByTimeAsync(PROBE_DELAYS[0]!);
+    expect(hub.refused).toBe(TOKEN_WALL);
+    const beforeAuthBack = streamCalls;
+    token = true;
+    await vi.advanceTimersByTimeAsync(PROBE_DELAYS[1]!);
+    await vi.advanceTimersByTimeAsync(0);
+    expect([hub.offline, hub.refused]).toEqual([false, null]);
+    expect(streamCalls).toBeGreaterThan(beforeAuthBack);
+    expect(reconnect).toHaveBeenCalledTimes(1);
+    close();
+
+    // 2. Outage recovery: stream fails while server is down, enters backoff, then Reach recovers and wakes it at once.
+    up = false;
+    const reconnect2 = vi.fn();
+    const close2 = hub.api.runEvents('r2', { reconnect: reconnect2 });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(hub.offline).toBe(true);
+    // Fail once more so SSE backoff is 2s -> 4s while Reach checks at PROBE_DELAYS[0] (2s).
+    await vi.advanceTimersByTimeAsync(1000);
+    const beforeReachBack = streamCalls;
+    up = true;
+    // Reach recovers 1s later (at t=2000ms), while SSE's own timer wouldn't fire until t=3000ms.
+    await vi.advanceTimersByTimeAsync(1000);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(hub.offline).toBe(false);
+    expect(streamCalls).toBeGreaterThan(beforeReachBack);
+    expect(reconnect2).toHaveBeenCalledTimes(1);
+    close2();
+  });
 });

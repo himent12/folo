@@ -7,7 +7,7 @@
  */
 import Check from '$icons/check';
 import ChevronDown from '$icons/chevron-down';
-import { createUniqueId, css, defaults, effect, Index, signal, tick } from 'fw';
+import { createUniqueId, css, defaults, effect, Index, onCleanup, signal, tick } from 'fw';
 import { classInk } from '$lib/design/classInk';
 import { compact } from '$lib/format';
 import { swatchStyle } from './swatch';
@@ -30,12 +30,27 @@ export default function ClassPicker(props: ClassPickerProps) {
   const list = signal<HTMLElement>();
 
   const options = () => [...(list.get()?.querySelectorAll<HTMLElement>('[role="option"]') ?? [])];
+  let alive = true;
+  onCleanup(() => {
+    alive = false;
+  });
 
   async function show() {
     typed = '';
     open.set(true);
     await tick();
+    if (!alive || !open.peek()) return;
     (list.get()?.querySelector<HTMLElement>('[aria-selected="true"]') ?? options()[0])?.focus();
+  }
+  function ontrigger(e: KeyboardEvent) {
+    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+    e.preventDefault();
+    if (!open.peek()) {
+      void show();
+      return;
+    }
+    const all = options();
+    (e.key === 'ArrowDown' ? all[0] : all.at(-1))?.focus();
   }
   function hide(refocus = true) {
     open.set(false);
@@ -76,6 +91,7 @@ export default function ClassPicker(props: ClassPickerProps) {
       typeAhead(e.key, Math.max(0, i))?.focus();
     } else if (e.key === 'Escape') {
       e.preventDefault();
+      e.stopPropagation();
       hide();
     } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
       e.preventDefault();
@@ -94,12 +110,34 @@ export default function ClassPicker(props: ClassPickerProps) {
       const r = root.get();
       if (r && !r.contains(e.target as Node)) hide(false);
     };
+    const onEsc = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape' || e.defaultPrevented || e.isComposing) return;
+      const r = root.get();
+      const dialogs = document.querySelectorAll('dialog[open]');
+      const top = dialogs[dialogs.length - 1];
+      if (top && (!r || !top.contains(r))) return;
+      e.preventDefault();
+      e.stopPropagation();
+      hide(true);
+    };
     document.addEventListener('pointerdown', away);
-    return () => document.removeEventListener('pointerdown', away);
+    document.addEventListener('keydown', onEsc);
+    return () => {
+      document.removeEventListener('pointerdown', away);
+      document.removeEventListener('keydown', onEsc);
+    };
   });
 
   return (
-    <div class="picker" class:block={p.block} ref={root}>
+    <div
+      class="picker"
+      class:block={p.block}
+      ref={root}
+      onfocusout={(e) => {
+        const r = root.get();
+        if (open.get() && e.relatedTarget instanceof Node && r && !r.contains(e.relatedTarget)) hide(false);
+      }}
+    >
       <button
         type="button"
         class="trigger"
@@ -109,6 +147,7 @@ export default function ClassPicker(props: ClassPickerProps) {
         aria-controls={`${uid}-list`}
         aria-label={`Filter by class: ${p.value === undefined ? 'all classes' : p.classes[p.value]}`}
         onclick={() => (open.get() ? hide() : show())}
+        onkeydown={ontrigger}
       >
         {p.value !== undefined ? (
           <>

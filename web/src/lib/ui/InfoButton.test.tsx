@@ -126,4 +126,37 @@ describe('InfoButton', () => {
     expect(fold.textContent).toContain('Size = √(box area');
     done();
   });
+
+  it('ignores Escape and pointerdown while an unrelated modal dialog is open above it', () => {
+    const { button, done } = setup({ text: 'Background help.' });
+    button.click();
+    flushSync();
+    expect(button.getAttribute('aria-expanded')).toBe('true');
+
+    const dialog = document.createElement('dialog');
+    dialog.open = true;
+    const inner = document.createElement('button');
+    dialog.appendChild(inner);
+    document.body.appendChild(dialog);
+
+    let dialogSawEsc = false;
+    const onDialogKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') dialogSawEsc = true;
+    };
+    dialog.addEventListener('keydown', onDialogKey);
+    try {
+      inner.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+      flushSync();
+      expect(button.getAttribute('aria-expanded')).toBe('true');
+
+      inner.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      flushSync();
+      expect(dialogSawEsc).toBe(true);
+      expect(button.getAttribute('aria-expanded')).toBe('true');
+    } finally {
+      dialog.removeEventListener('keydown', onDialogKey);
+      dialog.remove();
+      done();
+    }
+  });
 });

@@ -152,46 +152,71 @@ export default function BenchEntryPage() {
   const stopping = signal(false);
   const stopBusy = signal(false);
   const stopStatus = new DialogStatus();
-  let mounted = true;
-  onCleanup(() => (mounted = false));
-  async function stop() {
-    const e = entry.peek();
-    if (!e || stopBusy.peek()) return;
-    stopBusy.set(true);
-    const mark = live.mark();
-    try {
-      live.putEntry(await hub.api.stopBenchEntry(id.peek(), e.id), mark);
-      if (mounted) stopping.set(false);
-    } catch (err) {
-      if (mounted && stopping.peek()) stopStatus.error(err, 'Could not stop the entry');
-      // page-level: the stop confirm is closed or unmounted.
-      else toast.error(err, 'Could not stop the entry');
-    } finally {
-      stopBusy.set(false);
-    }
-  }
   const removing = signal(false);
   const removeBusy = signal(false);
   const removeStatus = new DialogStatus();
+  let mounted = true;
+  let stopSeq = 0;
+  let removeSeq = 0;
+  onCleanup(() => (mounted = false));
+  // Reset confirmation dialogs and in-flight busy guards when switching server, benchmark, or entry.
+  effect(() => {
+    void id.get();
+    void entryId.get();
+    void hub.epoch;
+    stopSeq++;
+    removeSeq++;
+    stopping.set(false);
+    removing.set(false);
+    stopBusy.set(false);
+    removeBusy.set(false);
+    stopStatus.clear();
+    removeStatus.clear();
+  });
+  async function stop() {
+    const e = entry.peek();
+    if (!e || stopBusy.peek() || router.location.path !== router.route.path) return;
+    const bid = id.peek(), targetId = e.id, epoch = hub.epoch, mark = live.mark(), seq = ++stopSeq;
+    stopBusy.set(true);
+    try {
+      const stopped = await hub.api.stopBenchEntry(bid, targetId);
+      const same = mounted && id.peek() === bid && entryId.peek() === targetId && hub.epoch === epoch && hub.mode !== 'connecting';
+      if (same) {
+        live.putEntry(stopped, mark);
+        stopping.set(false);
+      }
+    } catch (err) {
+      const same = mounted && id.peek() === bid && entryId.peek() === targetId && hub.epoch === epoch && hub.mode !== 'connecting';
+      if (same && stopping.peek()) stopStatus.error(err, 'Could not stop the entry');
+      // page-level: the stop confirm is closed, unmounted, or on another entry.
+      else if (hub.epoch === epoch && hub.mode !== 'connecting') toast.error(err, 'Could not stop the entry');
+    } finally {
+      if (seq === stopSeq) stopBusy.set(false);
+    }
+  }
   async function remove() {
     const e = entry.peek();
-    if (!e || removeBusy.peek()) return;
-    const bid = id.peek();
-    const startPath = router.location.path;
+    if (!e || removeBusy.peek() || router.location.path !== router.route.path) return;
+    const bid = id.peek(), targetId = e.id, epoch = hub.epoch, seq = ++removeSeq;
+    const startPath = router.route.path;
     removeBusy.set(true);
     try {
-      await hub.api.deleteBenchEntry(bid, e.id);
-      live.dropEntry(e.id);
-      if (mounted) removing.set(false);
-      // page-level: its confirm dialog has closed on the line above.
-      toast.success(`Deleted ${e.name}`, 'Its result is gone from the leaderboard. The model and its files were not touched.');
-      if (mounted && router.location.path === startPath) router.go(`/benchmarks/${bid}`, { replace: true });
+      await hub.api.deleteBenchEntry(bid, targetId);
+      const same = mounted && id.peek() === bid && entryId.peek() === targetId && hub.epoch === epoch && hub.mode !== 'connecting';
+      if (same) {
+        live.dropEntry(targetId);
+        removing.set(false);
+      }
+      // page-level: its confirm dialog has closed above or moved off this entry.
+      if (hub.epoch === epoch && hub.mode !== 'connecting') toast.success(`Deleted ${e.name}`, 'Its result is gone from the leaderboard. The model and its files were not touched.');
+      if (same && router.location.path === startPath) router.go(`/benchmarks/${bid}`, { replace: true });
     } catch (err) {
-      if (mounted && removing.peek()) removeStatus.error(err, 'Could not delete the entry');
-      // page-level: the delete confirm is closed or unmounted.
-      else toast.error(err, 'Could not delete the entry');
+      const same = mounted && id.peek() === bid && entryId.peek() === targetId && hub.epoch === epoch && hub.mode !== 'connecting';
+      if (same && removing.peek()) removeStatus.error(err, 'Could not delete the entry');
+      // page-level: the delete confirm is closed, unmounted, or on another entry.
+      else if (hub.epoch === epoch && hub.mode !== 'connecting') toast.error(err, 'Could not delete the entry');
     } finally {
-      removeBusy.set(false);
+      if (seq === removeSeq) removeBusy.set(false);
     }
   }
   const menu = computed((): MenuItem[] => {

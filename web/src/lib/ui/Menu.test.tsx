@@ -227,6 +227,46 @@ describe('Menu keyboard', () => {
       target.remove();
     }
   });
+
+  it('closes on Escape even when focus is on the trigger or outside the menu, unless occluded by a modal dialog', async () => {
+    const { target, c, trigger } = setup();
+    const winEsc = vi.fn();
+    const onWin = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') winEsc(e);
+    };
+    window.addEventListener('keydown', onWin);
+    try {
+      trigger.click();
+      flushSync();
+      await tick();
+      // Move focus back to the trigger button: Escape must still close the popover and not reach window.
+      trigger.focus();
+      trigger.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+      flushSync();
+      expect(target.querySelector('[role="menu"]')).toBeNull();
+      expect(document.activeElement).toBe(trigger);
+      expect(winEsc).not.toHaveBeenCalled();
+
+      // Reopen and place an unrelated open modal dialog on top: Escape must belong to the dialog, not close the menu.
+      trigger.click();
+      flushSync();
+      await tick();
+      const dialog = document.createElement('dialog');
+      dialog.open = true;
+      document.body.appendChild(dialog);
+      try {
+        dialog.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+        flushSync();
+        expect(target.querySelector('[role="menu"]')).not.toBeNull();
+      } finally {
+        dialog.remove();
+      }
+    } finally {
+      window.removeEventListener('keydown', onWin);
+      unmount(c);
+      target.remove();
+    }
+  });
 });
 
 describe('Menu on a phone', () => {

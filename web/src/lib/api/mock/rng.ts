@@ -34,8 +34,6 @@ export function hashBytes(b: Uint8Array): string {
 }
 
 export const range = (r: () => number, lo: number, hi: number) => lo + (hi - lo) * r();
-export const int = (r: () => number, lo: number, hi: number) => Math.floor(range(r, lo, hi + 1));
-export const pick = <T>(r: () => number, xs: readonly T[]): T => xs[Math.floor(r() * xs.length)] as T;
 
 /** Approximately normal (sum of uniforms). */
 export function gauss(r: () => number): number {

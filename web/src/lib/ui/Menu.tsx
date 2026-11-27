@@ -200,7 +200,19 @@ export default function Menu(props: MenuProps) {
       const r = root.get();
       if (r && !r.contains(e.target as Node)) hide(false);
     };
+    // Escape closes the desktop popover even when focus sits on the trigger or outside the menu list.
+    const onEsc = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape' || e.defaultPrevented || e.isComposing) return;
+      const r = root.get();
+      const dialogs = document.querySelectorAll('dialog[open]');
+      const top = dialogs[dialogs.length - 1];
+      if (top && (!r || !top.contains(r))) return;
+      e.preventDefault();
+      e.stopPropagation();
+      hide(true);
+    };
     document.addEventListener('pointerdown', away);
+    document.addEventListener('keydown', onEsc);
     // A list placed on the viewport would drift from its row: scrolling or resizing closes it.
     const drift = (e: Event) => {
       if (!list.get()?.contains(e.target as Node)) hide(false);
@@ -211,6 +223,7 @@ export default function Menu(props: MenuProps) {
     }
     return () => {
       document.removeEventListener('pointerdown', away);
+      document.removeEventListener('keydown', onEsc);
       window.removeEventListener('scroll', drift, true);
       window.removeEventListener('resize', drift);
     };

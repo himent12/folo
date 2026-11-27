@@ -14,7 +14,6 @@ import { cancelOnRemove } from '$lib/detect/DetectionView';
 
 /** How a box came out, in the gallery's one encoding (never by colour alone: a solid line, a solid line with a cross, a dashed line). */
 export type Outcome = 'right' | 'wrong' | 'missed';
-export const OUTCOME_WORD: Record<Outcome, string> = { right: 'right', wrong: 'wrong', missed: 'missed' };
 
 export interface MatchViewProps {
   src: string | null;
