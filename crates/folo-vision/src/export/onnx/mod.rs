@@ -396,6 +396,7 @@ fn metadata(
         (true, false) => "decoded",
         (true, true) => "end2end",
     };
+    m.retain(|k, _| !k.starts_with("folo.v2."));
     m.remove("folo.onnx.max_det");
     m.remove("folo.onnx.iou_head");
     m.remove("folo.onnx.iou_fusion_alpha");

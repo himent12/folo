@@ -25,8 +25,8 @@ use serde_json::{Value, json};
 /// Element-wise relative tolerance `(max, mean)` for `f32` raw head tensors.
 const TOL_F32_RAW: (f64, f64) = (2e-4, 1e-5);
 /// Element-wise relative tolerance `(max, mean)` for `f32` decoded pixel boxes (stride-32 coordinates near 0
-/// amplify ~1e-5 grid-unit FMA differences by 32× while mean error stays ~1e-6).
-const TOL_F32_DEC: (f64, f64) = (5e-4, 1e-5);
+/// amplify ~1.5e-5 grid-unit SIMD/FMA differences by 32× across Linux/Windows CPUs while mean error stays ~1e-6).
+const TOL_F32_DEC: (f64, f64) = (1e-3, 1e-5);
 /// Element-wise relative tolerance `(max, mean)` for `f16` raw/e2e graphs (11-bit mantissa vs FOLO's `f32`).
 const TOL_F16_RAW: (f64, f64) = (1e-1, 5e-3);
 /// Element-wise relative tolerance `(max, mean)` for `f16` decoded dense boxes (stride-32 pixel edges near 0
@@ -200,6 +200,7 @@ fn v2_export_covers_all_scales_and_variants() {
     assert!(!reused_v1.metadata.contains_key("folo.onnx.max_det"));
     assert!(!reused_v1.metadata.contains_key("folo.onnx.iou_head"));
     assert!(!reused_v1.metadata.contains_key("folo.onnx.iou_fusion_alpha"));
+    assert!(!reused_v1.metadata.keys().any(|k| k.starts_with("folo.v2.")));
 
     // Custom `in_channels = 1` (grayscale) + non-default `reg_max = 8` + `o2o` `K` capped by `A = 84 < max_det`.
     let mut custom_cfg = FoloV2Config::new("n", 3).unwrap().with_head(HeadMode::O2o).with_iou_head(true);
