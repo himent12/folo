@@ -470,7 +470,7 @@ fn packed_multipart_1x1_matches_unpacked_bit_exact() {
         (1, 32, 34, 16, 24, 20, 1, false, true), // hw=1088 (tail 8 -> VECS=1 direct)
         (1, 19, 55, 16, 24, 20, 1, true, true),  // hw=1045 (tail 13 -> VECS=2 copy)
         (1, 40, 28, 16, 24, 20, 1, false, true), // hw=1120 (tail 16 -> VECS=2 direct)
-        (1, 29, 37, 16, 24, 64, 4, true, false), // hw=1073 (tail 17 -> VECS=3 copy, mt og_blk>=4)
+        (1, 29, 37, 64, 64, 64, 4, true, false), // hw=1073 (tail 17 -> VECS=3 copy, cv.ks=32 -> min_og_blk=4, mt)
         (2, 7, 59, 96, 100, 16, 1, true, true),  // hw=413 (tail 5, n=2, total_ks=49>=48)
     ] {
         let c = c0 + c1;

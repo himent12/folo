@@ -1,9 +1,10 @@
-//! Single-barrier, L1-hot rotating row-strip fused x86-64 driver for single-part `3×3` (`pad = 1`)
-//! int8 convolutions (`q8::conv` / `q8::conv_per_channel`):
-//! - All `stride = 2, pad = 1` convs (3 rotating `(ev, od)` deinterleaved input row slots per task, `15–31 KiB`
-//!   in L1D, reusing `ky = 2 -> ky = 0` across consecutive rows).
-//! - Large-input `stride = 1, pad = 1` convs (`input > 384 KiB`, e.g. `64->64 80×80` and `folo-s` high-res layers),
-//!   where the global padded copy would otherwise spill across cores through L3 and pay a second rayon barrier.
+//! Single-barrier, L1-hot rotating row-strip and small-spatial shared-strip fused x86-64 driver for single-part
+//! `3×3` (`pad = 1`) int8 convolutions (`q8::conv` / `q8::conv_per_channel`):
+//! - `stride = 2, pad = 1` convs (except huge-weight / small-input shapes better served by channel-first
+//!   splitting): rotating `(ev, od)` deinterleaved input row slots per task (`RB ∈ {1..=4}` within a `48 KiB`
+//!   L1D budget, reusing `ky = 2 -> ky = 0` across consecutive rows).
+//! - `stride = 1, pad = 1` convs: small-spatial (`oh <= 24`) shared packed-strip path, or single-barrier
+//!   L1-hot rotating row strips (`RB ∈ {1..=4}` within `48 KiB` L1D) for medium/large feature maps.
 //!
 //! Arithmetic order is bit-for-bit identical to [`super::kernel::kernel_scalar`] + [`super::kernel::Epi::apply`].
 
