@@ -93,16 +93,15 @@ pub(crate) fn encode_conv(
         g.bias = GemmBias::None;
         g.act = UnaryOp::Identity;
     }
-    let check = !g.m.is_multiple_of(cfg.bm as usize)
-        || !g.n.is_multiple_of(cfg.bn as usize)
-        || !g.k.is_multiple_of(cfg.bk as usize);
     let mut spec = base_spec(&g, if splits > 1 { DType::F32 } else { out }, cfg)
         .bool("VEC_A", g.k.is_multiple_of(4))
         .bool("VEC_B", false)
         .bool("VEC_C", g.n.is_multiple_of(4))
         .bool("TRANS_A", false)
         .bool("TRANS_B", false)
-        .bool("CHECK", check)
+        .bool("CHECK_M", !g.m.is_multiple_of(cfg.bm as usize))
+        .bool("CHECK_N", !g.n.is_multiple_of(cfg.bn as usize))
+        .bool("CHECK_K", !g.k.is_multiple_of(cfg.bk as usize) || g.k == 0)
         .u32("CONV_MODE", 1)
         .bool("SPLIT", splits > 1);
     spec = with_window(spec, d);
@@ -147,16 +146,15 @@ pub(crate) fn encode_conv_sites(
         g.bias = GemmBias::None;
         g.act = UnaryOp::Identity;
     }
-    let check = !g.m.is_multiple_of(cfg.bm as usize)
-        || !g.n.is_multiple_of(cfg.bn as usize)
-        || !g.k.is_multiple_of(cfg.bk as usize);
     let spec = base_spec(&g, if splits > 1 { DType::F32 } else { DType::F16 }, cfg)
         .bool("VEC_A", g.k.is_multiple_of(4))
         .bool("VEC_B", false)
         .bool("VEC_C", g.n.is_multiple_of(4))
         .bool("TRANS_A", false)
         .bool("TRANS_B", false)
-        .bool("CHECK", check)
+        .bool("CHECK_M", !g.m.is_multiple_of(cfg.bm as usize))
+        .bool("CHECK_N", !g.n.is_multiple_of(cfg.bn as usize))
+        .bool("CHECK_K", !g.k.is_multiple_of(cfg.bk as usize) || g.k == 0)
         .u32("CONV_MODE", 1)
         .bool("SITES", true)
         .bool("SPLIT", splits > 1);
@@ -223,16 +221,15 @@ pub(crate) fn encode_conv_backward_input(
 ) -> Result<bool> {
     let (oh, ow) = d.output()?;
     let Some(cfg) = resolve(ctx, None, || pick_config_conv(g.m, g.n))? else { return Ok(false) };
-    let check = !g.m.is_multiple_of(cfg.bm as usize)
-        || !g.n.is_multiple_of(cfg.bn as usize)
-        || !g.k.is_multiple_of(cfg.bk as usize);
     let spec = base_spec(g, DType::F16, cfg)
         .bool("VEC_A", g.k.is_multiple_of(4))
         .bool("VEC_B", false)
         .bool("VEC_C", g.n.is_multiple_of(4))
         .bool("TRANS_A", false)
         .bool("TRANS_B", false)
-        .bool("CHECK", check)
+        .bool("CHECK_M", !g.m.is_multiple_of(cfg.bm as usize))
+        .bool("CHECK_N", !g.n.is_multiple_of(cfg.bn as usize))
+        .bool("CHECK_K", !g.k.is_multiple_of(cfg.bk as usize) || g.k == 0)
         .u32("CONV_MODE", 2);
     let Some(kernel) = build(ctx, with_window(spec, d)) else { return Ok(false) };
     let p = gemm_params(g)?.at(24).uz(d.h)?.uz(d.w)?.uz(oh)?.uz(ow)?;
@@ -240,10 +237,15 @@ pub(crate) fn encode_conv_backward_input(
     Ok(true)
 }
 
-/// Tile pick for stride-2 `dX` (sub-pixel and phase): `C64X128` starting at `N >= 1600` (40×40) when `M >= 128`
-/// to halve weight traffic on wide layers (`128→128 @ 80`, `256→256 @ 80`), else [`pick_config_conv`].
+/// Tile pick for stride-2 `dX` (sub-pixel and phase): `C64X128` starting at `M >= 128, N >= 1600` (40×40) or
+/// `M >= 64, N >= 6400` (80×80+ sub-pixel cells such as `16→32 @ 320²`) to halve weight traffic and keep
+/// 256-thread workgroups on wide spatial planes, else [`pick_config_conv`].
 fn pick_config_stride2_dx(m: usize, n: usize) -> CoopConfig {
-    if m >= 128 && n >= 1600 { CoopConfig::C64X128 } else { pick_config_conv(m, n) }
+    if (m >= 128 && n >= 1600) || (m >= 64 && n >= 6400) {
+        CoopConfig::C64X128
+    } else {
+        pick_config_conv(m, n)
+    }
 }
 
 /// `(BM, BN)` of the tile [`encode_conv_backward_input_subpixel`] will pick, for pre-dispatch grid checks.
@@ -269,17 +271,15 @@ pub(crate) fn encode_conv_backward_input_phase(
 ) -> Result<bool> {
     let (oh, ow) = d.output()?;
     let Some(cfg) = resolve(ctx, None, || pick_config_stride2_dx(g.m, g.n))? else { return Ok(false) };
-    let check = !g.m.is_multiple_of(cfg.bm as usize)
-        || !g.n.is_multiple_of(cfg.bn as usize)
-        || !g.k.is_multiple_of(cfg.bk as usize)
-        || g.k == 0;
     let spec = base_spec(g, DType::F16, cfg)
         .bool("VEC_A", vec_a)
         .bool("VEC_B", false)
         .bool("VEC_C", false)
         .bool("TRANS_A", false)
         .bool("TRANS_B", false)
-        .bool("CHECK", check)
+        .bool("CHECK_M", !g.m.is_multiple_of(cfg.bm as usize))
+        .bool("CHECK_N", !g.n.is_multiple_of(cfg.bn as usize))
+        .bool("CHECK_K", !g.k.is_multiple_of(cfg.bk as usize) || g.k == 0)
         .u32("CONV_MODE", 2);
     let Some(kernel) = build(ctx, phase.spec(with_window(spec, d))) else { return Ok(false) };
     let p = phase.params(gemm_params(g)?.at(24).uz(d.h)?.uz(d.w)?.uz(oh)?.uz(ow)?)?;
@@ -301,16 +301,15 @@ pub(crate) fn encode_conv_backward_input_subpixel(
     gx: &wgpu::Buffer,
 ) -> Result<bool> {
     let Some(cfg) = resolve(ctx, None, || pick_config_stride2_dx(g.m, g.n))? else { return Ok(false) };
-    let check = !g.m.is_multiple_of(cfg.bm as usize)
-        || !g.n.is_multiple_of(cfg.bn as usize)
-        || !g.k.is_multiple_of(cfg.bk as usize);
     let spec = base_spec(g, DType::F16, cfg)
         .bool("VEC_A", true)
         .bool("VEC_B", false)
         .bool("VEC_C", d.w.is_multiple_of(4))
         .bool("TRANS_A", false)
         .bool("TRANS_B", false)
-        .bool("CHECK", check)
+        .bool("CHECK_M", !g.m.is_multiple_of(cfg.bm as usize))
+        .bool("CHECK_N", !g.n.is_multiple_of(cfg.bn as usize))
+        .bool("CHECK_K", !g.k.is_multiple_of(cfg.bk as usize) || g.k == 0)
         .u32("CONV_MODE", 1)
         .bool("SUBPIXEL", true)
         .u32("KH", 2)
@@ -331,36 +330,48 @@ pub(crate) fn encode_conv_backward_input_subpixel(
 const MAX_WG: usize = 65_535;
 
 /// Tile configuration for a windowed weight gradient (`M = C_out/groups` rows, `N = C_in/groups·KH·KW` columns):
-/// `C32X32` for narrow weights (e.g. `folo-s`'s `3→32` stem with `N = 27`, when it fits `MAX_WG`), otherwise
-/// capped at `C64X128`/`C64X64` (falling back to `C128X128` only when `M` would exceed `MAX_WG` on 64-row tiles).
+/// narrow `C16X32` / `C16X64` / `C32X32` / `C32X64` tiles match small stems and shallow channels without `C16X256`
+/// column padding waste, otherwise capped at `C64X128`/`C64X64` (falling back to `C128X128` only when `M` would
+/// exceed `MAX_WG` on 64-row tiles).
 fn pick_config_weight_grad(m: usize, n: usize) -> CoopConfig {
-    if (n <= 32 || (m <= 32 && n <= 64)) && m.div_ceil(32) <= MAX_WG && n.div_ceil(32) <= MAX_WG {
+    if m <= 16 && n <= 32 && m.div_ceil(16) <= MAX_WG && n.div_ceil(32) <= MAX_WG {
+        return CoopConfig::C16X32;
+    }
+    if (n <= 32 || (m <= 32 && n <= 64 && m > 16)) && m.div_ceil(32) <= MAX_WG && n.div_ceil(32) <= MAX_WG {
         return CoopConfig::C32X32;
     }
     if m.div_ceil(64) > MAX_WG {
         return CoopConfig::C128X128;
     }
     match m {
+        0..=16 if n.div_ceil(64) <= MAX_WG => CoopConfig::C16X64,
         0..=16 => CoopConfig::C16X256,
+        17..=32 if n <= 192 && n.div_ceil(64) <= MAX_WG => CoopConfig::C32X64,
         17..=32 => CoopConfig::C32X128,
         _ if n >= 128 || n.div_ceil(64) > MAX_WG => CoopConfig::C64X128,
         _ => CoopConfig::C64X64,
     }
 }
 
-/// Tile configuration for the 1×1 `A · Bᵀ` weight gradient: `C32X32` for narrow `N <= 32` (when it fits
-/// `MAX_WG`), `C64X128` for wide `N >= 128`, `C64X64` elsewhere (stays at 24–35 KiB shared memory so Ada keeps
-/// full occupancy, falling back to `C128X128` only when `M` would exceed `MAX_WG` on 64-row tiles).
+/// Tile configuration for the 1×1 `A · Bᵀ` weight gradient: narrow `C16X32`/`C16X64`/`C32X32`/`C32X64` for
+/// shallow layers, `C64X128` for wide `N >= 128`, `C64X64` elsewhere (stays at 24–38 KiB shared memory so Ada
+/// keeps high occupancy, falling back to `C128X128` only when `M` would exceed `MAX_WG` on 64-row tiles).
 fn pick_config_pointwise_wgrad(m: usize, n: usize) -> CoopConfig {
     if m.div_ceil(64) > MAX_WG {
         return CoopConfig::C128X128;
     }
-    if m <= 16 && n >= 128 {
+    if m <= 16 && n <= 32 {
+        CoopConfig::C16X32
+    } else if m <= 16 && n.div_ceil(64) <= MAX_WG {
+        CoopConfig::C16X64
+    } else if m <= 16 {
         CoopConfig::C16X256
-    } else if m <= 32 && n >= 96 {
-        CoopConfig::C32X128
     } else if (n <= 32 || (m <= 32 && n <= 64)) && m.div_ceil(32) <= MAX_WG && n.div_ceil(32) <= MAX_WG {
         CoopConfig::C32X32
+    } else if m <= 32 && n <= 192 && n.div_ceil(64) <= MAX_WG {
+        CoopConfig::C32X64
+    } else if m <= 32 {
+        CoopConfig::C32X128
     } else if n >= 128 || n.div_ceil(64) > MAX_WG {
         CoopConfig::C64X128
     } else {
@@ -416,16 +427,17 @@ pub(crate) fn encode_conv_backward_weight(
         };
         let target = tmp.as_ref().map_or(gw, |t| t.raw());
         let out_dt = if total_slabs > 1 { DType::F32 } else { out };
-        let check = !cout_g.is_multiple_of(pw_cfg.bm as usize)
-            || !cin_g.is_multiple_of(pw_cfg.bn as usize)
-            || !hw.is_multiple_of(pw_cfg.bk as usize);
+        let (_, b_col) = super::col_major_tiles(ctx, pw_cfg, false, true);
         let spec = base_spec(&gp, out_dt, pw_cfg)
             .bool("VEC_A", hw.is_multiple_of(4))
             .bool("VEC_B", hw.is_multiple_of(4))
             .bool("VEC_C", cin_g.is_multiple_of(4))
             .bool("TRANS_A", false)
             .bool("TRANS_B", true)
-            .bool("CHECK", check)
+            .bool("B_COL", b_col)
+            .bool("CHECK_M", !cout_g.is_multiple_of(pw_cfg.bm as usize))
+            .bool("CHECK_N", !cin_g.is_multiple_of(pw_cfg.bn as usize))
+            .bool("CHECK_K", !hw.is_multiple_of(pw_cfg.bk as usize) || hw == 0)
             .u32("CONV_MODE", 0)
             .bool("SPLIT", sp > 1);
         let Some(kernel) = build(ctx, spec) else { return Ok(false) };
@@ -478,16 +490,19 @@ pub(crate) fn encode_conv_backward_weight(
         };
         let target = tmp.as_ref().map_or(gw, |t| t.raw());
         let out_dt = if total_slabs > 1 { DType::F32 } else { out };
-        let check = !cout_g.is_multiple_of(cfg.bm as usize)
-            || !ncols.is_multiple_of(cfg.bn as usize)
-            || !ohow.is_multiple_of(bk);
+        let (_, b_col) = super::col_major_tiles(ctx, cfg, false, true);
+        let wg_run = if b_col && (cfg == CoopConfig::C16X32 || cfg == CoopConfig::C32X64) { 16 } else { 8 };
         let spec = base_spec(&gp, out_dt, cfg)
             .bool("VEC_A", ohow.is_multiple_of(4))
             .bool("VEC_B", false)
             .bool("VEC_C", ncols.is_multiple_of(4))
             .bool("TRANS_A", false)
             .bool("TRANS_B", false)
-            .bool("CHECK", check)
+            .bool("B_COL", b_col)
+            .u32("WG_RUN", wg_run)
+            .bool("CHECK_M", !cout_g.is_multiple_of(cfg.bm as usize))
+            .bool("CHECK_N", !ncols.is_multiple_of(cfg.bn as usize))
+            .bool("CHECK_K", !ohow.is_multiple_of(bk) || ohow == 0)
             .u32("CONV_MODE", 3)
             .bool("PER_IMG", true)
             .bool("SPLIT", sp > 1);
@@ -519,16 +534,19 @@ pub(crate) fn encode_conv_backward_weight(
         None
     };
     let target = tmp.as_ref().map_or(gw, |t| t.raw());
-    let check = !g.m.is_multiple_of(cfg.bm as usize)
-        || !g.n.is_multiple_of(cfg.bn as usize)
-        || !np.is_multiple_of(bk);
+    let (_, b_col) = super::col_major_tiles(ctx, cfg, false, true);
+    let wg_run = if b_col && (cfg == CoopConfig::C16X32 || cfg == CoopConfig::C32X64) { 16 } else { 8 };
     let spec = base_spec(g, DType::F32, cfg)
         .bool("VEC_A", ohow.is_multiple_of(4))
         .bool("VEC_B", false)
         .bool("VEC_C", g.n.is_multiple_of(4))
         .bool("TRANS_A", false)
         .bool("TRANS_B", false)
-        .bool("CHECK", check)
+        .bool("B_COL", b_col)
+        .u32("WG_RUN", wg_run)
+        .bool("CHECK_M", !g.m.is_multiple_of(cfg.bm as usize))
+        .bool("CHECK_N", !g.n.is_multiple_of(cfg.bn as usize))
+        .bool("CHECK_K", !np.is_multiple_of(bk) || np == 0)
         .u32("CONV_MODE", 3)
         .bool("SPLIT", splits > 1);
     let spec = crate::kernels::conv::weight_grad_spec(with_window(spec, d), d, oh, ow);
@@ -558,10 +576,16 @@ pub(crate) fn encode_conv_backward_weight(
 mod tests {
     use super::*;
 
-    /// Narrow `C32X32` falls back to a wider tile whenever `M` (or `N`) would exceed `MAX_WG` (65,535).
+    /// Narrow `C16X32`/`C16X64`/`C32X32`/`C32X64` pick for shallow weights and fall back to wider tiles whenever
+    /// `M` (or `N`) would exceed `MAX_WG` (65,535).
     #[test]
     fn weight_grad_tile_pick_respects_grid_limit() {
+        assert_eq!(pick_config_weight_grad(16, 27), CoopConfig::C16X32);
+        assert_eq!(pick_config_weight_grad(16, 72), CoopConfig::C16X64);
         assert_eq!(pick_config_weight_grad(32, 27), CoopConfig::C32X32);
+        assert_eq!(pick_config_weight_grad(32, 144), CoopConfig::C32X64);
+        assert_eq!(pick_config_weight_grad(32, 288), CoopConfig::C32X128);
+        assert_eq!(pick_config_pointwise_wgrad(16, 32), CoopConfig::C16X32);
         assert_eq!(pick_config_pointwise_wgrad(32, 32), CoopConfig::C32X32);
         assert_eq!(pick_config_weight_grad(2_097_121, 9), CoopConfig::C64X64);
         assert_eq!(pick_config_pointwise_wgrad(2_097_121, 16), CoopConfig::C64X64);

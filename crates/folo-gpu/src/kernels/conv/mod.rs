@@ -21,9 +21,9 @@
 //!   and a direct depthwise kernel.
 //!
 //! Gradients take f32 or f16 operands (f32 accumulation either way; mixed-precision training). With tensor cores
-//! on, f16 input and weight gradients run on [`coop`](crate::kernels::coop) (narrow `M <= 16, N <= 32` stems
-//! keep the regular `STEM` tile; wider narrow weights such as `3→32` take `C32X32`), and the weight gradient can
-//! be written as f32 directly ([`conv2d_backward_weight_as`]).
+//! on, f16 input and weight gradients run on [`coop`](crate::kernels::coop) (narrow `M <= 16, N <= 32` stems take
+//! `C16X32`, shallow `M <= 16` weights take `C16X64`, `3→32` stems take `C32X32`, and `M <= 32, N <= 192` take
+//! `C32X64`), and the weight gradient can be written as f32 directly ([`conv2d_backward_weight_as`]).
 //!
 //! Files: `forward.rs` the forward ([`conv2d`], [`conv2d_cat`]); `split.rs` its split-K; `sites.rs` the forward
 //! at listed output pixels ([`conv2d_sites`]); `input_grad.rs` and `weight_grad.rs` the gradients;

@@ -161,13 +161,16 @@ fn f16_desc(m: usize, n: usize, k: usize, ta: bool, tb: bool, batch: usize) -> G
     d
 }
 
-pub(super) const CONFIGS: [CoopConfig; 6] = [
+pub(super) const CONFIGS: [CoopConfig; 9] = [
     CoopConfig::C128X128,
     CoopConfig::C64X128,
     CoopConfig::C64X64,
     CoopConfig::C32X128,
+    CoopConfig::C32X64,
     CoopConfig::C32X32,
     CoopConfig::C16X256,
+    CoopConfig::C16X64,
+    CoopConfig::C16X32,
 ];
 
 #[test]
@@ -200,10 +203,14 @@ fn coop_gemm_every_config_and_transpose() {
             }
         }
     }
-    // Exact tile multiples: no bounds checks compiled in.
+    // Exact tile multiples (no bounds checks) and single-axis ragged shapes (per-axis CHECK_M/N/K) across all transposes.
     for cfg in CONFIGS {
         let (m, n) = (cfg.bm as usize * 2, cfg.bn as usize);
-        run_gemm(&ctx, &f16_desc(m, n, 64, false, false, 1), DType::F16, Some(cfg), false, 3);
+        for (ta, tb) in [(false, false), (true, false), (false, true), (true, true)] {
+            run_gemm(&ctx, &f16_desc(m, n, 64, ta, tb, 1), DType::F16, Some(cfg), false, 3);
+        }
+        run_gemm(&ctx, &f16_desc(m, n + 3, 64, true, false, 1), DType::F16, Some(cfg), false, 4);
+        run_gemm(&ctx, &f16_desc(m + 3, n, 64, false, true, 1), DType::F16, Some(cfg), false, 5);
     }
 }
 

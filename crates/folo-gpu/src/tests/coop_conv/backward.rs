@@ -182,14 +182,19 @@ fn coop_conv_gradients() {
     ctx.set_tensor_cores(true);
 }
 
-/// The stem's weight gradient (3 → 16, 3×3 s2) on the regular kernels' 16×32 tile, with tensor cores on too:
-/// `N·OH·OW = 4·80·80 = 25600`, dozens of split-K chunks, exact sums so a dropped chunk fails.
+/// The stem's weight gradient (3 → 16, 3×3 s2): `C16X32` on tensor cores and the regular kernels' 16×32 `STEM`
+/// tile when tensor cores are off; `N·OH·OW = 4·80·80 = 25600`, dozens of split-K chunks, exact sums so a dropped
+/// chunk fails.
 #[test]
 fn coop_conv_weight_gradient_stem_split_k() {
     let (ctx, _g) = coop!();
     let d = cdesc(4, 3, 160, 160, 16, 1, Window2d::square(3, 2, 1));
-    for route in conv_grads(&ctx, &d, 200, true) {
-        assert!(matches!(route, Some((false, (16, 32), s)) if s >= 40), "stem route {route:?}");
+    let routes = conv_grads(&ctx, &d, 200, true);
+    for route in &routes[..2] {
+        assert!(matches!(route, Some((true, (16, 32), s)) if *s >= 40), "tensor-core stem route {route:?}");
+    }
+    for route in &routes[2..] {
+        assert!(matches!(route, Some((false, (16, 32), s)) if *s >= 40), "regular stem route {route:?}");
     }
     ctx.set_tensor_cores(true);
 }
@@ -345,16 +350,22 @@ fn coop_conv_pointwise_split_k_weight_grad() {
         // Single image (direct write, zero reduction) and single image with spatial splits.
         cdesc(1, 32, 16, 16, 32, 1, p1),
         cdesc(1, 64, 40, 40, 64, 1, p1),
-        // Multi-image YOLO 1×1 shapes: C32X32, C64X64, C64X128, C128X64, C128X128, plus 3-mode WGRAD_REDUCE.
+        // Multi-image YOLO 1×1 shapes: C16X32, C16X64, C32X32, C32X64, C64X64, C64X128, plus both WGRAD_REDUCE paths.
+        cdesc(4, 16, 20, 20, 16, 1, p1),
+        cdesc(4, 48, 20, 20, 16, 1, p1),
         cdesc(4, 16, 20, 20, 32, 1, p1),
         cdesc(4, 32, 20, 20, 32, 1, p1),
         cdesc(4, 32, 20, 20, 64, 1, p1),
         cdesc(4, 64, 20, 20, 32, 1, p1),
+        cdesc(4, 96, 20, 20, 32, 1, p1),
         cdesc(4, 48, 40, 40, 64, 1, p1),
         cdesc(4, 64, 16, 16, 128, 1, p1),
         cdesc(4, 96, 16, 16, 128, 1, p1),
         cdesc(4, 128, 20, 20, 128, 1, p1),
         cdesc(2, 256, 8, 8, 256, 1, p1),
+        // Large weights (`wn4 = 2048` / `9216`, `splits = 5` / `2`) exercising `conv2d_wgrad_reduce` FLAT=true.
+        cdesc(5, 64, 16, 16, 128, 1, p1),
+        cdesc(3, 64, 16, 16, 64, 1, Window2d::square(3, 1, 1)),
         // folo-s stem (3→32 3×3 s2: C32X32 + PER_IMG) and grouped/odd 1×1 (reduce_cols fallback).
         cdesc(4, 3, 32, 32, 32, 1, Window2d::square(3, 2, 1)),
         cdesc(4, 32, 32, 32, 64, 2, p1),
@@ -400,6 +411,91 @@ fn coop_conv_pointwise_split_k_weight_grad() {
     let names: Vec<_> = ctx.trace_end().into_iter().map(|op| op.name).collect();
     assert_eq!(names, ["coop_gemm", "conv2d_wgrad_reduce"], "expected 1x1 coop_gemm + wgrad_reduce");
     assert!(ctx.kernels_without_registry().is_empty(), "{:?}", ctx.kernels_without_registry());
+}
+
+/// Direct verification of all three `conv2d_wgrad_reduce` paths: flat 1-D (`FLAT=1`, including non-multiple-of-64
+/// `wn4` and odd `splits` tails), 1-barrier 32-wide subgroup reduction (`FLAT=0 subgroups`), and the portable
+/// 5-barrier shared-memory fallback (`FORCE_NO_SUBGROUPS=true`), for both f32 and f16 outputs.
+#[test]
+fn wgrad_reduce_flat_subgroup_and_portable_match_cpu() {
+    struct ForceGuard(bool);
+    impl ForceGuard {
+        fn set(v: bool) -> Self {
+            Self(crate::kernels::FORCE_NO_SUBGROUPS.replace(v))
+        }
+    }
+    impl Drop for ForceGuard {
+        fn drop(&mut self) {
+            crate::kernels::FORCE_NO_SUBGROUPS.set(self.0);
+        }
+    }
+
+    let (ctx, _g) = coop!();
+    let mut rng = Rng::new(711);
+    let cases = [
+        // FLAT=true: non-64-aligned wn4 with unrolled body + odd tail (splits=5, 7) and pure tail (splits=3).
+        (2051usize, 5usize, true),
+        (4099, 7, true),
+        (2051, 3, true),
+        // FLAT=false: small/ragged wn4 and split counts spanning < 32, == 32, and > 32 slabs.
+        (1, 2, false),
+        (7, 5, false),
+        (8, 31, false),
+        (19, 32, false),
+        (64, 33, false),
+        (513, 67, false),
+    ];
+    for (wn4, splits, expect_flat) in cases {
+        let wn = wn4 * 4;
+        let partials = rng.vec(splits * wn, -2.0, 2.0);
+        let mut want = vec![0f32; wn];
+        for col in 0..wn {
+            let mut sum = 0f64;
+            for s in 0..splits {
+                sum += partials[s * wn + col] as f64;
+            }
+            want[col] = sum as f32;
+        }
+        let tmp = ctx.upload(bytemuck::cast_slice(&partials)).unwrap();
+        for out in [DType::F32, DType::F16] {
+            let want_out = if out == DType::F16 { f16_round(&want) } else { want.clone() };
+            let modes: &[bool] = if expect_flat { &[false] } else { &[false, true] };
+            for &force_portable in modes {
+                let _fg = ForceGuard::set(force_portable);
+                let gw = GpuTensor::empty(&ctx, &[wn], out).unwrap();
+                ctx.trace_begin();
+                conv::finish_wgrad(&ctx, tmp.raw(), splits, wn, gw.raw(), out).unwrap();
+                let ops = ctx.trace_end();
+                assert_eq!(ops.len(), 1);
+                assert_eq!(ops[0].name, "conv2d_wgrad_reduce");
+                let want_flat = if expect_flat { "FLAT=1" } else { "FLAT=0" };
+                assert!(
+                    ops[0].spec.contains(want_flat),
+                    "wn4={wn4} splits={splits}: expected {want_flat} in {:?}",
+                    ops[0].spec
+                );
+                if !expect_flat {
+                    let has_sg = ops[0].spec.contains("subgroups");
+                    assert_eq!(
+                        has_sg,
+                        crate::kernels::use_subgroups(&ctx),
+                        "wn4={wn4} splits={splits} portable={force_portable}: {:?}",
+                        ops[0].spec
+                    );
+                }
+                let got = gw.to_vec().unwrap();
+                let (atol, rtol) = if out == DType::F16 { (1e-2, 2e-3) } else { (1e-4, 1e-5) };
+                for (i, (&g, &w)) in got.iter().zip(&want_out).enumerate() {
+                    let err = (g - w).abs();
+                    let lim = atol + rtol * w.abs();
+                    assert!(
+                        err <= lim,
+                        "wn4={wn4} splits={splits} out={out:?} portable={force_portable} [{i}]: got={g} want={w}"
+                    );
+                }
+            }
+        }
+    }
 }
 
 /// High-magnitude (AMP `loss_scale = 65536`) finiteness check on the new backward paths: `subpixel` `C64X128`

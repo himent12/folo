@@ -377,7 +377,7 @@ fn emit_loads(g: &GenCfg, wb: Option<&conv::WgradPlan>) -> String {
     }
     if let Some(wb) = wb {
         let reg = |u: usize| format!("rb[{}][{}]", u / 4, u % 4);
-        load.push_str(&conv::wgrad_b_load(wb, "B", reg, "f32", "0.0", g.per_img, g.check));
+        load.push_str(&conv::wgrad_b_load(wb, "B", reg, "f32", "0.0", g.per_img, (g.check, g.check)));
     }
     for u in 0..g.pb.count {
         let o = format!("(bo + {}u)", u * g.pb.step);

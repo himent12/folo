@@ -198,6 +198,19 @@ mod tests {
                 Spec::new().u32("BM", 64).u32("BN", 64).u32("BK", 16).u32("TM", 4).u32("TN", 4).u32("CAT", 4),
             ),
             ("coop_gemm", Spec::new().u32("BM", 16).u32("BN", 256).u32("BK", 32).u32("WGM", 1).u32("WGN", 8)),
+            (
+                "coop_gemm",
+                Spec::new()
+                    .u32("BM", 16)
+                    .u32("BN", 32)
+                    .u32("BK", 32)
+                    .u32("WGM", 1)
+                    .u32("WGN", 2)
+                    .u32("WG_RUN", 16)
+                    .bool("B_COL", true),
+            ),
+            ("conv2d_wgrad_reduce", Spec::new().bool("FLAT", true)),
+            ("conv2d_wgrad_reduce", Spec::new().bool("FLAT", false).subgroups(true)),
             ("ew2", Spec::new().u32("KIND", 3).u32("RANK", 8)),
             ("move", Spec::new().u32("EB", 2).u32("MODE", 1).u32("RANK", 0)),
             ("move_vec4", Spec::new().u32("MODE", 1).u32("RANK", 0)),

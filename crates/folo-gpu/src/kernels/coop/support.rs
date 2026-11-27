@@ -74,15 +74,15 @@ pub(crate) const FEATURES: wgpu::Features = wgpu::Features::EXPERIMENTAL_COOPERA
 ///    or `GpuOptions::tensor_cores`) and the adapter reports the exact 16×16×16 f16 × f16 → f32 configuration
 ///    with 32-wide subgroups ([`unavailable_reason`]).
 /// 2. Only the kernels generated in this module (and the self-test probe) contain
-///    `enable wgpu_cooperative_matrix;`, and they only `coopLoadT` / `coopStoreT` through **workgroup** arrays of
+///    `enable wgpu_cooperative_matrix;`, and they only `coopLoad` / `coopLoadT` / `coopStoreT` through **workgroup** arrays of
 ///    compile-time size. Every fragment's offset is a compile-time constant plus a subgroup index clamped to
-///    `0..8` (or `0..4` for `C32X32`), and its stride is a constant; the generator asserts that all 16 rows of every fragment lie inside
+///    `0..8` (or `0..4` / `0..2` for narrower configs), and its stride is a constant; the generator asserts that all 16 rows/columns of every fragment lie inside
 ///    the array ([`gen_coop`]). No cooperative load or store touches a storage buffer, so the missing bounds
 ///    checks on cooperative accesses cannot reach outside a binding: global memory is read and written only by
 ///    ordinary WGSL loads and stores, which wgpu bounds-checks (robust buffer access on Vulkan).
-/// 3. Every `coopLoadT`, `coopMultiplyAdd` and `coopStoreT` runs in workgroup-uniform control flow: the trip
+/// 3. Every `coopLoad`, `coopLoadT`, `coopMultiplyAdd` and `coopStoreT` runs in workgroup-uniform control flow: the trip
 ///    counts and conditions around them depend only on uniform parameters, never on the invocation, as
-///    subgroup-scope operations require. Workgroups are 128 (`C32X32`) or 256 invocations, a multiple of the subgroup size, and
+///    subgroup-scope operations require. Workgroups are 64 (`C16X32`), 128 (`C16X64`/`C32X32`/`C32X64`/`C32X128`/`C64X64`), or 256 invocations, a multiple of the subgroup size, and
 ///    which fragments a subgroup owns comes from `@builtin(subgroup_id)`, so it is uniform within the subgroup.
 /// 4. A device must pass [`self_test`] (the generated kernels against a CPU reference, plus a probe) before the
 ///    kernels are used, so a driver that mis-compiles them is caught at start-up; on failure the experimental
@@ -188,6 +188,28 @@ pub(crate) fn self_test(ctx: &GpuContext) -> Result<()> {
                 if !close {
                     return Err(GpuError::Wgpu(format!("{out:?} GEMM C[{i}][{j}] = {g}, expected {want}")));
                 }
+            }
+        }
+    }
+    // Also verify column-major `coopLoad` (`TRANS_A` + `TRANS_B`, `A_COL` + `B_COL`) at startup.
+    let (mt, nt, kt) = (32usize, 32usize, 32usize);
+    let at: Vec<f32> = (0..kt * mt).map(|i| ((i * 3 % 11) as f32 - 5.0) / 8.0).collect();
+    let bt: Vec<f32> = (0..nt * kt).map(|i| ((i * 5 % 13) as f32 - 6.0) / 16.0).collect();
+    let mut dt = GemmDesc::new(mt, nt, kt, true, true, 1);
+    dt.dtype = DType::F16;
+    let (gat, gbt) = (ctx.upload(&to_f16_bytes(&at))?, ctx.upload(&to_f16_bytes(&bt))?);
+    let gct = ctx.alloc(DType::F32.bytes(mt * nt))?;
+    if !encode_gemm(ctx, &dt, DType::F32, gat.raw(), gbt.raw(), ctx.dummy(), gct.raw(), None)? {
+        return Err(GpuError::Wgpu(ctx.tensor_cores_status()));
+    }
+    let got_t: Vec<f32> = bytemuck::pod_collect_to_vec(&ctx.read(gct.raw(), 0, DType::F32.bytes(mt * nt))?);
+    for i in 0..mt {
+        for j in 0..nt {
+            let want: f32 = (0..kt).map(|k| at[k * mt + i] * bt[j * kt + k]).sum();
+            let g = got_t[i * nt + j];
+            let close = (g - want).abs() <= 1e-4 * (1.0 + want.abs()); // false for NaN
+            if !close {
+                return Err(GpuError::Wgpu(format!("transposed GEMM C[{i}][{j}] = {g}, expected {want}")));
             }
         }
     }

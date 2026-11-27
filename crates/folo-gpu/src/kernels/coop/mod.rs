@@ -8,14 +8,17 @@
 //! and [`super::conv::conv2d`] then route f16 problems here and fall back to the regular kernels on anything
 //! unexpected (a kernel that fails to build turns tensor cores off for the context).
 //!
-//! **Layout.** A workgroup of `32 · WGM · WGN` invocations (`128` for `C32X32`, `256` for all other configs; 4 or
-//! 8 subgroups of 32) computes a `BM × BN` tile of `C`. The subgroups are arranged `WGM × WGN`; each owns
-//! `FM × FN` accumulator fragments of 16×16 f32. `K` is walked in steps of `BK`: the next `A` and `B` tiles are
-//! fetched into registers with ordinary (bounds-checked) loads while the current ones are consumed from
-//! double-buffered f16 tiles in workgroup memory, one barrier per step, exactly like the f32 generator in
-//! [`super::gemm`]. The tiles are row-major with 8 halves of padding per row (16-byte aligned rows, fewer bank
-//! conflicts): `As[m][k]` and `Bs[k][n]`, read with `coopLoadT`. `CONV_MODE = 1` gathers the `B` tile straight
-//! from the NCHW image as the f32 implicit-GEMM conv does (no im2col buffer).
+//! **Layout.** A workgroup of `32 · WGM · WGN` invocations (`64` for `C16X32`, `128` for `C16X64`/`C32X32`/
+//! `C32X64`/`C32X128`/`C64X64`, `256` for `C64X128`/`C128X128`/`C16X256`; 2, 4 or 8 subgroups of 32) computes a
+//! `BM × BN` tile of `C`. The subgroups are arranged `WGM × WGN`; each owns `FM × FN` accumulator fragments of
+//! 16×16 f32. `K` is walked in steps of `BK`: the next `A` and `B` tiles are fetched into registers with ordinary
+//! (bounds-checked) loads while the current ones are consumed from double-buffered f16 tiles in workgroup memory,
+//! one barrier per step, exactly like the f32 generator in [`super::gemm`]. Plain operands store row-major tiles
+//! (`As[m][k]`, `Bs[k][n]`, read with `coopLoadT`); transposed operands (`TRANS_A` / `TRANS_B`) and `CONV_MODE = 3`
+//! weight gradients store column-major tiles (`A_COL`: `As[k][m]`, `B_COL`: `Bs[n][k]`, read with `coopLoad`) when
+//! they fit workgroup storage so stores into shared memory remain contiguous without bank-conflicting scatters.
+//! Every tile row carries 8 halves of padding (16-byte aligned rows, fewer bank conflicts). `CONV_MODE = 1` gathers
+//! the `B` tile straight from the NCHW image as the f32 implicit-GEMM conv does (no im2col buffer).
 //!
 //! **Epilogue.** Cooperative matrices have no per-element access, so each subgroup stores one fragment at a time
 //! into its own 1 KiB slice of an f32 scratch array, and its 32 lanes then apply `alpha`, the bias and the
@@ -54,7 +57,7 @@ const PAD: u32 = 8;
 const FRAG: u32 = 256;
 
 /// Tile configuration of the tensor-core kernels: a `bm × bn` tile of `C` per workgroup, `wgm · wgn` subgroups
-/// (4 or 8), each owning `(bm / 16 / wgm) × (bn / 16 / wgn)` accumulator fragments, `bk` deep `K` tiles.
+/// (2, 4 or 8), each owning `(bm / 16 / wgm) × (bn / 16 / wgn)` accumulator fragments, `bk` deep `K` tiles.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CoopConfig {
     /// Tile rows.
@@ -65,7 +68,7 @@ pub struct CoopConfig {
     pub bk: u32,
     /// Subgroup rows.
     pub wgm: u32,
-    /// Subgroup columns (`wgm · wgn ∈ {4, 8}`).
+    /// Subgroup columns (`wgm · wgn ∈ {2, 4, 8}`).
     pub wgn: u32,
 }
 
@@ -74,22 +77,28 @@ impl CoopConfig {
     pub const C128X128: CoopConfig = CoopConfig { bm: 128, bn: 128, bk: 32, wgm: 2, wgn: 4 };
     /// 64×128 tiles, 2×2 fragments per subgroup (256 threads).
     pub const C64X128: CoopConfig = CoopConfig { bm: 64, bn: 128, bk: 32, wgm: 2, wgn: 4 };
-    /// 64×64 tiles, 1×2 fragments per subgroup (256 threads).
-    pub const C64X64: CoopConfig = CoopConfig { bm: 64, bn: 64, bk: 32, wgm: 4, wgn: 2 };
-    /// 32×128 tiles (short `M`, e.g. 32 output channels), 1×2 fragments per subgroup (256 threads).
-    pub const C32X128: CoopConfig = CoopConfig { bm: 32, bn: 128, bk: 32, wgm: 2, wgn: 4 };
+    /// 64×64 tiles, 2×2 fragments per subgroup (128 threads, 4 subgroups, 23–24 KiB workgroup memory).
+    pub const C64X64: CoopConfig = CoopConfig { bm: 64, bn: 64, bk: 32, wgm: 2, wgn: 2 };
+    /// 32×128 tiles (short `M`, e.g. 32 output channels), 2×2 fragments per subgroup (128 threads, 4 subgroups).
+    pub const C32X128: CoopConfig = CoopConfig { bm: 32, bn: 128, bk: 32, wgm: 1, wgn: 4 };
+    /// 32×64 tiles (narrow `M <= 32` weight gradients with moderate `N`), 1×2 fragments per subgroup (128 threads).
+    pub const C32X64: CoopConfig = CoopConfig { bm: 32, bn: 64, bk: 32, wgm: 2, wgn: 2 };
     /// 32×32 tiles (batch-1 small spatial planes like 20×20), 1×1 fragment per subgroup (128 threads, 14 KiB
     /// workgroup memory): 4× more tiles than `C64X64`, eliminating split-K finish dispatches deterministically.
     pub const C32X32: CoopConfig = CoopConfig { bm: 32, bn: 32, bk: 32, wgm: 2, wgn: 2 };
-    /// 16×256 tiles (`M <= 16`), 1×2 fragments per subgroup (256 threads).
+    /// 16×256 tiles (`M <= 16` wide spatial planes), 1×2 fragments per subgroup (256 threads).
     pub const C16X256: CoopConfig = CoopConfig { bm: 16, bn: 256, bk: 32, wgm: 1, wgn: 8 };
+    /// 16×64 tiles (`M <= 16` weight gradients), 1×1 fragment per subgroup (128 threads, 16–17 KiB workgroup memory).
+    pub const C16X64: CoopConfig = CoopConfig { bm: 16, bn: 64, bk: 32, wgm: 1, wgn: 4 };
+    /// 16×32 tiles (narrow `M <= 16, N <= 32` stem weight gradients), 1×1 fragment per subgroup (64 threads, 10 KiB).
+    pub const C16X32: CoopConfig = CoopConfig { bm: 16, bn: 32, bk: 32, wgm: 1, wgn: 2 };
 
-    /// Subgroups per workgroup (`4` or `8`).
+    /// Subgroups per workgroup (`2`, `4` or `8`).
     pub const fn subgroups(&self) -> u32 {
         self.wgm * self.wgn
     }
 
-    /// Invocations per workgroup (`128` or `256`, always a multiple of 32).
+    /// Invocations per workgroup (`64`, `128` or `256`, always a multiple of 32).
     pub const fn threads(&self) -> u32 {
         self.subgroups() * 32
     }
@@ -102,12 +111,12 @@ impl CoopConfig {
         self.bn / 16 / self.wgn
     }
 
-    /// Whether the generator supports this configuration: 4 or 8 subgroups that split the tile into whole
+    /// Whether the generator supports this configuration: 2, 4 or 8 subgroups that split the tile into whole
     /// fragments, `bk` a multiple of 16, and tile loads that map evenly onto the workgroup's invocations.
     pub fn valid(&self) -> bool {
         let Self { bm, bn, bk, wgm, wgn } = *self;
         let sgs = wgm.saturating_mul(wgn);
-        if [bm, bn, bk, wgm, wgn].contains(&0) || (sgs != 4 && sgs != 8) || bk > 64 {
+        if [bm, bn, bk, wgm, wgn].contains(&0) || !matches!(sgs, 2 | 4 | 8) || bk > 64 {
             return false;
         }
         let threads = sgs * 32;
@@ -120,10 +129,27 @@ impl CoopConfig {
             && (bk * bn).is_multiple_of(threads)
     }
 
-    /// Workgroup memory used: two `A` and two `B` f16 tiles plus the f32 epilogue scratch.
+    /// Workgroup memory used for row-major tiles: two `A` and two `B` f16 tiles plus the f32 epilogue scratch.
     pub fn workgroup_bytes(&self) -> u32 {
-        2 * (self.bm * (self.bk + PAD) + self.bk * (self.bn + PAD)) * 2 + self.subgroups() * FRAG * 4
+        self.workgroup_bytes_for(false, false)
     }
+
+    /// Workgroup memory used with optional column-major `As` (`a_col`: `BK × (BM + PAD)`) and/or `Bs` (`b_col`:
+    /// `BN × (BK + PAD)`).
+    pub(crate) fn workgroup_bytes_for(&self, a_col: bool, b_col: bool) -> u32 {
+        let a = if a_col { self.bk * (self.bm + PAD) } else { self.bm * (self.bk + PAD) };
+        let b = if b_col { self.bn * (self.bk + PAD) } else { self.bk * (self.bn + PAD) };
+        2 * (a + b) * 2 + self.subgroups() * FRAG * 4
+    }
+}
+
+/// Whether column-major workgroup tiles (`A_COL` / `B_COL`, loaded via `coopLoad` so transposed or wgrad stores
+/// write contiguously without bank-conflicting scatters) fit `ctx`'s workgroup-storage limit for `cfg`.
+pub(crate) fn col_major_tiles(ctx: &GpuContext, cfg: CoopConfig, want_a: bool, want_b: bool) -> (bool, bool) {
+    let max = ctx.caps().max_workgroup_storage;
+    let a_col = want_a && cfg.workgroup_bytes_for(true, false) <= max;
+    let b_col = want_b && cfg.workgroup_bytes_for(a_col, true) <= max;
+    (a_col, b_col)
 }
 
 /// Picks a tile configuration for an `m × n` output (times `batch`): short `M` gets the flat tiles, otherwise the
