@@ -51,10 +51,10 @@ function classListFromInsights(insights: DatasetInsightsData) {
   ].sort((a, b) => b.boxes - a.boxes || a.class_id - b.class_id);
 }
 
-/** Iterates nonzero `counts.by_kind` entries ordered by `KINDS` severity, preserving any additional server kinds cleanly. */
-function checkIssueEntries(counts?: IssueCounts): { kind: string; label: string; severity: IssueSeverity; count: number }[] {
+/** Iterates nonzero `counts.by_kind` entries ordered by `KINDS` severity, preserving any unknown future kinds without guessing severity. */
+function checkIssueEntries(counts?: IssueCounts): { kind: string; label: string; severity: IssueSeverity | 'unknown'; count: number }[] {
   if (!counts) return [];
-  const out: { kind: string; label: string; severity: IssueSeverity; count: number }[] = [];
+  const out: { kind: string; label: string; severity: IssueSeverity | 'unknown'; count: number }[] = [];
   const seen = new Set<string>();
   for (const severity of SEVERITY_ORDER) {
     for (const kind of KINDS[severity]) {
@@ -65,7 +65,7 @@ function checkIssueEntries(counts?: IssueCounts): { kind: string; label: string;
   }
   for (const [kind, n] of Object.entries(counts.by_kind)) {
     if (seen.has(kind) || !n || n <= 0) continue;
-    out.push({ kind, label: kindLabel(kind), severity: 'warning', count: n });
+    out.push({ kind, label: kindLabel(kind), severity: 'unknown', count: n });
   }
   return out;
 }

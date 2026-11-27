@@ -35,6 +35,8 @@ export interface UseTrackingInput {
   frameKey?: () => string | null;
   /** Frame index and timestamp (ms) for the current captured frame. */
   frameMeta?: () => { frame: number; timestampMs: number } | null;
+  /** True when `pred()` belongs to the currently active media frame (prevents attaching stale N-1 boxes to frame N). */
+  predMatchesFrame?: () => boolean;
   /** Human-readable clip or stream name used for trajectory export filenames & metadata. */
   sourceName?: () => string;
   modelId: () => string | null;
@@ -243,8 +245,9 @@ export function useTracking(input: UseTrackingInput) {
     const mode = input.mediaMode();
     const p = input.pred();
     const fk = input.frameKey ? input.frameKey() : null;
+    const matchesFrame = input.predMatchesFrame ? input.predMatchesFrame() : true;
     void trackerReadyTick.get();
-    if (!on || mode === 'none' || !p) {
+    if (!on || mode === 'none' || !p || !matchesFrame) {
       untrack(() => {
         if (!p) {
           trackedFrame.set(null);
@@ -361,7 +364,7 @@ export function useTracking(input: UseTrackingInput) {
   function exportTracksCsv(): boolean {
     const obs = trackHistory.observations();
     if (!obs.length) return false;
-    return downloadTracksCsv(exportFilenameBase(), obs, trackHistory.summary().unique_tracks);
+    return downloadTracksCsv(exportFilenameBase(), obs);
   }
 
   /** Explicitly clears recorded trajectories, trails, and active tracker state without leaving media mode. */

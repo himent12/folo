@@ -84,16 +84,31 @@ describe('compare/export (RunCompare CSV & Markdown)', () => {
     expect(md).toContain('## Results');
     expect(md).toContain('| Best mAP50-95 |');
     if (!sameData) expect(md).toContain('> ');
+
+    // Sub-4-decimal metric differences preserve exact precision in CSV and mark differs='yes'.
+    const closeA: Run = { ...rA, id: 'run_c1', name: 'close-a', best: { epoch: 10, map50_95: 0.50001 } };
+    const closeB: Run = { ...rB, id: 'run_c2', name: 'close-b', best: { epoch: 10, map50_95: 0.50002 } };
+    const closeCsv = buildRunCompareCsv({ ...input, chosen: [closeA, closeB], baselineId: closeA.id });
+    const mapRow = closeCsv.rows.find((row) => row[1] === 'Best mAP50-95');
+    expect(mapRow).toEqual(['result', 'Best mAP50-95', 'yes', 0.50001, 0.50002]);
   });
 
-  it('wires Copy Markdown and Download CSV in CompareTable and updates when baseline swaps', async () => {
-    const runs = (await hub.api.runs()).filter((r) => r.status === 'completed').slice(0, 2);
-    router.route = parse(`#/runs/compare?ids=${runs.map((r) => r.id).join(',')}`);
+  it('wires Copy Markdown and Download CSV in CompareTable, preserves header Menu DOM across refreshes, and updates when baseline swaps', async () => {
+    const runs = (await hub.api.runs()).filter((r) => r.status === 'completed').slice(0, 3);
+    router.route = parse(`#/runs/compare?ids=${runs.slice(0, 2).map((r) => r.id).join(',')}`);
     mounted = render(() => <RunCompare />, target);
 
     await until(() => target.querySelector('[data-run-compare-copy-md]'), 'export actions');
     const copyBtn = target.querySelector<HTMLButtonElement>('[data-run-compare-copy-md]')!;
     const csvBtn = target.querySelector<HTMLButtonElement>('[data-run-compare-download-csv]')!;
+    const headerMenuBtn = target.querySelector<HTMLButtonElement>('button[aria-label="Export run comparison"]')!;
+    expect(headerMenuBtn).not.toBeNull();
+
+    // Adding a 3rd run while staying >= 2 must NOT remount the header Export menu button.
+    router.go(`/runs/compare?ids=${runs.map((r) => r.id).join(',')}`, { replace: true });
+    flushSync();
+    await until(() => target.querySelectorAll('.chip').length === 3, 'three runs');
+    expect(target.querySelector<HTMLButtonElement>('button[aria-label="Export run comparison"]')).toBe(headerMenuBtn);
 
     const copied: string[] = [];
     Object.defineProperty(navigator, 'clipboard', {
@@ -122,5 +137,11 @@ describe('compare/export (RunCompare CSV & Markdown)', () => {
     const csvText = await blobs[0]!.text();
     expect(csvText).toContain(`${runs[1]!.name} (baseline)`);
     revokePendingBlobUrls();
+
+    // Dropping below 2 runs removes header actions completely (no empty `.actions` wrapper).
+    router.go(`/runs/compare?ids=${runs[0]!.id}`, { replace: true });
+    flushSync();
+    await until(() => target.querySelectorAll('.chip').length === 1, 'one run');
+    expect(target.querySelector('button[aria-label="Export run comparison"]')).toBeNull();
   });
 });

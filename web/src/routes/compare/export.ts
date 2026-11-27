@@ -129,30 +129,33 @@ export function buildRunCompareCsv(input: RunCompareExportInput): {
   const valStatus = ordered.map((r) => r.status);
   rows.push(['result', 'Status', new Set(valStatus).size > 1 ? 'yes' : 'no', ...valStatus]);
 
-  const mapVals = ordered.map((r) => (r.best && Number.isFinite(r.best.map50_95) ? Number(r.best.map50_95.toFixed(4)) : null));
-  rows.push(['result', 'Best mAP50-95', new Set(mapVals.map(String)).size > 1 ? 'yes' : 'no', ...mapVals]);
+  const differsNum = (vals: readonly (number | null)[]) =>
+    new Set(vals.map((v) => (v === null ? 'null' : String(v)))).size > 1 ? 'yes' : 'no';
+
+  const mapVals = ordered.map((r) => (r.best && Number.isFinite(r.best.map50_95) ? r.best.map50_95 : null));
+  rows.push(['result', 'Best mAP50-95', differsNum(mapVals), ...mapVals]);
 
   const bestEpVals = ordered.map((r) => r.best?.epoch ?? null);
-  rows.push(['result', 'Best epoch', new Set(bestEpVals.map(String)).size > 1 ? 'yes' : 'no', ...bestEpVals]);
+  rows.push(['result', 'Best epoch', differsNum(bestEpVals), ...bestEpVals]);
 
   const precVals = ordered.map((r) => {
     const v = bestEpochVal(r, input.metrics);
-    return v && Number.isFinite(v.precision) ? Number(v.precision.toFixed(4)) : null;
+    return v && Number.isFinite(v.precision) ? v.precision : null;
   });
-  rows.push(['result', 'Precision (best-F1)', new Set(precVals.map(String)).size > 1 ? 'yes' : 'no', ...precVals]);
+  rows.push(['result', 'Precision (best-F1)', differsNum(precVals), ...precVals]);
 
   const recVals = ordered.map((r) => {
     const v = bestEpochVal(r, input.metrics);
-    return v && Number.isFinite(v.recall) ? Number(v.recall.toFixed(4)) : null;
+    return v && Number.isFinite(v.recall) ? v.recall : null;
   });
-  rows.push(['result', 'Recall (best-F1)', new Set(recVals.map(String)).size > 1 ? 'yes' : 'no', ...recVals]);
+  rows.push(['result', 'Recall (best-F1)', differsNum(recVals), ...recVals]);
 
   const confVals = ordered.map((r) => {
     const v = bestEpochVal(r, input.metrics);
     if (!v || (v.precision === 0 && v.recall === 0)) return null;
-    return v.best_f1_conf != null && Number.isFinite(v.best_f1_conf) ? Number(v.best_f1_conf.toFixed(4)) : null;
+    return v.best_f1_conf != null && Number.isFinite(v.best_f1_conf) ? v.best_f1_conf : null;
   });
-  rows.push(['result', 'Best-F1 conf', new Set(confVals.map(String)).size > 1 ? 'yes' : 'no', ...confVals]);
+  rows.push(['result', 'Best-F1 conf', differsNum(confVals), ...confVals]);
 
   const settingRows = buildCompareSettingRows(input.datasets, input.startOf);
   for (const [label, fn] of settingRows) {

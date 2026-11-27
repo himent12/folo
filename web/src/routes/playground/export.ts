@@ -86,7 +86,7 @@ export function exportTracksJson(filenameBase: string, payload: TrackExportPaylo
   const ok = exportTableJson(filenameBase, payload, 'playground-export');
   if (ok) {
     const n = payload.observations.length;
-    const u = payload.summary.unique_tracks;
+    const u = new Set(payload.observations.map((o) => o.track_id)).size;
     toast.success(
       'Tracks JSON exported',
       `${u} unique ${u === 1 ? 'track' : 'tracks'} · ${n} ${n === 1 ? 'observation' : 'observations'}.`,
@@ -98,12 +98,12 @@ export function exportTracksJson(filenameBase: string, payload: TrackExportPaylo
 }
 
 /** Downloads frame-indexed ByteTrack trajectory observations as formula-safe RFC-4180 CSV. */
-export function exportTracksCsv(filenameBase: string, observations: readonly TrackObservation[], uniqueTracks?: number): boolean {
+export function exportTracksCsv(filenameBase: string, observations: readonly TrackObservation[]): boolean {
   if (!observations.length) return false;
   const rows = buildTrackExportCsvRows(observations);
   const ok = exportTableCsv(filenameBase, TRACK_CSV_HEADERS, rows, 'playground-export');
   if (ok) {
-    const u = uniqueTracks ?? new Set(observations.map((o) => o.track_id)).size;
+    const u = new Set(observations.map((o) => o.track_id)).size;
     toast.success(
       'Tracks CSV exported',
       `${u} unique ${u === 1 ? 'track' : 'tracks'} · ${rows.length} ${rows.length === 1 ? 'row' : 'rows'}.`,

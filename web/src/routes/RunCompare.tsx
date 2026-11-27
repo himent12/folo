@@ -3,7 +3,7 @@
 import Copy from '$icons/copy';
 import Download from '$icons/download';
 import GitCompare from '$icons/git-compare-arrows';
-import { css, onCleanup, onDocument, signal } from 'fw';
+import { computed, css, onCleanup, onDocument, signal } from 'fw';
 import { isTyping } from '$lib/keys';
 import { href } from '$lib/router';
 import { setCrumbs } from '$lib/shell/crumbs';
@@ -83,6 +83,7 @@ export default function RunCompare() {
     }, 1600);
     announce(msg);
   }
+  const canExport = computed(() => s.chosen.get().length >= 2);
   const exportItems: MenuItem[] = [
     { label: 'Copy Markdown', icon: Copy, onclick: () => void onCopyMarkdown() },
     { label: 'Download CSV', icon: Download, onclick: () => onDownloadCsv() },
@@ -178,10 +179,10 @@ export default function RunCompare() {
       title="Compare runs"
       inlineActions
       sub={s.narrow() ? undefined : lede}
-      actions={() =>
-        s.chosen.get().length >= 2 ? (
-          <Menu icon={Download} text={s.narrow() ? undefined : 'Export'} label="Export run comparison" items={exportItems} />
-        ) : null
+      actions={
+        canExport.get()
+          ? () => <Menu icon={Download} text={s.narrow() ? undefined : 'Export'} label="Export run comparison" items={exportItems} />
+          : undefined
       }
     >
       <p class="sr-only" role="status" aria-live="polite">

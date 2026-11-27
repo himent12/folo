@@ -798,4 +798,77 @@ describe('TrackHistoryRecorder, trajectory CSV/JSON export, and MediaBar track s
     view.unmount();
     host.remove();
   });
+
+  it('does not attach stale frame N-1 boxes to frame N while inference is in flight, and reports exported unique track count in CSV toast after cap', async () => {
+    const { mod, spy } = makeFakeWasm(true);
+    const engine = new BrowserEngine(async () => mod);
+    const frameKey = signal<string | null>('video:1:2');
+    const frameMeta = signal<{ frame: number; timestampMs: number } | null>({ frame: 2, timestampMs: 67 });
+    const predMatches = signal(false);
+    const pred = signal<Prediction | null>(predFrame(10)); // stale frame 1 prediction while frame 2 is in flight
+    const host = document.body.appendChild(document.createElement('div'));
+    let ctrl!: ReturnType<typeof useTracking>;
+
+    function Harness() {
+      ctrl = useTracking({
+        engine,
+        browserOff: () => null,
+        mediaMode: () => 'video',
+        mediaKey: () => 'video:1',
+        frameKey: () => frameKey.get(),
+        frameMeta: () => frameMeta.get(),
+        predMatchesFrame: () => predMatches.get(),
+        sourceName: () => 'clip.mp4',
+        modelId: () => 'm1',
+        modelName: () => 'shapes-s',
+        classes: () => ['circle', 'square'],
+        pred: () => pred.get(),
+        conf: () => 0.25,
+        iou: () => 0.45,
+        maxDet: () => 300,
+        o2o: () => false,
+        maxObservations: 1,
+      });
+      return <div />;
+    }
+
+    const view = render(() => <Harness />, host);
+    flushSync();
+
+    // Enable tracking while frame 2 is awaiting inference -> must NOT record stale frame 1 boxes under frame 2!
+    ctrl.setEnabled(true);
+    flushSync();
+    await vi.waitFor(() => expect(spy.created).toHaveLength(1));
+    flushSync();
+    expect(spy.updates).toHaveLength(0);
+    expect(ctrl.getObservations()).toEqual([]);
+
+    // Now frame 2's actual prediction arrives -> tracked cleanly with frame 2's boxes (x1=99) & timestamp 67.
+    const f2 = predFrame(99);
+    pred.set(f2);
+    predMatches.set(true);
+    flushSync();
+    expect(spy.updates).toHaveLength(1);
+    expect(ctrl.getObservations()).toEqual([expect.objectContaining({ frame: 2, timestamp_ms: 67, x1: 99, track_id: 1 })]);
+
+    // Frame 3 adds class 1 (track_id 2); maxObservations=1 drops track_id 1 -> CSV toast must report 1 unique track (matching file).
+    frameKey.set('video:1:3');
+    frameMeta.set({ frame: 3, timestampMs: 100 });
+    pred.set({
+      ...predFrame(120),
+      boxes: [{ class: 1, name: 'square', score: 0.9, x1: 120, y1: 20, x2: 160, y2: 60 }],
+    });
+    flushSync();
+    expect(ctrl.summary.get().unique_tracks).toBe(2);
+    expect(ctrl.getObservations()).toHaveLength(1);
+
+    vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:cap-csv');
+    vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {});
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+    expect(ctrl.exportTracksCsv()).toBe(true);
+    expect(toast.items.at(-1)?.detail).toBe('1 unique track · 1 row.');
+
+    view.unmount();
+    host.remove();
+  });
 });

@@ -175,12 +175,16 @@ export function buildBenchErrorExportCsvRows(rows: readonly BenchErrorExportRow[
 }
 
 function errorFilenameBase(input: Pick<BenchErrorExportInput, 'bench' | 'entry' | 'filter'>): string {
-  const filterTag = input.filter === 'all' ? 'errors' : `${input.filter}-errors`;
+  const filterTag = input.filter === 'all' || input.filter === 'errors' ? 'errors' : `${input.filter}-errors`;
   return `bench-${input.bench.name}-${input.entry.name}-${filterTag}`;
 }
 
-function exportSummaryDetail(rowCount: number, input: Pick<BenchErrorExportInput, 'analyzed' | 'loadedImages' | 'totalImages'>): string {
-  const imgCount = input.analyzed.length;
+function exportSummaryDetail(
+  rows: readonly BenchErrorExportRow[],
+  input: Pick<BenchErrorExportInput, 'loadedImages' | 'totalImages'>,
+): string {
+  const rowCount = rows.length;
+  const imgCount = new Set(rows.map((r) => r.image_id)).size;
   const base = `${rowCount} ${rowCount === 1 ? 'error' : 'errors'} across ${imgCount} ${imgCount === 1 ? 'image' : 'images'}`;
   if (input.totalImages !== null && input.loadedImages < input.totalImages) {
     return `${base} (${input.loadedImages} of ${input.totalImages} loaded).`;
@@ -199,7 +203,7 @@ export function exportBenchErrorsCsv(input: BenchErrorExportInput): boolean {
     'bench-error-export',
   );
   if (ok) {
-    toast.success('Error analysis CSV exported', exportSummaryDetail(rows.length, input), undefined, {
+    toast.success('Error analysis CSV exported', exportSummaryDetail(rows, input), undefined, {
       key: 'bench-error-export',
     });
   }
@@ -212,7 +216,7 @@ export function exportBenchErrorsJson(input: BenchErrorExportInput): boolean {
   if (!payload.errors.length) return false;
   const ok = exportTableJson(errorFilenameBase(input), payload, 'bench-error-export');
   if (ok) {
-    toast.success('Error analysis JSON exported', exportSummaryDetail(payload.errors.length, input), undefined, {
+    toast.success('Error analysis JSON exported', exportSummaryDetail(payload.errors, input), undefined, {
       key: 'bench-error-export',
     });
   }

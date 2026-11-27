@@ -27,23 +27,22 @@ export const KIND_LABEL: Record<IssueKind, string> = {
 
 /** Formats any server issue kind (known or future) into a concise display label. */
 export function kindLabel(kind: string): string {
-  if (kind in KIND_LABEL) return KIND_LABEL[kind as IssueKind];
+  if (Object.prototype.hasOwnProperty.call(KIND_LABEL, kind)) return KIND_LABEL[kind as IssueKind];
   const cleaned = kind.replace(/[_-]+/g, ' ').trim();
   return cleaned ? cleaned[0]!.toUpperCase() + cleaned.slice(1) : 'Other';
 }
 
 /**
- * Derives a concise audit sub-tag strictly from real `folo-data` / `folo dataset check` issue kinds & messages
- * (e.g. exact split leakage, perceptual dHash near-duplicate, or perceptual split leakage), or null when none applies.
+ * Derives a concise audit sub-tag strictly from real `folo-data` / `folo dataset check` message prefixes
+ * (`split leakage (`, `perceptual split leakage (`, `perceptual near-duplicate `), anchored at start-of-string
+ * so interpolated filenames containing those words are never misclassified.
  */
 export function issueAuditTag(issue: Pick<DatasetIssue, 'kind' | 'message'>): string | null {
   if (issue.kind !== 'duplicate_image') return null;
   const msg = issue.message;
-  const isPerceptual = /perceptual|dhash|near-duplicate/i.test(msg);
-  const isLeakage = /split leakage/i.test(msg);
-  if (isPerceptual && isLeakage) return 'Perceptual leakage';
-  if (isLeakage) return 'Split leakage';
-  if (isPerceptual) return 'Near-duplicate';
+  if (/^perceptual split leakage\s*\(/i.test(msg)) return 'Perceptual leakage';
+  if (/^split leakage\s*\(/i.test(msg)) return 'Split leakage';
+  if (/^perceptual near-duplicate\b/i.test(msg)) return 'Near-duplicate';
   return null;
 }
 

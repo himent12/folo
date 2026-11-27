@@ -85,7 +85,7 @@ function TrackSummaryBar(props: { tracking: TrackingController }) {
           {hasObs() ? (
             <span class="faint">
               {' '}
-              · {s().observations_recorded} {s().observations_recorded === 1 ? 'obs' : 'obs'}
+              · {s().observations_recorded} obs
               {s().truncated ? ' (recent cap)' : ''}
             </span>
           ) : null}

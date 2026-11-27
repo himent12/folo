@@ -208,8 +208,9 @@ export function useMediaSession(input: UseMediaSessionInput) {
     if (m === 'webcam' && (!camActive.peek() || el.readyState < 2)) return false;
 
     const seq = ++captureSeq;
-    // Snapshot media timestamp alongside pixel copy so a seek during async encoding never mislabels the frame.
+    // Snapshot media & wall-clock timestamps alongside pixel copy so async JPEG encoding never skews timestamps.
     const capturedTime = el.currentTime;
+    const capturedPerfMs = performance.now();
     scrubThrottle.beginFlight();
     try {
       const frame = await captureVideoFrame(el, { mime: 'image/jpeg', quality: live ? 0.88 : 0.94 });
@@ -235,7 +236,7 @@ export function useMediaSession(input: UseMediaSessionInput) {
         camFrameCount++;
         lastFrameMeta.set({
           frame: camFrameCount,
-          timestampMs: camStartMs > 0 ? Math.max(0, Math.round(performance.now() - camStartMs)) : 0,
+          timestampMs: camStartMs > 0 ? Math.max(0, Math.round(capturedPerfMs - camStartMs)) : 0,
         });
       }
       const name = m === 'video' ? videoFrameName(videoName.peek(), capturedTime) : 'webcam-live.jpg';
@@ -457,7 +458,7 @@ export function useMediaSession(input: UseMediaSessionInput) {
     camErr.set(null);
     mode.set('webcam');
     lastFrameMeta.set(null);
-    camStartMs = performance.now();
+    camStartMs = 0;
     camFrameCount = 0;
     sessionSeq.set((n) => n + 1);
     input.onTrackReset?.();
@@ -529,6 +530,7 @@ export function useMediaSession(input: UseMediaSessionInput) {
       if (el.videoWidth > 0 && el.videoHeight > 0) {
         camDims.set({ width: el.videoWidth, height: el.videoHeight });
       }
+      camStartMs = performance.now();
       camActive.set(true);
       camPaused.set(false);
       scheduleNextLiveTick();

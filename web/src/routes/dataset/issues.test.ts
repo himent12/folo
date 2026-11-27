@@ -120,8 +120,16 @@ describe('issueAuditTag and kindLabel', () => {
       }),
     ).toBe('Near-duplicate');
     expect(issueAuditTag({ kind: 'duplicate_image', message: 'same bytes as images/train/01.jpg' })).toBeNull();
-    expect(issueAuditTag({ kind: 'clipped_box', message: 'split leakage in comment' })).toBeNull();
+    // Paths containing "split leakage" or "perceptual" / "dhash" must NOT trigger false-positive audit tags.
+    expect(
+      issueAuditTag({
+        kind: 'duplicate_image',
+        message: 'same bytes as images/train/split leakage/perceptual_dhash.jpg',
+      }),
+    ).toBeNull();
+    expect(issueAuditTag({ kind: 'clipped_box', message: 'split leakage (train, val): comment' })).toBeNull();
     expect(kindLabel('duplicate_image')).toBe('Duplicate image');
     expect(kindLabel('near_duplicate_image')).toBe('Near duplicate image');
+    expect(kindLabel('toString')).toBe('ToString');
   });
 });

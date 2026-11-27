@@ -147,14 +147,21 @@ describe('bench/entry/errorExport', () => {
       return `blob:err-${blobs.length}`;
     });
     vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {});
-    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+    const downloads: string[] = [];
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (this: HTMLAnchorElement) {
+      downloads.push(this.download);
+    });
 
     expect(exportBenchErrorsCsv(input)).toBe(true);
+    expect(downloads[0]).toBe('bench-fasteners-qa-folo-s-errors.csv');
     expect(toast.items[0]?.title).toBe('Error analysis CSV exported');
     expect(toast.items[0]?.detail).toContain('5 errors across 1 image (2 of 10 loaded)');
 
-    expect(exportBenchErrorsJson(input)).toBe(true);
+    // Under filter='all' (which includes clean.jpg), the toast still counts only the 1 image with exported errors.
+    const analyzedAll = filterAndSortImages(IMAGES, 'all', 'worst', CLASSES);
+    expect(exportBenchErrorsJson({ ...input, filter: 'all', analyzed: analyzedAll })).toBe(true);
     expect(toast.items[0]?.title).toBe('Error analysis JSON exported');
+    expect(toast.items[0]?.detail).toContain('5 errors across 1 image (2 of 10 loaded)');
     expect(click).toHaveBeenCalledTimes(2);
     expect(pendingBlobRevokeCount()).toBe(2);
     revokePendingBlobUrls();
