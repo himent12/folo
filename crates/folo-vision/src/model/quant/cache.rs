@@ -11,8 +11,14 @@ const BIAS_CACHE_KEY: u64 = 0x666f_6c6f_6269_6173; // "folobias"
 
 /// Fast 64-bit FNV-1a hasher for internal boundary-name lookups and `QConv` cache keys (avoids SipHash overhead
 /// on ~130 lookups per forward pass).
-#[derive(Default)]
 pub(crate) struct FnvHasher(u64);
+
+impl Default for FnvHasher {
+    #[inline]
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl FnvHasher {
     const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;

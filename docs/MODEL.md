@@ -1543,7 +1543,7 @@ GPU forwards, training, export and the `f32` default are unchanged.
 
 - **Schema versions (`version: 1` and `version: 2`).** `folo quantize` writes `version: 2` (`VERSION_V2`): per-channel
   C4 activation grids (`channel_ranges`), per-part concat scale decoupling, direct `u8` stem (`u8_stem: true`), and
-  sensitivity-default `f32_convs` (`neck.out5.*`). Readers accept `1..=2` (missing `version` defaults to `1`; any
+  sensitivity-selected `f32_convs` (`Calibration::with_sensitivity_f32` / `SensitivityPolicy::default()`). Readers accept `1..=2` (missing `version` defaults to `1`; any
   version outside `1..=2` is rejected). In either version, `channel_ranges` is used whenever present for a boundary
   (missing entries fall back to per-tensor `ranges`) and `u8_stem` (default `false` when absent) controls the direct
   `u8` stem; only per-part concat scale decoupling is gated on `version >= 2`.

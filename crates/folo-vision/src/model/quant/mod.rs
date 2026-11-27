@@ -20,7 +20,9 @@ pub use calib::{
 pub use exec::Int8Plan;
 pub use fake::FakeQuant;
 pub use pool::ScratchStats;
-pub use sensitivity::{ConvSensitivity, SensitivityPolicy, analyze_sensitivity, select_f32_convs};
+pub use sensitivity::{
+    ConvSensitivity, SensitivityPolicy, analyze_sensitivity, analyze_sensitivity_at, select_f32_convs,
+};
 
 /// An affine u8 grid (folo-core's [`folo_core::cpu::q8::Grid`]): `x ≈ scale · (q − zero)`.
 pub use folo_core::cpu::q8::Grid as QParam;

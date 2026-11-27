@@ -142,14 +142,18 @@ impl Calibration {
         self
     }
 
-    /// Selects and appends sensitivity-ranked `f32_convs` under `policy` (folded/unfolded weight SQNR vs MAC
-    /// budget with residual bottleneck pairing, deduplicated).
+    /// Selects and appends sensitivity-ranked `f32_convs` under `policy` (folded-weight SQNR vs MAC budget with
+    /// atomic residual-bottleneck pairing, deduplicated). Existing entries in `self.f32_convs` are preserved and
+    /// their MAC share is counted against `policy.max_f32_mac_fraction`, so chaining after another policy (such as
+    /// [`Calibration::with_p5_tail_f32`]) never exceeds the cap by adding further convs.
     pub fn with_sensitivity_f32(
         mut self,
         model: &FoloModel,
         policy: super::SensitivityPolicy,
     ) -> Result<Self> {
-        for name in super::select_f32_convs(model, &self, policy)? {
+        let extra =
+            super::sensitivity::select_f32_convs_with_existing(model, &self, policy, &self.f32_convs)?;
+        for name in extra {
             if !self.is_f32(&name) {
                 self.f32_convs.push(name);
             }

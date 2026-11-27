@@ -46,6 +46,11 @@ pub trait Exec {
     }
     /// `act(conv(x))` dequantised: `qkv`, whose output stays `f32`.
     fn conv_f32(&mut self, name: &str, conv: &ConvBnAct, x: &Self::A) -> Result<Tensor>;
+    /// Attention matmuls + positional encoding (`o + pe(v)` from `qkv`). Symbolic executors override this to
+    /// avoid running `pe` (which would mutate BatchNorm running stats on unfused training-mode models).
+    fn attend_and_pe(&mut self, a: &Attention, qkv: &Tensor, b: usize, h: usize, w: usize) -> Result<Tensor> {
+        a.attend_and_pe(qkv, b, h, w)
+    }
     /// `act(conv(cat(parts)))` directly as `f32`: used for the head-only P5 output (`neck.out5.cv2`) so an int8
     /// conv writes `f32` directly without a `u8` round-trip, and an `f32` conv skips requantisation.
     fn conv_out_f32(&mut self, name: &str, conv: &ConvBnAct, parts: &[&Self::A]) -> Result<Tensor> {
@@ -448,7 +453,7 @@ fn attention<E: Exec>(e: &mut E, nb: &mut NameBuf, a: &Attention, x: &E::A, out_
     let qkv = e.conv_f32(nb.as_str(), &a.qkv, x)?;
     nb.restore(lq);
 
-    let attn_out = a.attend_and_pe(&qkv, b, h, w)?;
+    let attn_out = e.attend_and_pe(a, &qkv, b, h, w)?;
     let lp = nb.push_field("proj.in");
     let pin = e.quantize(nb.as_str(), &attn_out)?;
     nb.restore(lp);

@@ -16,6 +16,7 @@ use folo_nn::{ConvBnAct, Result};
 use super::walk::{self, Exec};
 use super::{Calibration, VERSION_V2, int8_able};
 use crate::model::FoloModel;
+use crate::model::blocks::Attention;
 
 /// Reference input resolution (`640×640`) used to compute relative per-conv MAC fractions during sensitivity
 /// analysis.
@@ -50,7 +51,8 @@ pub struct SensitivityPolicy {
     /// Maximum fraction of total eligible backbone+neck MACs allowed in `f32_convs` (default `0.05`, i.e. 5%).
     pub max_f32_mac_fraction: f64,
     /// Only promote convs whose [`ConvSensitivity::folded_weight_sqnr_db`] is below this threshold in dB
-    /// (default `38.0`).
+    /// (default `35.0`: promotes genuinely outlier-distorted layers without needlessly pulling well-quantised
+    /// `36–39 dB` layers out of int8).
     pub sqnr_threshold_db: f64,
     /// Always include the head-facing P5 output conv `neck.out5.cv2` when within budget (zero extra requantisation
     /// cost because it feeds only the `f32` head).
@@ -64,10 +66,28 @@ impl Default for SensitivityPolicy {
     fn default() -> Self {
         Self {
             max_f32_mac_fraction: 0.05,
-            sqnr_threshold_db: 38.0,
+            sqnr_threshold_db: 35.0,
             include_p5_head_out: true,
             pair_residual_bottlenecks: true,
         }
+    }
+}
+
+impl SensitivityPolicy {
+    /// Validates policy bounds (`max_f32_mac_fraction` finite and in `0.0..=1.0`, `sqnr_threshold_db` not `NaN`).
+    pub fn validate(&self) -> Result<()> {
+        if !self.max_f32_mac_fraction.is_finite() || !(0.0..=1.0).contains(&self.max_f32_mac_fraction) {
+            return Err(folo_nn::Error::Invalid(format!(
+                "SensitivityPolicy::max_f32_mac_fraction must be finite and in 0.0..=1.0, got {}",
+                self.max_f32_mac_fraction
+            )));
+        }
+        if self.sqnr_threshold_db.is_nan() {
+            return Err(folo_nn::Error::Invalid(
+                "SensitivityPolicy::sqnr_threshold_db must not be NaN".into(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -80,6 +100,8 @@ struct SymAct {
 
 struct Analyzer<'a> {
     cal: &'a Calibration,
+    input_hw: (usize, usize),
+    pending_attn_dims: Option<[usize; 4]>,
     entries: Vec<ConvSensitivity>,
 }
 
@@ -101,7 +123,15 @@ impl Analyzer<'_> {
             .then(|| int8_able(conv, [n, c, h, w], res.map(|r| r.dims)))
             .flatten();
         let Some((oh, ow)) = able else {
-            return Ok(q8::out_size(h, w, cfg.kernel, cfg.stride, cfg.padding));
+            let wd = conv.conv.weight.dims();
+            let (kh, kw) = if wd.len() == 4 { (wd[2], wd[3]) } else { (cfg.kernel, cfg.kernel) };
+            let oh = (h + 2 * cfg.padding)
+                .checked_sub(cfg.dilation * kh.saturating_sub(1) + 1)
+                .map(|v| v / cfg.stride.max(1) + 1);
+            let ow = (w + 2 * cfg.padding)
+                .checked_sub(cfg.dilation * kw.saturating_sub(1) + 1)
+                .map(|v| v / cfg.stride.max(1) + 1);
+            return Ok(oh.zip(ow));
         };
 
         let taps = cfg.kernel * cfg.kernel;
@@ -111,7 +141,7 @@ impl Analyzer<'_> {
             .saturating_mul(oh as u64)
             .saturating_mul(ow as u64);
 
-        let orig_w = conv.conv.weight.to_vec::<f32>()?;
+        let orig_w = conv.conv.weight.to_dtype(folo_core::DType::F32)?.to_vec::<f32>()?;
         let part_grids: Vec<&[Grid]> = parts.iter().map(|a| a.grids.as_slice()).collect();
         let decouple = self.cal.version >= VERSION_V2 && should_decouple_parts(&part_grids);
         let (folded_sqnr, unfolded_sqnr) = measure_weight_sqnr(&orig_w, o, c, taps, &part_grids, decouple);
@@ -212,33 +242,19 @@ fn measure_weight_sqnr(
     (to_db(f_sig, f_err), to_db(u_sig, u_err))
 }
 
-/// Downstream error-propagation multiplier: early backbone convs feed all 3 detection scales (P3/P4/P5),
-/// mid-network convs feed P4/P5, and P5-tail convs feed P5 only.
-fn downstream_weight(name: &str) -> f64 {
-    if name.starts_with("backbone.down2")
-        || name.starts_with("backbone.stage2")
-        || name.starts_with("backbone.down3")
-        || name.starts_with("backbone.stage3")
-    {
-        1.5
-    } else if name.starts_with("backbone.down4")
-        || name.starts_with("backbone.stage4")
-        || name.starts_with("neck.out3")
-    {
-        1.2
-    } else if name == "neck.out5.cv2" {
-        // Zero requantisation boundary cost: feeds the f32 head directly.
-        1.3
-    } else {
-        1.0
-    }
+/// Boundary priority multiplier: `neck.out5.cv2` writes straight into the `f32` head with zero extra
+/// requantisation cost; all other convs start at `1.0` and are penalised in [`analyze_sensitivity_at`] by both
+/// MAC share and output spatial area (high-resolution `u8 <-> f32` conversion bandwidth).
+fn boundary_priority(name: &str) -> f64 {
+    if name == "neck.out5.cv2" { 1.3 } else { 1.0 }
 }
 
 impl Exec for Analyzer<'_> {
     type A = SymAct;
 
     fn stem(&mut self, name: &str, conv: &ConvBnAct, x: &Tensor) -> Result<SymAct> {
-        let [n, _, h, w] = [x.dims()[0], x.dims()[1], x.dims()[2], x.dims()[3]];
+        let n = x.dims()[0];
+        let (h, w) = self.input_hw;
         let cfg = conv.conv.config();
         let (oh, ow) = q8::out_size(h, w, cfg.kernel, cfg.stride, cfg.padding).unwrap_or((h / 2, w / 2));
         let grids = self.cal.channel_params(name, cfg.out_channels)?;
@@ -255,38 +271,55 @@ impl Exec for Analyzer<'_> {
         let [n, _, h, w] = parts[0].dims;
         let cfg = conv.conv.config();
         let (oh, ow) = self.inspect_conv(name, conv, parts, res)?.unwrap_or((h, w));
+        // Mirror `f32` residual broadcasting (e.g. a 1×1 conv output added to a 2×2 residual produces 2×2).
+        let (oh, ow) = match res {
+            Some(r) => (oh.max(r.dims[2]), ow.max(r.dims[3])),
+            None => (oh, ow),
+        };
         let grids = self.cal.channel_params(name, cfg.out_channels)?;
         Ok(SymAct { dims: [n, cfg.out_channels, oh, ow], grids })
     }
 
     fn conv_f32(&mut self, name: &str, conv: &ConvBnAct, x: &SymAct) -> Result<Tensor> {
-        let [n, _, h, w] = x.dims;
-        let cfg = conv.conv.config();
-        let (oh, ow) = self.inspect_conv(name, conv, &[x], None)?.unwrap_or((h, w));
-        // Return a zero-sized shape proxy? `walk::attention` calls `attend_and_pe` on this tensor, which needs
-        // real dims on `qkv`. Use `attend_and_pe` bypass: `Analyzer` runs `features_symbolic` instead? No —
-        // `Attention::attend_and_pe` only runs at 20×20 = 400 pixels if we use tiny symbolic dims, OR even better:
-        // scale `REF_IMGSZ` analytically! Wait: we want exact MACs without running `attend_and_pe` on 640×640!
-        // `Tensor::zeros` at `[n, o, oh, ow]` is tiny at 20×20 (`1*256*20*20` = 400 KiB, ~0.1 ms).
-        Ok(Tensor::zeros([n, cfg.out_channels, oh, ow]))
+        let _ = self.inspect_conv(name, conv, &[x], None)?;
+        Ok(Tensor::zeros([0]))
+    }
+
+    fn attend_and_pe(
+        &mut self,
+        a: &Attention,
+        _qkv: &Tensor,
+        b: usize,
+        h: usize,
+        w: usize,
+    ) -> Result<Tensor> {
+        // Shape-only bypass: never invokes `a.pe.forward`, so unfused training-mode BatchNorm stats stay
+        // untouched and GPU/non-F32 models do not run tensor ops during sensitivity analysis.
+        self.pending_attn_dims = Some([b, a.proj.conv.config().in_channels, h, w]);
+        Ok(Tensor::zeros([0]))
     }
 
     fn conv_out_f32(&mut self, name: &str, conv: &ConvBnAct, parts: &[&SymAct]) -> Result<Tensor> {
-        let [n, _, h, w] = parts[0].dims;
         let cfg = conv.conv.config();
         let _ = self.inspect_conv(name, conv, parts, None)?;
         let _ = self.cal.channel_params(name, cfg.out_channels)?;
-        Ok(Tensor::zeros([n, cfg.out_channels, h, w]))
+        Ok(Tensor::zeros([0]))
     }
 
     fn quantize(&mut self, name: &str, x: &Tensor) -> Result<SymAct> {
-        let (n, c, h, w) = x.dims4()?;
+        let [n, c, h, w] = match self.pending_attn_dims.take() {
+            Some(d) => d,
+            None => {
+                let (n, c, h, w) = x.dims4()?;
+                [n, c, h, w]
+            }
+        };
         let grids = self.cal.channel_params(name, c)?;
         Ok(SymAct { dims: [n, c, h, w], grids })
     }
 
-    fn dequantize(&mut self, x: &SymAct) -> Result<Tensor> {
-        Ok(Tensor::zeros([x.dims[0], x.dims[1], 1, 1]))
+    fn dequantize(&mut self, _x: &SymAct) -> Result<Tensor> {
+        Ok(Tensor::zeros([0]))
     }
 
     fn narrow(&mut self, x: &SymAct, start: usize, len: usize) -> Result<SymAct> {
@@ -309,33 +342,43 @@ impl Exec for Analyzer<'_> {
 }
 
 /// Analyse per-conv quantisation sensitivity across `model`'s int8-eligible backbone and neck convolutions using
-/// `cal`'s calibrated activation grids. Results are sorted descending by [`ConvSensitivity::score`].
+/// `cal`'s calibrated activation grids at the `640×640` reference resolution. Results are sorted descending by
+/// [`ConvSensitivity::score`].
 ///
-/// Runs symbolically at 64×64 (scaling spatial sizes 10× to the `640×640` reference geometry) so analysis
-/// completes in ~1–2 ms even for large models (`folo-l`/`folo-x`) without running any convolutions.
+/// Purely symbolic (zero convolutions, zero feature-map allocations, and no mutation of unfused BatchNorm stats).
 pub fn analyze_sensitivity(model: &FoloModel, cal: &Calibration) -> Result<Vec<ConvSensitivity>> {
+    analyze_sensitivity_at(model, cal, (REF_IMGSZ, REF_IMGSZ))
+}
+
+/// Like [`analyze_sensitivity`], evaluating exact per-conv spatial geometry and MACs at `input_hw = (h, w)`.
+pub fn analyze_sensitivity_at(
+    model: &FoloModel,
+    cal: &Calibration,
+    input_hw: (usize, usize),
+) -> Result<Vec<ConvSensitivity>> {
     cal.check_version()?;
+    if input_hw.0 == 0 || input_hw.1 == 0 {
+        return Err(folo_nn::Error::Invalid(format!(
+            "sensitivity analysis input_hw must be positive, got {}x{}",
+            input_hw.0, input_hw.1
+        )));
+    }
     let _g = folo_core::no_grad();
-    // Run the symbolic walk at 64×64 (every stride-32 feature map is ≥ 2×2, attention is 2×2 = 4 tokens so
-    // `attend_and_pe` takes microseconds) and scale spatial dimensions by `REF_IMGSZ / 64 = 10` for exact 640² MACs.
-    let probe = 64usize;
-    let scale = REF_IMGSZ / probe;
-    let x = Tensor::zeros([1, model.config().in_channels, probe, probe]);
-    let mut analyzer = Analyzer { cal, entries: Vec::new() };
+    let x = Tensor::zeros([1, model.config().in_channels, 1, 1]);
+    let mut analyzer = Analyzer { cal, input_hw, pending_attn_dims: None, entries: Vec::new() };
     let _ = walk::features(model, &mut analyzer, &x)?;
 
     let mut total_macs = 0u64;
-    for e in &mut analyzer.entries {
-        e.out_hw = (e.out_hw.0 * scale, e.out_hw.1 * scale);
-        e.macs = e.macs.saturating_mul((scale * scale) as u64);
+    for e in &analyzer.entries {
         total_macs = total_macs.saturating_add(e.macs);
     }
     let total_f = (total_macs.max(1)) as f64;
+    let input_area = (input_hw.0.saturating_mul(input_hw.1)).max(1) as f64;
     for e in &mut analyzer.entries {
         e.mac_fraction = e.macs as f64 / total_f;
         let distortion = (42.0 - e.folded_weight_sqnr_db).max(0.0);
-        let dw = downstream_weight(&e.name);
-        e.score = distortion * dw / (e.mac_fraction + 0.015);
+        let spatial_cost = (e.out_hw.0.saturating_mul(e.out_hw.1)) as f64 / input_area;
+        e.score = distortion * boundary_priority(&e.name) / (e.mac_fraction + spatial_cost + 0.015);
     }
     analyzer.entries.sort_by(|a, b| b.score.total_cmp(&a.score).then_with(|| a.name.cmp(&b.name)));
     Ok(analyzer.entries)
@@ -348,7 +391,20 @@ pub fn select_f32_convs(
     cal: &Calibration,
     policy: SensitivityPolicy,
 ) -> Result<Vec<String>> {
-    let budget = policy.max_f32_mac_fraction.clamp(0.0, 1.0);
+    select_f32_convs_with_existing(model, cal, policy, &[])
+}
+
+/// Like [`select_f32_convs`], accounting for `existing` `f32_convs` against `policy.max_f32_mac_fraction` and
+/// returning only the newly selected conv names that still fit within the remaining budget.
+pub(crate) fn select_f32_convs_with_existing(
+    model: &FoloModel,
+    cal: &Calibration,
+    policy: SensitivityPolicy,
+    existing: &[String],
+) -> Result<Vec<String>> {
+    policy.validate()?;
+    cal.check_version()?;
+    let budget = policy.max_f32_mac_fraction;
     if budget <= 0.0 {
         return Ok(Vec::new());
     }
@@ -359,6 +415,17 @@ pub fn select_f32_convs(
     let mut selected: Vec<String> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     let mut used_frac = 0.0f64;
+
+    for name in existing {
+        if seen.insert(name.clone())
+            && let Some(entry) = by_name.get(name.as_str())
+        {
+            used_frac += entry.mac_fraction;
+        }
+    }
+    if used_frac >= budget {
+        return Ok(Vec::new());
+    }
 
     let try_add = |names: &[&str], used: &mut f64, out: &mut Vec<String>, seen: &mut HashSet<String>| {
         let mut add_frac = 0.0f64;
@@ -382,7 +449,8 @@ pub fn select_f32_convs(
     };
 
     // 1. Head-facing P5 output conv (`neck.out5.cv2`): zero extra requantisation cost (writes f32 straight to head).
-    if policy.include_p5_head_out && by_name.contains_key("neck.out5.cv2") {
+    if policy.include_p5_head_out && !seen.contains("neck.out5.cv2") && by_name.contains_key("neck.out5.cv2")
+    {
         try_add(&["neck.out5.cv2"], &mut used_frac, &mut selected, &mut seen);
     }
 
@@ -390,7 +458,7 @@ pub fn select_f32_convs(
     //    Residual bottleneck pairs `(cv1, cv2)` are promoted atomically when `pair_residual_bottlenecks` is set so
     //    we never introduce a redundant internal `u8 <-> f32` conversion between `cv1` and `cv2`.
     for entry in &ranked {
-        if entry.folded_weight_sqnr_db >= policy.sqnr_threshold_db {
+        if entry.folded_weight_sqnr_db.is_nan() || entry.folded_weight_sqnr_db >= policy.sqnr_threshold_db {
             continue;
         }
         if seen.contains(&entry.name) {

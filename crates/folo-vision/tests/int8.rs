@@ -694,3 +694,133 @@ fn sensitivity_analysis_and_selective_f32_policy_wire_end_to_end() {
     let mut m_check = model(53);
     m_check.set_int8(Some(sample_cal)).unwrap();
 }
+
+#[test]
+fn sensitivity_edge_cases_and_scratch_pool_error_recovery() {
+    // 1. Unfused training-mode model: `analyze_sensitivity` must NOT mutate `pe.bn` running stats.
+    let mut unfused = FoloModel::with_rng(ModelConfig::new("n", 4).unwrap(), &mut Rng::seed(61)).unwrap();
+    // Seed non-trivial running stats on `pe.bn` so any zero-tensor forward would visibly shift them.
+    {
+        let bn = unfused.backbone.psa.blocks.items_mut()[0].attn.pe.bn.as_mut().expect("unfused pe has bn");
+        let n = bn.running_mean.dims()[0];
+        bn.running_mean.copy_from(&Tensor::from_vec(vec![1.25f32; n], [n]).unwrap()).unwrap();
+        bn.running_var.copy_from(&Tensor::from_vec(vec![2.5f32; n], [n]).unwrap()).unwrap();
+    }
+    let fused_ref = model(61);
+    let x = input(1, 64, 64, 62);
+    let cal = calibrated(&fused_ref, &x);
+    let before_mean = unfused.backbone.psa.blocks.items()[0]
+        .attn
+        .pe
+        .bn
+        .as_ref()
+        .unwrap()
+        .running_mean
+        .to_vec::<f32>()
+        .unwrap();
+    let before_var = unfused.backbone.psa.blocks.items()[0]
+        .attn
+        .pe
+        .bn
+        .as_ref()
+        .unwrap()
+        .running_var
+        .to_vec::<f32>()
+        .unwrap();
+    let _ = quant::analyze_sensitivity(&unfused, &cal).unwrap();
+    let after_mean = unfused.backbone.psa.blocks.items()[0]
+        .attn
+        .pe
+        .bn
+        .as_ref()
+        .unwrap()
+        .running_mean
+        .to_vec::<f32>()
+        .unwrap();
+    let after_var = unfused.backbone.psa.blocks.items()[0]
+        .attn
+        .pe
+        .bn
+        .as_ref()
+        .unwrap()
+        .running_var
+        .to_vec::<f32>()
+        .unwrap();
+    assert_eq!(before_mean, after_mean, "analyze_sensitivity mutated pe.bn running_mean");
+    assert_eq!(before_var, after_var, "analyze_sensitivity mutated pe.bn running_var");
+
+    // 2. Policy validation rejects NaN / out-of-range budgets and NaN SQNR threshold.
+    for bad in [
+        quant::SensitivityPolicy { max_f32_mac_fraction: f64::NAN, ..Default::default() },
+        quant::SensitivityPolicy { max_f32_mac_fraction: -0.05, ..Default::default() },
+        quant::SensitivityPolicy { max_f32_mac_fraction: 1.5, ..Default::default() },
+        quant::SensitivityPolicy { max_f32_mac_fraction: f64::INFINITY, ..Default::default() },
+        quant::SensitivityPolicy { sqnr_threshold_db: f64::NAN, ..Default::default() },
+    ] {
+        assert!(
+            quant::select_f32_convs(&fused_ref, &cal, bad).is_err(),
+            "invalid policy should error: {bad:?}"
+        );
+    }
+
+    // 3. Chaining `with_p5_tail_f32` + `with_sensitivity_f32` enforces the MAC cap on the combined set.
+    let p5_only = cal.clone().with_p5_tail_f32(&fused_ref);
+    let chained = p5_only
+        .clone()
+        .with_sensitivity_f32(
+            &fused_ref,
+            quant::SensitivityPolicy {
+                max_f32_mac_fraction: 0.05,
+                sqnr_threshold_db: 100.0,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        chained.f32_convs, p5_only.f32_convs,
+        "with_sensitivity_f32 must not append new convs when existing f32_convs already exceed the 5% cap"
+    );
+
+    // 4. Broadcast `f32` residual shape propagation (`2x2` `attn.proj` producing 1x1 broadcast over 2x2 at 64x64).
+    let mut bcast_m = model(63);
+    let c_attn = bcast_m.backbone.psa.blocks.items()[0].attn.proj.conv.config().in_channels;
+    bcast_m.backbone.psa.blocks.items_mut()[0].attn.proj = fused(c_attn, c_attn, 2, 1, 0, 64);
+    let bcast_entries = quant::analyze_sensitivity_at(&bcast_m, &cal, (64, 64)).unwrap();
+    let ffn1 = bcast_entries.iter().find(|e| e.name == "backbone.psa.block0.ffn1").unwrap();
+    let ffn2 = bcast_entries.iter().find(|e| e.name == "backbone.psa.block0.ffn2").unwrap();
+    assert_eq!(ffn1.out_hw, (2, 2), "ffn1 lost broadcast residual shape after 2x2 attn.proj");
+    assert_eq!(ffn2.out_hw, (2, 2), "ffn2 lost broadcast residual shape after 2x2 attn.proj");
+
+    // 5. All-zero weights yield 100 dB SQNR (never promoted), and `version: 1` calibrations analyse cleanly.
+    let mut zero_m = model(61);
+    let z_dims = zero_m.backbone.stage2.cv1.conv.weight.dims().to_vec();
+    zero_m.backbone.stage2.cv1.conv.weight = Tensor::zeros(z_dims);
+    let zero_entries = quant::analyze_sensitivity(&zero_m, &cal).unwrap();
+    let z_entry = zero_entries.iter().find(|e| e.name == "backbone.stage2.cv1").unwrap();
+    assert_eq!(z_entry.folded_weight_sqnr_db, 100.0);
+    assert_eq!(z_entry.score, 0.0);
+    let cal_v1 =
+        Calibration { version: quant::VERSION_V1, channel_ranges: Default::default(), ..cal.clone() };
+    let v1_entries = quant::analyze_sensitivity(&fused_ref, &cal_v1).unwrap();
+    assert!(v1_entries.len() >= 50);
+
+    // 6. `ScratchPool` error recovery: a mid-graph failure (34×34 fails at `neck.td4` concat while live
+    //    `SlotHandle`s exist) drops every handle and returns the pool cleanly so the next 64×64 forward
+    //    allocates zero new buffers (instead of leaking the pool and re-allocating ~12 buffers).
+    let plan = Int8Plan::new(cal);
+    let _g = no_grad();
+    let _ = folo_core::cpu::in_pool(|| quant::exec::features(&fused_ref, &plan, &x)).unwrap();
+    let bad_x = input(1, 34, 34, 65);
+    assert!(folo_core::cpu::in_pool(|| quant::exec::features(&fused_ref, &plan, &bad_x)).is_err());
+    let after_err = plan.scratch_stats();
+    let _ = folo_core::cpu::in_pool(|| quant::exec::features(&fused_ref, &plan, &x)).unwrap();
+    let after_recovery = plan.scratch_stats();
+    assert_eq!(
+        after_recovery.allocs, after_err.allocs,
+        "ScratchPool was not returned after an erroring forward: {after_err:?} -> {after_recovery:?}"
+    );
+    assert!(
+        after_recovery.reuses > after_err.reuses,
+        "expected buffer reuses on recovery forward: {after_err:?} -> {after_recovery:?}"
+    );
+}
