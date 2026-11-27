@@ -94,67 +94,6 @@ pub fn filter_label_images(
 }
 
 impl FoloApp {
-    /// Handles top-level review keyboard shortcuts while `Route::LabelJob(job_id)` is open and no
-    /// modal, menu, or inline form is active. Returns `true` when the key was handled.
-    pub(crate) fn handle_label_review_key(
-        &mut self,
-        job_id: &str,
-        key: &str,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        if self.label.confirm_delete_job.is_some() || self.label.confirm_delete_image.is_some() {
-            return false;
-        }
-        let shown = self.current_filtered_label_images(job_id);
-        let active_id = self
-            .label
-            .selected_image
-            .as_deref()
-            .and_then(|sel| shown.iter().find(|im| im.id == sel).map(|im| im.id.clone()))
-            .or_else(|| shown.first().map(|im| im.id.clone()));
-        let Some(active_id) = active_id else {
-            return false;
-        };
-        let n_classes = self.label_job_by_id(job_id).map_or(0, |j| j.classes.len());
-        let has_selected_box = self.label.selected_box.as_ref().is_some_and(|s| s.image_id == active_id);
-        match key {
-            "left" => self.step_label_image(job_id, -1, cx),
-            "right" | "s" | "S" => self.step_label_image(job_id, 1, cx),
-            "a" | "A" => self.approve_label_image(job_id, &active_id, true, cx),
-            "delete" | "backspace" if has_selected_box => {
-                self.delete_selected_label_box(job_id, &active_id, cx)
-            }
-            "b" | "B" => {
-                self.label.show_boxes = !self.label.show_boxes;
-            }
-            "l" | "L" => {
-                self.label.show_labels = !self.label.show_labels;
-            }
-            "+" | "=" => {
-                (self.label.zoom, self.label.pan) =
-                    crate::viz::zoom_step(self.label.zoom, self.label.pan, 1.4);
-            }
-            "-" => {
-                (self.label.zoom, self.label.pan) =
-                    crate::viz::zoom_step(self.label.zoom, self.label.pan, 1.0 / 1.4);
-            }
-            "0" => {
-                self.label.zoom = 1.0;
-                self.label.pan = (0., 0.);
-            }
-            k if has_selected_box && k.len() == 1 && k.as_bytes()[0].is_ascii_digit() => {
-                let d = (k.as_bytes()[0] - b'0') as usize;
-                if d >= 1 && d <= n_classes {
-                    self.reclassify_selected_label_box(job_id, &active_id, (d - 1) as u32, cx);
-                } else {
-                    return false;
-                }
-            }
-            _ => return false,
-        }
-        true
-    }
-
     /// Returns the filtered images of `job_id` under the current status + class filters.
     pub fn current_filtered_label_images(&self, job_id: &str) -> Vec<LabelImage> {
         let Some(all) = self.label.images.get(job_id).and_then(|l| l.ready()) else {
@@ -167,7 +106,22 @@ impl FoloApp {
     }
 
     /// Ensures `label.selected_image` points to a valid image in the current filtered set (or None if empty).
+    /// Keeps an image with unsaved local edits selected as long as it still exists in the job so a
+    /// concurrent SSE status update never silently discards the user's draft.
     pub fn reconcile_selected_label_image(&mut self, job_id: &str) {
+        if self.label.editor.is_dirty()
+            && self.label.editor.job_id.as_deref() == Some(job_id)
+            && let Some(dirty_id) = self.label.editor.image_id.as_deref()
+            && self
+                .label
+                .images
+                .get(job_id)
+                .and_then(|l| l.ready())
+                .is_some_and(|list| list.iter().any(|im| im.id == dirty_id))
+        {
+            self.label.selected_image = Some(dirty_id.to_string());
+            return;
+        }
         let shown = self.current_filtered_label_images(job_id);
         if shown.is_empty() {
             self.label.selected_image = None;
@@ -185,9 +139,10 @@ impl FoloApp {
         }
     }
 
-    /// Selects a specific image in the review workspace, resetting box selection and zoom.
+    /// Selects a specific image in the review workspace, resetting box selection, draft, and zoom.
     pub fn select_label_image(&mut self, image_id: String, cx: &mut Context<Self>) {
         self.label.pending_advance = None;
+        self.label.editor.pending_switch = None;
         if self.label.selected_image.as_deref() != Some(image_id.as_str()) {
             self.label.selected_image = Some(image_id);
             self.label.selected_box = None;
@@ -196,6 +151,7 @@ impl FoloApp {
             self.label.pan = (0., 0.);
             self.label.review_error = None;
             self.label.confirm_delete_image = None;
+            self.label.editor.drawing = None;
             cx.notify();
         }
     }
@@ -219,8 +175,8 @@ impl FoloApp {
 
     /// Approves (marks reviewed) the current image, optionally advancing to the next image in view.
     ///
-    /// For a `labeled` image with unchanged boxes, sends `reviewed: true` + `expect` revision;
-    /// for a `pending`/`failed` image, saves its current (empty) boxes as a reviewed background image.
+    /// If there are unsaved box edits in the local draft, persists those boxes with `reviewed: true`
+    /// in a single PUT; otherwise marks the unchanged image reviewed (sending `expect` revision).
     pub fn approve_label_image(
         &mut self,
         job_id: &str,
@@ -231,14 +187,7 @@ impl FoloApp {
         if self.label.mutating {
             return;
         }
-        let Some(im) = self
-            .label
-            .images
-            .get(job_id)
-            .and_then(|l| l.ready())
-            .and_then(|list| list.iter().find(|i| i.id == image_id))
-            .cloned()
-        else {
+        let Some(im) = self.ensure_label_editor_synced(job_id, image_id) else {
             return;
         };
         if im.status == LabelImageStatus::Labeling {
@@ -247,6 +196,11 @@ impl FoloApp {
             cx.notify();
             return;
         }
+        if self.label.editor.is_dirty_for(job_id, image_id) {
+            self.save_label_edits(job_id, image_id, advance, cx);
+            return;
+        }
+        self.label.editor.pending_switch = None;
         let next_after = if advance { self.next_image_after(job_id, image_id) } else { None };
         let expect = Some(label_box_revision(&im.boxes));
         let req = if im.status == LabelImageStatus::Labeled {
@@ -254,119 +208,24 @@ impl FoloApp {
         } else {
             UpdateLabelImage { boxes: Some(im.boxes.clone()), reviewed: Some(true), expect }
         };
-        self.send_label_image_update(job_id, image_id, req, next_after, false, cx);
+        self.send_label_image_update(job_id, image_id, req, next_after, None, false, cx);
     }
 
-    /// Deletes the currently selected box from `image_id` and persists via `PUT /api/label/jobs/{id}/images/{img}`.
-    pub fn delete_selected_label_box(&mut self, job_id: &str, image_id: &str, cx: &mut Context<Self>) {
-        if self.label.mutating {
-            return;
-        }
-        let Some(sel) = self.label.selected_box.clone() else { return };
-        if sel.image_id != image_id {
-            self.label.selected_box = None;
-            cx.notify();
-            return;
-        }
-        let Some(im) = self
-            .label
-            .images
-            .get(job_id)
-            .and_then(|l| l.ready())
-            .and_then(|list| list.iter().find(|i| i.id == image_id))
-            .cloned()
-        else {
-            return;
-        };
-        if im.status == LabelImageStatus::Labeling {
-            self.label.review_error =
-                Some(ApiError::new("label_job_active", "The agent is labeling this image right now."));
-            cx.notify();
-            return;
-        }
-        if sel.index >= im.boxes.len() || label_box_revision(&im.boxes) != sel.revision {
-            self.label.selected_box = None;
-            self.label.hover_box = None;
-            self.label.review_error = Some(ApiError::new(
-                "label_boxes_changed",
-                "This image's boxes changed; reselect the box before deleting.",
-            ));
-            cx.notify();
-            return;
-        }
-        let expect = Some(sel.revision);
-        let mut boxes = im.boxes.clone();
-        boxes.remove(sel.index);
-        let req = UpdateLabelImage { boxes: Some(boxes), reviewed: Some(im.reviewed), expect };
-        self.send_label_image_update(job_id, image_id, req, None, true, cx);
-    }
-
-    /// Reclassifies the currently selected box on `image_id` to `class` and persists to `/api/label`.
-    pub fn reclassify_selected_label_box(
-        &mut self,
-        job_id: &str,
-        image_id: &str,
-        class: u32,
-        cx: &mut Context<Self>,
-    ) {
-        if self.label.mutating {
-            return;
-        }
-        let Some(sel) = self.label.selected_box.clone() else { return };
-        if sel.image_id != image_id {
-            self.label.selected_box = None;
-            cx.notify();
-            return;
-        }
-        let Some(im) = self
-            .label
-            .images
-            .get(job_id)
-            .and_then(|l| l.ready())
-            .and_then(|list| list.iter().find(|i| i.id == image_id))
-            .cloned()
-        else {
-            return;
-        };
-        if im.status == LabelImageStatus::Labeling {
-            self.label.review_error =
-                Some(ApiError::new("label_job_active", "The agent is labeling this image right now."));
-            cx.notify();
-            return;
-        }
-        if sel.index >= im.boxes.len() || label_box_revision(&im.boxes) != sel.revision {
-            self.label.selected_box = None;
-            self.label.hover_box = None;
-            self.label.review_error = Some(ApiError::new(
-                "label_boxes_changed",
-                "This image's boxes changed; reselect the box before reclassifying.",
-            ));
-            cx.notify();
-            return;
-        }
-        if im.boxes[sel.index].class == class {
-            return;
-        }
-        let expect = Some(sel.revision);
-        let mut boxes = im.boxes.clone();
-        boxes[sel.index].class = class;
-        let req = UpdateLabelImage { boxes: Some(boxes), reviewed: Some(im.reviewed), expect };
-        self.send_label_image_update(job_id, image_id, req, None, false, cx);
-    }
-
-    fn next_image_after(&self, job_id: &str, current_id: &str) -> Option<String> {
+    pub(super) fn next_image_after(&self, job_id: &str, current_id: &str) -> Option<String> {
         let shown = self.current_filtered_label_images(job_id);
         let pos = shown.iter().position(|im| im.id == current_id)?;
         // Prefer the next image in view, else wrap to the previous one if this was last.
         shown.get(pos + 1).or_else(|| pos.checked_sub(1).and_then(|p| shown.get(p))).map(|im| im.id.clone())
     }
 
-    fn send_label_image_update(
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn send_label_image_update(
         &mut self,
         job_id: &str,
         image_id: &str,
         req: UpdateLabelImage,
         advance_to: Option<String>,
+        then_switch: Option<super::editor::PendingImageSwitch>,
         clear_box: bool,
         cx: &mut Context<Self>,
     ) {
@@ -412,12 +271,16 @@ impl FoloApp {
                         let fresh = cur_img_seq == seen_img_seq;
                         let new_rev = label_box_revision(&updated.boxes);
                         let new_len = updated.boxes.len();
+                        let saved_boxes = updated.boxes.clone();
                         if fresh {
                             this.upsert_label_image(&jid2, updated);
                         }
                         this.refresh_label_jobs(cx);
                         if on_job {
                             if fresh {
+                                if this.label.editor.is_for(&jid2, &iid2) {
+                                    this.label.editor.commit_saved(saved_boxes);
+                                }
                                 if clear_box {
                                     if this.label.selected_box.as_ref().is_some_and(|s| s.image_id == iid2) {
                                         this.label.selected_box = None;
@@ -432,8 +295,16 @@ impl FoloApp {
                                         this.label.selected_box = None;
                                     }
                                 }
+                            } else if this.label.editor.is_for(&jid2, &iid2) {
+                                // SSE for our save (or a newer remote update) landed while `mutating` was
+                                // true: advance `base` to our confirmed save first, then re-sync against
+                                // the latest cached image so `is_dirty` clears immediately if they match.
+                                this.label.editor.commit_saved(saved_boxes);
+                                let _ = this.ensure_label_editor_synced(&jid2, &iid2);
                             }
-                            if let Some(next_id) = advance_to
+                            if let Some(pending_sw) = then_switch {
+                                this.execute_pending_label_switch(&jid2, pending_sw, cx);
+                            } else if let Some(next_id) = advance_to
                                 && (still_pending_advance
                                     || this.label.selected_image.as_deref() == Some(iid2.as_str()))
                             {
@@ -443,8 +314,11 @@ impl FoloApp {
                         }
                     }
                     Err(e) => {
+                        this.label.editor.pending_switch = None;
                         if e.code == "label_boxes_changed" {
-                            if on_job && this.label.selected_box.as_ref().is_some_and(|s| s.image_id == iid2)
+                            if on_job
+                                && !this.label.editor.is_dirty_for(&jid2, &iid2)
+                                && this.label.selected_box.as_ref().is_some_and(|s| s.image_id == iid2)
                             {
                                 this.label.selected_box = None;
                                 this.label.hover_box = None;
@@ -492,6 +366,9 @@ impl FoloApp {
                     Ok(()) => {
                         if let Some(list) = this.label.images.get_mut(&jid2).and_then(|l| l.ready_mut()) {
                             list.retain(|i| i.id != iid2);
+                        }
+                        if this.label.editor.is_for(&jid2, &iid2) {
+                            this.label.editor.reset();
                         }
                         if on_job {
                             if this.label.selected_image.as_deref() == Some(iid2.as_str()) {

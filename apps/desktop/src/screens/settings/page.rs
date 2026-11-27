@@ -286,7 +286,7 @@ impl FoloApp {
             ))
             .child(row(
                 "FOLO Studio",
-                help("Web UI served by `folo serve` for browser access and run comparison."),
+                help("Web UI served by `folo serve` for browser access."),
                 studio_controls,
             ));
 

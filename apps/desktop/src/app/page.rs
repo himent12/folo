@@ -18,6 +18,7 @@ impl FoloApp {
             Route::Dataset(id) => self.dataset(&id, window, cx),
             Route::Runs => self.runs(window, cx),
             Route::Run(id) => self.run_view(&id, window, cx),
+            Route::RunCompare => self.run_compare_view(window, cx),
             Route::Models => self.models(window, cx),
             Route::Model(id) => self.model_view(&id, window, cx),
             Route::Benches => self.benches(window, cx),

@@ -128,6 +128,36 @@ impl FoloApp {
             .tooltip(crate::controls::tip("Start training", Some("Ctrl N")))
             .into_any_element()
         };
+        let pinned_n = self.run_compare.ids.iter().filter(|id| runs.iter().any(|r| r.id == **id)).count();
+        let compare_btn = if total >= 2 && self.store.runs.error().is_none() {
+            let label = if pinned_n >= 2 { format!("Compare ({pinned_n})") } else { "Compare runs".into() };
+            self.button(
+                "runs-compare",
+                label,
+                Btn::Secondary,
+                Some("icons/git-compare-arrows.svg"),
+                window,
+                cx,
+                act(|this, w, cx| this.open_run_compare(None, w, cx)),
+            )
+            .tooltip(crate::controls::tip(
+                "Overlay loss & mAP curves and diff hyperparameters of 2–4 runs",
+                None,
+            ))
+            .into_any_element()
+        } else {
+            self.button_disabled(
+                "runs-compare",
+                "Compare runs",
+                Btn::Secondary,
+                Some("icons/git-compare-arrows.svg"),
+                "Train at least two runs to compare them side by side",
+                window,
+                cx,
+            )
+            .into_any_element()
+        };
+        header_actions.push(compare_btn);
         header_actions.push(new);
         let header = page_header(&t, "Runs", subtitle, header_actions);
         if let Some(e) = self.store.runs.error().cloned() {
@@ -173,8 +203,24 @@ impl FoloApp {
                 cx.notify();
             }),
         );
+        let select_mode = self.run_compare.select_mode && total >= 2;
         let query = self.run_search.read(cx).text().to_string();
         let search = self.search_field("runs-search", self.run_search.clone(), 220., window, cx);
+        let select_toggle = (total >= 2).then(|| {
+            self.button(
+                "runs-select-cmp",
+                if select_mode { "Done selecting" } else { "Pin to compare" },
+                if select_mode { Btn::Primary } else { Btn::Secondary },
+                Some("icons/pin.svg"),
+                window,
+                cx,
+                act(|this, _, cx| {
+                    this.run_compare.select_mode = !this.run_compare.select_mode;
+                    cx.notify();
+                }),
+            )
+            .tooltip(crate::controls::tip("Pin 2–4 runs from the table to compare side by side", None))
+        });
         let extra_filter = self.run_arch_filter.is_some() || !query.trim().is_empty();
         let now = self.store.api.now();
         let mut visible: Vec<Run> = filter_runs(&runs, self.run_filter, self.run_arch_filter, &query, |r| {
@@ -287,6 +333,7 @@ impl FoloApp {
                     });
                     if e2e { base + " · end-to-end head: predicts without NMS" } else { base }
                 });
+                let is_pinned = self.run_compare.ids.iter().any(|x| x == &r.id);
                 let row = div()
                     .id(SharedString::from(key.clone()))
                     .when_some(focus_text, |d, s| d.child(crate::controls::focus_tip(&t, s, 36.)))
@@ -297,6 +344,7 @@ impl FoloApp {
                     .h(px(36.))
                     .border_b_1()
                     .border_color(t.line_subtle)
+                    .when(select_mode && is_pinned, |d| d.bg(t.accent_muted))
                     .cursor_pointer()
                     .hover(|s| s.bg(t.bg_hover))
                     .active(|s| s.bg(t.bg_active))
@@ -323,13 +371,34 @@ impl FoloApp {
                             .id(SharedString::from(format!("rn-{}", r.id)))
                             .flex_1()
                             .min_w(px(RUN_NAME_MIN))
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
                             .when(crate::ui::may_overflow(&r.name, ty::SM.size, name_w), |d| {
                                 d.tooltip(crate::controls::tip(r.name.clone(), None))
+                            })
+                            .when(select_mode, |d| {
+                                d.child(
+                                    div()
+                                        .size(px(16.))
+                                        .flex_none()
+                                        .rounded(px(4.))
+                                        .border_1()
+                                        .border_color(if is_pinned { t.accent_solid } else { t.line_control })
+                                        .bg(if is_pinned { t.accent_solid } else { t.bg_raised })
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .when(is_pinned, |d| {
+                                            d.child(icon("icons/check.svg", 11., t.accent_on))
+                                        }),
+                                )
                             })
                             .child(
                                 text(ty::SM, t.text_primary)
                                     .font_weight(FontWeight::MEDIUM)
-                                    .w(px(name_w))
+                                    .flex_1()
+                                    .min_w_0()
                                     .ellipsis()
                                     .child(r.name.clone()),
                             ),
@@ -402,7 +471,13 @@ impl FoloApp {
                     0.,
                     window,
                     cx,
-                    act(move |this, w, cx| this.navigate(Route::Run(id.clone()), w, cx)),
+                    act(move |this, w, cx| {
+                        if select_mode {
+                            this.toggle_run_compare_pin(id.clone(), cx);
+                        } else {
+                            this.navigate(Route::Run(id.clone()), w, cx);
+                        }
+                    }),
                 )
                 .into_any_element()
             })
@@ -496,6 +571,56 @@ impl FoloApp {
         // otherwise).
         let narrowed = shown_line(ids.len(), total)
             .map(|line| text(ty::SM, t.text_tertiary).tnum().px(px(16.)).child(line));
+        let select_bar = select_mode.then(|| {
+            let open_cmp = if pinned_n >= 2 {
+                self.button(
+                    "runs-sel-open",
+                    format!("Compare {pinned_n} runs"),
+                    Btn::Primary,
+                    Some("icons/git-compare-arrows.svg"),
+                    window,
+                    cx,
+                    act(|this, w, cx| this.open_run_compare(None, w, cx)),
+                )
+            } else {
+                self.button_disabled(
+                    "runs-sel-open",
+                    "Compare selected",
+                    Btn::Primary,
+                    Some("icons/git-compare-arrows.svg"),
+                    "Click at least 2 runs below to compare them",
+                    window,
+                    cx,
+                )
+            };
+            let clear_btn = self.button(
+                "runs-sel-clear",
+                "Clear",
+                Btn::Secondary,
+                None,
+                window,
+                cx,
+                act(|this, _, cx| {
+                    this.run_compare.ids.clear();
+                    this.run_compare.pinned_run = None;
+                    cx.notify();
+                }),
+            );
+            panel(&t)
+                .bg(t.bg_raised)
+                .px(px(14.))
+                .py(px(8.))
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .justify_between()
+                .gap(px(8.))
+                .child(text(ty::SM, t.text_secondary).child(format!(
+                    "{pinned_n} of {} runs pinned · click rows below to pin or unpin",
+                    super::compare_data::RUN_COMPARE_MAX
+                )))
+                .child(div().flex().items_center().gap(px(8.)).child(clear_btn).child(open_cmp))
+        });
         let toolbar = div()
             .flex()
             .flex_wrap()
@@ -504,8 +629,16 @@ impl FoloApp {
             .child(seg)
             .child(arch_seg)
             .child(div().flex_1().min_w(px(8.)))
+            .children(select_toggle)
             .child(search);
-        let body = div().flex().flex_col().gap(px(12.)).child(toolbar).child(table).children(narrowed);
+        let body = div()
+            .flex()
+            .flex_col()
+            .gap(px(12.))
+            .child(toolbar)
+            .children(select_bar)
+            .child(table)
+            .children(narrowed);
         self.page_frame(&t, header, body, cx)
     }
 }

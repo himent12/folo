@@ -107,6 +107,9 @@ impl FoloApp {
                     if let Some(list) = self.label.images.get_mut(&id).and_then(|l| l.ready_mut()) {
                         list.retain(|i| i.id != r.id);
                     }
+                    if self.label.editor.is_for(&id, &r.id) {
+                        self.label.editor.reset();
+                    }
                     if self.label.selected_image.as_deref() == Some(r.id.as_str()) {
                         self.label.selected_image = None;
                         self.label.selected_box = None;
@@ -189,6 +192,9 @@ impl FoloApp {
                         }
                         this.label.images.remove(&id);
                         this.label.logs.remove(&id);
+                        if this.label.editor.job_id.as_deref() == Some(id.as_str()) {
+                            this.label.editor.reset();
+                        }
                         this.refresh_label_jobs(cx);
                     }
                     _ => {}

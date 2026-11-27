@@ -64,6 +64,14 @@ impl FoloApp {
             }
             return;
         }
+        if self.label.editor.drawing.is_some() {
+            if ev.pressed_button != Some(MouseButton::Left) {
+                self.finish_label_box_draw(cx);
+            } else {
+                self.update_label_box_draw(ev.position, cx);
+            }
+            return;
+        }
         let Some(drag) = self.drag.as_ref() else { return };
         if ev.pressed_button != Some(MouseButton::Left) {
             if let Some(d) = self.drag.take() {
@@ -83,7 +91,7 @@ impl FoloApp {
         self.set_slider(id, frac, cx);
     }
 
-    pub(super) fn on_drag_end(&mut self, _: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn on_drag_end(&mut self, ev: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
         if self.scroll_drag.take().is_some() {
             cx.notify();
         }
@@ -95,6 +103,10 @@ impl FoloApp {
             && i.drag_from.take().is_some()
         {
             cx.notify();
+        }
+        if self.label.editor.drawing.is_some() {
+            self.update_label_box_draw(ev.position, cx);
+            self.finish_label_box_draw(cx);
         }
         if let Some(d) = self.drag.take() {
             if d.id == "play-iou" {

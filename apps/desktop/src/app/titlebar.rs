@@ -261,6 +261,7 @@ impl FoloApp {
                 ("Runs".into(), Some(Route::Runs)),
                 (self.store.run(id).map_or(id.clone(), |r| r.name.clone()).into(), None),
             ],
+            Route::RunCompare => vec![("Runs".into(), Some(Route::Runs)), ("Compare".into(), None)],
             Route::Model(id) => vec![
                 ("Models".into(), Some(Route::Models)),
                 (self.store.model(id).map_or(id.clone(), |m| m.name.clone()).into(), None),

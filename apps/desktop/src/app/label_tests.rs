@@ -245,12 +245,22 @@ fn review_workspace_keyboard_mutations_conflicts_agent_and_export() {
     });
     settle(&mut app, window);
 
-    // Reclassify box 0 to class index 1 (key '2', or '1' if already 1).
+    // Reclassify box 0 in the local draft with key '2' (or '1' if already 1), then delete it with
+    // Delete, and verify edits stay in the undoable draft until saved via Ctrl+S or Approve ('a').
     let next_cls = if orig_boxes[0].class == 1 { 0u32 } else { 1u32 };
     let key = (next_cls + 1).to_string();
     press(&mut app, window, &key);
     settle(&mut app, window);
+    drive(&mut app, window, |this, _, _| {
+        assert!(this.label.editor.is_dirty_for("lb_4f10", &target_img), "reclassify dirties draft");
+        assert_eq!(this.label.editor.draft[0].class, next_cls, "reclassify updated draft box class");
+    });
+
+    // Save via Ctrl+S persists the reclassified box to the backend.
+    press(&mut app, window, "ctrl-s");
+    settle(&mut app, window);
     let after_recls = drive(&mut app, window, |this, _, _| {
+        assert!(!this.label.editor.is_dirty_for("lb_4f10", &target_img), "Ctrl+S clears dirty state");
         this.label
             .images
             .get("lb_4f10")
@@ -261,11 +271,18 @@ fn review_workspace_keyboard_mutations_conflicts_agent_and_export() {
             .unwrap()
             .clone()
     });
-    assert_eq!(after_recls.boxes[0].class, next_cls, "reclassify updated box class");
+    assert_eq!(after_recls.boxes[0].class, next_cls, "reclassify persisted box class");
     assert_eq!(after_recls.source, Some(LabelSource::Manual));
 
-    // Delete box 0 with Delete key (revision updated automatically after reclassify).
+    // Delete box 0 with Delete key (draft mutation, revision updated automatically after save),
+    // then persist via Ctrl+S.
     press(&mut app, window, "delete");
+    settle(&mut app, window);
+    drive(&mut app, window, |this, _, _| {
+        assert_eq!(this.label.editor.draft.len(), orig_boxes.len() - 1, "Delete removed draft box");
+        assert!(this.label.editor.is_dirty_for("lb_4f10", &target_img));
+    });
+    press(&mut app, window, "ctrl-s");
     settle(&mut app, window);
     let after_del = drive(&mut app, window, |this, _, _| {
         this.label
@@ -278,7 +295,21 @@ fn review_workspace_keyboard_mutations_conflicts_agent_and_export() {
             .unwrap()
             .clone()
     });
-    assert_eq!(after_del.boxes.len(), orig_boxes.len() - 1, "Delete removed the selected box");
+    assert_eq!(after_del.boxes.len(), orig_boxes.len() - 1, "Delete persisted box removal");
+
+    // Pick another unreviewed image to verify bare Enter does NOT approve and 'a' approves.
+    let unrev_img = drive(&mut app, window, |this, _, cx| {
+        let all = this.label.images.get("lb_4f10").and_then(|l| l.ready()).unwrap();
+        let im = all
+            .iter()
+            .find(|i| i.status == LabelImageStatus::Labeled && !i.reviewed && i.id != target_img)
+            .expect("second unreviewed image")
+            .id
+            .clone();
+        this.select_label_image(im.clone(), cx);
+        im
+    });
+    settle(&mut app, window);
 
     // Bare Enter does NOT silently approve an image when focus is on a segmented filter or root.
     press(&mut app, window, "enter");
@@ -291,7 +322,7 @@ fn review_workspace_keyboard_mutations_conflicts_agent_and_export() {
             .and_then(|l| l.ready())
             .unwrap()
             .iter()
-            .find(|i| i.id == target_img)
+            .find(|i| i.id == unrev_img)
             .unwrap()
             .reviewed
     });
@@ -307,7 +338,7 @@ fn review_workspace_keyboard_mutations_conflicts_agent_and_export() {
             .and_then(|l| l.ready())
             .unwrap()
             .iter()
-            .find(|i| i.id == target_img)
+            .find(|i| i.id == unrev_img)
             .unwrap()
             .reviewed
     });

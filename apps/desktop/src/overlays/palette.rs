@@ -131,6 +131,16 @@ impl FoloApp {
             keys: &["Ctrl", "N"],
             action: act(|this, w, cx| this.open_new_run(None, w, cx)),
         });
+        if self.store.runs.ready().is_some_and(|l| l.len() >= 2) {
+            items.push(PaletteItem {
+                group: "Actions",
+                icon: "icons/git-compare-arrows.svg",
+                title: "Compare runs".into(),
+                detail: "Overlay loss & mAP curves".into(),
+                keys: &[],
+                action: act(|this, w, cx| this.open_run_compare(None, w, cx)),
+            });
+        }
         if self.label_on() {
             items.push(PaletteItem {
                 group: "Actions",

@@ -285,15 +285,31 @@ impl FoloApp {
                             }
                         }
                         let on_this_job = route_label(&this.route) == Some(key.as_str());
-                        if on_this_job && let Some(sel) = this.label.selected_box.as_ref() {
-                            let still_valid =
-                                imgs.iter().find(|im| im.id == sel.image_id).is_some_and(|im| {
-                                    sel.index < im.boxes.len()
-                                        && label_box_revision(&im.boxes) == sel.revision
-                                });
-                            if !still_valid {
-                                this.label.selected_box = None;
-                                this.label.hover_box = None;
+                        if on_this_job {
+                            if let Some(active_id) = this.label.editor.image_id.clone()
+                                && this.label.editor.job_id.as_deref() == Some(key.as_str())
+                            {
+                                if let Some(im) = imgs.iter().find(|im| im.id == active_id) {
+                                    let n_cls = this.label_job_by_id(&key).map_or(0, |j| j.classes.len());
+                                    this.label.editor.sync_image(&key, im, n_cls, this.label.mutating);
+                                } else {
+                                    this.label.editor.reset();
+                                }
+                            }
+                            if let Some(sel) = this.label.selected_box.as_ref() {
+                                let still_valid = if this.label.editor.is_for(&key, &sel.image_id) {
+                                    sel.index < this.label.editor.draft.len()
+                                        && this.label.editor.draft_revision() == sel.revision
+                                } else {
+                                    imgs.iter().find(|im| im.id == sel.image_id).is_some_and(|im| {
+                                        sel.index < im.boxes.len()
+                                            && label_box_revision(&im.boxes) == sel.revision
+                                    })
+                                };
+                                if !still_valid {
+                                    this.label.selected_box = None;
+                                    this.label.hover_box = None;
+                                }
                             }
                         }
                         this.label.images.insert(key.clone(), Load::Ready(imgs));
@@ -396,6 +412,7 @@ impl FoloApp {
         self.label.hover_box = None;
         self.label.zoom = 1.0;
         self.label.pan = (0., 0.);
+        self.label.editor.reset();
         self.label.scope = LabelScope::Unlabeled;
         if matches!(self.route, Route::LabelJobs) {
             self.label.list_stale = true;
@@ -452,9 +469,23 @@ impl FoloApp {
         }
     }
 
-    /// Clears `selected_box` if a live update changed the box array of the currently selected image.
+    /// Syncs the active editor with a fresh server `LabelImage` snapshot and clears `selected_box`
+    /// only if the displayed box array changed underneath it.
     pub(super) fn invalidate_stale_box_selection(&mut self, job_id: &str, image: &LabelImage) {
         if route_label(&self.route) != Some(job_id) {
+            return;
+        }
+        let n_cls = self.label_job_by_id(job_id).map_or(0, |j| j.classes.len());
+        if self.label.editor.is_for(job_id, &image.id) {
+            self.label.editor.sync_image(job_id, image, n_cls, self.label.mutating);
+            if let Some(sel) = self.label.selected_box.as_ref()
+                && sel.image_id == image.id
+                && (sel.index >= self.label.editor.draft.len()
+                    || self.label.editor.draft_revision() != sel.revision)
+            {
+                self.label.selected_box = None;
+                self.label.hover_box = None;
+            }
             return;
         }
         if let Some(sel) = self.label.selected_box.as_ref()

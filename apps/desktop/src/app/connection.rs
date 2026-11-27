@@ -115,6 +115,7 @@ impl FoloApp {
         self.server_mode = mode;
         self.clear_bench();
         self.clear_label();
+        self.run_compare.clear();
         self.subscriptions.clear();
         self.subscribing.clear();
         self.stream_lost.clear();

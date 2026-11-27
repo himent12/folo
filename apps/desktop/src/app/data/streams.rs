@@ -262,6 +262,7 @@ impl FoloApp {
     fn step_needs_every_tick(&self, run_id: &str) -> bool {
         match &self.route {
             Route::Run(open) => open == run_id,
+            Route::RunCompare => self.run_compare.ids.iter().any(|id| id == run_id),
             Route::Overview => self.store.live_run().is_some_and(|r| r.id == run_id),
             _ => false,
         }

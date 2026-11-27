@@ -15,6 +15,8 @@ pub enum Route {
     Dataset(String),
     Runs,
     Run(String),
+    /// Side-by-side comparison of 2–4 training runs.
+    RunCompare,
     Models,
     Model(String),
     /// Vision benchmarks (servers with `vision_bench`).
@@ -44,8 +46,9 @@ pub enum Section {
 }
 
 impl Route {
-    /// `overview`, `datasets`, `dataset:ID`, `runs`, `run:ID`, `models`, `model:ID`, `benchmarks`, `bench:ID`,
-    /// `bench-entry:ID/ENTRY`, `bench-compare:ID`, `playground`, `labeling`, `label:ID`, `settings`.
+    /// `overview`, `datasets`, `dataset:ID`, `runs`, `run:ID`, `runs-compare`, `models`, `model:ID`,
+    /// `benchmarks`, `bench:ID`, `bench-entry:ID/ENTRY`, `bench-compare:ID`, `playground`, `labeling`,
+    /// `label:ID`, `settings`.
     pub fn parse(s: &str) -> Option<Route> {
         let valid_id = |v: &str| !v.trim().is_empty();
         let (kind, id) = s.split_once(':').map_or((s, None), |(k, i)| (k, Some(i)));
@@ -55,6 +58,7 @@ impl Route {
             ("dataset", Some(id)) if valid_id(id) => Route::Dataset(id.to_string()),
             ("runs", None) => Route::Runs,
             ("run", Some(id)) if valid_id(id) => Route::Run(id.to_string()),
+            ("runs-compare" | "run-compare", None) => Route::RunCompare,
             ("models", None) => Route::Models,
             ("model", Some(id)) if valid_id(id) => Route::Model(id.to_string()),
             ("benchmarks" | "benches", None) => Route::Benches,
@@ -79,7 +83,7 @@ impl Route {
         match self {
             Route::Overview => Section::Overview,
             Route::Datasets | Route::Dataset(_) => Section::Datasets,
-            Route::Runs | Route::Run(_) => Section::Runs,
+            Route::Runs | Route::Run(_) | Route::RunCompare => Section::Runs,
             Route::Models | Route::Model(_) => Section::Models,
             Route::Benches | Route::Bench(_) | Route::BenchEntry(..) | Route::BenchCompare(_) => {
                 Section::Benchmarks
@@ -131,10 +135,16 @@ impl FoloApp {
         if route == self.route {
             return;
         }
+        // Guard unsaved bounding-box edits before leaving an active, renderable labeling job.
+        if self.label_route_has_renderable_dirty_draft() {
+            self.label.editor.pending_switch = Some(crate::label::PendingImageSwitch::Navigate(route));
+            cx.notify();
+            return;
+        }
         let prev = std::mem::replace(&mut self.route, route);
         // Runs opens on all runs, unless coming up from one of them: a filter (one the queue
         // toast set, say) doesn't wait there to make the list look empty later.
-        if self.route == Route::Runs && !matches!(prev, Route::Run(_)) {
+        if self.route == Route::Runs && !matches!(prev, Route::Run(_) | Route::RunCompare) {
             self.run_filter = super::RunFilter::All;
             self.run_arch_filter = None;
             self.run_search.update(cx, |i, cx| i.set_text("", cx));
@@ -163,6 +173,11 @@ impl FoloApp {
     }
 
     pub fn back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.label_route_has_renderable_dirty_draft() {
+            self.label.editor.pending_switch = Some(crate::label::PendingImageSwitch::Back);
+            cx.notify();
+            return;
+        }
         // Past the pages of what was deleted since, and the page already open.
         while let Some(r) = self.history.pop() {
             if r != self.route && !self.route_gone(&r) {
@@ -189,6 +204,13 @@ impl FoloApp {
     /// Re-opens the page most recently left with [`Self::back`] (`Alt+→`), skipping any route that
     /// was deleted since or matches the current page.
     pub fn forward(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.label_route_has_renderable_dirty_draft()
+            && self.forward_history.iter().any(|r| r != &self.route && !self.route_gone(r))
+        {
+            self.label.editor.pending_switch = Some(crate::label::PendingImageSwitch::Forward);
+            cx.notify();
+            return;
+        }
         while let Some(r) = self.forward_history.pop() {
             if r != self.route && !self.route_gone(&r) {
                 let prev = std::mem::replace(&mut self.route, r);
@@ -205,7 +227,7 @@ impl FoloApp {
     pub fn parent_route(&self) -> Option<Route> {
         match &self.route {
             Route::Dataset(_) => Some(Route::Datasets),
-            Route::Run(_) => Some(Route::Runs),
+            Route::Run(_) | Route::RunCompare => Some(Route::Runs),
             Route::Model(_) => Some(Route::Models),
             Route::Bench(_) => Some(Route::Benches),
             Route::BenchEntry(b, _) | Route::BenchCompare(b) => Some(Route::Bench(b.clone())),
@@ -248,6 +270,11 @@ impl FoloApp {
         self.ds_scroll_anchor = None;
         self.chart_hover = None;
         self.chart_hover_on = None;
+        self.run_compare.hover = None;
+        self.run_compare.hover_on = None;
+        if self.route != Route::Runs {
+            self.run_compare.select_mode = false;
+        }
         self.export_open = false;
         self.pr_pin = None;
         self.pr_focus = None;

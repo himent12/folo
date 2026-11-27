@@ -315,6 +315,15 @@ impl FoloApp {
         if form.submitting {
             return;
         }
+        let job_id = form.job.clone();
+        if self.label.editor.is_dirty() && self.label.editor.job_id.as_deref() == Some(job_id.as_str()) {
+            form.error = Some(ApiError::new(
+                "unsaved_edits",
+                "Save or discard your unsaved box edits before creating a dataset.",
+            ));
+            cx.notify();
+            return;
+        }
         let name = form.name.read(cx).text().trim().to_string();
         if name.is_empty() {
             form.error = Some(ApiError::new("invalid_body", "Enter a dataset name."));
@@ -323,7 +332,6 @@ impl FoloApp {
         }
         form.submitting = true;
         form.error = None;
-        let job_id = form.job.clone();
         let seq = form.seq;
         let lgen = self.label.epoch;
         let val_fraction = LABEL_VAL_FRACTIONS[form.val_idx.min(LABEL_VAL_FRACTIONS.len() - 1)];
@@ -402,7 +410,14 @@ impl FoloApp {
             self.restore_label_focus(None, "label-rm-img", window, cx);
             cx.notify();
             true
-        } else if self.label.selected_box.take().is_some() {
+        } else if self.label.editor.cancel_draw()
+            || self.label.editor.pending_switch.take().is_some()
+            || self.label.selected_box.take().is_some()
+        {
+            cx.notify();
+            true
+        } else if self.label.editor.tool == super::editor::EditTool::Draw {
+            self.label.editor.tool = super::editor::EditTool::Select;
             cx.notify();
             true
         } else {

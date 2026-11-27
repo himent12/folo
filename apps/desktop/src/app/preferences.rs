@@ -102,6 +102,11 @@ impl FoloApp {
         if self.confirm_close.is_some() || self.close_checking {
             return false;
         }
+        if self.label_route_has_renderable_dirty_draft() {
+            self.label.editor.pending_switch = Some(crate::label::PendingImageSwitch::CloseWindow);
+            cx.notify();
+            return false;
+        }
         let Some(url) = self.server_proc.as_mut().and_then(|p| p.running().then(|| p.url.clone())) else {
             // Nothing of ours runs: nothing stops.
             self.save_window_state(window, cx);

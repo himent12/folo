@@ -1,7 +1,10 @@
-//! Runs: the run list and the live training dashboard.
+//! Runs: the run list, the live training dashboard, and multi-run comparison.
 
 mod charts;
 mod cloud;
+mod compare;
+pub(crate) mod compare_data;
+mod compare_table;
 mod config;
 mod detail;
 mod list;
@@ -10,6 +13,7 @@ mod per_class;
 mod samples;
 
 pub(crate) use charts::RunChartOpts;
+pub(crate) use compare_data::RunCompareState;
 #[cfg(test)]
 pub(crate) use list::filter_runs;
 pub(crate) use logs::LogFilterCache;
