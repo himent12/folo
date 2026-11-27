@@ -55,7 +55,7 @@ function watch() {
   });
   if (typeof document !== 'undefined') {
     document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'visible') modelsChanged();
+      if (document.visibilityState === 'visible' && hub.mode !== 'connecting') modelsChanged();
     });
   }
 }

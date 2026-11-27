@@ -41,7 +41,7 @@ import { COMPARE_CAP_TIP, COMPARE_MAX, compareHint, compareReason } from './runs
 import Ident from '$lib/ui/Ident';
 import Lineage from '$lib/ui/Lineage';
 import Meta from '$lib/ui/Meta';
-import { isOffline, OFFLINE_REASON } from '$lib/ui/offline';
+import { isDisconnected, OFFLINE_REASON } from '$lib/ui/offline';
 import { FROM_SCRATCH, origin, type Origin } from '$lib/lineage';
 import Menu, { type MenuItem } from '$lib/ui/Menu';
 import SortHeader from '$lib/ui/SortHeader';
@@ -355,7 +355,7 @@ export default function Runs() {
   // Progress rails stay neutral; only a live run's rail carries the accent ("now"). Status is the mark beside it.
   const tone = (r: Run) => (r.status === 'running' ? 'accent' : 'neutral');
   // Nothing answers: the actions that need the server are disabled and say why (as on Datasets).
-  const offline = computed(() => !runs.data && isOffline(runs.error));
+  const offline = computed(() => !runs.data && isDisconnected(runs.error));
   /** Runs to filter, or on their way: the toolbar is live (else it stays in place, disabled). */
   const filterable = computed(() => (runs.data ? runs.data.length > 0 : !runs.error));
   /** Rows to head (or their skeleton): the column heads show; with none the frame holds the state alone. */

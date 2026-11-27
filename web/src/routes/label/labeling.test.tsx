@@ -622,4 +622,67 @@ describe('the job list: the palette’s New labeling job', () => {
       }
     });
   }
+
+  it('suppresses ?new=1 on refused connect, waits through initial handshake, closes on connecting, and blocks JobDialog submission', () => {
+    const prevMode = hub.mode;
+    const createSpy = vi.spyOn(hub.api, 'createLabelJob');
+    let err: ApiError | null = null;
+    const errSpy = vi.spyOn(hub, 'connectError', 'get').mockImplementation(() => err);
+    try {
+      history.replaceState(null, '', '#/datasets/label');
+      router.route = parse('#/datasets/label');
+      open(LabelJobs, {});
+      router.go('/datasets/label?new=1');
+      flushSync();
+      expect(dialogOpen()).toBe(true);
+
+      // Switching servers leaves hub.mode === 'connecting' while hub.api still holds the prior client: close at once.
+      hub.mode = 'connecting';
+      flushSync();
+      expect(dialogOpen()).toBe(false);
+
+      // During the initial handshake grace period (connectError === null), ?new=1 stays pending and does not open early.
+      router.go('/datasets/label?new=1');
+      flushSync();
+      expect(dialogOpen()).toBe(false);
+      expect(location.hash).toBe('#/datasets/label?new=1');
+
+      // Once the handshake finishes, the pending ?new=1 opens the dialog and cleans the URL.
+      hub.mode = 'mock';
+      flushSync();
+      expect(dialogOpen()).toBe(true);
+      expect(location.hash).toBe('#/datasets/label');
+
+      // On a refused/unreachable server switch (connectError !== null), ?new=1 is suppressed and stripped immediately.
+      err = new ApiError(0, 'connect_refused', 'token required');
+      hub.mode = 'connecting';
+      flushSync();
+      expect(dialogOpen()).toBe(false);
+      router.go('/datasets/label?new=1');
+      flushSync();
+      expect(dialogOpen()).toBe(false);
+      expect(location.hash).toBe('#/datasets/label');
+
+      // Unmount the list before mounting standalone JobDialog, which must refuse submission while connecting.
+      if (c) unmount(c);
+      c = undefined;
+      open(JobDialog, { open: true } as JobDialogProps);
+      const inputs = document.querySelectorAll<HTMLInputElement>('dialog[open] input');
+      inputs[0]!.value = 'street-scenes';
+      inputs[0]!.dispatchEvent(new Event('input', { bubbles: true }));
+      inputs[1]!.value = 'car';
+      inputs[1]!.dispatchEvent(new Event('input', { bubbles: true }));
+      flushSync();
+      const submitBtn = document.querySelector<HTMLButtonElement>('dialog[open] button[type="submit"]')!;
+      expect(submitBtn.disabled).toBe(true);
+      expect(why(submitBtn)).toBe('Connecting to server');
+      document.querySelector<HTMLFormElement>('dialog[open] form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      flushSync();
+      expect(createSpy).not.toHaveBeenCalled();
+    } finally {
+      errSpy.mockRestore();
+      createSpy.mockRestore();
+      hub.mode = prevMode;
+    }
+  });
 });

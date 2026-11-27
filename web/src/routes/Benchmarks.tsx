@@ -24,7 +24,7 @@ import Input from '$lib/ui/Input';
 import Menu, { type MenuItem } from '$lib/ui/Menu';
 import Meta from '$lib/ui/Meta';
 import NoValue from '$lib/ui/NoValue';
-import { isOffline, OFFLINE_REASON } from '$lib/ui/offline';
+import { isDisconnected, OFFLINE_REASON } from '$lib/ui/offline';
 import Panel from '$lib/ui/Panel';
 import { rowNav } from '$lib/ui/rowNav';
 import Segmented from '$lib/ui/Segmented';
@@ -87,8 +87,9 @@ export default function Benchmarks() {
   const creating = signal(false);
   effect(() => {
     if (router.route.name !== 'benchmarks' || router.route.query.get('new') !== '1') return;
+    if (hub.mode === 'connecting' && hub.connectError === null) return;
     untrack(() => {
-      if (!unavailable.peek()) creating.set(true);
+      if (!unavailable.peek() && hub.mode !== 'connecting') creating.set(true);
       const q = new URLSearchParams(router.route.query);
       q.delete('new');
       const s = q.toString();
@@ -96,7 +97,7 @@ export default function Benchmarks() {
     });
   });
   effect(() => {
-    if (unavailable.get() && creating.peek()) creating.set(false);
+    if ((unavailable.get() || hub.mode === 'connecting') && creating.peek()) creating.set(false);
   });
 
   // Filter, sort and search live in the URL query (./bench/listState), replaced as they change so typing never
@@ -203,7 +204,7 @@ export default function Benchmarks() {
       .filter(Boolean);
   });
 
-  const offline = computed(() => !benches.data && isOffline(benches.error));
+  const offline = computed(() => !benches.data && isDisconnected(benches.error));
   const hasData = computed(() => (benches.data ? benches.data.length > 0 : !benches.error));
   const hasRows = computed(() => (benches.data ? shown.get().length > 0 : !benches.error));
   const canExport = computed(() => !unavailable.get() && !!benches.data && shown.get().length > 0);
@@ -281,7 +282,7 @@ export default function Benchmarks() {
               <Menu icon={Download} text={phone.current ? undefined : 'Export'} label="Export benchmarks" items={exportItems} />
             ) : null}
             {!unavailable.get() ? (
-              <Gate reason={offline.get() ? OFFLINE_REASON : null}>
+              <Gate reason={offline.get() ? OFFLINE_REASON : hub.mode === 'connecting' ? 'Connecting to server' : null}>
                 {(why) => (
                   <Button variant="primary" icon={Plus} disabled={!!why()} aria-describedby={why()} onclick={() => creating.set(true)}>
                     {phone.current ? 'New' : 'New benchmark'}

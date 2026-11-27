@@ -210,7 +210,7 @@ export default function Dataset() {
   // well: image ids are positions, so the old list would put other images' boxes on the pixels the server now sends.
   effect(() => {
     const again = () => {
-      if (document.visibilityState !== 'visible' || !d() || ds.loading || ds.refreshing) return;
+      if (document.visibilityState !== 'visible' || hub.mode === 'connecting' || !d() || ds.loading || ds.refreshing) return;
       // The check after the dataset: the server notices a change on that read and indexes again, and a check read
       // beside it could still answer from the old index.
       void ds.refresh().then(() => check.refresh());

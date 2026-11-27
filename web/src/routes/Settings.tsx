@@ -93,8 +93,8 @@ export default function Settings() {
     }
   });
   const caps = computed(() => sys.data?.capabilities);
-  /** `/api/system` failed with nothing loaded: System says so (with Retry) instead of being missing (shell F11c). */
-  const sysFailed = computed(() => sys.error !== undefined && !sys.data);
+  /** `/api/system` failed with nothing loaded while connected: System says so (with Retry) instead of being missing (shell F11c). */
+  const sysFailed = computed(() => hub.mode !== 'connecting' && sys.error !== undefined && !sys.data);
   /** FOLO's own GPU buffer pool (`gpu_pool`): absent until the server has used the GPU, and from older servers. */
   const pool = computed(() => sys.data?.gpu_pool);
   const capRows = computed(() => {

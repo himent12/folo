@@ -292,6 +292,10 @@ export default function Cloud() {
               error={connections.error}
               title="Could not load cloud settings"
               retry={() => {
+                if (hub.mode === 'connecting') {
+                  void hub.connect();
+                  return;
+                }
                 void providers.refresh();
                 void connections.refresh();
                 if (instances.error && !instances.data) void instances.refresh();

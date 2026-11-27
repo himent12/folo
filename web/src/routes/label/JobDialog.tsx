@@ -124,7 +124,9 @@ export default function JobDialog(props: JobDialogProps) {
   const show = (e: string | null) => (touched.get() ? e : null);
   const missing = computed(() => (!name.get().trim() ? 'Enter a name' : all.get().length === 0 ? 'Add at least one class' : null));
   const shownError = computed(() => (touched.get() ? Object.entries(errs.get()).find(([, e]) => e)?.[0] : undefined));
+  const connecting = computed(() => hub.mode === 'connecting');
   const reason = computed(() => {
+    if (connecting.get()) return 'Connecting to server';
     const s = shownError.get();
     return missing.get() ?? (s ? FIX[s] : null);
   });
@@ -133,15 +135,18 @@ export default function JobDialog(props: JobDialogProps) {
     e.preventDefault();
     touched.set(true);
     error.set(undefined);
-    if (Object.values(errs.peek()).some((x) => x) || busy.peek()) return;
+    if (Object.values(errs.peek()).some((x) => x) || busy.peek() || connecting.peek()) return;
+    const epoch = hub.epoch;
     busy.set(true);
     try {
       const job = props.job;
       if (job) {
         await props.onsave?.({ name: name.peek().trim(), classes: all.peek() });
+        if (hub.epoch !== epoch || connecting.peek()) return;
         open.set(false);
       } else {
         const made = await hub.api.createLabelJob({ name: name.peek().trim(), classes: all.peek(), instructions: instructions.peek().trim() });
+        if (hub.epoch !== epoch || connecting.peek()) return;
         // The next New labeling job starts blank.
         created = true;
         // The dialog closes first: what was made is said over the job's page it opens.
@@ -150,6 +155,7 @@ export default function JobDialog(props: JobDialogProps) {
         router.go(`/datasets/label/${made.id}`);
       }
     } catch (err) {
+      if (hub.epoch !== epoch || connecting.peek()) return;
       error.set(err);
     } finally {
       busy.set(false);

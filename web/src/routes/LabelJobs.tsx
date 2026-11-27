@@ -19,7 +19,7 @@ import Gate from '$lib/ui/Gate';
 import Input from '$lib/ui/Input';
 import Meta from '$lib/ui/Meta';
 import NoValue from '$lib/ui/NoValue';
-import { isOffline, OFFLINE_REASON } from '$lib/ui/offline';
+import { isDisconnected, OFFLINE_REASON } from '$lib/ui/offline';
 import Panel from '$lib/ui/Panel';
 import Progress from '$lib/ui/Progress';
 import { rowNav } from '$lib/ui/rowNav';
@@ -76,8 +76,9 @@ export default function LabelJobs() {
   const askedNew = computed(() => router.route.name === 'label-jobs' && router.route.query.get('new') === '1');
   effect(() => {
     if (!askedNew.get()) return;
+    if (hub.mode === 'connecting' && hub.connectError === null) return;
     untrack(() => {
-      if (!unsupported.peek()) creating.set(true);
+      if (!unsupported.peek() && hub.mode !== 'connecting') creating.set(true);
       const q = new URLSearchParams(router.route.query);
       q.delete('new');
       const s = q.toString();
@@ -85,7 +86,7 @@ export default function LabelJobs() {
     });
   });
   effect(() => {
-    if (unsupported.get() && creating.peek()) creating.set(false);
+    if ((unsupported.get() || hub.mode === 'connecting') && creating.peek()) creating.set(false);
   });
 
   // Status filter and search query live in the URL query (./label/listState) so Back, reload and shared links restore them.
@@ -148,7 +149,7 @@ export default function LabelJobs() {
     labeled: shown.get().reduce((a, j) => a + j.counts.labeled, 0),
   }));
 
-  const offline = computed(() => !jobs.data && isOffline(jobs.error));
+  const offline = computed(() => !jobs.data && isDisconnected(jobs.error));
   const hasData = computed(() => (jobs.data ? jobs.data.length > 0 : !jobs.error));
   const hasRows = computed(() => (jobs.data ? shown.get().length > 0 : !jobs.error));
   const phone = new MediaQuery(media.phone, false);
@@ -200,7 +201,7 @@ export default function LabelJobs() {
         actions={() => (
           <>
             {!unsupported.get() ? (
-              <Gate reason={offline.get() ? OFFLINE_REASON : null}>
+              <Gate reason={offline.get() ? OFFLINE_REASON : hub.mode === 'connecting' ? 'Connecting to server' : null}>
                 {(why) => (
                   <Button variant="primary" icon={Plus} disabled={!!why()} aria-describedby={why()} onclick={() => creating.set(true)}>
                     {phone.current ? 'New job' : 'New labeling job'}

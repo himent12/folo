@@ -332,7 +332,16 @@ export class LiveRun {
         });
         return;
       }
-      if (hub.mode === 'connecting') return;
+      if (hub.mode === 'connecting') {
+        const err = hub.connectError;
+        untrack(() => {
+          if (this.#run.peek() === undefined) {
+            this.error = err ?? undefined;
+            this.loading = err === null;
+          }
+        });
+        return;
+      }
       void hub.epoch;
       void this.#retry.get();
       this.#viewSeq++;
@@ -794,6 +803,10 @@ export class LiveRun {
 
   /** Reloads from scratch (after a load error). */
   retry() {
+    if (hub.mode === 'connecting') {
+      if (hub.connectError !== null) void hub.connect();
+      return;
+    }
     this.#retry.set((n) => n + 1);
   }
 

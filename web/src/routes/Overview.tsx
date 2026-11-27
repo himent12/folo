@@ -80,6 +80,10 @@ export default function Overview() {
   // Published weights (`folo weights pull`, Desktop's download) are not the user's work: day one still shows the way in.
   const fresh = computed(() => noDatasets.get() && runList.get()?.length === 0 && !!models.data?.every((m) => m.source === 'published'));
   function retryAll() {
+    if (hub.mode === 'connecting') {
+      void hub.connect();
+      return;
+    }
     void runs.refresh();
     void models.refresh();
     void datasets.refresh();
@@ -234,7 +238,7 @@ export default function Overview() {
         // Nothing loaded and every request failed: one recovery block (Retry, Connection settings) in the frame the live
         // card would fill, the page's focal slot, never four panels each saying the server has not answered and never a
         // frameless block in the corner of an empty canvas (DESIGN_DIRECTION §2.8).
-        <div class="live">
+        <div class="live" ref={(e) => (liveEl = e)} onfocusin={onLiveFocusIn} onfocusout={onLiveFocusOut}>
           <Panel title="Training">
             <ErrorState error={runs.error} retry={retryAll} title="Could not load the overview" compact />
           </Panel>

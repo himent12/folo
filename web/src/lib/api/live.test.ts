@@ -702,4 +702,27 @@ describe('LiveRun ordering', () => {
       stop();
     }
   });
+
+  it('exits loading on cold-load connectError while hub is connecting and delegates retry() to hub.connect()', async () => {
+    const refused = new ApiError(0, 'connect_refused', 'This server needs a token.');
+    const errSpy = vi.spyOn(hub, 'connectError', 'get').mockReturnValue(refused);
+    const connectSpy = vi.spyOn(hub, 'connect').mockResolvedValue(undefined);
+    let live!: LiveRun;
+    hub.mode = 'connecting';
+    const stop = root(() => {
+      live = new LiveRun(() => 'run_7d1e');
+    });
+    try {
+      flushSync();
+      expect(live.loading).toBe(false);
+      expect(live.error).toBe(refused);
+      live.retry();
+      expect(connectSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      errSpy.mockRestore();
+      connectSpy.mockRestore();
+      hub.mode = 'live';
+      stop();
+    }
+  });
 });

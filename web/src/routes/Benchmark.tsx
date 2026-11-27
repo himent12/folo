@@ -39,7 +39,7 @@ import InfoButton from '$lib/ui/InfoButton';
 import Menu, { type MenuItem } from '$lib/ui/Menu';
 import Meta from '$lib/ui/Meta';
 import Note from '$lib/ui/Note';
-import { isOffline, OFFLINE_REASON } from '$lib/ui/offline';
+import { isDisconnected, OFFLINE_REASON } from '$lib/ui/offline';
 import Skeleton from '$lib/ui/Skeleton';
 import Tabs from '$lib/ui/Tabs';
 import { toast } from '$lib/ui/toast';
@@ -421,7 +421,7 @@ export default function Benchmark() {
   // ---------- the header ----------
   const phone = new MediaQuery(media.phone, false);
   const now = new Now(() => live.lost !== null);
-  const offline = computed(() => isOffline(live.error) || isOffline(live.resyncError));
+  const offline = computed(() => isDisconnected(live.error) || isDisconnected(live.resyncError));
   const addWhy = computed(() => (offline.get() ? OFFLINE_REASON : unsaved.get() ? 'Save or discard the plan’s changes first' : null));
   const designWhy = computed(() => (!bench.get() ? null : !editable.get() ? FROZEN : null));
   /** The source, linked while the server still has it; a benchmark keeps its own copy either way. */

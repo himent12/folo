@@ -216,4 +216,146 @@ describe('Resource', () => {
       process.off('unhandledRejection', onUnhandled);
     }
   });
+
+  it('clears previous server data on epoch change while connecting, surfaces connectError, and delegates refresh() to hub.connect()', async () => {
+    let r!: Resource<string>;
+    const stop = root(() => {
+      r = new Resource(() => Promise.resolve('server A'));
+    });
+    flushSync();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(r.data).toBe('server A');
+
+    // Switching to another server that refuses access (`folo serve --token`): epoch bumps while mode is connecting.
+    const refused = new Error('token required');
+    const errSpy = vi.spyOn(hub, 'connectError', 'get').mockReturnValue(refused as never);
+    const connectSpy = vi.spyOn(hub, 'connect').mockResolvedValue(undefined);
+    try {
+      hub.mode = 'connecting';
+      hub.epoch++;
+      flushSync();
+      expect(r.data).toBeUndefined();
+      expect(r.loading).toBe(false);
+      expect(r.error).toBe(refused);
+
+      // Clicking Retry while still connecting calls hub.connect() instead of querying the previous server's Api.
+      await r.refresh();
+      expect(connectSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      errSpy.mockRestore();
+      connectSpy.mockRestore();
+      hub.mode = 'mock';
+      stop();
+    }
+  });
+
+  it('does not restart hub.connect() from background refresh() while holding same-server data or probing', async () => {
+    let r!: Resource<string>;
+    const stop = root(() => {
+      r = new Resource(() => Promise.resolve('server A'));
+    });
+    flushSync();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(r.data).toBe('server A');
+
+    const connectSpy = vi.spyOn(hub, 'connect').mockResolvedValue(undefined);
+    const errSpy = vi.spyOn(hub, 'connectError', 'get').mockReturnValue(new Error('offline') as never);
+    try {
+      // Same-server reconnect: data is still shown, so background polls/visibility refreshes must NOT abort hub.connect().
+      hub.mode = 'connecting';
+      flushSync();
+      expect(r.data).toBe('server A');
+      await r.refresh();
+      expect(connectSpy).not.toHaveBeenCalled();
+
+      // New-server switch while actively probing (connectError === null): refresh() must NOT abort the in-flight handshake.
+      errSpy.mockReturnValue(null);
+      hub.epoch++;
+      flushSync();
+      expect([r.data, r.loading, r.refreshing]).toEqual([undefined, true, false]);
+      await r.refresh();
+      expect(connectSpy).not.toHaveBeenCalled();
+    } finally {
+      errSpy.mockRestore();
+      connectSpy.mockRestore();
+      hub.mode = 'mock';
+      stop();
+    }
+  });
+
+  it('clears stale error/stale when startFrom lends cached data, recovers from connectError, and resets refreshing on epoch switch', async () => {
+    const refused = new Error('token required');
+    let err: Error | null = null;
+    const errSpy = vi.spyOn(hub, 'connectError', 'get').mockImplementation(() => err as never);
+    let source!: Resource<string>;
+    let cachedFollower!: Resource<string>;
+    let reconnectFollower!: Resource<string>;
+    let cachedFetches = 0;
+    const pending = deferred<string>();
+    let sourceCalls = 0;
+    const stopSource = root(() => {
+      source = new Resource(() => (++sourceCalls <= 2 ? Promise.resolve('live data') : pending.promise));
+    });
+    let stopCached: (() => void) | null = null;
+    let stopReconnect: (() => void) | null = null;
+    try {
+      // 1. Source commits cached data first; a follower with prior error/stale hits the `start && 'data' in start`
+      //    branch synchronously without calling its own fetcher and must clear both error and stale.
+      flushSync();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(source.data).toBe('live data');
+
+      stopCached = root(() => {
+        cachedFollower = new Resource(
+          () => {
+            cachedFetches++;
+            return Promise.resolve('fallback');
+          },
+          { startFrom: () => source },
+        );
+      });
+      cachedFollower.error = refused;
+      cachedFollower.stale = refused;
+      cachedFollower.refreshing = true;
+      flushSync();
+      expect(cachedFetches).toBe(0);
+      expect(cachedFollower.data).toBe('live data');
+      expect(cachedFollower.error).toBeUndefined();
+      expect(cachedFollower.stale).toBeUndefined();
+      expect(cachedFollower.loading).toBe(false);
+      expect(cachedFollower.refreshing).toBe(false);
+
+      // 2. Follower mounted while connecting shows connectError and recovers cleanly once the hub reconnects.
+      err = refused;
+      hub.mode = 'connecting';
+      stopReconnect = root(() => {
+        reconnectFollower = new Resource(() => Promise.resolve('fallback'), { startFrom: () => source });
+      });
+      flushSync();
+      expect(reconnectFollower.error).toBe(refused);
+      expect(reconnectFollower.loading).toBe(false);
+
+      err = null;
+      hub.mode = 'mock';
+      flushSync();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(reconnectFollower.data).toBe('live data');
+      expect(reconnectFollower.error).toBeUndefined();
+      expect(reconnectFollower.loading).toBe(false);
+
+      // 3. Start a quiet background refresh on source, then switch server (epoch++ while connecting): refreshing resets.
+      void source.refresh();
+      expect(source.refreshing).toBe(true);
+      hub.mode = 'connecting';
+      hub.epoch++;
+      flushSync();
+      expect([source.data, source.refreshing]).toEqual([undefined, false]);
+    } finally {
+      errSpy.mockRestore();
+      hub.mode = 'mock';
+      stopReconnect?.();
+      stopCached?.();
+      stopSource();
+    }
+  });
 });

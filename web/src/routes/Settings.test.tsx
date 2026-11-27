@@ -498,4 +498,65 @@ describe('Settings › Throughput', () => {
     expect(cells('Precision')).toEqual(['f16', 'f16 · tensor cores']);
     expect(cells('Latency')).toEqual([expect.any(String), '2.50 ms']);
   });
+
+  it('clears the previous server’s System, GPU memory, and Throughput panels after switching to a refused server (playtest R17)', async () => {
+    vi.useFakeTimers();
+    const prevUrl = prefs.serverUrl;
+    const prevApi = hub.api;
+    const mockA = new MockApi('normal', 0);
+    const sysA = await mockA.system();
+    const tpA = await mockA.throughput();
+    const HEALTH = { status: 'ok', version: '0.1.0', api: 'v1', mock: false };
+
+    vi.stubGlobal('fetch', async (url: string, init?: RequestInit) => {
+      if (url.startsWith('http://127.0.0.1:17879')) {
+        if (url.endsWith('/api/health')) return Response.json(HEALTH);
+        return Response.json({ error: { code: 'unauthorized', message: 'this server needs a token', hint: null } }, { status: 401 });
+      }
+      if (url.endsWith('/api/health')) return Response.json(HEALTH);
+      if (init?.method === 'HEAD') return new Response(null, { status: 200 });
+      if (url.endsWith('/api/system')) return Response.json(sysA);
+      if (url.endsWith('/api/system/throughput')) return Response.json(tpA);
+      if (url.endsWith('/api/cloud/providers')) return Response.json({ providers: [] });
+      if (url.endsWith('/api/cloud/connections')) return Response.json({ connections: [] });
+      if (url.endsWith('/api/cloud/instances')) return Response.json({ instances: [] });
+      if (url.endsWith('/api/runs')) return Response.json({ runs: [] });
+      return Response.json({});
+    });
+
+    try {
+      prefs.serverUrl = 'http://127.0.0.1:17878';
+      await hub.connect();
+      c = mount(Settings, { target });
+      await vi.advanceTimersByTimeAsync(0);
+      flushSync();
+      expect(target.querySelector('#system')).not.toBeNull();
+      expect(target.querySelector('#system .pool')).not.toBeNull();
+      expect(target.querySelector('#throughput')).not.toBeNull();
+
+      // Switch Server URL to the token-walled server on 17879 and click Save and reconnect.
+      const input = target.querySelector<HTMLInputElement>('#server-url')!;
+      input.value = 'http://127.0.0.1:17879';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      flushSync();
+      const saveBtn = [...target.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('Save and reconnect'))!;
+      saveBtn.click();
+      await vi.advanceTimersByTimeAsync(0);
+      flushSync();
+
+      expect(hub.mode).toBe('connecting');
+      expect(target.querySelector('#connection .s-title')?.textContent).toContain('Not connected');
+      // Server A's GPU readings, System capabilities, Cloud, and Throughput must be gone.
+      expect(target.querySelector('#system')).toBeNull();
+      expect(target.querySelector('#throughput')).toBeNull();
+      expect(target.querySelector('#cloud')).toBeNull();
+      expect(target.querySelector('#diagnostics')?.textContent).toContain('Not loaded');
+    } finally {
+      prefs.serverUrl = prevUrl;
+      hub.api = prevApi;
+      vi.unstubAllGlobals();
+      vi.useRealTimers();
+      hub.mode = 'mock';
+    }
+  });
 });
