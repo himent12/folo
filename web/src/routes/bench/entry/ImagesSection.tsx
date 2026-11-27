@@ -432,7 +432,7 @@ export default function ImagesSection(props: ImagesSectionProps) {
             <Button icon={ChevronLeft} disabled={openIdx.get() <= 0} onclick={() => step(-1)}>
               Previous
             </Button>
-            <Button iconRight={ChevronRight} disabled={!canStepNext.get()} onclick={() => step(1)}>
+            <Button iconRight={ChevronRight} loading={loading.get()} disabled={!canStepNext.get()} onclick={() => step(1)}>
               Next
             </Button>
           </>

@@ -69,8 +69,9 @@ export default function LiveMediaCanvas(props: LiveMediaCanvasProps) {
     );
   }
 
-  // Repaint whenever boxes, labels, scores, renderTick, or active state change; animate smoothly at rAF while streaming.
+  // Repaint whenever canvas, boxes, labels, scores, renderTick, or active state change; animate smoothly at rAF while streaming.
   effect(() => {
+    void canvasEl.get();
     void props.video;
     void props.boxes;
     void props.classes;

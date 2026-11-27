@@ -214,6 +214,7 @@ export function useMediaSession(input: UseMediaSessionInput) {
         camPaused.set(true);
         videoEl.peek()?.pause();
       } else if (m === 'video' && playing.peek()) {
+        playing.set(false);
         videoEl.peek()?.pause();
       }
       return;
@@ -237,6 +238,15 @@ export function useMediaSession(input: UseMediaSessionInput) {
     const busy = input.isPredicting();
     if (!busy && waitingForInference) {
       untrack(() => settleInferenceTick());
+    }
+  });
+
+  // Restart the live loop whenever inference unblocks (e.g. model catalog finishes loading or user fixes an error/weights).
+  effect(() => {
+    const blocked = input.isInferenceBlocked();
+    const streaming = liveStreaming.get();
+    if (!blocked && streaming && !waitingForInference) {
+      untrack(() => scheduleNextLiveTick());
     }
   });
 
@@ -558,7 +568,7 @@ export function useMediaSession(input: UseMediaSessionInput) {
       playing.set(false);
       clearLiveTimer();
       previewTick.set((t) => t + 1);
-      if (videoReady.peek() && autoDetect.peek()) scrubThrottle.schedule(true);
+      if (videoReady.peek() && autoDetect.peek() && !untrack(() => input.isInferenceBlocked())) scrubThrottle.schedule(true);
       else if (!autoDetect.peek()) frameSynced.set(false);
     },
     onended: () => {
@@ -566,7 +576,7 @@ export function useMediaSession(input: UseMediaSessionInput) {
       playing.set(false);
       clearLiveTimer();
       previewTick.set((t) => t + 1);
-      if (videoReady.peek() && autoDetect.peek()) scrubThrottle.schedule(true);
+      if (videoReady.peek() && autoDetect.peek() && !untrack(() => input.isInferenceBlocked())) scrubThrottle.schedule(true);
       else if (!autoDetect.peek()) frameSynced.set(false);
     },
     onerror: () => {

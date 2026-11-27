@@ -42,6 +42,8 @@ export interface UsePlaygroundExportInput {
   zoom: ZoomState;
   activeJson: () => unknown;
   isUnsyncedVideoPreview: () => boolean;
+  /** True while actively streaming webcam or playing auto-detected video (prevents export buttons strobing in the header). */
+  isLiveStreaming: () => boolean;
 }
 
 export function usePlaygroundExport(o: UsePlaygroundExportInput) {
@@ -62,7 +64,7 @@ export function usePlaygroundExport(o: UsePlaygroundExportInput) {
 
   const canExport = computed(() => {
     const s = o.source.get();
-    if (!s || !o.dims() || o.isUnsyncedVideoPreview() || o.predictingA.get()) return false;
+    if (!s || !o.dims() || o.isLiveStreaming() || o.isUnsyncedVideoPreview() || o.predictingA.get()) return false;
     if (o.compare.get()) {
       if (o.predictingB.get()) return false;
       const aOk = predAMatches.get() || (!o.resultA() && (!!o.errorA.get() || o.weightsMissingA.get()));

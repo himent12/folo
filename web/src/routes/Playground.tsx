@@ -251,10 +251,10 @@ export default function Playground() {
     onFrame: (f) => setLiveFrame(f.blob, f.name, f.width, f.height, mediaSession.mode.peek() === 'webcam' ? 'webcam' : 'video'),
     isPredicting: () => predicting.get() || (cmp.compare.get() && cmp.predictingB.get()),
     isInferenceBlocked: () =>
-      !modelId.peek() ||
-      !!error.peek() ||
-      weightsMissing.peek() ||
-      (cmp.compare.peek() && (!cmp.modelBId.peek() || !!cmp.errorB.peek() || cmp.weightsMissingB.peek())),
+      !modelId.get() ||
+      !!error.get() ||
+      weightsMissing.get() ||
+      (cmp.compare.get() && (!cmp.modelBId.get() || !!cmp.errorB.get() || cmp.weightsMissingB.get())),
     hasValidResult: () => !!pred.peek() && (!cmp.compare.peek() || !!cmp.predB.peek()),
     lastLatencyMs: () => pred.peek()?.timing.total_ms ?? null,
     onStopped: () => seg.set(source.peek()?.kind ?? 'file'),
@@ -270,11 +270,14 @@ export default function Playground() {
   };
   isLiveStreamFn = () => mediaSession.liveStreaming.get();
 
+  let predMatchesSourceFn: () => boolean = () => true;
+
   // The image, its result and the thresholds outlive the page for the tab; a dataset image and the thresholds are in
   // the URL (./playground/session).
   const restored = keepSession({
     source,
     pred,
+    predMatchesSource: () => predMatchesSourceFn(),
     runOn: runOn as Signal<string>,
     conf,
     iou,
@@ -416,7 +419,7 @@ export default function Playground() {
     );
   });
   const activeJson = computed(() => (cmp.compare.get() ? cmp.compareJson.get() : singleJson.get()));
-  const { exportingPng, predAMatches, canExport, onExportPng, onExportJson } = usePlaygroundExport({
+  const { exportingPng, predAMatches, predBMatches, canExport, onExportPng, onExportJson } = usePlaygroundExport({
     source,
     src,
     dims: () => dims.get(),
@@ -449,7 +452,9 @@ export default function Playground() {
     zoom: cmp.zoom,
     activeJson: () => activeJson.peek(),
     isUnsyncedVideoPreview: () => mediaSession.mode.get() === 'video' && !mediaSession.frameSynced.get(),
+    isLiveStreaming: () => mediaSession.liveStreaming.get(),
   });
+  predMatchesSourceFn = () => predAMatches.get();
   const effectiveO2o = computed(() => (cmp.compare.get() ? o2o.get() && cmp.o2oB.get() : o2o.get()));
 
   function toggleClass(c: number) {
@@ -542,9 +547,9 @@ export default function Playground() {
       truthBoxes={truthBoxes.get()}
       truthOnly={truthOnly.get()}
       modelA={model.get()}
-      predA={pred.get()}
-      keptA={kept.get()}
-      visibleCountA={rows.get().length}
+      predA={predAMatches.get() ? pred.get() : null}
+      keptA={predAMatches.get() ? kept.get() : []}
+      visibleCountA={predAMatches.get() ? rows.get().length : 0}
       classesA={classes.get()}
       onlyA={only.get()}
       activeIdxA={activeIdx.get()}
@@ -554,9 +559,9 @@ export default function Playground() {
       onHoverA={(b) => hover.set(b)}
       onSelectA={pickFromImage}
       modelB={cmp.modelB.get()}
-      predB={cmp.predB.get()}
-      keptB={cmp.keptB.get()}
-      visibleCountB={cmp.rowsB.get().length}
+      predB={predBMatches.get() ? cmp.predB.get() : null}
+      keptB={predBMatches.get() ? cmp.keptB.get() : []}
+      visibleCountB={predBMatches.get() ? cmp.rowsB.get().length : 0}
       classesB={cmp.classesB.get()}
       onlyB={cmp.onlyB.get()}
       activeIdxB={cmp.activeIdxB.get()}

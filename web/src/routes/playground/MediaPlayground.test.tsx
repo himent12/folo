@@ -306,7 +306,7 @@ describe('Playground: Local Video Frame Scrubber & Live Webcam', () => {
     }
   });
 
-  it('pauses live webcam loop when inference fails instead of hammering /api/predict and lets Auto-off video scrub visually', async () => {
+  it('gates exports while prediction is in flight and lets Auto-off video scrub visually without hijacking Space', async () => {
     const origCreateUrl = URL.createObjectURL;
     const origRevokeUrl = URL.revokeObjectURL;
     let urlSeq = 0;
@@ -381,6 +381,91 @@ describe('Playground: Local Video Frame Scrubber & Live Webcam', () => {
       expect(hud.textContent).toContain('PREVIEW');
       expect(predictSpy).toHaveBeenCalledTimes(1);
     } finally {
+      URL.createObjectURL = origCreateUrl;
+      URL.revokeObjectURL = origRevokeUrl;
+    }
+  });
+
+  it('auto-pauses live webcam on inference failure without retrying and starts streaming once models finish loading', async () => {
+    const stopTrack = vi.fn();
+    const fakeStream = {
+      getTracks: () => [{ stop: stopTrack, addEventListener: vi.fn(), removeEventListener: vi.fn() }],
+    } as unknown as MediaStream;
+    const origMediaDevices = navigator.mediaDevices;
+    const origSrcObject = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'srcObject');
+    const origCreateUrl = URL.createObjectURL;
+    const origRevokeUrl = URL.revokeObjectURL;
+    let assigned: MediaProvider | null = null;
+    Object.defineProperty(HTMLMediaElement.prototype, 'srcObject', {
+      configurable: true,
+      get: () => assigned,
+      set: (v: MediaProvider | null) => {
+        assigned = v;
+      },
+    });
+    Object.defineProperty(navigator, 'mediaDevices', {
+      configurable: true,
+      value: { getUserMedia: vi.fn(async () => fakeStream) },
+    });
+    URL.createObjectURL = vi.fn(() => 'blob:webcam-fail-test');
+    URL.revokeObjectURL = vi.fn();
+    const ctxStub = {
+      drawImage: vi.fn(),
+      save: vi.fn(),
+      beginPath: vi.fn(),
+      rect: vi.fn(),
+      clip: vi.fn(),
+      restore: vi.fn(),
+    } as unknown as CanvasRenderingContext2D;
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(ctxStub);
+    vi.spyOn(HTMLCanvasElement.prototype, 'toBlob').mockImplementation((cb) => {
+      cb(new Blob(['jpg'], { type: 'image/jpeg' }));
+    });
+    vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue(undefined);
+    vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => {});
+
+    try {
+      const api = new MockApi('normal', 0);
+      const origModels = api.models.bind(api);
+      let releaseModels!: (list: Awaited<ReturnType<typeof api.models>>) => void;
+      api.models = () => new Promise((r) => (releaseModels = r));
+      const predictSpy = vi.spyOn(api, 'predict').mockRejectedValue(new Error('server offline'));
+      hub.api = api;
+      hub.mode = 'mock';
+      target = document.createElement('div');
+      document.body.appendChild(target);
+      history.replaceState(history.state, '', '#/playground?model=m_hard_s');
+      router.route = parse('#/playground?model=m_hard_s');
+      handle = render(() => <Playground />, target);
+
+      const camBtn = await until(
+        () => [...target.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('Live camera')),
+        'Live camera button before models resolve',
+      );
+      camBtn.click();
+      flushSync();
+      const decoder = target.querySelector<HTMLVideoElement>('video.media-decoder')!;
+      Object.defineProperty(decoder, 'videoWidth', { configurable: true, value: 320 });
+      Object.defineProperty(decoder, 'videoHeight', { configurable: true, value: 240 });
+      Object.defineProperty(decoder, 'readyState', { configurable: true, value: 4 });
+      await until(() => target.querySelector('[data-live-media="webcam"] .live-hud'), 'LIVE HUD while models load');
+      expect(predictSpy).toHaveBeenCalledTimes(0);
+
+      // Model catalog resolves -> reactive effect automatically starts webcam detection without needing Pause/Resume!
+      releaseModels(await origModels());
+      await until(() => predictSpy.mock.calls.length === 1, 'first webcam prediction fires after models load');
+
+      // Prediction failed -> live webcam auto-pauses and stops firing further requests.
+      const hud = await until(() => {
+        const el = target.querySelector('[data-live-media="webcam"] .live-hud');
+        return el?.textContent?.includes('PAUSED') ? el : null;
+      }, 'webcam auto-paused on inference failure');
+      expect(hud.textContent).toContain('PAUSED');
+      await new Promise((r) => setTimeout(r, 120));
+      expect(predictSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: origMediaDevices });
+      if (origSrcObject) Object.defineProperty(HTMLMediaElement.prototype, 'srcObject', origSrcObject);
       URL.createObjectURL = origCreateUrl;
       URL.revokeObjectURL = origRevokeUrl;
     }
