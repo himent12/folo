@@ -1,0 +1,115 @@
+// @vitest-environment happy-dom
+// New run CLI command preview: GPU VRAM auto-batch preview (`--set auto_batch=true`) without mutating POST /api/runs payloads.
+import { flush as flushSync, signal, tick } from 'fw';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { hub } from '$lib/api/index';
+import { MockApi } from '$lib/api/mock';
+import { parse, router } from '$lib/router';
+import { withAutoBatch } from '$lib/trainCli';
+import { toast } from '$lib/ui/toast';
+import { render, type Rendered } from '../../../framework/testing';
+import RunNew from '../RunNew';
+import CliCommand from './CliCommand';
+
+let target: HTMLElement;
+let mounted: Rendered | undefined;
+
+beforeEach(() => {
+  sessionStorage.clear();
+  toast.items = [];
+  target = document.createElement('div');
+  document.body.appendChild(target);
+  Element.prototype.scrollIntoView ??= () => {};
+});
+
+afterEach(() => {
+  mounted?.unmount();
+  mounted = undefined;
+  target?.remove();
+  vi.restoreAllMocks();
+  toast.items = [];
+});
+
+describe('CliCommand auto-batch preview', () => {
+  it('appends --set auto_batch=true cleanly and idempotently in withAutoBatch', () => {
+    const baseParts = ['folo train', '--data D:/shapes', '--batch 16'];
+    const baseLine = baseParts.join(' ');
+    const first = withAutoBatch(baseParts, baseLine);
+    expect(first.line).toBe('folo train --data D:/shapes --batch 16 --set auto_batch=true');
+    expect(first.parts.at(-1)).toBe('--set auto_batch=true');
+    // Calling twice never duplicates the flag
+    const second = withAutoBatch(first.parts, first.line);
+    expect(second.line).toBe(first.line);
+    expect(second.parts).toEqual(first.parts);
+  });
+
+  it('toggles --set auto_batch=true in preview & clipboard copy and disables on CPU', async () => {
+    const onCpu = signal(false);
+    const baseParts = ['folo train', '--data D:/shapes', '--model folo-s', '--epochs 100', '--batch 16', '--imgsz 640'];
+    const baseLine = baseParts.join(' ');
+
+    mounted = render(
+      () => <CliCommand cliParts={baseParts} cli={baseLine} cliPlaceholder={null} onCpu={onCpu.get()} />,
+      target,
+    );
+    flushSync();
+
+    const toggle = target.querySelector<HTMLInputElement>('[data-auto-batch-toggle]')!;
+    expect(toggle.checked).toBe(false);
+    expect(toggle.disabled).toBe(false);
+    expect(target.querySelector('.cli code')?.textContent).not.toContain('--set auto_batch=true');
+
+    toggle.checked = true;
+    toggle.dispatchEvent(new Event('change', { bubbles: true }));
+    flushSync();
+    expect(target.querySelector('.cli code')?.textContent).toContain('--set auto_batch=true');
+    expect(target.querySelector('[data-auto-batch-note]')?.textContent).toContain('CLI-only');
+
+    const write = vi.fn(async () => {});
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText: write }, configurable: true });
+    target.querySelector<HTMLButtonElement>('button[aria-label="Copy command"]')!.click();
+    await Promise.resolve();
+    expect(write).toHaveBeenCalledWith(`${baseLine} --set auto_batch=true`);
+
+    // Switching to CPU disables the toggle and omits --set auto_batch=true
+    onCpu.set(true);
+    flushSync();
+    expect(toggle.disabled).toBe(true);
+    expect(toggle.checked).toBe(false);
+    expect(target.querySelector('.cli code')?.textContent).not.toContain('--set auto_batch=true');
+  });
+
+  it('never alters POST /api/runs TrainConfig payload when Auto-batch VRAM CLI preview is checked in RunNew', async () => {
+    const api = new MockApi('normal', 0);
+    api.imageUrl = async () => 'data:,';
+    hub.api = api;
+    hub.mode = 'mock';
+    router.route = parse('#/runs/new');
+
+    mounted = render(() => <RunNew />, target);
+    await vi.waitFor(() => {
+      flushSync();
+      const t = target.querySelector<HTMLInputElement>('[data-auto-batch-toggle]');
+      const hasGpu = !!target.querySelector('select#device option[value="gpu:0"]');
+      const hasDataset = !!target.querySelector('input[name="dataset"]:checked');
+      if (!t || t.disabled || !hasGpu || !hasDataset) {
+        throw new Error('waiting for RunNew GPU and dataset');
+      }
+    });
+
+    const toggle = target.querySelector<HTMLInputElement>('[data-auto-batch-toggle]')!;
+    toggle.checked = true;
+    toggle.dispatchEvent(new Event('change', { bubbles: true }));
+    flushSync();
+    expect(target.querySelector('.cli code')?.textContent).toContain('--set auto_batch=true');
+
+    const create = vi.spyOn(api, 'createRun');
+    target.querySelector('form')!.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+    await tick();
+    expect(create).toHaveBeenCalledOnce();
+    const payload = create.mock.calls[0]![0];
+    expect(typeof payload.batch).toBe('number');
+    expect(payload.batch).toBe(16);
+    expect('auto_batch' in payload).toBe(false);
+  });
+});

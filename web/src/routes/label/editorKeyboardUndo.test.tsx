@@ -245,3 +245,78 @@ describe('EditorHints: overflow scroll, class bounds, and touch mode', () => {
     expect(target.querySelector('.key-strip')).toBeNull();
   });
 });
+
+describe('Labeling editor: U next-unlabeled shortcut', () => {
+  it('jumps to the next pending or failed image wrapping around, skipping labeled and labeling images', async () => {
+    const api = new MockApi('normal', 0);
+    const orig = api.labelImages.bind(api);
+    api.labelImages = async (jobId, query) => {
+      const page = await orig(jobId, query);
+      return {
+        ...page,
+        images: page.images.slice(0, 5).map((im, idx) => ({
+          ...im,
+          status:
+            idx === 0
+              ? ('pending' as const)
+              : idx === 1
+                ? ('labeled' as const)
+                : idx === 2
+                  ? ('labeling' as const)
+                  : idx === 3
+                    ? ('failed' as const)
+                    : ('labeled' as const),
+        })),
+        total: 5,
+      };
+    };
+    hub.api = api;
+    await openEditor('1');
+    expect(editor()!.querySelector('.key-strip')?.textContent).toContain('Next unlabeled');
+
+    // From image 1 (pending), U skips image 2 (labeled) and image 3 (labeling) -> lands on image 4 (failed)
+    expect(press('u').defaultPrevented).toBe(true);
+    await vi.waitFor(() => {
+      flushSync();
+      expect(router.route.query.get('image')).toBe('4');
+    });
+
+    // From image 4 (failed), U skips image 5 (labeled) and wraps around to image 1 (pending)
+    expect(press('U').defaultPrevented).toBe(true);
+    await vi.waitFor(() => {
+      flushSync();
+      expect(router.route.query.get('image')).toBe('1');
+    });
+  });
+
+  it('guards U while typing in inputs, respects unsaved changes prompt, and reports when no unlabeled images remain', async () => {
+    await openEditor('1');
+    // Guarded when focused in input
+    const noteInput = editor()!.querySelector<HTMLInputElement>('input[placeholder*="differently"]')!;
+    noteInput.focus();
+    expect(press('u', {}, noteInput).defaultPrevented).toBe(false);
+    expect(router.route.query.get('image')).toBe('1');
+
+    // Unsaved changes prompt appears before navigating away on U
+    byText('Add box').click();
+    flushSync();
+    expect(press('u').defaultPrevented).toBe(true);
+    const leaveDialog = [...document.querySelectorAll<HTMLDialogElement>('dialog[open]')].find((d) =>
+      d.textContent?.includes('Save your changes?'),
+    );
+    expect(leaveDialog).toBeDefined();
+    expect(router.route.query.get('image')).toBe('1');
+
+    // Close leave prompt, open fully-labeled job lb_51d0 -> U shows status info instead of navigating
+    mounted?.unmount();
+    mounted = undefined;
+    document.body.innerHTML = '';
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    hub.api = new MockApi('normal', 0);
+    await openEditor('1', 'lb_51d0');
+    expect(press('u').defaultPrevented).toBe(true);
+    expect(router.route.query.get('image')).toBe('1');
+    expect(editor()!.querySelector('[role="status"]')?.textContent).toContain('No more unlabeled images');
+  });
+});

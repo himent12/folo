@@ -2,9 +2,9 @@
 import ChevronRight from '$icons/chevron-right';
 import Copy from '$icons/copy';
 import TriangleAlert from '$icons/triangle-alert';
-import { computed, css, Index } from 'fw';
+import { computed, css, Index, signal } from 'fw';
 import type { Model, TrainConfig } from '$lib/api/types';
-import { SHELL, trainCommand } from '$lib/trainCli';
+import { SHELL, trainCommand, withAutoBatch } from '$lib/trainCli';
 import Button from '$lib/ui/Button';
 import { toast } from '$lib/ui/toast';
 
@@ -26,6 +26,8 @@ export interface CliCommandProps {
   cliParts: string[];
   cli: string;
   cliPlaceholder: string | null;
+  /** True when the selected target is CPU (GPU VRAM auto-batch probing is skipped on CPU). */
+  onCpu?: boolean;
   /** Prefill or linked weights still loading: hold the command until the run's real settings are resolved. */
   pending?: string | null;
   /** The Seed field holds no seed: held as Start is (lib/seed), never a command that would run with another seed. */
@@ -33,6 +35,13 @@ export interface CliCommandProps {
 }
 
 export default function CliCommand(props: CliCommandProps) {
+  /** CLI-preview-only toggle for `--set auto_batch=true` (never mutates `POST /api/runs` payload). */
+  const autoBatch = signal(false);
+  const autoBatchActive = computed(() => autoBatch.get() && !props.onCpu);
+  const shown = computed(() =>
+    autoBatchActive.get() ? withAutoBatch(props.cliParts, props.cli) : { parts: props.cliParts, line: props.cli },
+  );
+
   // page-level: the Summary rail's Copy command (the phone sheet holds no copy control).
   async function copy(text: string, done: string) {
     try {
@@ -59,7 +68,19 @@ export default function CliCommand(props: CliCommandProps) {
         <p class="cli-note">Enter a seed first: the command needs one.</p>
       ) : (
         <>
-          <p class="cli-shell">In {SHELL}:</p>
+          <div class="cli-top">
+            <p class="cli-shell">In {SHELL}:</p>
+            <label class="cli-auto" class:off={!!props.onCpu}>
+              <input
+                type="checkbox"
+                data-auto-batch-toggle
+                checked={autoBatchActive.get()}
+                disabled={!!props.onCpu}
+                onchange={(e) => autoBatch.set((e.currentTarget as HTMLInputElement).checked)}
+              />
+              <span>Auto-batch VRAM</span>
+            </label>
+          </div>
           {props.cliPlaceholder ? (
             <p class="cli-req">
               <TriangleAlert size={14} aria-hidden="true" />
@@ -68,7 +89,7 @@ export default function CliCommand(props: CliCommandProps) {
           ) : null}
           <div class="cli-body">
             <code aria-describedby={props.cliPlaceholder ? 'cli-note' : undefined}>
-              <Index each={props.cliParts}>
+              <Index each={shown.get().parts}>
                 {(p, i) => (
                   <span class="ln" class:cont={i > 0}>
                     {props.cliPlaceholder && p() === `--weights <path to ${props.cliPlaceholder}>` ? (
@@ -83,7 +104,7 @@ export default function CliCommand(props: CliCommandProps) {
                     ) : (
                       p()
                     )}
-                    {i < props.cliParts.length - 1 ? ' `' : ''}
+                    {i < shown.get().parts.length - 1 ? ' `' : ''}
                   </span>
                 )}
               </Index>
@@ -96,13 +117,18 @@ export default function CliCommand(props: CliCommandProps) {
                   icon={Copy}
                   aria-label="Copy template"
                   title="Copy template"
-                  onclick={() => copy(props.cli, 'Template copied: replace the weights path')}
+                  onclick={() => copy(shown.get().line, 'Template copied: replace the weights path')}
                 />
               ) : (
-                <Button size="sm" variant="ghost" icon={Copy} aria-label="Copy command" title="Copy command" onclick={() => copy(props.cli, 'Command copied')} />
+                <Button size="sm" variant="ghost" icon={Copy} aria-label="Copy command" title="Copy command" onclick={() => copy(shown.get().line, 'Command copied')} />
               )}
             </span>
           </div>
+          {autoBatchActive.get() ? (
+            <p class="cli-note" data-auto-batch-note>
+              CLI-only: probes GPU VRAM budget (80% target) via <span class="mono">--set auto_batch=true</span>; Start training still uses the selected numeric batch size.
+            </p>
+          ) : null}
           {props.cliPlaceholder ? (
             <p class="cli-note" id="cli-note">
               Put the path of {props.cliPlaceholder} on the server in its place: this server does not report it.
@@ -148,11 +174,35 @@ css`
     font-weight: var(--weight-regular);
   }
   /* The shell the command is written for, as ui/Remedy names it. */
-  .cli-shell {
+  .cli-top {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2);
     margin-top: var(--space-2);
+  }
+  .cli-shell {
     color: var(--text-tertiary);
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
+  }
+  .cli-auto {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    color: var(--text-secondary);
+    cursor: pointer;
+    user-select: none;
+  }
+  .cli-auto.off {
+    color: var(--text-disabled);
+    cursor: not-allowed;
+  }
+  .cli-auto input {
+    accent-color: var(--accent-solid);
   }
   .cli-body {
     position: relative;

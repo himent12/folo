@@ -4,13 +4,15 @@
  * split proportions, and one-click jump/filter controls for underrepresented classes or full Statistics.
  */
 import ArrowRight from '$icons/arrow-right';
+import ChevronDown from '$icons/chevron-down';
 import CircleAlert from '$icons/circle-alert';
 import CircleCheck from '$icons/circle-check';
 import TriangleAlert from '$icons/triangle-alert';
 import X from '$icons/x';
-import { computed, css, Dynamic, For, Show } from 'fw';
+import { computed, css, Dynamic, effect, For, Show, signal } from 'fw';
 import type { Dataset, DatasetStats, IssueCounts, Split } from '$lib/api/types';
 import { compact, num } from '$lib/format';
+import DatasetCurateCli from './DatasetCurateCli';
 import { computeDatasetInsights, type InsightTone } from './insights';
 import { FEW_BOXES } from './health';
 import { swatchStyle } from './swatch';
@@ -76,6 +78,16 @@ export default function DatasetInsights(props: DatasetInsightsProps) {
   const isCleanQuality = computed(() => {
     const d = data.get();
     return d.brokenLabels === 0 && d.imageErrors === 0 && d.emptyImages === 0 && !d.tinyWarn && d.checkErrors === 0 && d.checkWarnings === 0;
+  });
+
+  const curateOpen = signal(false);
+  let prevDatasetId = props.dataset.id;
+  effect(() => {
+    const nextId = props.dataset.id;
+    if (nextId !== prevDatasetId) {
+      prevDatasetId = nextId;
+      curateOpen.set(false);
+    }
   });
 
   return (
@@ -149,6 +161,17 @@ export default function DatasetInsights(props: DatasetInsightsProps) {
           Stats
           <ArrowRight size={12} strokeWidth={2} aria-hidden="true" />
         </button>
+        <button
+          type="button"
+          class="stats-link curate-btn"
+          class:open={curateOpen.get()}
+          aria-expanded={curateOpen.get()}
+          data-curate-toggle
+          onclick={() => curateOpen.set(!curateOpen.peek())}
+        >
+          CLI
+          <ChevronDown size={12} strokeWidth={2} aria-hidden="true" />
+        </button>
       </div>
 
       {nonZeroSplits.get().length > 0 ? (
@@ -180,6 +203,8 @@ export default function DatasetInsights(props: DatasetInsightsProps) {
           </span>
         </div>
       ) : null}
+
+      {curateOpen.get() ? <DatasetCurateCli dataset={props.dataset} stats={props.stats} activeClass={props.activeClass} /> : null}
     </section>
   );
 }
@@ -312,6 +337,16 @@ css`
   .stats-link:hover {
     color: var(--text-primary);
     background: var(--bg-hover);
+  }
+  .curate-btn :global(svg) {
+    transition: transform var(--dur-fast) var(--ease-standard);
+  }
+  .curate-btn.open {
+    color: var(--text-primary);
+    background: var(--bg-active);
+  }
+  .curate-btn.open :global(svg) {
+    transform: rotate(180deg);
   }
   .split-bar {
     display: flex;

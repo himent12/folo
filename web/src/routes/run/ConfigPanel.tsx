@@ -24,6 +24,8 @@ import Panel from '$lib/ui/Panel';
 import { toast } from '$lib/ui/toast';
 import { tooltip } from '$lib/ui/tooltip';
 import { batchSetting, closeMosaicSetting, headSetting, lrSetting, optimizerSetting, precisionSetting, resolvedRows, effectiveBatchSetting, type Setting } from './resolved';
+import CheckpointCli from './CheckpointCli';
+import type { CheckpointCliBundle } from './runExport';
 
 export interface ConfigPanelProps {
   config: TrainConfig;
@@ -38,6 +40,8 @@ export interface ConfigPanelProps {
   weights?: Origin | null;
   /** The run's `folo train` command, quoted for PowerShell (`GET /api/runs/{id}/cli`); null where the server has none. */
   cli?: string | null;
+  /** Shell-safe `folo val` / `folo predict` commands for this run's best checkpoint; omitted when no checkpoint exists. */
+  checkpointCli?: CheckpointCliBundle | null;
   /** The run's server id (`run_7d1e`): in the header, never in the page's (design/UNIFIED.md §2, Detail header). */
   runId?: string;
 }
@@ -236,6 +240,7 @@ export default function ConfigPanel(props: ConfigPanelProps) {
           <CommandLine command={props.cli} label={`${SHELL} command`} copied="The run's folo train command, for the server's machine." />
         </div>
       ) : null}
+      {props.checkpointCli ? <CheckpointCli bundle={props.checkpointCli} /> : null}
     </Panel>
   );
 }

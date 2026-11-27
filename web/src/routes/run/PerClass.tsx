@@ -2,11 +2,13 @@
  * Per-class validation metrics of the latest epoch, with the change since the previous epoch in a column of its own.
  * A class's own metric is AP (AP50-95, AP50); mAP is only their mean.
  */
+import Download from '$icons/download';
 import { computed, css, For, Index } from 'fw';
 import type { Epoch } from '$lib/api/types';
 import { classInk } from '$lib/design/classInk';
 import { stepDecimals, unitTop } from '$lib/charts/domain';
 import { score } from '$lib/format';
+import Menu, { type MenuItem } from '$lib/ui/Menu';
 import Panel from '$lib/ui/Panel';
 import Skeleton from '$lib/ui/Skeleton';
 import { tooltip } from '$lib/ui/tooltip';
@@ -23,6 +25,8 @@ export interface PerClassProps {
   unavailable?: boolean;
   /** The run ended before its first validation (its final history says so): none will come, and the panel says so. */
   ended?: boolean;
+  /** Optional export menu items (CSV/JSON) shown in the panel header when metrics are loaded. */
+  exportItems?: MenuItem[];
 }
 
 /** The last two epochs, compared by identity: a step (which bumps `version` too) leaves them as they were. */
@@ -79,6 +83,11 @@ export default function PerClass(props: PerClassProps) {
       meta={epochNo.get() ? `epoch ${epochNo.get()}${barTop.get() < 1 ? ` · bars 0–${formatBarTop(barTop.get())}` : ''}` : undefined}
       pad="none"
       id="per-class"
+      actions={
+        props.exportItems && props.exportItems.length > 0
+          ? () => <Menu variant="ghost" icon={Download} text="Export" label="Export run metrics" items={props.exportItems!} />
+          : undefined
+      }
     >
       {props.unavailable ? (
         <p class="none">Per-class results show once the run's metrics load.</p>

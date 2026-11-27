@@ -96,11 +96,23 @@ export interface TrainCommand {
   placeholder: string | null;
 }
 
+/** CLI override flag enabling the GPU VRAM-budget auto-batch prober (`TrainConfig.auto_batch`, docs/VISION.md). */
+export const AUTO_BATCH_FLAG = '--set auto_batch=true';
+
+/** Appends `--set auto_batch=true` to an existing CLI command preview (`parts` and `line`) without mutating it. */
+export function withAutoBatch(parts: readonly string[], line: string): { parts: string[]; line: string } {
+  if (parts.some((p) => p === AUTO_BATCH_FLAG) || /(?:^|\s)--set(?:=|\s+)auto_batch=true(?:\s|$)/.test(line)) {
+    return { parts: [...parts], line };
+  }
+  return { parts: [...parts, AUTO_BATCH_FLAG], line: `${line} ${AUTO_BATCH_FLAG}` };
+}
+
 /**
  * `folo train` for `config`. `data` is the dataset's path on the server; `model` the model `config.weights` names,
- * where known (its `path` is the file to fine-tune from).
+ * where known (its `path` is the file to fine-tune from). Pass `{ autoBatch: true }` to preview CLI-only GPU
+ * VRAM-budget auto-batching (`--set auto_batch=true`) without changing `TrainConfig`.
  */
-export function trainCommand(config: TrainConfig, data: string, model?: Model): TrainCommand {
+export function trainCommand(config: TrainConfig, data: string, model?: Model, opts?: { autoBatch?: boolean }): TrainCommand {
   const weights = config.weights ? weightsRef(config.weights, model) : null;
   const ctx: Context = { data, weights };
   const argv = ['train'];
@@ -127,6 +139,10 @@ export function trainCommand(config: TrainConfig, data: string, model?: Model): 
     // A placeholder stays readable (`<path to x.folo>`): it is there to be replaced, not run.
     const shown = f.flag === '--weights' && weights?.kind === 'placeholder' ? words : words.map(quote);
     parts.push(`${f.flag} ${shown.join(' ')}`);
+  }
+  if (opts?.autoBatch) {
+    argv.push('--set', 'auto_batch=true');
+    parts.push(AUTO_BATCH_FLAG);
   }
   return { argv, parts, line: parts.join(' '), placeholder: weights?.kind === 'placeholder' ? weights.file : null };
 }
