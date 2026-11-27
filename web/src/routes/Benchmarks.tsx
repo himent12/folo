@@ -356,7 +356,6 @@ export default function Benchmarks() {
                     variant="secondary"
                     icon={sortDir.get() === 'asc' ? ChevronUp : ChevronDown}
                     aria-label={sortDir.get() === 'asc' ? 'Sort ascending; click for descending' : 'Sort descending; click for ascending'}
-                    aria-pressed={sortDir.get() === 'asc'}
                     disabled={!hasData.get()}
                     onclick={() => sortDir.set((d) => (d === 'asc' ? 'desc' : 'asc'))}
                   />
@@ -518,8 +517,12 @@ export default function Benchmarks() {
                             <td class="hide-md src">
                               <span class="src-row" title={`${b().source_name} · ${sourceKind(b().source)}`}>
                                 <span class="src-name truncate">{b().source_name}</span>
-                                <span class="src-sep" aria-hidden="true">·</span>
-                                <span class="src-kind">{sourceKind(b().source)}</span>
+                                {!isGeneratedBenchSource(b().source) ? (
+                                  <>
+                                    <span class="src-sep" aria-hidden="true">·</span>
+                                    <span class="src-kind">{sourceKind(b().source)}</span>
+                                  </>
+                                ) : null}
                               </span>
                             </td>
                             <td class="r num muted">{num(b().images)}</td>
@@ -606,6 +609,7 @@ css`
   .src-sep,
   .src-kind {
     flex-shrink: 0;
+    font-size: var(--type-sm-size);
     color: var(--text-tertiary);
   }
   .lt-sort {
