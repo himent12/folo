@@ -383,7 +383,18 @@ impl Inner {
     }
 
     pub(super) async fn export(&self, a: ExportArgs) -> Result<Output, Error> {
-        let axes = DynamicAxes { batch: a.dynamic || a.dynamic_batch, hw: a.dynamic || a.dynamic_hw };
+        if a.format != folo_api::ExportFormat::Onnx && (a.dynamic_batch.is_some() || a.dynamic_hw.is_some()) {
+            return Err(invalid_arguments("dynamic_batch and dynamic_hw only apply to format `onnx`"));
+        }
+        if a.dynamic && (a.dynamic_batch == Some(false) || a.dynamic_hw == Some(false)) {
+            return Err(invalid_arguments(
+                "`dynamic: true` cannot be combined with `dynamic_batch: false` or `dynamic_hw: false`",
+            ));
+        }
+        let axes = DynamicAxes {
+            batch: a.dynamic || a.dynamic_batch.unwrap_or(false),
+            hw: a.dynamic || a.dynamic_hw.unwrap_or(false),
+        };
         let spec = ExportSpec {
             format: a.format,
             onnx: OnnxSwitches { decode: a.decode, dynamic: axes.batch && axes.hw, half: a.half },

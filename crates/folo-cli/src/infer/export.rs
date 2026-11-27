@@ -95,15 +95,51 @@ fn load_v2_for_onnx(path: &Path) -> Result<LoadedV2, CliError> {
         Some("true") => true,
         Some(v) => return Err(bad(format!("folo.fused must be \"true\" or \"false\", got `{v}`"))),
     };
-    if let Some(kind) = meta.get("folo.kind").map(String::as_str)
-        && !matches!(kind, "weights" | "checkpoint")
+    let kind = meta.get("folo.kind").map(String::as_str);
+    if let Some(k) = kind
+        && !matches!(k, "weights" | "checkpoint")
     {
-        return Err(bad(format!("folo.kind must be \"weights\" or \"checkpoint\", got `{kind}`")));
+        return Err(bad(format!("folo.kind must be \"weights\" or \"checkpoint\", got `{k}`")));
     }
-    if let Some(dt) = meta.get("folo.dtype").map(String::as_str)
-        && !matches!(dt, "F32" | "F16")
-    {
-        return Err(bad(format!("folo.dtype must be \"F32\" or \"F16\", got `{dt}`")));
+    let declared_dtype = match meta.get("folo.dtype").map(String::as_str) {
+        None => None,
+        Some("F32") => Some(DType::F32),
+        Some("F16") => Some(DType::F16),
+        Some(dt) => return Err(bad(format!("folo.dtype must be \"F32\" or \"F16\", got `{dt}`"))),
+    };
+    if kind == Some("weights") {
+        let extra: Vec<&str> = container
+            .tensors
+            .iter()
+            .filter(|t| {
+                matches!(Namespace::of(&t.name), Namespace::Ema | Namespace::Optim | Namespace::Sched)
+            })
+            .map(|t| t.name.as_str())
+            .collect();
+        if !extra.is_empty() {
+            return Err(bad(format!(
+                "a weights file holds only the model namespace, but it has {}",
+                extra.join(", ")
+            )));
+        }
+    }
+    if let Some(expected_dt) = declared_dtype {
+        for t in &container.tensors {
+            let ns = Namespace::of(&t.name);
+            let is_weight_tensor =
+                ns == Namespace::Model || (ns == Namespace::Ema && !t.name.starts_with("ema.__"));
+            if is_weight_tensor
+                && t.dtype.to_core().is_some_and(|d| d.is_float())
+                && t.dtype.to_core() != Some(expected_dt)
+            {
+                return Err(bad(format!(
+                    "tensor `{}` is {}, but folo.dtype is {:?}",
+                    t.name,
+                    t.dtype.as_str(),
+                    expected_dt
+                )));
+            }
+        }
     }
 
     let has_ema =

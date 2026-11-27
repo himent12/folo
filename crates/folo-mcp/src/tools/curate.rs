@@ -86,31 +86,80 @@ fn validate_class_map(
     Ok(out_map)
 }
 
-/// Rejects datasets with corrupt COCO split manifests or unreadable VOC ImageSets split files so curation never
-/// silently omits an entire split.
+/// Whether `path` is a confirmed COCO annotation location (explicitly passed input file, inside `annotations/` or
+/// a split folder `train|val|valid|test/`, a split/annotations directory itself, or a root `instances*.json` /
+/// `_annotations.coco.json`) as opposed to a root-level heuristic candidate like `coco_predictions.json` whose lack
+/// of an `images` array is benign.
+fn is_confirmed_coco_annotation(path: &Path, input: &Path, root: &Path) -> bool {
+    if input.is_file() {
+        return true;
+    }
+    if path == root.join("annotations")
+        || ["train", "val", "valid", "test"].iter().any(|s| path == root.join(s))
+    {
+        return true;
+    }
+    let parent = path.parent();
+    if parent.is_some_and(|p| p == root.join("annotations"))
+        || ["train", "val", "valid", "test"].iter().any(|s| parent.is_some_and(|p| p == root.join(s)))
+    {
+        return true;
+    }
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_ascii_lowercase();
+    name.starts_with("instances") || name == "_annotations.coco.json"
+}
+
+/// Rejects datasets with corrupt or dangling COCO split manifests or unreadable/dangling VOC ImageSets split
+/// files so curation never silently omits an entire split (mirroring `folo dataset convert/merge/filter`).
 fn check_unreadable_splits(ds: &LoadedDataset, input: &Path) -> Result<(), Error> {
     let bad: Vec<(PathBuf, String)> = match ds.format {
-        Format::Coco => ds
-            .report
-            .issues
-            .iter()
-            .filter(|i| {
-                i.kind == IssueKind::BrokenLabel
-                    && (i.message.starts_with("invalid JSON:")
-                        || (i.message == "no `images` array: not a COCO file"
-                            && (input.is_file() || i.path.parent().is_some_and(|p| p != ds.root))))
-            })
-            .map(|i| (i.path.clone(), i.message.clone()))
-            .collect(),
-        Format::Voc => ds
-            .report
-            .issues
-            .iter()
-            .filter(|i| {
-                i.kind == IssueKind::Other && i.message.starts_with("cannot read ImageSets split file:")
-            })
-            .map(|i| (i.path.clone(), i.message.clone()))
-            .collect(),
+        Format::Coco => {
+            let mut bad: Vec<(PathBuf, String)> = ds
+                .report
+                .issues
+                .iter()
+                .filter(|i| {
+                    i.kind == IssueKind::BrokenLabel
+                        && (i.message.starts_with("invalid JSON:")
+                            || (i.message == "no `images` array: not a COCO file"
+                                && is_confirmed_coco_annotation(&i.path, input, &ds.root)))
+                })
+                .map(|i| (i.path.clone(), i.message.clone()))
+                .collect();
+            if !input.is_file() {
+                for (p, msg) in folo_server::coco_dangling_annotation_links(&ds.root) {
+                    if is_confirmed_coco_annotation(&p, input, &ds.root) {
+                        bad.push((p, msg));
+                    }
+                }
+            }
+            bad
+        }
+        Format::Voc => {
+            let mut bad: Vec<(PathBuf, String)> = ds
+                .report
+                .issues
+                .iter()
+                .filter(|i| {
+                    i.kind == IssueKind::Other && i.message.starts_with("cannot read ImageSets split file:")
+                })
+                .map(|i| (i.path.clone(), i.message.clone()))
+                .collect();
+            for rel in ["ImageSets/Main", "imagesets/main", "ImageSets/main", "imagesets/Main"] {
+                let dir = ds.root.join(rel);
+                if !dir.is_dir() {
+                    continue;
+                }
+                for name in ["train.txt", "val.txt", "trainval.txt", "test.txt"] {
+                    let p = dir.join(name);
+                    if let Some(msg) = folo_server::dangling_link_message(&p) {
+                        bad.push((p, msg));
+                    }
+                }
+                break;
+            }
+            bad
+        }
         _ => Vec::new(),
     };
     if let Some((first_path, first_msg)) = bad.first() {
@@ -331,16 +380,11 @@ impl Inner {
             }
         };
         if let Err(e) = self.ensure_dataset(&dataset.id).await {
+            // Only roll back and remove files when we own a fresh registration token; if the store reused an
+            // existing registration (`rollback == None`), never delete someone else's registration or files.
             let unregistered = if let Some(token) = rollback {
                 let (id, c) = (dataset.id.clone(), self.confinement.clone());
                 let ok = self.blocking(move |s| s.delete_dataset_if_unused(&id, &token)).await.is_ok();
-                if ok {
-                    c.forget(&dataset.id);
-                }
-                ok
-            } else if self.proxy.is_none() {
-                let (id, c) = (dataset.id.clone(), self.confinement.clone());
-                let ok = self.blocking(move |s| s.delete_dataset(&id)).await.is_ok();
                 if ok {
                     c.forget(&dataset.id);
                 }
@@ -591,6 +635,16 @@ impl Inner {
                 && (!v.is_finite() || v < 0.0)
             {
                 return Err(invalid_arguments(format!("{name} must be finite and >= 0, got {v}")));
+            }
+        }
+        for (name, val) in [
+            ("min_width", a.min_width),
+            ("min_height", a.min_height),
+            ("max_width", a.max_width),
+            ("max_height", a.max_height),
+        ] {
+            if val == Some(0) {
+                return Err(invalid_arguments(format!("{name} must be >= 1, got 0")));
             }
         }
         let cfg = FilterConfig {

@@ -425,10 +425,10 @@ pub struct ExportArgs {
     pub dynamic: bool,
     /// ONNX only: symbolic batch axis only (`"batch"`, static H/W unless `dynamic_hw` is also true).
     #[serde(default)]
-    pub dynamic_batch: bool,
+    pub dynamic_batch: Option<bool>,
     /// ONNX only: symbolic spatial axes only (`"height"`, `"width"`, static batch unless `dynamic_batch` is also true).
     #[serde(default)]
-    pub dynamic_hw: bool,
+    pub dynamic_hw: Option<bool>,
     /// ONNX only: f16 weights, input and outputs (the file name gets `-f16`).
     #[serde(default)]
     pub half: bool,
