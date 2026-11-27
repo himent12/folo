@@ -88,41 +88,10 @@ pub(super) unsafe fn kernel_avx512vnni_zmm(
     }
 }
 
-/// [`super::silu::silu_q8`] on 16 lanes (`__m512`), bit-identical to scalar [`super::silu::silu_q8`].
-#[cfg(test)]
-#[target_feature(enable = "avx512f")]
-#[inline]
-pub(super) fn silu_q8_avx512(x: __m512) -> __m512 {
-    let x = _mm512_max_ps(_mm512_set1_ps(-85.0), x);
-    let u = _mm512_max_ps(_mm512_mul_ps(x, _mm512_set1_ps(NEG_LOG2_E)), _mm512_set1_ps(-124.0));
-    let magic = _mm512_set1_ps(MAGIC_EXP);
-    let z = _mm512_add_ps(u, magic);
-    let n = _mm512_sub_ps(z, magic);
-    let f = _mm512_sub_ps(u, n);
-    let f2 = _mm512_mul_ps(f, f);
-    let p01 = _mm512_fmadd_ps(_mm512_set1_ps(C1), f, _mm512_set1_ps(C0));
-    let p23 = _mm512_fmadd_ps(_mm512_set1_ps(C3), f, _mm512_set1_ps(C2));
-    let p45 = _mm512_fmadd_ps(_mm512_set1_ps(C5), f, _mm512_set1_ps(C4));
-    let p2345 = _mm512_fmadd_ps(p45, f2, p23);
-    let p = _mm512_fmadd_ps(p2345, f2, p01);
-    let s = _mm512_slli_epi32::<23>(_mm512_castps_si512(z));
-    let e = _mm512_mul_ps(p, _mm512_castsi512_ps(s));
-    let one = _mm512_set1_ps(1.0);
-    let d = _mm512_add_ps(one, e);
-    let r0 =
-        _mm512_castsi512_ps(_mm512_sub_epi32(_mm512_set1_epi32(RECIP_MAGIC as i32), _mm512_castps_si512(d)));
-    let e0 = _mm512_fnmadd_ps(d, r0, one);
-    let u2 = _mm512_fmadd_ps(r0, e0, r0);
-    let e2 = _mm512_mul_ps(e0, e0);
-    let t2 = _mm512_fmadd_ps(e2, e2, e2);
-    let r = _mm512_fmadd_ps(u2, t2, u2);
-    _mm512_mul_ps(x, r)
-}
-
 /// [`super::silu::silu_q8`] on 2 independent 16-lane ZMM vectors (32 floats), bit-identical to scalar.
 #[target_feature(enable = "avx512f")]
 #[inline]
-fn silu_q8_avx512_x2(x: [__m512; 2]) -> [__m512; 2] {
+pub(super) fn silu_q8_avx512_x2(x: [__m512; 2]) -> [__m512; 2] {
     let min_x = _mm512_set1_ps(-85.0);
     let x0 = _mm512_max_ps(min_x, x[0]);
     let x1 = _mm512_max_ps(min_x, x[1]);
@@ -444,31 +413,34 @@ unsafe fn k_loop_1x1_512<const ZVECS: usize>(
     let (mut c20, mut c21, mut c22) = (z, z, z);
     let (mut c30, mut c31, mut c32) = (z, z, z);
     // SAFETY: caller guarantees `ks` planes of stride `hw` with `col + ZVECS * 16` readable words.
+    // Guarding with `ks > 0` avoids out-of-bounds `base.add(col)` on a 0-channel view backed only by `SLACK`.
     unsafe {
-        let mut bp = base.add(col);
-        let mut ap = a;
-        let hw2 = hw.wrapping_mul(2);
-        let mut p = 0;
-        while p + 2 <= ks {
-            let b0 = _mm512_loadu_si512(bp as *const __m512i);
-            let b1 = if ZVECS >= 2 { _mm512_loadu_si512(bp.add(16) as *const __m512i) } else { z };
-            let b2 = if ZVECS >= 3 { _mm512_loadu_si512(bp.add(32) as *const __m512i) } else { z };
-            dp512!(ZVECS, b0, b1, b2, ap, c00, c01, c02, c10, c11, c12, c20, c21, c22, c30, c31, c32);
-            let bp1 = bp.add(hw);
-            let ap1 = ap.add(MR);
-            let b0 = _mm512_loadu_si512(bp1 as *const __m512i);
-            let b1 = if ZVECS >= 2 { _mm512_loadu_si512(bp1.add(16) as *const __m512i) } else { z };
-            let b2 = if ZVECS >= 3 { _mm512_loadu_si512(bp1.add(32) as *const __m512i) } else { z };
-            dp512!(ZVECS, b0, b1, b2, ap1, c00, c01, c02, c10, c11, c12, c20, c21, c22, c30, c31, c32);
-            bp = bp.wrapping_add(hw2);
-            ap = ap.wrapping_add(2 * MR);
-            p += 2;
-        }
-        if p < ks {
-            let b0 = _mm512_loadu_si512(bp as *const __m512i);
-            let b1 = if ZVECS >= 2 { _mm512_loadu_si512(bp.add(16) as *const __m512i) } else { z };
-            let b2 = if ZVECS >= 3 { _mm512_loadu_si512(bp.add(32) as *const __m512i) } else { z };
-            dp512!(ZVECS, b0, b1, b2, ap, c00, c01, c02, c10, c11, c12, c20, c21, c22, c30, c31, c32);
+        if ks > 0 {
+            let mut bp = base.add(col);
+            let mut ap = a;
+            let hw2 = hw.wrapping_mul(2);
+            let mut p = 0;
+            while p + 2 <= ks {
+                let b0 = _mm512_loadu_si512(bp as *const __m512i);
+                let b1 = if ZVECS >= 2 { _mm512_loadu_si512(bp.add(16) as *const __m512i) } else { z };
+                let b2 = if ZVECS >= 3 { _mm512_loadu_si512(bp.add(32) as *const __m512i) } else { z };
+                dp512!(ZVECS, b0, b1, b2, ap, c00, c01, c02, c10, c11, c12, c20, c21, c22, c30, c31, c32);
+                let bp1 = bp.add(hw);
+                let ap1 = ap.add(MR);
+                let b0 = _mm512_loadu_si512(bp1 as *const __m512i);
+                let b1 = if ZVECS >= 2 { _mm512_loadu_si512(bp1.add(16) as *const __m512i) } else { z };
+                let b2 = if ZVECS >= 3 { _mm512_loadu_si512(bp1.add(32) as *const __m512i) } else { z };
+                dp512!(ZVECS, b0, b1, b2, ap1, c00, c01, c02, c10, c11, c12, c20, c21, c22, c30, c31, c32);
+                bp = bp.wrapping_add(hw2);
+                ap = ap.wrapping_add(2 * MR);
+                p += 2;
+            }
+            if p < ks {
+                let b0 = _mm512_loadu_si512(bp as *const __m512i);
+                let b1 = if ZVECS >= 2 { _mm512_loadu_si512(bp.add(16) as *const __m512i) } else { z };
+                let b2 = if ZVECS >= 3 { _mm512_loadu_si512(bp.add(32) as *const __m512i) } else { z };
+                dp512!(ZVECS, b0, b1, b2, ap, c00, c01, c02, c10, c11, c12, c20, c21, c22, c30, c31, c32);
+            }
         }
         store_tile512!(ZVECS, acc, c00, c01, c02, c10, c11, c12, c20, c21, c22, c30, c31, c32);
     }
@@ -592,21 +564,26 @@ unsafe fn k_loop_bmode_8(
             c3 = _mm256_dpbusd_epi32(c3, b0, _mm256_set1_epi32(*$ap.add(3)));
         };
     }
-    // SAFETY: caller guarantees `col + 8` readable words in B and `ks * MR` weights at `a`.
+    // SAFETY: caller guarantees `col + 8` readable words in B (when `ks > 0` / `g_cnt > 0`) and `ks * MR` weights.
     unsafe {
         match b_mode {
             BMode::Pointwise1x1 { base, hw } => {
-                let mut bp = base.add(col);
-                let mut ap = a;
-                for _ in 0..ks {
-                    step8!(bp, ap);
-                    bp = bp.wrapping_add(hw);
-                    ap = ap.wrapping_add(MR);
+                if ks > 0 {
+                    let mut bp = base.add(col);
+                    let mut ap = a;
+                    for _ in 0..ks {
+                        step8!(bp, ap);
+                        bp = bp.wrapping_add(hw);
+                        ap = ap.wrapping_add(MR);
+                    }
                 }
             }
             BMode::Pointwise1x1Parts { parts, hw } => {
                 let mut ap = a;
                 for &(base, g_cnt) in parts {
+                    if g_cnt == 0 {
+                        continue;
+                    }
                     let mut bp = base.add(col);
                     for _ in 0..g_cnt {
                         step8!(bp, ap);

@@ -251,31 +251,40 @@ fn silu_avx512_matches_scalar_bit_for_bit() {
         f32::NEG_INFINITY,
         f32::MIN_POSITIVE,
         -f32::MIN_POSITIVE,
+        f32::NAN,
+        -f32::NAN,
     ];
     for i in -1000..=1000 {
         xs.push(i as f32 * 0.1);
     }
-    while !xs.len().is_multiple_of(16) {
+    while !xs.len().is_multiple_of(32) {
         xs.push(0.25);
     }
     #[target_feature(enable = "avx512f")]
-    unsafe fn eval16(src: &[f32]) -> [f32; 16] {
+    unsafe fn eval32(src: &[f32]) -> [f32; 32] {
         use std::arch::x86_64::*;
-        let mut out = [0.0f32; 16];
-        // SAFETY: `src.len() >= 16` and `out.len() == 16`.
+        let mut out = [0.0f32; 32];
+        // SAFETY: `src.len() >= 32` and `out.len() == 32`.
         unsafe {
-            let v = _mm512_loadu_ps(src.as_ptr());
-            let r = super::vnni512::silu_q8_avx512(v);
-            _mm512_storeu_ps(out.as_mut_ptr(), r);
+            let v0 = _mm512_loadu_ps(src.as_ptr());
+            let v1 = _mm512_loadu_ps(src.as_ptr().add(16));
+            let [r0, r1] = super::vnni512::silu_q8_avx512_x2([v0, v1]);
+            _mm512_storeu_ps(out.as_mut_ptr(), r0);
+            _mm512_storeu_ps(out.as_mut_ptr().add(16), r1);
         }
         out
     }
-    for chunk in xs.as_chunks::<16>().0 {
+    for chunk in xs.as_chunks::<32>().0 {
         // SAFETY: avx512f detected above.
-        let got = unsafe { eval16(chunk) };
+        let got = unsafe { eval32(chunk) };
         for (i, &x) in chunk.iter().enumerate() {
             let exp = silu_q8(x);
-            assert_eq!(got[i].to_bits(), exp.to_bits(), "silu_q8_avx512 mismatch at x={x}");
+            if x.is_nan() {
+                assert!(got[i].is_nan(), "silu_q8_avx512_x2 lost NaN at lane {i}");
+                assert!(exp.is_nan());
+            } else {
+                assert_eq!(got[i].to_bits(), exp.to_bits(), "silu_q8_avx512_x2 mismatch at x={x}");
+            }
         }
     }
 }
@@ -599,6 +608,96 @@ fn per_channel_large_3x3_s1_hits_rotating_strip_bit_exact() {
         }
     }
     recycle(got);
+}
+
+#[test]
+fn zero_channel_concat_and_decoupled_padded_wide_multipart_bit_exact() {
+    let mut seed = 0x00C4_0097_u64;
+    let mut next_f32 = |lo: f32, hi: f32| {
+        let u = ((lcg(&mut seed) >> 40) as f32) / ((1u32 << 24) as f32);
+        lo + u * (hi - lo)
+    };
+
+    // 1) Zero-channel C4 view backed by exactly `SLACK` words concatenated with a 4-channel view on
+    // `hw > SLACK` (1x97 and 1x104, hitting col > SLACK and 1..=8 narrow tails) for coupled & decoupled 1x1.
+    for &(h, w) in &[(1usize, 97usize), (1, 104)] {
+        let hw = h * w;
+        let (c0, c1, o) = (0usize, 4usize, 8usize);
+        let g0 = Grid::from_range(-1.0, 1.0);
+        let g1 = Grid::from_range(-2.0, 3.0);
+        let out_grid = Grid::from_range(-3.0, 4.0);
+        let empty_buf = vec![0u32; SLACK];
+        let x0v = C4 { data: &empty_buf, offset: 0, img_stride: 0, c: c0, zero: g0.zero };
+        let x1f: Vec<f32> = (0..c1 * hw).map(|_| next_f32(-2.0, 3.0)).collect();
+        let mut x1b = alloc(1, c1, hw);
+        quantize(&x1f, 1, c1, hw, g1, &mut x1b);
+        let x1v = C4 { data: &x1b, offset: 0, img_stride: (c1 / 4) * hw, c: c1, zero: g1.zero };
+        let wf: Vec<f32> = (0..o * c1).map(|_| next_f32(-0.8, 0.8)).collect();
+        let bias: Vec<f32> = (0..o).map(|_| next_f32(-0.4, 0.4)).collect();
+        let pg0: [Grid; 0] = [];
+        let pg1 = vec![g1; c1];
+        let out_grids = vec![out_grid; o];
+        for decouple in [false, true] {
+            let cv = QConv::new_parts(&wf, &bias, (o, c1, 1), 1, 0, true, &[&pg0, &pg1], decouple);
+            let (ref_u8, _) = conv_ref_packed(&[x0v, x1v], 1, h, w, &cv, None, Some(&out_grids));
+            let mut got = alloc(1, o, hw);
+            conv(&[x0v, x1v], 1, h, w, &cv, None, QOut::U8 { data: &mut got, grid: out_grid });
+            assert_eq!(
+                &got[..(o / 4) * hw],
+                &ref_u8[..],
+                "zero-channel concat 1x1 (decouple={decouple}) mismatch at {h}x{w}"
+            );
+            recycle(got);
+        }
+        recycle(x1b);
+    }
+
+    // 2) Decoupled padded-width multi-part 3x3 (ow = 52 >= 48, `t.wq != t.ow`) with residuals (U8 & F32).
+    let (h, w, c0, c1, o) = (4usize, 52usize, 8usize, 8usize, 8usize);
+    let c = c0 + c1;
+    let hw = h * w;
+    let g0 = Grid::from_range(-1.5, 2.0);
+    let g1 = Grid::from_range(-5.0, 1.5);
+    let res_grid = Grid::from_range(-1.0, 1.0);
+    let out_grid = Grid::from_range(-3.0, 4.0);
+    let pg0 = vec![g0; c0];
+    let pg1 = vec![g1; c1];
+    let res_grids = vec![res_grid; o];
+    let out_grids = vec![out_grid; o];
+    let x0f: Vec<f32> = (0..c0 * hw).map(|_| next_f32(-1.5, 2.0)).collect();
+    let x1f: Vec<f32> = (0..c1 * hw).map(|_| next_f32(-5.0, 1.5)).collect();
+    let rf: Vec<f32> = (0..o * hw).map(|_| next_f32(-1.0, 1.0)).collect();
+    let mut x0b = alloc(1, c0, hw);
+    let mut x1b = alloc(1, c1, hw);
+    let mut rb = alloc(1, o, hw);
+    quantize(&x0f, 1, c0, hw, g0, &mut x0b);
+    quantize(&x1f, 1, c1, hw, g1, &mut x1b);
+    quantize(&rf, 1, o, hw, res_grid, &mut rb);
+    let x0v = C4 { data: &x0b, offset: 0, img_stride: (c0 / 4) * hw, c: c0, zero: g0.zero };
+    let x1v = C4 { data: &x1b, offset: 0, img_stride: (c1 / 4) * hw, c: c1, zero: g1.zero };
+    let rv = C4 { data: &rb, offset: 0, img_stride: (o / 4) * hw, c: o, zero: res_grid.zero };
+    let wf: Vec<f32> = (0..o * c * 9).map(|_| next_f32(-0.6, 0.6)).collect();
+    let bias: Vec<f32> = (0..o).map(|_| next_f32(-0.3, 0.3)).collect();
+    let cv = QConv::new_parts(&wf, &bias, (o, c, 3), 1, 1, true, &[&pg0, &pg1], true);
+
+    let (ref_u8, _) = conv_ref_packed(&[x0v, x1v], 1, h, w, &cv, Some((rv, &res_grids)), Some(&out_grids));
+    let mut got_u8 = alloc(1, o, hw);
+    conv(&[x0v, x1v], 1, h, w, &cv, Some((rv, res_grid)), QOut::U8 { data: &mut got_u8, grid: out_grid });
+    assert_eq!(&got_u8[..(o / 4) * hw], &ref_u8[..], "decoupled padded 3x3 u8 mismatch");
+    recycle(got_u8);
+
+    let (_, ref_f32) = conv_ref_packed(&[x0v, x1v], 1, h, w, &cv, Some((rv, &res_grids)), None);
+    let mut got_f32 = vec![0.0f32; o * hw];
+    conv(&[x0v, x1v], 1, h, w, &cv, Some((rv, res_grid)), QOut::F32 { data: &mut got_f32 });
+    assert_eq!(
+        got_f32.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+        ref_f32.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+        "decoupled padded 3x3 f32 mismatch"
+    );
+
+    recycle(x0b);
+    recycle(x1b);
+    recycle(rb);
 }
 
 #[test]

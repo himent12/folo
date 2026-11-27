@@ -129,28 +129,32 @@ macro_rules! define_fused_isa {
                     };
                 }
                 // SAFETY: caller guarantees `ks` planes of stride `hw` with `col + VECS * 8` readable words
-                // (within `ks * hw + SLACK`). Trailing `wrapping_add` pointers are never dereferenced.
+                // (within `ks * hw + SLACK`). Guarding with `ks > 0` avoids forming an out-of-bounds pointer
+                // on a 0-channel view backed only by `SLACK` words; trailing `wrapping_add` pointers are never
+                // dereferenced.
                 unsafe {
-                    let mut bp = base.add(col);
-                    let mut ap = a;
-                    if UNROLL2 {
-                        let hw2 = hw.wrapping_mul(2);
-                        let mut p = 0;
-                        while p + 2 <= ks {
-                            step_bp!(bp, ap);
-                            step_bp!(bp.add(hw), ap.add(MR));
-                            bp = bp.wrapping_add(hw2);
-                            ap = ap.wrapping_add(2 * MR);
-                            p += 2;
-                        }
-                        if p < ks {
-                            step_bp!(bp, ap);
-                        }
-                    } else {
-                        for _ in 0..ks {
-                            step_bp!(bp, ap);
-                            bp = bp.wrapping_add(hw);
-                            ap = ap.wrapping_add(MR);
+                    if ks > 0 {
+                        let mut bp = base.add(col);
+                        let mut ap = a;
+                        if UNROLL2 {
+                            let hw2 = hw.wrapping_mul(2);
+                            let mut p = 0;
+                            while p + 2 <= ks {
+                                step_bp!(bp, ap);
+                                step_bp!(bp.add(hw), ap.add(MR));
+                                bp = bp.wrapping_add(hw2);
+                                ap = ap.wrapping_add(2 * MR);
+                                p += 2;
+                            }
+                            if p < ks {
+                                step_bp!(bp, ap);
+                            }
+                        } else {
+                            for _ in 0..ks {
+                                step_bp!(bp, ap);
+                                bp = bp.wrapping_add(hw);
+                                ap = ap.wrapping_add(MR);
+                            }
                         }
                     }
                     store_tile!(VECS, acc, c00, c01, c02, c10, c11, c12, c20, c21, c22, c30, c31, c32);
