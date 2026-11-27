@@ -441,7 +441,8 @@ impl FoloApp {
                             .child(m.name.clone()),
                     ),
             )
-            // The architecture is a name (sans), with a v2 badge for FOLO v2 and e2e tag for o2o.
+            // The architecture is a name (sans), with a v2 badge for FOLO v2 (omitted when e2e is
+            // also shown so `folo2-x` + `e2e` stays inside ARCH_W) and e2e tag for o2o.
             .child({
                 let model_arch = self.store.model_arch(m);
                 div()
@@ -449,9 +450,13 @@ impl FoloApp {
                     .flex_none()
                     .flex()
                     .items_center()
-                    .gap(px(6.))
-                    .child(text(ty::SM, t.text_secondary).whitespace_nowrap().child(model_arch.as_str()))
-                    .when(model_arch.is_v2(), |d| d.child(badge(&t, "v2", Tone::Accent)))
+                    .gap(px(5.))
+                    .child(
+                        text(ty::SM, if model_arch.is_v2() { t.accent_text } else { t.text_secondary })
+                            .whitespace_nowrap()
+                            .child(model_arch.as_str()),
+                    )
+                    .when(model_arch.is_v2() && !e2e, |d| d.child(badge(&t, "v2", Tone::Accent)))
                     .when(e2e, |d| d.child(e2e_tag(&t, format!("e2e-m-{}", m.id))))
             })
             .when(c.classes, |d| {

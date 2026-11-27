@@ -203,11 +203,6 @@ impl ModelArch {
         None
     }
 
-    /// Parse an optional raw override string, falling back to `folo-<scale>`.
-    pub fn from_raw_or(raw: Option<&str>, fallback: Arch) -> Self {
-        raw.and_then(Self::parse).unwrap_or_else(|| Self::v1(fallback))
-    }
-
     /// Whether `query` (already lowercased) matches this architecture or its family label.
     pub fn matches_query(self, q_lower: &str) -> bool {
         self.as_str().contains(q_lower)

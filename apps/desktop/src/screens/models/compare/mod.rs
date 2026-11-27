@@ -16,7 +16,7 @@ use crate::api::{Head, Model, ModelEval};
 use crate::app::{FoloApp, Route, act, export_default_dir, picked_save};
 use crate::arch::ModelArch;
 use crate::controls::Btn;
-use crate::screens::models::groups::eval_set;
+use crate::screens::models::groups::eval_set_with_report;
 use crate::screens::playground::write_export_bytes;
 use crate::screens::{loading_rows, page_header};
 use crate::theme::{Theme, radius, theme, ty};
@@ -25,7 +25,7 @@ use crate::ui::*;
 pub use data::{
     MODEL_COMPARE_MAX, ModelCompareState, build_model_compare_csv, build_model_compare_markdown,
     build_per_class_rows, fmt_signed_delta, fmt_signed_delta2, model_compare_filename,
-    reconcile_compare_models, same_eval_set,
+    reconcile_compare_models, same_eval_set_with_evals,
 };
 
 struct CompareExportInputs {
@@ -38,14 +38,15 @@ struct CompareExportInputs {
 
 impl FoloApp {
     /// Opens side-by-side Model Compare (`Route::ModelCompare`), optionally seeding `seed` as
-    /// baseline slot 0.
+    /// baseline slot 0. Preserves `seed` when `store.models` is not loaded yet.
     pub fn open_model_compare(&mut self, seed: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
-        let models = self.store.models.ready().cloned().unwrap_or_default();
         if let Some(sid) = seed {
             self.model_compare.ids.retain(|id| id != &sid);
             self.model_compare.ids.insert(0, sid);
         }
-        reconcile_compare_models(&mut self.model_compare.ids, &self.store, &models);
+        if let Some(models) = self.store.models.ready().cloned() {
+            reconcile_compare_models(&mut self.model_compare.ids, &self.store, &models);
+        }
         self.navigate(Route::ModelCompare, window, cx);
     }
 
@@ -74,7 +75,7 @@ impl FoloApp {
     }
 
     /// Snapshot of currently compared models, canonical architectures, evaluation set labels, and
-    /// loaded evals for export actions.
+    /// loaded evals for export actions. Uses loaded [`ModelEval`] provenance when available.
     fn model_compare_export_inputs(&self) -> Option<CompareExportInputs> {
         let all = self.store.models.ready()?;
         let mut ids = self.model_compare.ids.clone();
@@ -85,11 +86,16 @@ impl FoloApp {
             return None;
         }
         let archs: Vec<ModelArch> = models.iter().map(|m| self.store.model_arch(m)).collect();
-        let sets: Vec<String> = models.iter().map(|m| eval_set(&self.store, m).label).collect();
         let evals: Vec<Option<ModelEval>> =
             models.iter().map(|m| self.store.evals.get(&m.id).and_then(|l| l.ready()).cloned()).collect();
+        let sets: Vec<String> = models
+            .iter()
+            .zip(evals.iter())
+            .map(|(m, ev)| eval_set_with_report(&self.store, m, ev.as_ref()).label)
+            .collect();
         let refs: Vec<&Model> = models.iter().collect();
-        let same = same_eval_set(&self.store, &refs);
+        let e_refs: Vec<Option<&ModelEval>> = evals.iter().map(Option::as_ref).collect();
+        let same = same_eval_set_with_evals(&self.store, &refs, &e_refs);
         Some(CompareExportInputs { models, archs, sets, evals, same })
     }
 
@@ -100,7 +106,7 @@ impl FoloApp {
         };
         let m_refs: Vec<&Model> = inp.models.iter().collect();
         let e_refs: Vec<Option<&ModelEval>> = inp.evals.iter().map(Option::as_ref).collect();
-        let csv = build_model_compare_csv(&m_refs, &inp.archs, &inp.sets, &e_refs);
+        let csv = build_model_compare_csv(&m_refs, &inp.archs, &inp.sets, &e_refs, inp.same);
         cx.write_to_clipboard(folo_ui::ClipboardItem::new_string(csv));
         self.toast(
             Tone::Success,
@@ -144,7 +150,7 @@ impl FoloApp {
         let m_refs: Vec<&Model> = inp.models.iter().collect();
         let e_refs: Vec<Option<&ModelEval>> = inp.evals.iter().map(Option::as_ref).collect();
         let filename = model_compare_filename(&m_refs, "csv");
-        let bytes = build_model_compare_csv(&m_refs, &inp.archs, &inp.sets, &e_refs).into_bytes();
+        let bytes = build_model_compare_csv(&m_refs, &inp.archs, &inp.sets, &e_refs, inp.same).into_bytes();
         self.save_model_compare_file("CSV", filename, bytes, cx);
     }
 
@@ -304,7 +310,9 @@ impl FoloApp {
             page_header(&t, "Compare models", subtitle, vec![copy_csv, save_csv, copy_md, save_md, back_btn]);
 
         let refs: Vec<&Model> = chosen.iter().collect();
-        let same_set = same_eval_set(&self.store, &refs);
+        let eval_refs: Vec<Option<&ModelEval>> =
+            chosen.iter().map(|m| self.store.evals.get(&m.id).and_then(|l| l.ready())).collect();
+        let same_set = same_eval_set_with_evals(&self.store, &refs, &eval_refs);
         let chips = self.model_compare_chips(&t, &chosen, &all, window, cx);
         let summary_panel = self.model_compare_summary(&t, &chosen, same_set, window, cx);
         let per_class_panel = self.model_compare_per_class(&t, &chosen, window, cx);
@@ -370,18 +378,31 @@ impl FoloApp {
                     None,
                     window,
                     cx,
-                    act(move |this, _, cx| this.model_compare_make_baseline(&mid_base, cx)),
+                    act(move |this, w, cx| {
+                        this.model_compare_make_baseline(&mid_base, cx);
+                        w.focus(&this.fh(format!("model-cmp-open-{mid_base}"), cx));
+                    }),
                 )
             });
             let rm_btn = can_remove.then(|| {
                 let mid_rm = m.id.clone();
+                let fallback_focus = chosen
+                    .get(slot.saturating_sub(1))
+                    .filter(|c| c.id != m.id)
+                    .or_else(|| chosen.get(slot + 1))
+                    .map(|c| c.id.clone());
                 self.icon_button(
                     &format!("model-cmp-rm-{}", m.id),
                     "icons/x.svg",
                     "Remove from comparison",
                     window,
                     cx,
-                    act(move |this, _, cx| this.model_compare_remove(&mid_rm, cx)),
+                    act(move |this, w, cx| {
+                        this.model_compare_remove(&mid_rm, cx);
+                        if let Some(next_id) = fallback_focus.as_deref() {
+                            w.focus(&this.fh(format!("model-cmp-open-{next_id}"), cx));
+                        }
+                    }),
                 )
             });
             let chip = div()
@@ -515,9 +536,10 @@ impl FoloApp {
         let eval_cells: Vec<AnyElement> = chosen
             .iter()
             .map(|m| {
+                let ev = self.store.evals.get(&m.id).and_then(|l| l.ready());
                 text(ty::SM, t.text_secondary)
                     .ellipsis()
-                    .child(eval_set(&self.store, m).label)
+                    .child(eval_set_with_report(&self.store, m, ev).label)
                     .into_any_element()
             })
             .collect();
@@ -566,8 +588,10 @@ impl FoloApp {
 
         let metric_cells = |extract: fn(&Model) -> Option<f32>,
                             decimals: usize,
-                            highlight_best: bool|
+                            highlight_best: bool,
+                            directional: bool|
          -> Vec<AnyElement> {
+            let eps = if decimals == 2 { 0.005 } else { 0.0005 };
             let vals: Vec<Option<f32>> = chosen.iter().map(extract).collect();
             let base = vals.first().copied().flatten();
             let best = if highlight_best && same_set {
@@ -578,7 +602,7 @@ impl FoloApp {
             vals.into_iter()
                 .enumerate()
                 .map(|(i, val)| {
-                    let is_best = best.is_some_and(|b| val.is_some_and(|v| (v - b).abs() < 0.0005));
+                    let is_best = best.is_some_and(|b| val.is_some_and(|v| (v - b).abs() < eps));
                     let main = match val.filter(|v| v.is_finite()) {
                         Some(v) => {
                             let s = if decimals == 2 { format!("{v:.2}") } else { format!("{v:.3}") };
@@ -595,9 +619,11 @@ impl FoloApp {
                                 let d = v - b;
                                 let s =
                                     if decimals == 2 { fmt_signed_delta2(d) } else { fmt_signed_delta(d) };
-                                let color = if d > 0.0005 {
+                                let color = if !directional {
+                                    t.text_tertiary
+                                } else if d > eps {
                                     t.success_text
-                                } else if d < -0.0005 {
+                                } else if d < -eps {
                                     t.danger_text
                                 } else {
                                     t.text_tertiary
@@ -627,16 +653,22 @@ impl FoloApp {
             .child(row_frame("Parameters", param_cells))
             .child(row_frame("Compute", flops_cells))
             .child(row_frame("File size", size_cells))
-            .child(row_frame("mAP50-95", metric_cells(|m| m.metrics.as_ref().map(|x| x.map50_95), 3, true)))
-            .child(row_frame("mAP50", metric_cells(|m| m.metrics.as_ref().map(|x| x.map50), 3, true)))
+            .child(row_frame(
+                "mAP50-95",
+                metric_cells(|m| m.metrics.as_ref().map(|x| x.map50_95), 3, true, true),
+            ))
+            .child(row_frame("mAP50", metric_cells(|m| m.metrics.as_ref().map(|x| x.map50), 3, true, true)))
             .child(row_frame(
                 "Precision",
-                metric_cells(|m| m.metrics.as_ref().map(|x| x.precision), 3, false),
+                metric_cells(|m| m.metrics.as_ref().map(|x| x.precision), 3, false, true),
             ))
-            .child(row_frame("Recall", metric_cells(|m| m.metrics.as_ref().map(|x| x.recall), 3, false)))
+            .child(row_frame(
+                "Recall",
+                metric_cells(|m| m.metrics.as_ref().map(|x| x.recall), 3, false, true),
+            ))
             .child(row_frame(
                 "Best F1 conf",
-                metric_cells(|m| m.metrics.as_ref().and_then(|x| x.best_f1_conf), 2, false),
+                metric_cells(|m| m.metrics.as_ref().and_then(|x| x.best_f1_conf), 2, false, false),
             ))
             .into_any_element()
     }
@@ -651,29 +683,45 @@ impl FoloApp {
         let t = *t;
         let lead_w = if self.content_width(window) < 880. { 130. } else { 164. };
         let any_loading = chosen.iter().any(|m| self.store.evals.get(&m.id).is_some_and(|l| l.is_loading()));
+        let any_failed =
+            chosen.iter().any(|m| self.store.evals.get(&m.id).is_some_and(|l| l.error().is_some()));
         let refs: Vec<&Model> = chosen.iter().collect();
         let eval_refs: Vec<Option<&ModelEval>> =
             chosen.iter().map(|m| self.store.evals.get(&m.id).and_then(|l| l.ready())).collect();
         let rows = build_per_class_rows(&refs, &eval_refs);
 
+        let status_hint = if any_loading {
+            "AP50-95 · signed Δ vs baseline · loading evals…"
+        } else if any_failed {
+            "AP50-95 · signed Δ vs baseline · some evals failed to load"
+        } else {
+            "AP50-95 · signed Δ vs baseline"
+        };
         let mut p = panel(&t).flex().flex_col().overflow_hidden().child(
-            panel_header(&t, "Per-class AP deltas")
-                .child(text(ty::SM, t.text_tertiary).child("AP50-95 · signed Δ vs baseline")),
+            panel_header(&t, "Per-class AP deltas").child(
+                text(ty::SM, if any_failed && !any_loading { t.warning_text } else { t.text_tertiary })
+                    .child(status_hint),
+            ),
         );
 
         if rows.is_empty() && any_loading {
             return p.child(loading_rows(&t, "model-cmp-pc", 4)).into_any_element();
         }
         if rows.is_empty() {
-            return p
-                .child(empty_state(
-                    &t,
-                    "icons/bar-chart-3.svg",
+            let (title, desc, tone) = if any_failed {
+                (
+                    "Couldn't load per-class evaluation",
+                    "Evaluation reports for the selected models failed to load from the server.",
+                    Tone::Warning,
+                )
+            } else {
+                (
                     "No per-class evaluation yet",
                     "Per-class AP deltas appear once models have saved evaluation reports.",
                     Tone::Neutral,
-                ))
-                .into_any_element();
+                )
+            };
+            return p.child(empty_state(&t, "icons/bar-chart-3.svg", title, desc, tone)).into_any_element();
         }
 
         let mut head = div()

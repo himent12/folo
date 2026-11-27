@@ -87,8 +87,16 @@ pub(super) fn weights_epoch(m: &Model, run: Option<&Run>, done: Option<u32>) -> 
 }
 
 /// This server's measured end-to-end latency for `arch` at `imgsz` on its default device (a row of
-/// its own adapter, the one with the most samples), as Studio picks it.
-fn measured_latency<'a>(t: &'a crate::api::ThroughputTable, m: &Model) -> Option<&'a InferThroughput> {
+/// its own adapter, the one with the most samples), as Studio picks it. `folo-server` keeps FOLO v2
+/// out of the v1 scale-keyed throughput table, so v2 models never inherit v1 numbers.
+fn measured_latency<'a>(
+    t: &'a crate::api::ThroughputTable,
+    m: &Model,
+    model_arch: crate::arch::ModelArch,
+) -> Option<&'a InferThroughput> {
+    if model_arch.is_v2() {
+        return None;
+    }
     t.inference
         .iter()
         .filter(|r| {
@@ -102,8 +110,15 @@ fn measured_latency<'a>(t: &'a crate::api::ThroughputTable, m: &Model) -> Option
 }
 
 /// The reference latency for the architecture (docs/BENCHMARKS.md, as the table carries it): at
-/// 640 px, f16 first.
-fn reference_latency<'a>(t: &'a crate::api::ThroughputTable, m: &Model) -> Option<&'a InferThroughput> {
+/// 640 px, f16 first. Returns `None` for FOLO v2 models since the table holds v1 references only.
+fn reference_latency<'a>(
+    t: &'a crate::api::ThroughputTable,
+    m: &Model,
+    model_arch: crate::arch::ModelArch,
+) -> Option<&'a InferThroughput> {
+    if model_arch.is_v2() {
+        return None;
+    }
     t.inference
         .iter()
         .filter(|r| r.source == ThroughputSource::Reference && r.arch == m.arch && r.imgsz == 640)
@@ -492,7 +507,7 @@ impl FoloApp {
         // The architecture's number, never this model's own timing: measured on this server where it
         // has predicted at the model's size, and the reference (docs/BENCHMARKS.md).
         if let Some(tp) = self.throughput.ready() {
-            if let Some(h) = measured_latency(tp, m) {
+            if let Some(h) = measured_latency(tp, m, model_arch) {
                 fact(
                     "Measured latency",
                     value_with(
@@ -511,7 +526,7 @@ impl FoloApp {
             }
             fact(
                 "Reference latency",
-                match reference_latency(tp, m) {
+                match reference_latency(tp, m, model_arch) {
                     Some(r) => value_with(
                         &t,
                         ms(r.latency_ms),
@@ -706,5 +721,17 @@ mod tests {
         assert_eq!(trained_for(&m, None, None).as_deref(), Some("50 epochs planned at 320 px"));
         m.trained_with = None;
         assert_eq!(trained_for(&m, None, None), None);
+    }
+
+    #[test]
+    fn folo2_models_do_not_inherit_v1_measured_or_reference_latency() {
+        use crate::api::Backend;
+        let mock = crate::api::mock::MockBackend::new(4200, true);
+        let tp = mock.throughput().unwrap();
+        let m = mock.models().unwrap().into_iter().find(|m| m.id == "m_7c12").unwrap();
+        // v1 lookup finds reference latency for Arch::N; v2 lookup must return None for both.
+        assert!(super::reference_latency(&tp, &m, crate::arch::ModelArch::v1(m.arch)).is_some());
+        assert!(super::measured_latency(&tp, &m, crate::arch::ModelArch::v2(m.arch)).is_none());
+        assert!(super::reference_latency(&tp, &m, crate::arch::ModelArch::v2(m.arch)).is_none());
     }
 }

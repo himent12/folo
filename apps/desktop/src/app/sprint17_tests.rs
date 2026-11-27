@@ -152,3 +152,68 @@ fn folo2_int8_quantize_cli_builder_emits_selective_f32_flags_and_v2_hints() {
     assert!(p5.command.contains("--f32-policy p5-tail"));
     assert!(p5.hint.as_deref().is_some_and(|h| h.contains("FOLO v2 P5 neck tail")));
 }
+
+#[test]
+fn review_fixes_arch_caches_probe_sync_and_finetune_resolution() {
+    let (mut app, window) = open();
+
+    // 1. Store::run_arch resolves fine-tune runs from config.weights even before a checkpoint exists.
+    drive(&mut app, window, |this, _, _| {
+        let mut fake_run = this.store.runs.ready().unwrap()[0].clone();
+        fake_run.id = "run_ft_v2".into();
+        fake_run.model_id = None;
+        fake_run.config.arch = Arch::N;
+        fake_run.config.weights = Some("m_7c12".into()); // seeded folo2-n model
+        assert_eq!(this.store.run_arch(&fake_run), ModelArch::v2(Arch::N));
+    });
+
+    // 2. MockBackend infers folo2-* from config.weights when arch_override is None (and blocks cloud).
+    let mock = MockBackend::new(4200, true);
+    let mut cfg = mock.runs().unwrap()[0].config.clone();
+    cfg.name = "ft-from-v2-weights".into();
+    cfg.arch = Arch::N;
+    cfg.weights = Some("m_7c12".into());
+    cfg.compute = None;
+    let created = mock.create_run(cfg.clone()).unwrap();
+    let (run_archs, _) = mock.known_archs();
+    assert!(
+        run_archs.iter().any(|(id, a)| id == &created.id && a == "folo2-n"),
+        "fine-tune from v2 weights records folo2-n: {run_archs:?}"
+    );
+
+    // 3. In-flight probe blocks Start and late probe completion promotes open New Run form to v2.
+    drive(&mut app, window, |this, w, cx| {
+        this.open_new_run(Some("ds_8f2c"), w, cx);
+        let f = this.new_run.as_mut().unwrap();
+        f.arch_family = ArchFamily::Folo;
+        f.arch = 0;
+        f.weights = Some("m_late_v2".into());
+        this.store.probing_model_archs.insert("m_late_v2".into());
+        assert_eq!(this.nr_folo2_blocked(), Some("Checking model architecture…"));
+
+        // Probe completes with folo2-l -> unblocks & promotes the open form.
+        this.store.probing_model_archs.remove("m_late_v2");
+        this.store.probed_model_archs.insert("m_late_v2".into());
+        this.store.note_model_arch("m_late_v2", ModelArch::v2(Arch::L));
+        this.sync_new_run_arch_after_probe(cx);
+        assert!(this.nr_folo2_blocked().is_none());
+        assert_eq!(this.new_run.as_ref().unwrap().model_arch(), ModelArch::v2(Arch::L));
+        this.close_new_run(w, cx);
+    });
+
+    // 4. set_backend clears stale arch caches and new_run_last; open_model_compare preserves seed before models load.
+    drive(&mut app, window, |this, w, cx| {
+        this.store.probed_model_archs.insert("stale_m".into());
+        this.store.probed_run_archs.insert("stale_r".into());
+        this.store.run_archs.insert("stale_r".into(), ModelArch::v2(Arch::X));
+        this.new_run_last = Some((ArchFamily::Folo2, 3, 2, 100.0));
+        this.set_backend(Arc::new(MockBackend::new(4200, true)), ServerMode::Mock, cx);
+        assert!(!this.store.probed_model_archs.contains("stale_m"));
+        assert!(!this.store.probed_run_archs.contains("stale_r"));
+        assert!(!this.store.run_archs.contains_key("stale_r"));
+        assert!(this.new_run_last.is_none());
+        // Models are Load::Idle right after set_backend: open_model_compare must keep seed.
+        this.open_model_compare(Some("m_7c12".into()), w, cx);
+        assert_eq!(this.model_compare.ids, vec!["m_7c12"]);
+    });
+}

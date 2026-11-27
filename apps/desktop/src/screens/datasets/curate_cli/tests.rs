@@ -173,3 +173,38 @@ fn export_coco_panel_controls_wire_into_dataset_statistics_tab() {
         assert!(keys.iter().any(|k| k == "ds-cli-copy"), "{keys:?}");
     });
 }
+
+#[test]
+fn export_coco_disables_and_strips_empty_splits_across_datasets() {
+    let api = MockBackend::new(4200, true);
+    let mut ds_with_test = api.dataset("ds_3b91").unwrap();
+    ds_with_test.id = "ds_a".into();
+    ds_with_test.path = "/data/a/data.yaml".into();
+    ds_with_test.format = DatasetFormat::Yolo;
+    ds_with_test.splits.test = 20;
+
+    let mut ds_no_test = ds_with_test.clone();
+    ds_no_test.id = "ds_b".into();
+    ds_no_test.path = "/data/b/data.yaml".into();
+    ds_no_test.splits.test = 0;
+
+    let mut st = DatasetCliState {
+        mode: DatasetCliMode::ExportCoco,
+        export_coco_split: Some(Split::Test),
+        ..Default::default()
+    };
+    st.sync_dataset(&ds_with_test);
+    assert_eq!(st.export_coco_split, Some(Split::Test));
+    let cmd_a = build_dataset_cli(&ds_with_test, &st);
+    assert!(cmd_a.command.contains("--split test"), "{}", cmd_a.command);
+
+    // Even before sync_dataset runs, build_dataset_cli refuses to emit an empty split.
+    let cmd_b_direct = build_dataset_cli(&ds_no_test, &st);
+    assert!(!cmd_b_direct.command.contains("--split test"), "{}", cmd_b_direct.command);
+
+    // sync_dataset clears the stale empty split when switching datasets.
+    st.sync_dataset(&ds_no_test);
+    assert_eq!(st.export_coco_split, None);
+    let cmd_b = build_dataset_cli(&ds_no_test, &st);
+    assert!(!cmd_b.command.contains("--split"), "{}", cmd_b.command);
+}

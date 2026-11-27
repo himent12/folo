@@ -14,11 +14,16 @@ use crate::ui::*;
 impl FoloApp {
     /// Fetches the run's `folo train` command and puts it on the clipboard.
     fn copy_run_cli(&mut self, id: String, cx: &mut Context<Self>) {
+        let rid = id.clone();
         self.fetch(
             cx,
             move |api| api.run_cli(&id),
-            |this, r, cx| match r {
+            move |this, r, cx| match r {
                 Ok(c) => {
+                    this.store.sync_known_archs();
+                    if let Some(arch) = crate::arch::ModelArch::from_cli_argv(&c.argv) {
+                        this.store.note_run_arch(&rid, arch);
+                    }
                     cx.write_to_clipboard(folo_ui::ClipboardItem::new_string(c.cli.clone()));
                     this.toast(
                         Tone::Neutral,

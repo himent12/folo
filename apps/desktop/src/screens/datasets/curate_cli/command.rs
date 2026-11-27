@@ -159,10 +159,22 @@ impl Default for DatasetCliState {
     }
 }
 
+/// Number of images in split `sp` of dataset `ds`.
+pub fn split_image_count(ds: &Dataset, sp: Split) -> u64 {
+    match sp {
+        Split::Train => ds.splits.train,
+        Split::Val => ds.splits.val,
+        Split::Test => ds.splits.test,
+    }
+}
+
 impl DatasetCliState {
-    /// Resets dataset-scoped fields (such as class filter index and default convert target) when
-    /// opening a different dataset.
+    /// Resets dataset-scoped fields (such as class filter index, zero-image COCO split selection,
+    /// and default convert target) when opening a different dataset or when split counts change.
     pub fn sync_dataset(&mut self, ds: &Dataset) {
+        if self.export_coco_split.is_some_and(|sp| split_image_count(ds, sp) == 0) {
+            self.export_coco_split = None;
+        }
         if self.dataset_id.as_deref() == Some(ds.id.as_str()) {
             if self.filter_class.is_some_and(|c| (c as usize) >= ds.classes.len()) {
                 self.filter_class = None;
@@ -438,7 +450,7 @@ pub fn build_dataset_cli(ds: &Dataset, state: &DatasetCliState) -> BuiltDatasetC
                 parts.push("--from".to_string());
                 parts.push(from.to_string());
             }
-            if let Some(sp) = state.export_coco_split {
+            if let Some(sp) = state.export_coco_split.filter(|&sp| split_image_count(ds, sp) > 0) {
                 parts.push("--split".to_string());
                 parts.push(split_cli_value(sp).to_string());
             }

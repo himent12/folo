@@ -171,11 +171,15 @@ impl FoloApp {
         let Some(f) = self.new_run.as_mut() else { return };
         f.weights = c.id.clone();
         f.weights_name = c.id.as_ref().map(|_| c.label.clone());
+        f.arch_touched = true;
         if let Some(a) = c.arch {
             f.arch = a;
         }
         if let Some(fam) = c.family {
             f.arch_family = fam;
+        }
+        if let Some(wid) = c.id.as_deref() {
+            self.probe_model_arch(wid, cx);
         }
         self.resuggest_run_name(cx);
         cx.notify();
@@ -192,6 +196,7 @@ impl FoloApp {
     pub fn nr_set_arch(&mut self, arch: usize, cx: &mut Context<Self>) {
         let Some(f) = self.new_run.as_mut().filter(|f| f.arch != arch) else { return };
         f.arch = arch;
+        f.arch_touched = true;
         self.nr_arch_changed(cx);
     }
 
@@ -199,6 +204,7 @@ impl FoloApp {
     pub fn nr_set_arch_family(&mut self, family: crate::arch::ArchFamily, cx: &mut Context<Self>) {
         let Some(f) = self.new_run.as_mut().filter(|f| f.arch_family != family) else { return };
         f.arch_family = family;
+        f.arch_touched = true;
         self.nr_arch_changed(cx);
     }
 

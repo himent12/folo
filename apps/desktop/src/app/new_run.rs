@@ -73,6 +73,29 @@ impl FoloApp {
         self.open_new_run_from_arch(config, crate::arch::ModelArch::v1(config.arch), note, window, cx);
     }
 
+    /// The New run dialog prefilled from an existing run, resolving its canonical architecture
+    /// (and triggering any needed HTTP arch probe so Clone/Retry never downgrades `folo2-*` to v1).
+    pub fn open_new_run_from_run(
+        &mut self,
+        run: &Run,
+        config: &TrainConfig,
+        note: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let arch = self.store.run_arch(run);
+        self.open_new_run_from_arch(config, arch, note, window, cx);
+        if let Some(f) = self.new_run.as_mut() {
+            f.source_run_id = Some(run.id.clone());
+            f.arch_touched = false;
+        }
+        self.probe_missing_model_archs(cx);
+        self.probe_run_arch(&run.id, cx);
+        if let Some(w) = config.weights.as_deref() {
+            self.probe_model_arch(w, cx);
+        }
+    }
+
     /// The New run dialog prefilled from an earlier run with its canonical architecture (`folo-*` or `folo2-*`).
     pub fn open_new_run_from_arch(
         &mut self,
@@ -246,8 +269,11 @@ impl FoloApp {
             },
         };
         // The last started run's choices, else the defaults (folo-s, 640 px, 100 epochs).
-        let (arch_family, arch, imgsz, epochs) =
+        let (mut arch_family, arch, imgsz, epochs) =
             self.new_run_last.unwrap_or((crate::arch::ArchFamily::Folo, 1, 2, 100.0));
+        if self.store.system.ready().is_some() && !self.store.supports_folo2() {
+            arch_family = crate::arch::ArchFamily::Folo;
+        }
         let model_arch = crate::arch::ModelArch::new(arch_family, ARCHS[arch]);
         let runs = self.store.runs.ready().map(Vec::as_slice).unwrap_or_default();
         let suggested = free_model_run_name(&ds_name, model_arch, runs);
@@ -382,6 +408,8 @@ impl FoloApp {
             weights: None,
             weights_name: None,
             base: None,
+            source_run_id: None,
+            arch_touched: false,
             epochs_input,
             lr_input,
             close_input,
@@ -422,11 +450,77 @@ impl FoloApp {
         f.name.clone().update(cx, |i, cx| i.set_text(name, cx));
     }
 
-    /// Why a FOLO v2 selection cannot start on the current target, if it cannot: either the server
-    /// does not advertise `folo2_arch`, or Cloud compute is selected (`folo-server` restricts v2
-    /// runs to local training for now).
+    /// Reconciles an open New run form after an async `x-folo-arch` or `/cli` probe completes,
+    /// so fine-tune weights or a cloned/retried run never stays on a provisional v1 fallback.
+    pub(super) fn sync_new_run_arch_after_probe(&mut self, cx: &mut Context<Self>) {
+        let desired = {
+            let Some(f) = self.new_run.as_ref() else { return };
+            if let Some(wid) = f.weights.as_deref() {
+                self.store.model_archs.get(wid).copied()
+            } else if !f.arch_touched
+                && let Some(rid) = f.source_run_id.as_deref()
+            {
+                self.store.run(rid).map(|r| self.store.run_arch(r))
+            } else {
+                None
+            }
+        };
+        let mut changed = false;
+        if let Some(arch) = desired
+            && let Some(f) = self.new_run.as_mut()
+            && f.model_arch() != arch
+        {
+            f.arch_family = arch.family;
+            f.arch = ARCHS.iter().position(|a| *a == arch.scale).unwrap_or(f.arch);
+            changed = true;
+        }
+        if changed {
+            self.resuggest_run_name(cx);
+            self.ensure_estimate(cx);
+        }
+        cx.notify();
+    }
+
+    /// Whether an async HTTP architecture probe is still in flight for the form's chosen weights
+    /// or cloned/retried source run.
+    fn nr_arch_probe_pending(&self) -> bool {
+        let Some(f) = self.new_run.as_ref() else { return false };
+        if let Some(wid) = f.weights.as_deref()
+            && self.store.probing_model_archs.contains(wid)
+        {
+            return true;
+        }
+        if !f.arch_touched
+            && let Some(rid) = f.source_run_id.as_deref()
+        {
+            if self.store.probing_run_archs.contains(rid) {
+                return true;
+            }
+            if let Some(run) = self.store.run(rid) {
+                if run.model_id.as_deref().is_some_and(|mid| self.store.probing_model_archs.contains(mid)) {
+                    return true;
+                }
+                if run
+                    .config
+                    .weights
+                    .as_deref()
+                    .is_some_and(|wid| self.store.probing_model_archs.contains(wid))
+                {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Why a FOLO v2 selection cannot start on the current target, if it cannot: either an arch
+    /// probe is still resolving for the selected weights/source run, the server does not advertise
+    /// `folo2_arch`, or Cloud compute is selected (`folo-server` restricts v2 runs to local training).
     pub fn nr_folo2_blocked(&self) -> Option<&'static str> {
         let f = self.new_run.as_ref()?;
+        if self.nr_arch_probe_pending() {
+            return Some("Checking model architecture…");
+        }
         if !f.arch_family.is_v2() {
             return None;
         }

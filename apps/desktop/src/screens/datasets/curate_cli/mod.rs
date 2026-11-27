@@ -9,7 +9,10 @@ mod tests;
 use std::rc::Rc;
 
 use folo_ui::prelude::FluentBuilder;
-use folo_ui::{AnyElement, Context, IntoElement, ParentElement, SharedString, Styled, Window, div, px};
+use folo_ui::{
+    AnyElement, Context, InteractiveElement, IntoElement, ParentElement, SharedString,
+    StatefulInteractiveElement, Styled, Window, div, px,
+};
 
 use crate::api::{Dataset, Split};
 use crate::app::{FoloApp, act};
@@ -19,7 +22,7 @@ use crate::ui::*;
 
 pub use command::{
     CocoImageMode, DHASH_PRESETS, DatasetCliMode, DatasetCliState, DatasetTargetFormat, FilterClassMode,
-    SPLIT_TEST_PRESETS, SPLIT_VAL_PRESETS, build_dataset_cli,
+    SPLIT_TEST_PRESETS, SPLIT_VAL_PRESETS, build_dataset_cli, split_image_count,
 };
 
 impl FoloApp {
@@ -405,6 +408,22 @@ impl FoloApp {
                 .into_iter()
                 .enumerate()
                 .map(|(i, (sp, label))| {
+                    let empty_split = sp.is_some_and(|s| split_image_count(ds, s) == 0);
+                    if empty_split {
+                        return div()
+                            .id(SharedString::from(format!("ds-cli-coco-split-{i}-disabled")))
+                            .h(px(26.))
+                            .px(px(10.))
+                            .flex()
+                            .items_center()
+                            .rounded(px(radius::SM))
+                            .border_1()
+                            .border_color(t.line_subtle)
+                            .opacity(0.45)
+                            .tooltip(crate::controls::tip(format!("No {label} images in this dataset"), None))
+                            .child(text(ty::SM, t.text_tertiary).child(label))
+                            .into_any_element();
+                    }
                     let active = self.ds_cli.export_coco_split == sp;
                     self.chip(
                         &format!("ds-cli-coco-split-{i}"),
@@ -519,7 +538,7 @@ impl FoloApp {
         panel(&t)
             .flex()
             .flex_col()
-            .child(panel_header(&t, "Curate & convert CLI").child(mode_seg))
+            .child(panel_header(&t, "Curate & export CLI").child(mode_seg))
             .child(
                 div()
                     .p(px(16.))

@@ -252,6 +252,8 @@ impl FoloApp {
         s.samples_refreshing.clear();
         s.samples_refresh_error.clear();
         s.logs.clear();
+        s.clear_arch_caches();
+        s.sync_known_archs();
         self.log_cache.clear();
         // Images that failed are asked for again (their few automatic retries may be spent).
         s.images_px.forget_failed();

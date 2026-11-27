@@ -9,7 +9,7 @@
 
 use std::cmp::Ordering;
 
-use crate::api::{Model, ModelSource, RunStatus, time};
+use crate::api::{Model, ModelEval, ModelSource, RunStatus, Split, time};
 use crate::store::Store;
 
 /// What a group's scores are on, and so whether they rank.
@@ -66,6 +66,46 @@ pub fn eval_set(store: &Store, m: &Model) -> EvalSet {
             let mut set = unranked(&key, format!("{name} · split unknown"), 3);
             set.order.1 = name.to_lowercase();
             set
+        }
+    }
+}
+
+/// What `m`'s evaluation report actually scored on when a loaded [`ModelEval`] carries concrete
+/// `dataset_id` / `split` provenance, falling back to [`eval_set`] otherwise.
+pub fn eval_set_with_report(store: &Store, m: &Model, eval: Option<&ModelEval>) -> EvalSet {
+    let Some(ev) = eval else {
+        return eval_set(store, m);
+    };
+    let Some(split) = ev.split else {
+        return eval_set(store, m);
+    };
+    let (word, split_rank) = match split {
+        Split::Val => ("Validation", 0),
+        Split::Train => ("Training", 1),
+        Split::Test => ("Test", 2),
+    };
+    let ds_name = ev
+        .dataset_name
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .map(str::to_string)
+        .or_else(|| ev.dataset_id.as_deref().and_then(|id| store.dataset_summary(id)).map(|d| d.name.clone()))
+        .or_else(|| m.run_id.as_deref().and_then(|rid| store.run(rid)).map(|r| store.run_dataset_name(r)))
+        .or_else(|| ev.dataset_id.clone())
+        .unwrap_or_else(|| "Unknown dataset".into());
+    if let Some(ds_id) = ev.dataset_id.as_deref().filter(|s| !s.trim().is_empty()) {
+        EvalSet {
+            key: format!("{ds_id}:{}", split.as_str()),
+            label: format!("{word} split of {ds_name}"),
+            ranked: true,
+            order: (0, ds_name.to_lowercase(), split_rank),
+        }
+    } else {
+        EvalSet {
+            key: format!("~eval:{}:{}", ds_name.to_lowercase(), split.as_str()),
+            label: format!("{word} split of {ds_name}"),
+            ranked: false,
+            order: (3, ds_name.to_lowercase(), split_rank),
         }
     }
 }

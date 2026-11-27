@@ -122,8 +122,14 @@ pub struct Store {
     /// Canonical architecture overrides (`folo2-*` or resolved `folo-*`) keyed by run id and model id.
     pub run_archs: HashMap<String, crate::arch::ModelArch>,
     pub model_archs: HashMap<String, crate::arch::ModelArch>,
-    /// Model ids already probed via `GET /api/models/{id}` for `x-folo-arch` on this backend.
+    /// Model ids confirmed via `GET /api/models/{id}` (`x-folo-arch`) on this backend.
     pub probed_model_archs: std::collections::HashSet<String>,
+    /// Run ids confirmed via `GET /api/runs/{id}/cli` on this backend.
+    pub probed_run_archs: std::collections::HashSet<String>,
+    /// Model ids whose `x-folo-arch` probe is currently in flight.
+    pub probing_model_archs: std::collections::HashSet<String>,
+    /// Run ids whose `/cli` arch probe is currently in flight.
+    pub probing_run_archs: std::collections::HashSet<String>,
 }
 
 impl Store {
@@ -160,14 +166,32 @@ impl Store {
             run_archs: HashMap::new(),
             model_archs: HashMap::new(),
             probed_model_archs: Default::default(),
+            probed_run_archs: Default::default(),
+            probing_model_archs: Default::default(),
+            probing_run_archs: Default::default(),
         };
         store.sync_known_archs();
         store
     }
 
+    /// Clears cached/probed canonical architectures when swapping backends or retrying all data.
+    pub fn clear_arch_caches(&mut self) {
+        self.run_archs.clear();
+        self.model_archs.clear();
+        self.probed_model_archs.clear();
+        self.probed_run_archs.clear();
+        self.probing_model_archs.clear();
+        self.probing_run_archs.clear();
+    }
+
     /// Whether the connected server advertises `folo2_arch` (`folo2-n..x`) support.
     pub fn supports_folo2(&self) -> bool {
         self.features.iter().any(|f| f == crate::arch::FEATURE_FOLO2_ARCH)
+    }
+
+    /// Whether the connected server advertises `run_cli` (`GET /api/runs/{id}/cli`).
+    pub fn supports_run_cli(&self) -> bool {
+        self.features.iter().any(|f| f == "run_cli")
     }
 
     /// Pull canonical `folo2-*` run/model architectures known to the backend into the store cache.
@@ -208,6 +232,11 @@ impl Store {
         }
         if let Some(mid) = r.model_id.as_deref()
             && let Some(&arch) = self.model_archs.get(mid)
+        {
+            return arch;
+        }
+        if let Some(wid) = r.config.weights.as_deref()
+            && let Some(&arch) = self.model_archs.get(wid)
         {
             return arch;
         }

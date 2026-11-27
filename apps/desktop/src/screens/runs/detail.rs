@@ -171,8 +171,8 @@ impl FoloApp {
                 if r.status == RunStatus::Stopped {
                     actions.push(self.resume_button(&r, window, cx));
                 }
+                let run_clone = r.clone();
                 let cfg = r.config.clone();
-                let run_arch = self.store.run_arch(&r);
                 actions.push(
                     self.button(
                         "run-clone-cfg",
@@ -181,7 +181,7 @@ impl FoloApp {
                         Some("icons/copy.svg"),
                         window,
                         cx,
-                        act(move |this, w, cx| this.open_new_run_from_arch(&cfg, run_arch, None, w, cx)),
+                        act(move |this, w, cx| this.open_new_run_from_run(&run_clone, &cfg, None, w, cx)),
                     )
                     .tooltip(crate::controls::tip(
                         "Open New run prefilled with this run's configuration",
@@ -242,7 +242,7 @@ impl FoloApp {
                         format!("Batch lowered from {from} to {to} so the run fits in GPU memory.")
                     })
                 };
-                let run_arch = self.store.run_arch(&r);
+                let run_retry = r.clone();
                 actions.push(
                     self.button(
                         "run-retry-cfg",
@@ -253,7 +253,7 @@ impl FoloApp {
                         window,
                         cx,
                         act(move |this, w, cx| {
-                            this.open_new_run_from_arch(&cfg, run_arch, note.clone(), w, cx)
+                            this.open_new_run_from_run(&run_retry, &cfg, note.clone(), w, cx)
                         }),
                     )
                     .into_any_element(),

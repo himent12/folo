@@ -455,22 +455,24 @@ impl FoloApp {
                                     .child(r.name.clone()),
                             ),
                     )
-                    // The architecture, v2 badge for FOLO v2, and e2e tag for an end-to-end run.
+                    // The architecture, v2 badge for FOLO v2 (omitted when e2e is also shown so
+                    // `folo2-x` + `e2e` stays inside the 96 px column), and e2e tag for o2o.
                     .child({
                         let run_arch = self.store.run_arch(r);
+                        let is_e2e = r.config.head == crate::api::Head::O2o;
                         div()
                             .w(px(96.))
                             .flex_none()
                             .flex()
                             .items_center()
-                            .gap(px(5.))
+                            .gap(px(4.))
                             .child(
-                                text(ty::SM, t.text_secondary).whitespace_nowrap().child(run_arch.as_str()),
+                                text(ty::SM, if run_arch.is_v2() { t.accent_text } else { t.text_secondary })
+                                    .whitespace_nowrap()
+                                    .child(run_arch.as_str()),
                             )
-                            .when(run_arch.is_v2(), |d| d.child(badge(&t, "v2", Tone::Accent)))
-                            .when(r.config.head == crate::api::Head::O2o, |d| {
-                                d.child(e2e_tag(&t, format!("e2e-r-{}", r.id)))
-                            })
+                            .when(run_arch.is_v2() && !is_e2e, |d| d.child(badge(&t, "v2", Tone::Accent)))
+                            .when(is_e2e, |d| d.child(e2e_tag(&t, format!("e2e-r-{}", r.id))))
                     })
                     .when(c.dataset, |d| {
                         d.child(

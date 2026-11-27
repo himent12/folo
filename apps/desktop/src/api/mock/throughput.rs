@@ -108,7 +108,7 @@ impl MockBackend {
         arch_override: Option<&str>,
     ) -> ApiResult<RunEstimate> {
         self.check()?;
-        let model_arch = crate::arch::ModelArch::from_raw_or(arch_override, config.arch);
+        let model_arch = self.resolve_mock_arch(config, arch_override);
         if model_arch.is_v2() && config.compute.is_some() {
             return Err(ApiError::new(
                 "invalid_config",

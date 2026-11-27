@@ -375,6 +375,27 @@ pub(super) fn resolve(config: &TrainConfig, train_images: u64, classes: usize) -
 }
 
 impl MockBackend {
+    /// Resolves the canonical architecture for a mock training/estimate request: explicit override
+    /// first, then the fine-tuned weights' known architecture, else v1 `config.arch`.
+    pub(super) fn resolve_mock_arch(
+        &self,
+        config: &TrainConfig,
+        arch_override: Option<&str>,
+    ) -> crate::arch::ModelArch {
+        if let Some(raw) = arch_override
+            && let Some(arch) = crate::arch::ModelArch::parse(raw)
+        {
+            return arch;
+        }
+        if let Some(wid) = config.weights.as_deref()
+            && let Some(raw) = self.model_archs.lock().unwrap().get(wid).cloned()
+            && let Some(arch) = crate::arch::ModelArch::parse(&raw)
+        {
+            return arch;
+        }
+        crate::arch::ModelArch::v1(config.arch)
+    }
+
     /// Starts a mock run with an optional canonical `"folo2-*"` architecture override.
     pub(super) fn create_run_inner(
         &self,
@@ -382,7 +403,7 @@ impl MockBackend {
         arch_override: Option<&str>,
     ) -> ApiResult<Run> {
         self.check()?;
-        let model_arch = crate::arch::ModelArch::from_raw_or(arch_override, config.arch);
+        let model_arch = self.resolve_mock_arch(&config, arch_override);
         if model_arch.is_v2() && config.compute.is_some() {
             return Err(ApiError::new(
                 "invalid_config",

@@ -305,6 +305,10 @@ pub struct NewRunForm {
     /// The run this form was prefilled from: settings the form doesn't show (seed, colour and
     /// translate jitter) carry over unchanged.
     pub base: Option<TrainConfig>,
+    /// Run id this form was cloned/retried from, so a late HTTP arch probe can sync its family.
+    pub source_run_id: Option<String>,
+    /// Set once the user explicitly picks a family or scale in the dialog.
+    pub arch_touched: bool,
     /// Exact entry next to the sliders; invalid text keeps the last good value and shows a hint.
     pub epochs_input: Entity<TextInput>,
     pub lr_input: Entity<TextInput>,

@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use crate::api::{Head, Model, ModelEval};
 use crate::arch::ModelArch;
-use crate::screens::models::groups::{eval_set, group_models};
+use crate::screens::models::groups::{eval_set, eval_set_with_report, group_models};
 use crate::store::Store;
 use crate::ui::push_csv_safe_text;
 
@@ -71,15 +71,18 @@ pub fn reconcile_compare_models(ids: &mut Vec<String>, store: &Store, models: &[
     }
 }
 
-/// Whether all compared models share the same ranked evaluation dataset.
-pub fn same_eval_set(store: &Store, models: &[&Model]) -> bool {
+/// Whether all compared models share the same ranked evaluation dataset and split, preferring each
+/// loaded [`ModelEval`]'s recorded `dataset_id` + `split` provenance when present.
+pub fn same_eval_set_with_evals(store: &Store, models: &[&Model], evals: &[Option<&ModelEval>]) -> bool {
     let Some(first) = models.first() else { return true };
-    let base = eval_set(store, first);
+    let first_eval = evals.first().copied().flatten();
+    let base = eval_set_with_report(store, first, first_eval);
     if !base.ranked {
         return false;
     }
-    models[1..].iter().all(|m| {
-        let set = eval_set(store, m);
+    models[1..].iter().enumerate().all(|(i, m)| {
+        let ev = evals.get(i + 1).copied().flatten();
+        let set = eval_set_with_report(store, m, ev);
         set.ranked && set.key == base.key
     })
 }
@@ -232,6 +235,7 @@ pub fn build_model_compare_csv(
     archs: &[ModelArch],
     eval_sets: &[String],
     evals: &[Option<&ModelEval>],
+    same_set: bool,
 ) -> String {
     let mut out = String::new();
     if models.is_empty() {
@@ -290,6 +294,20 @@ pub fn build_model_compare_csv(
     push_text(&mut out, "Architecture", archs.iter().map(|a| a.as_str().to_string()).collect());
     push_text(&mut out, "Family", archs.iter().map(|a| a.family.label().to_string()).collect());
     push_text(&mut out, "Evaluation set", eval_sets.to_vec());
+    if !same_set && models.len() > 1 {
+        let mut caveat_row = vec![
+            CsvCell::Text("summary".into()),
+            CsvCell::Text("Evaluation caveat".into()),
+            CsvCell::Text(
+                "Models were evaluated on different datasets or unranked splits; compare deltas with caution."
+                    .into(),
+            ),
+        ];
+        while caveat_row.len() < header.len() {
+            caveat_row.push(CsvCell::Text(String::new()));
+        }
+        csv_row(&mut out, &caveat_row);
+    }
     push_text(&mut out, "Input size (px)", models.iter().map(|m| m.imgsz.to_string()).collect());
     push_text(&mut out, "Head", models.iter().map(|m| head_label(m.head).to_string()).collect());
     push_text(&mut out, "Parameters", models.iter().map(|m| m.params.to_string()).collect());
@@ -355,10 +373,21 @@ pub fn build_model_compare_csv(
     out
 }
 
-/// Escapes pipe characters and collapses newlines so arbitrary model or class names never break a
-/// GitHub-Flavored Markdown table row.
+/// Escapes Markdown syntax characters and collapses newlines so arbitrary model, dataset, or class
+/// names render literally in GitHub-Flavored Markdown prose and tables.
 pub fn escape_md_cell(s: &str) -> String {
-    s.replace(['\r', '\n'], " ").replace('|', "\\|")
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '\r' | '\n' => out.push(' '),
+            '\\' | '|' | '[' | ']' | '(' | ')' | '`' | '*' | '_' | '<' | '>' | '~' | '!' => {
+                out.push('\\');
+                out.push(ch);
+            }
+            _ => out.push(ch),
+        }
+    }
+    out
 }
 
 fn md_row(out: &mut String, cols: &[String]) {

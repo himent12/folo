@@ -105,6 +105,7 @@ impl FoloApp {
         self.nr_estimate_gen += 1;
         // A draft's dataset belongs to the old server, and so do the ids deleted there.
         self.new_run_draft = None;
+        self.new_run_last = None;
         self.deleted.clear();
         // Model ids are per server: loaded local models belong to the old one.
         crate::local::forget_all();
@@ -112,6 +113,8 @@ impl FoloApp {
             self.play_target = None;
         }
         self.store.api = api;
+        self.store.clear_arch_caches();
+        self.store.sync_known_archs();
         self.server_mode = mode;
         self.clear_bench();
         self.clear_label();
