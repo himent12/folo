@@ -74,6 +74,22 @@ pub trait Exec {
     fn attend_and_pe(&mut self, a: &Attention, qkv: &Tensor, b: usize, h: usize, w: usize) -> Result<Tensor> {
         a.attend_and_pe(qkv, b, h, w)
     }
+    /// Attention matmuls + positional encoding (`o + pe(v)` from `qkv`) directly quantised onto boundary
+    /// `pin_name` when `a.proj` will actually run in int8 (`!out_f32` and matching residual dims `res_dims`);
+    /// default falls back to [`Exec::attend_and_pe`] + [`Exec::quantize`].
+    #[allow(clippy::too_many_arguments)]
+    fn attend_and_pe_q(
+        &mut self,
+        a: &Attention,
+        qkv: &Tensor,
+        res_dims: [usize; 4],
+        pin_name: &str,
+        _out_f32: bool,
+    ) -> Result<Self::A> {
+        let [b, _, h, w] = res_dims;
+        let attn_out = self.attend_and_pe(a, qkv, b, h, w)?;
+        self.quantize(pin_name, &attn_out)
+    }
     /// FOLO v2 `HyperContext` gather + FFN + scene pooling + broadcast from `av`. Symbolic executors override
     /// this to avoid running tensor ops during sensitivity analysis.
     fn hyper_attend_and_scene(
@@ -86,15 +102,49 @@ pub trait Exec {
     ) -> Result<(Tensor, Tensor)> {
         h_ctx.attend_and_scene(av, b, h, w)
     }
+    /// FOLO v2 `HyperContext` gather + FFN + scene pooling + broadcast directly quantised onto boundary
+    /// `pin_name` when `h_ctx.out_proj` will actually run in int8 (`!out_f32` and matching residual dims
+    /// `res_dims`); default falls back to [`Exec::hyper_attend_and_scene`] + [`Exec::quantize`].
+    #[allow(clippy::too_many_arguments)]
+    fn hyper_attend_and_scene_q(
+        &mut self,
+        h_ctx: &HyperContext,
+        av: &Tensor,
+        res_dims: [usize; 4],
+        pin_name: &str,
+        _out_f32: bool,
+    ) -> Result<(Self::A, Tensor)> {
+        let [b, _, h, w] = res_dims;
+        let (y_ctx, g_scene) = self.hyper_attend_and_scene(h_ctx, av, b, h, w)?;
+        let pin = self.quantize(pin_name, &y_ctx)?;
+        Ok((pin, g_scene))
+    }
     /// FOLO v2 relocated `FullPadGate` modulation on `f32` head inputs (`P3_head`/`P4_head`).
     fn fullpad_gate(&mut self, gate: &FullPadGate, feat: &Tensor, g_scene: &Tensor) -> Result<Tensor> {
         gate.forward(feat, g_scene)
+    }
+    /// Fused dequantisation + relocated `FullPadGate` modulation (`P3_head`/`P4_head`): avoids allocating and
+    /// writing an intermediate un-modulated `f32` feature tensor when `x` is materialised `u8` C4.
+    fn dequantize_fullpad_gate(
+        &mut self,
+        x: &Self::A,
+        gate: &FullPadGate,
+        g_scene: &Tensor,
+    ) -> Result<Tensor> {
+        let raw = self.dequantize(x)?;
+        self.fullpad_gate(gate, &raw, g_scene)
     }
     /// `act(conv(cat(parts)))` directly as `f32`: used for the head-only P5 output (`neck.out5.cv2`) so an int8
     /// conv writes `f32` directly without a `u8` round-trip, and an `f32` conv skips requantisation.
     fn conv_out_f32(&mut self, name: &str, conv: &ConvBnAct, parts: &[&Self::A]) -> Result<Tensor> {
         let y = self.conv(name, conv, parts, None)?;
         self.dequantize(&y)
+    }
+    /// Hint that `x` will be consumed in `f32` more than once (e.g. a residual bottleneck whose `cv1` and
+    /// `cv2` both run in `f32`). Executors backed by quantised storage may return an `f32`-backed activation so
+    /// the shared input is dequantised once rather than twice.
+    fn materialize_f32(&mut self, _x: &Self::A) -> Result<Option<Self::A>> {
+        Ok(None)
     }
     /// Quantise an `f32` tensor onto the grid of `name` (may be deferred until an int8 consumer reads it).
     fn quantize(&mut self, name: &str, x: &Tensor) -> Result<Self::A>;
@@ -104,6 +154,14 @@ pub trait Exec {
     fn narrow(&mut self, x: &Self::A, start: usize, len: usize) -> Result<Self::A>;
     /// `k × k` max pool, stride 1, padding `k / 2` (same grid).
     fn max_pool(&mut self, x: &Self::A, k: usize) -> Result<Self::A>;
+    /// Three chained `k × k` max pools for `SPPF` (`y1 = pool(y0)`, `y2 = pool(y1)`, `y3 = pool(y2)`),
+    /// keeping the same grid; executors may fuse all three stages per C4 group in L1 cache.
+    fn sppf_pools(&mut self, y0: &Self::A, k: usize) -> Result<[Self::A; 3]> {
+        let y1 = self.max_pool(y0, k)?;
+        let y2 = self.max_pool(&y1, k)?;
+        let y3 = self.max_pool(&y2, k)?;
+        Ok([y1, y2, y3])
+    }
     /// Nearest-neighbour upsample by 2 (same grid).
     fn upsample2(&mut self, x: &Self::A) -> Result<Self::A>;
     /// Nearest-neighbour upsample by 2 with a hint of whether the downstream consumer runs in `f32`: when
@@ -287,16 +345,23 @@ fn block_entry_is_f32<E: Exec>(e: &E, nb: &mut NameBuf, blk: &C3k2Block) -> bool
 }
 
 fn bottleneck<E: Exec>(e: &mut E, nb: &mut NameBuf, b: &Bottleneck, x: &E::A, out_f32: bool) -> Result<E::A> {
+    let l1 = nb.push_field("cv1");
+    let cv1_f32 = e.wants_f32(nb.as_str(), &b.cv1);
+    nb.restore(l1);
+
     let l2 = nb.push_field("cv2");
     let cv2_f32 = e.wants_f32(nb.as_str(), &b.cv2);
     nb.restore(l2);
 
+    let cached = if b.residual && cv1_f32 && cv2_f32 { e.materialize_f32(x)? } else { None };
+    let x_ref = cached.as_ref().unwrap_or(x);
+
     let l1 = nb.push_field("cv1");
-    let y = run_conv(e, nb.as_str(), &b.cv1, &[x], None, cv2_f32)?;
+    let y = run_conv(e, nb.as_str(), &b.cv1, &[x_ref], None, cv2_f32)?;
     nb.restore(l1);
 
     let l2 = nb.push_field("cv2");
-    let out = run_conv(e, nb.as_str(), &b.cv2, &[&y], b.residual.then_some(x), out_f32)?;
+    let out = run_conv(e, nb.as_str(), &b.cv2, &[&y], b.residual.then_some(x_ref), out_f32)?;
     nb.restore(l2);
     Ok(out)
 }
@@ -482,9 +547,7 @@ pub(super) fn sppf<E: Exec>(e: &mut E, nb: &mut NameBuf, b: &Sppf, x: &E::A, out
         e.ensure_u8(&y0)?;
     }
 
-    let y1 = e.max_pool(&y0, b.k)?;
-    let y2 = e.max_pool(&y1, b.k)?;
-    let y3 = e.max_pool(&y2, b.k)?;
+    let [y1, y2, y3] = e.sppf_pools(&y0, b.k)?;
 
     let l2 = nb.push_field("cv2");
     let out = run_conv(e, nb.as_str(), &b.cv2, &[&y0, &y1, &y2, &y3], None, out_f32)?;
@@ -493,14 +556,17 @@ pub(super) fn sppf<E: Exec>(e: &mut E, nb: &mut NameBuf, b: &Sppf, x: &E::A, out
 }
 
 fn attention<E: Exec>(e: &mut E, nb: &mut NameBuf, a: &Attention, x: &E::A, out_f32: bool) -> Result<E::A> {
-    let [b, _, h, w] = e.dims(x);
+    let res_dims = e.dims(x);
     let lq = nb.push_field("qkv");
     let qkv = e.conv_f32(nb.as_str(), &a.qkv, x)?;
     nb.restore(lq);
 
-    let attn_out = e.attend_and_pe(a, &qkv, b, h, w)?;
+    let lp = nb.push_field("proj");
+    let proj_f32 = e.wants_f32(nb.as_str(), &a.proj);
+    nb.restore(lp);
+
     let lp = nb.push_field("proj.in");
-    let pin = e.quantize(nb.as_str(), &attn_out)?;
+    let pin = e.attend_and_pe_q(a, &qkv, res_dims, nb.as_str(), proj_f32)?;
     nb.restore(lp);
 
     let lp = nb.push_field("proj");

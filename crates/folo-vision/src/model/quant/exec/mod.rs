@@ -20,6 +20,7 @@ use std::sync::Arc;
 use folo_core::Tensor;
 use folo_core::cpu::q8::{self, C4, Grid, QConv, QOut, QStem};
 use folo_nn::{ConvBnAct, Error, Result};
+use rayon::prelude::*;
 
 use self::plan::GridOwner;
 use super::cache::{PartKeyRef, load_qconv_view, load_qstem};
@@ -27,8 +28,9 @@ use super::calib::conv_f32;
 use super::pool::{ScratchPool, SlotHandle};
 use super::walk::{self, Exec};
 use super::{ConvView, VERSION_V2, int8_able, static_int8_able, static_int8_able_rep, stem_int8_able};
-use crate::model::FoloModel;
-use crate::model::v2::{StemV2, WsQARepConv3x3};
+use crate::model::blocks::Attention;
+use crate::model::v2::{FullPadGate, HyperContext, StemV2, WsQARepConv3x3};
+use crate::model::{FoloModel, attn_simd};
 
 /// A materialised u8 C4 activation (or a channel slice of one) backed by a pooled [`SlotHandle`].
 #[derive(Clone)]
@@ -287,6 +289,27 @@ impl<'a> Int8<'a> {
         load_qstem(conv)
     }
 
+    /// Run `conv_f32` over `parts` without heap `Vec` allocations for `parts.len() <= 8`.
+    fn run_conv_f32_parts(conv: &ConvBnAct, parts: &[&QAct<'a>], res: Option<&QAct<'a>>) -> Result<Tensor> {
+        let r = res.map(QAct::to_f32).transpose()?;
+        if parts.len() <= 8 {
+            let mut ts: [Option<Tensor>; 8] = [const { None }; 8];
+            for (i, a) in parts.iter().enumerate() {
+                ts[i] = Some(a.to_f32()?);
+            }
+            let first = ts[0].as_ref().expect("non-empty parts");
+            let mut refs = [first; 8];
+            for i in 1..parts.len() {
+                refs[i] = ts[i].as_ref().expect("initialized part");
+            }
+            conv_f32(conv, &refs[..parts.len()], r.as_ref())
+        } else {
+            let ts = parts.iter().map(|a| a.to_f32()).collect::<Result<Vec<_>>>()?;
+            let refs: Vec<&Tensor> = ts.iter().collect();
+            conv_f32(conv, &refs, r.as_ref())
+        }
+    }
+
     fn max_pool_u8(&mut self, u: &QActU8<'a>, k: usize) -> QAct<'a> {
         let [n, c, h, w] = u.dims;
         let mut out = self.pool.borrow_mut().take_buf(n, c, h * w);
@@ -306,6 +329,84 @@ impl<'a> Int8<'a> {
                 max_scale: u.max_scale,
             }),
         }
+    }
+
+    /// Fused 3-stage `SPPF` C4 max pooling (`y0 -> y1 -> y2 -> y3`) running all 3 stages per C4 group in L1
+    /// cache across Rayon workers, keeping worker threads warm for `sppf.cv2` and staying bit-exact with 3×
+    /// `q8::max_pool`.
+    fn sppf_pools_u8(&mut self, u: &QActU8<'a>, k: usize) -> [QAct<'a>; 3] {
+        let [n, c, h, w] = u.dims;
+        let hw = h * w;
+        let groups = c / 4;
+        let total = n * groups * hw;
+        let r = k / 2;
+        let (mut out1, mut out2, mut out3) = {
+            let mut pool = self.pool.borrow_mut();
+            (pool.take_buf(n, c, hw), pool.take_buf(n, c, hw), pool.take_buf(n, c, hw))
+        };
+        if total > 0 {
+            let pool = self.pool.borrow();
+            let src_data = pool.slice(u.buf.slot());
+            let u_offset = u.offset;
+            let u_img_stride = u.img_stride;
+            type SppfOutItem<'s> = (usize, ((&'s mut [u32], &'s mut [u32]), &'s mut [u32]));
+            let run_group = |tmp: &mut Vec<u32>, (ig, ((o1, o2), o3)): SppfOutItem<'_>| {
+                if tmp.len() < hw {
+                    tmp.resize(hw, 0);
+                }
+                let (img, g) = (ig / groups, ig % groups);
+                let src = &src_data[u_offset + img * u_img_stride + g * hw..][..hw];
+                attn_simd::max_pool_c4_plane(src, h, w, r, &mut tmp[..hw], o1);
+                attn_simd::max_pool_c4_plane(o1, h, w, r, &mut tmp[..hw], o2);
+                attn_simd::max_pool_c4_plane(o2, h, w, r, &mut tmp[..hw], o3);
+            };
+            if n * groups >= 8 && hw > 0 {
+                if hw <= 1024 {
+                    out1[..total]
+                        .par_chunks_exact_mut(hw)
+                        .zip(out2[..total].par_chunks_exact_mut(hw))
+                        .zip(out3[..total].par_chunks_exact_mut(hw))
+                        .enumerate()
+                        .for_each(|(ig, ((o1, o2), o3))| {
+                            let mut stack_tmp = [0u32; 1024];
+                            let tmp = &mut stack_tmp[..hw];
+                            let (img, g) = (ig / groups, ig % groups);
+                            let src = &src_data[u_offset + img * u_img_stride + g * hw..][..hw];
+                            attn_simd::max_pool_c4_plane(src, h, w, r, tmp, o1);
+                            attn_simd::max_pool_c4_plane(o1, h, w, r, tmp, o2);
+                            attn_simd::max_pool_c4_plane(o2, h, w, r, tmp, o3);
+                        });
+                } else {
+                    out1[..total]
+                        .par_chunks_exact_mut(hw)
+                        .zip(out2[..total].par_chunks_exact_mut(hw))
+                        .zip(out3[..total].par_chunks_exact_mut(hw))
+                        .enumerate()
+                        .for_each_init(|| Vec::with_capacity(hw), run_group);
+                }
+            } else {
+                let mut tmp = vec![0u32; hw];
+                out1[..total]
+                    .chunks_exact_mut(hw)
+                    .zip(out2[..total].chunks_exact_mut(hw))
+                    .zip(out3[..total].chunks_exact_mut(hw))
+                    .enumerate()
+                    .for_each(|item| run_group(&mut tmp, item));
+            }
+        }
+        let wrap = |buf: Vec<u32>| QAct {
+            repr: QActRepr::U8(QActU8 {
+                buf: SlotHandle::new(&self.pool, buf),
+                offset: 0,
+                img_stride: groups * hw,
+                dims: u.dims,
+                bg: u.bg.clone(),
+                grid_offset: u.grid_offset,
+                grids_hash: u.grids_hash,
+                max_scale: u.max_scale,
+            }),
+        };
+        [wrap(out1), wrap(out2), wrap(out3)]
     }
 
     /// Execute the int8 conv into `out`, borrowing all input C4 views from `self.pool` simultaneously.
@@ -492,9 +593,7 @@ impl<'a> Exec for Int8<'a> {
             })
             .flatten();
         let Some((oh, ow)) = able else {
-            let ts = parts.iter().map(|a| a.to_f32()).collect::<Result<Vec<_>>>()?;
-            let r = res.map(QAct::to_f32).transpose()?;
-            let y = conv_f32(conv, &ts.iter().collect::<Vec<_>>(), r.as_ref())?;
+            let y = Self::run_conv_f32_parts(conv, parts, res)?;
             return QAct::from_f32_lazy(y, bg);
         };
         let mut out = self.pool.borrow_mut().take_buf(n, o, oh * ow);
@@ -535,9 +634,7 @@ impl<'a> Exec for Int8<'a> {
             })
             .flatten();
         let Some((oh, ow)) = able else {
-            let ts = parts.iter().map(|a| a.to_f32()).collect::<Result<Vec<_>>>()?;
-            let r = res.map(QAct::to_f32).transpose()?;
-            let y = conv_f32(conv, &ts.iter().collect::<Vec<_>>(), r.as_ref())?;
+            let y = Self::run_conv_f32_parts(conv, parts, res)?;
             return QAct::from_f32_lazy(y, bg);
         };
         let mut out = folo_core::cpu::take_buffer(n * o * oh * ow);
@@ -585,13 +682,84 @@ impl<'a> Exec for Int8<'a> {
             })
             .flatten();
         let Some((oh, ow)) = able else {
-            let ts = parts.iter().map(|a| a.to_f32()).collect::<Result<Vec<_>>>()?;
-            return conv_f32(conv, &ts.iter().collect::<Vec<_>>(), None);
+            return Self::run_conv_f32_parts(conv, parts, None);
         };
         let mut out = folo_core::cpu::take_buffer(n * o * oh * ow);
         let dims =
             self.run_parts_into(name, ConvView::from_cba(conv), parts, None, QOut::F32 { data: &mut out })?;
         Ok(Tensor::from_vec(out, dims.to_vec())?)
+    }
+
+    fn attend_and_pe_q(
+        &mut self,
+        a: &Attention,
+        qkv: &Tensor,
+        res_dims: [usize; 4],
+        pin_name: &str,
+        out_f32: bool,
+    ) -> Result<QAct<'a>> {
+        let [b, _, h, w] = res_dims;
+        let c = a.heads * a.head_dim;
+        let proj_runs_int8 =
+            !out_f32 && c.is_multiple_of(4) && int8_able(&a.proj, [b, c, h, w], Some(res_dims)).is_some();
+        if proj_runs_int8 {
+            let (bg, _) = self.plan.boundary_for(pin_name, c)?;
+            let mut out = self.pool.borrow_mut().take_buf(b, c, h * w);
+            match a.attend_and_pe_into_c4(qkv, b, h, w, &bg.as_ref().grids, &mut out) {
+                Ok(true) => return Ok(QAct::new(&self.pool, out, [b, c, h, w], bg)),
+                Ok(false) => {
+                    self.pool.borrow_mut().return_buf(out);
+                }
+                Err(e) => {
+                    self.pool.borrow_mut().return_buf(out);
+                    return Err(e);
+                }
+            }
+        }
+        let attn_out = self.attend_and_pe(a, qkv, b, h, w)?;
+        self.quantize(pin_name, &attn_out)
+    }
+
+    fn hyper_attend_and_scene_q(
+        &mut self,
+        h_ctx: &HyperContext,
+        av: &Tensor,
+        res_dims: [usize; 4],
+        pin_name: &str,
+        out_f32: bool,
+    ) -> Result<(QAct<'a>, Tensor)> {
+        self.hyper_attend_and_scene_q_impl(h_ctx, av, res_dims, pin_name, out_f32)
+    }
+
+    fn dequantize_fullpad_gate(
+        &mut self,
+        x: &QAct<'a>,
+        gate: &FullPadGate,
+        g_scene: &Tensor,
+    ) -> Result<Tensor> {
+        self.dequantize_fullpad_gate_impl(x, gate, g_scene)
+    }
+
+    fn materialize_f32(&mut self, x: &QAct<'a>) -> Result<Option<QAct<'a>>> {
+        match &x.repr {
+            QActRepr::U8(u) => {
+                let tensor = u.to_f32()?;
+                let u8_cache = OnceCell::new();
+                let _ = u8_cache.set(u.clone());
+                Ok(Some(QAct {
+                    repr: QActRepr::F32(QActF32 {
+                        tensor,
+                        dims: u.dims,
+                        bg: u.bg.clone(),
+                        grid_offset: u.grid_offset,
+                        grids_hash: u.grids_hash,
+                        max_scale: u.max_scale,
+                        u8_cache,
+                    }),
+                }))
+            }
+            QActRepr::F32(_) => Ok(None),
+        }
     }
 
     fn quantize(&mut self, name: &str, x: &Tensor) -> Result<QAct<'a>> {
@@ -668,6 +836,25 @@ impl<'a> Exec for Int8<'a> {
                         u8_cache: OnceCell::new(),
                     }),
                 })
+            }
+        }
+    }
+
+    fn sppf_pools(&mut self, y0: &QAct<'a>, k: usize) -> Result<[QAct<'a>; 3]> {
+        match &y0.repr {
+            QActRepr::U8(u) => {
+                let u_clone = u.clone();
+                Ok(self.sppf_pools_u8(&u_clone, k))
+            }
+            QActRepr::F32(f) => {
+                if let Some(u) = f.u8_cache.get() {
+                    let u_clone = u.clone();
+                    return Ok(self.sppf_pools_u8(&u_clone, k));
+                }
+                let y1 = self.max_pool(y0, k)?;
+                let y2 = self.max_pool(&y1, k)?;
+                let y3 = self.max_pool(&y2, k)?;
+                Ok([y1, y2, y3])
             }
         }
     }

@@ -115,14 +115,17 @@ fn hyper_context<E: Exec>(
     x: &E::A,
     out_f32: bool,
 ) -> Result<(E::A, Tensor)> {
-    let [b, _, h, w] = e.dims(x);
+    let res_dims = e.dims(x);
     let lav = nb.push_field("av_proj");
     let av = e.conv_f32(nb.as_str(), &h_ctx.av_proj, x)?;
     nb.restore(lav);
 
-    let (y_ctx, g_scene) = e.hyper_attend_and_scene(h_ctx, &av, b, h, w)?;
+    let lo = nb.push_field("out_proj");
+    let out_proj_f32 = e.wants_f32(nb.as_str(), &h_ctx.out_proj);
+    nb.restore(lo);
+
     let lin = nb.push_field("out_proj.in");
-    let pin = e.quantize(nb.as_str(), &y_ctx)?;
+    let (pin, g_scene) = e.hyper_attend_and_scene_q(h_ctx, &av, res_dims, nb.as_str(), out_proj_f32)?;
     nb.restore(lin);
 
     let lo = nb.push_field("out_proj");
@@ -234,25 +237,23 @@ pub fn features_v2<E: Exec>(model: &FoloV2Model, e: &mut E, x: &Tensor) -> Resul
     drop((up14, p3, p2_spd));
 
     let nd3 = run_conv(e, "neck.down3", &nk.down3, &[&out3_raw], None, out4_f32)?;
-    // Dequantise P3 while `out3_raw` is hot in L2 cache, then apply relocated FullPAD gate on f32 head input.
-    let p3_raw = e.dequantize(&out3_raw)?;
-    drop(out3_raw);
+    // Dequantise P3 while `out3_raw` is hot in L2 cache, fusing relocated FullPAD FiLM modulation directly.
     let p3_head = match &nk.pad_p3 {
-        Some(gate) => e.fullpad_gate(gate, &p3_raw, &g_scene)?,
-        None => p3_raw,
+        Some(gate) => e.dequantize_fullpad_gate(&out3_raw, gate, &g_scene)?,
+        None => e.dequantize(&out3_raw)?,
     };
+    drop(out3_raw);
 
     nb.set("neck.out4");
     let out4_raw = folo_block(e, &mut nb, &nk.out4, &[&nd3, &td4], e.wants_f32("neck.down4", &nk.down4))?;
     drop((nd3, td4));
 
     let nd4 = run_conv(e, "neck.down4", &nk.down4, &[&out4_raw], None, out5_f32)?;
-    let p4_raw = e.dequantize(&out4_raw)?;
-    drop(out4_raw);
     let p4_head = match &nk.pad_p4 {
-        Some(gate) => e.fullpad_gate(gate, &p4_raw, &g_scene)?,
-        None => p4_raw,
+        Some(gate) => e.dequantize_fullpad_gate(&out4_raw, gate, &g_scene)?,
+        None => e.dequantize(&out4_raw)?,
     };
+    drop(out4_raw);
 
     nb.set("neck.out5");
     let out5 = folo_block_f32(e, &mut nb, &nk.out5, &[&nd4, &p5])?;

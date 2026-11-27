@@ -615,3 +615,99 @@ fn hypercontext_ffn_residual_bias_cancellation_matches_reference() {
         "expected residual e_t = 1.0 preserved after cancelling +2^24 / -2^24, got {fv:?}"
     );
 }
+
+/// Fused `FullPadGate` direct CPU path, fused `dequantize_fullpad_gate` (scaling per-channel grids in one
+/// dequantise pass), and fused `HyperContext::attend_and_scene_into_c4` match `FakeQuant` and tensor
+/// reference with non-zero gate weights on multi-batch rectangular inputs, and are thread-deterministic.
+#[test]
+fn fullpad_gate_fused_dequant_and_hyper_c4_parity() {
+    use folo_vision::model::blocks::Init;
+    use folo_vision::model::v2::FullPadGate;
+
+    let x_cal = Tensor::rand_uniform([1, 3, 64, 96], 0.0, 1.0, &mut Rng::seed(93));
+    let x_test = Tensor::rand_uniform([2, 3, 64, 96], 0.0, 1.0, &mut Rng::seed(94));
+
+    let mut cfg = FoloV2Config::new("n", 4).unwrap();
+    cfg.fullpad = true;
+    let m = tiny_v2(cfg, 95, &x_cal);
+    // Give both FullPad gates non-zero weights and biases so `1 + tanh(proj(g_scene))` varies per channel.
+    {
+        let _g = no_grad();
+        let mut wrng = Rng::seed(96);
+        for gate in [m.neck.pad_p3.as_ref(), m.neck.pad_p4.as_ref()].into_iter().flatten() {
+            let w_shape = gate.proj.weight.dims().to_vec();
+            gate.proj.weight.copy_from(&Tensor::rand_uniform(w_shape, -0.6, 0.6, &mut wrng)).unwrap();
+            if let Some(bias) = &gate.proj.bias {
+                let b_shape = bias.dims().to_vec();
+                bias.copy_from(&Tensor::rand_uniform(b_shape, -0.4, 0.4, &mut wrng)).unwrap();
+            }
+        }
+    }
+
+    // 1. Direct `FullPadGate::forward` CPU fast path vs grad-enabled reference (including batch=2).
+    {
+        let gate = m.neck.pad_p3.as_ref().expect("fullpad pad_p3");
+        let c_feat = gate.proj.weight.dims()[0];
+        let c_scene = gate.proj.weight.dims()[1];
+        let feat = Tensor::rand_uniform([2, c_feat, 8, 12], -2.0, 2.0, &mut Rng::seed(97));
+        let g_scene = Tensor::rand_uniform([2, c_scene], -1.5, 1.5, &mut Rng::seed(98));
+        let ref_out = gate.forward(&feat, &g_scene).unwrap().to_vec::<f32>().unwrap();
+        let fast_out = {
+            let _g = no_grad();
+            gate.forward(&feat, &g_scene).unwrap().to_vec::<f32>().unwrap()
+        };
+        let worst = ref_out.iter().zip(&fast_out).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+        assert!(worst < 1e-5, "FullPadGate fast path diverged from reference: max abs diff {worst}");
+
+        // Aliased gate weight/bias storage must not deadlock.
+        let mut arng = Rng::seed(101);
+        let mut aliased = FullPadGate::new(4, 4, &mut Init::new(&mut arng)).unwrap();
+        aliased.proj.bias = Some(aliased.proj.weight.reshape([16]).unwrap().narrow(0, 0, 4).unwrap());
+        let af = Tensor::rand_uniform([1, 4, 2, 2], -1.0, 1.0, &mut Rng::seed(99));
+        let ag = Tensor::rand_uniform([1, 4], -1.0, 1.0, &mut Rng::seed(100));
+        let a_ref = aliased.forward(&af, &ag).unwrap().to_vec::<f32>().unwrap();
+        let a_fast = {
+            let _g = no_grad();
+            aliased.forward(&af, &ag).unwrap().to_vec::<f32>().unwrap()
+        };
+        let a_worst = a_ref.iter().zip(&a_fast).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+        assert!(a_worst < 1e-5, "aliased FullPadGate diverged: {a_worst}");
+    }
+
+    // 2. End-to-end `features_v2` with non-zero FullPad gates (both pure int8 and mixed with `out_proj` in f32).
+    let cal_pure = quant::calibrate_v2(&m, || std::iter::once(Ok(x_cal.clone())), Method::MinMax).unwrap();
+    let mut cal_mixed = cal_pure.clone();
+    cal_mixed.f32_convs.push("backbone.hyper.out_proj".into());
+
+    let _g = no_grad();
+    for (label, cal) in [("pure_int8", &cal_pure), ("hyper_out_proj_f32", &cal_mixed)] {
+        let plan = Int8Plan::new(cal.clone());
+        let mut fq = FakeQuant::new(cal);
+        let fq_feats = fq.features_v2(&m, &x_test).unwrap();
+        let pool1 = rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+        let pool4 = rayon::ThreadPoolBuilder::new().num_threads(4).build().unwrap();
+        let q1 = pool1.install(|| {
+            let _g = no_grad();
+            quant::exec::features_v2(&m, &plan, &x_test).unwrap()
+        });
+        let q4 = pool4.install(|| {
+            let _g = no_grad();
+            quant::exec::features_v2(&m, &plan, &x_test).unwrap()
+        });
+        for l in 0..3 {
+            let v_fq = fq_feats[l].to_vec::<f32>().unwrap();
+            let v1 = q1[l].to_vec::<f32>().unwrap();
+            let v4 = q4[l].to_vec::<f32>().unwrap();
+            assert!(
+                v1.iter().zip(&v4).all(|(a, b)| a.to_bits() == b.to_bits()),
+                "{label} level {l}: not bit-deterministic across 1 vs 4 threads"
+            );
+            let max_abs = v_fq.iter().map(|v| v.abs()).fold(1e-3f32, f32::max);
+            let max_diff = v_fq.iter().zip(&v4).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+            assert!(
+                max_diff < max_abs * 0.08 + 1e-2,
+                "{label} level {l}: max_diff={max_diff:.5} vs max_abs={max_abs:.5}"
+            );
+        }
+    }
+}

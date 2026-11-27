@@ -7,9 +7,11 @@
 //! - [`HyperContext`]: linear `O(N·M)` P5 hypergraph global context (`HyperACE-Lite`).
 //! - [`FullPadGate`]: zero-init residual FiLM gate injecting P5 scene context into `f32` head inputs.
 
+use std::cell::RefCell;
 use std::sync::RwLock;
 
 use folo_core::cpu::gemm::{Strided, gemm};
+use folo_core::cpu::q8::{self, Grid};
 use folo_core::{Conv2dParams, DType, Device, Tensor, is_grad_enabled, no_grad};
 use folo_nn::{
     Activation, BatchNorm2d, Conv2d, Conv2dConfig, ConvBnAct, Error, Forward, Linear, Module, ModuleList,
@@ -17,7 +19,16 @@ use folo_nn::{
 };
 use rayon::prelude::*;
 
+use crate::model::attn_simd;
 use crate::model::blocks::{Fuse, Init};
+
+thread_local! {
+    /// Reusable per-thread flat scratch slab for [`HyperContext`] (`a_gather`, `a_bcast`, `e_t`, `h1`,
+    /// `e_ffn`, `mx`, `sum`, plus optional `y_ctx` when fusing directly into C4 `u8`).
+    static HYPER_SCRATCH: RefCell<Vec<f32>> = const { RefCell::new(Vec::new()) };
+}
+
+const MAX_HYPER_TLS_ELEMS: usize = 1 << 20;
 
 const CONV3X3_S1_P1: Conv2dParams =
     Conv2dParams { stride: [1, 1], padding: [1, 1], dilation: [1, 1], groups: 1 };
@@ -488,15 +499,9 @@ impl HyperContext {
         Ok((y_ctx, g_scene))
     }
 
-    fn attend_and_scene_cpu_fast(
-        &self,
-        av: &Tensor,
-        b: usize,
-        h: usize,
-        w: usize,
-    ) -> Result<Option<(Tensor, Tensor)>> {
+    fn cpu_fast_eligible(&self, av: &Tensor, b: usize, h: usize, w: usize) -> Option<usize> {
         let (m, cg) = (self.m_edges, self.c_g);
-        let Some(n) = h.checked_mul(w) else { return Ok(None) };
+        let n = h.checked_mul(w)?;
         let eligible = !is_grad_enabled()
             && b > 0
             && m > 0
@@ -521,174 +526,256 @@ impl HyperContext {
                 .bias
                 .as_ref()
                 .is_none_or(|t| t.device().is_cpu() && t.dtype() == DType::F32 && t.dims() == [cg]);
-        if !eligible {
-            return Ok(None);
-        }
-        // Snapshot small FFN weights/biases once before locking `av` if any storage aliases.
-        let w1 = self.ffn1.weight.to_vec::<f32>()?;
-        let b1 = self.ffn1.bias.as_ref().map(|t| t.to_vec::<f32>()).transpose()?;
-        let w2 = self.ffn2.weight.to_vec::<f32>()?;
-        let b2 = self.ffn2.bias.as_ref().map(|t| t.to_vec::<f32>()).transpose()?;
+        eligible.then_some(n)
+    }
 
-        let mut y_ctx = folo_core::cpu::take_buffer(b * cg * n);
-        let mut g_scene = folo_core::cpu::take_buffer(b * cg);
-        let mut a_gather = vec![0.0f32; m * n];
-        let mut a_bcast = vec![0.0f32; m * n];
-        let mut e_t = vec![0.0f32; m * cg];
-        let mut h1 = vec![0.0f32; m * cg];
-        let mut e_ffn = vec![0.0f32; m * cg];
+    /// Borrow `av`, `ffn1.{weight,bias}`, and `ffn2.{weight,bias}` zero-copy when distinct from `av` and each
+    /// other (snapshotting only any aliased storage to prevent `RwLock` self-deadlock).
+    fn with_av_and_ffn<R>(
+        &self,
+        av: &Tensor,
+        mut f: impl FnMut(&[f32], &[f32], Option<&[f32]>, &[f32], Option<&[f32]>) -> R,
+    ) -> Result<R> {
+        let w1_t = &self.ffn1.weight;
+        let b1_t = self.ffn1.bias.as_ref();
+        let w2_t = &self.ffn2.weight;
+        let b2_t = self.ffn2.bias.as_ref();
+
+        let w1_own = w1_t.same_storage(av).then(|| w1_t.to_vec::<f32>()).transpose()?;
+        let b1_own = b1_t
+            .filter(|t| t.same_storage(av) || t.same_storage(w1_t))
+            .map(|t| t.to_vec::<f32>())
+            .transpose()?;
+        let w2_own =
+            (w2_t.same_storage(av) || w2_t.same_storage(w1_t) || b1_t.is_some_and(|t| w2_t.same_storage(t)))
+                .then(|| w2_t.to_vec::<f32>())
+                .transpose()?;
+        let b2_own = b2_t
+            .filter(|t| {
+                t.same_storage(av)
+                    || t.same_storage(w1_t)
+                    || t.same_storage(w2_t)
+                    || b1_t.is_some_and(|b1| t.same_storage(b1))
+            })
+            .map(|t| t.to_vec::<f32>())
+            .transpose()?;
+
+        let mut run_b2 = |av_s: &[f32], w1: &[f32], b1: Option<&[f32]>, w2: &[f32]| -> folo_core::Result<R> {
+            match (&b2_own, b2_t) {
+                (Some(v), _) => Ok(f(av_s, w1, b1, w2, Some(v))),
+                (None, Some(t)) => t.with_f32_slice(|s| f(av_s, w1, b1, w2, Some(s))),
+                (None, None) => Ok(f(av_s, w1, b1, w2, None)),
+            }
+        };
+        let mut run_w2 = |av_s: &[f32], w1: &[f32], b1: Option<&[f32]>| -> folo_core::Result<R> {
+            match &w2_own {
+                Some(v) => run_b2(av_s, w1, b1, v),
+                None => w2_t.with_f32_slice(|s| run_b2(av_s, w1, b1, s))?,
+            }
+        };
+        let mut run_b1 = |av_s: &[f32], w1: &[f32]| -> folo_core::Result<R> {
+            match (&b1_own, b1_t) {
+                (Some(v), _) => run_w2(av_s, w1, Some(v)),
+                (None, Some(t)) => t.with_f32_slice(|s| run_w2(av_s, w1, Some(s)))?,
+                (None, None) => run_w2(av_s, w1, None),
+            }
+        };
+        Ok(av.with_f32_slice(|av_s| -> folo_core::Result<R> {
+            match &w1_own {
+                Some(v) => run_b1(av_s, v),
+                None => w1_t.with_f32_slice(|s| run_b1(av_s, s))?,
+            }
+        })??)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn compute_attend_and_scene_slices(
+        &self,
+        av_s: &[f32],
+        w1: &[f32],
+        b1: Option<&[f32]>,
+        w2: &[f32],
+        b2: Option<&[f32]>,
+        b: usize,
+        n: usize,
+        work: &mut [f32],
+        y_ctx: &mut [f32],
+        g_scene: &mut [f32],
+    ) {
+        let (m, cg) = (self.m_edges, self.c_g);
+        let mn = m * n;
+        let mcg = m * cg;
+        let (a_gather, rest) = work.split_at_mut(mn);
+        let (a_bcast, rest) = rest.split_at_mut(mn);
+        let (e_t, rest) = rest.split_at_mut(mcg);
+        let (h1, rest) = rest.split_at_mut(mcg);
+        let (e_ffn, rest) = rest.split_at_mut(mcg);
+        let (mx_buf, sum_buf) = rest.split_at_mut(n);
+
         let av_stride = (m + cg) * n;
         let inv_m = 1.0 / m as f32;
 
-        av.with_f32_slice(|av_s| {
-            for bi in 0..b {
-                let a_off = bi * av_stride;
-                let v_off = a_off + m * n;
-                let a_slice = &av_s[a_off..a_off + m * n];
+        for bi in 0..b {
+            let a_off = bi * av_stride;
+            let v_off = a_off + mn;
+            let a_slice = &av_s[a_off..a_off + mn];
 
-                // 1. a_gather = softmax(a_logits, dim=-1) over n for each hyperedge row.
-                for r in 0..m {
-                    let src = &a_slice[r * n..(r + 1) * n];
-                    let dst = &mut a_gather[r * n..(r + 1) * n];
-                    let mut mx = f32::NEG_INFINITY;
-                    let mut non_finite = false;
-                    for &v in src {
-                        if !v.is_finite() {
-                            non_finite = true;
-                        }
-                        if v > mx {
-                            mx = v;
-                        }
-                    }
-                    if non_finite {
-                        let mx = src.iter().copied().fold(f32::NEG_INFINITY, |a, b| {
-                            if a.is_nan() || b.is_nan() { f32::NAN } else { a.max(b) }
-                        });
-                        let mut sum = 0.0f32;
-                        for (d, &v) in dst.iter_mut().zip(src) {
-                            let e = (v - mx).exp();
-                            *d = e;
-                            sum += e;
-                        }
-                        for d in dst.iter_mut() {
-                            *d /= sum;
-                        }
-                    } else {
-                        let mut sum = 0.0f32;
-                        for (d, &v) in dst.iter_mut().zip(src) {
-                            let e = folo_core::cpu::fast_exp(v - mx);
-                            *d = e;
-                            sum += e;
-                        }
-                        let inv = 1.0 / sum;
-                        for d in dst.iter_mut() {
-                            *d *= inv;
-                        }
-                    }
-                }
-
-                // 2. a_bcast = softmax(a_logits, dim=1) over m for each spatial token column.
-                for j in 0..n {
-                    let mut mx = f32::NEG_INFINITY;
-                    let mut non_finite = false;
-                    for r in 0..m {
-                        let v = a_slice[r * n + j];
-                        if !v.is_finite() {
-                            non_finite = true;
-                        }
-                        if v > mx {
-                            mx = v;
-                        }
-                    }
-                    if non_finite {
-                        let mut mx = f32::NEG_INFINITY;
-                        for r in 0..m {
-                            let v = a_slice[r * n + j];
-                            mx = if mx.is_nan() || v.is_nan() { f32::NAN } else { mx.max(v) };
-                        }
-                        let mut sum = 0.0f32;
-                        for r in 0..m {
-                            let e = (a_slice[r * n + j] - mx).exp();
-                            a_bcast[r * n + j] = e;
-                            sum += e;
-                        }
-                        for r in 0..m {
-                            a_bcast[r * n + j] /= sum;
-                        }
-                    } else {
-                        let mut sum = 0.0f32;
-                        for r in 0..m {
-                            let e = folo_core::cpu::fast_exp(a_slice[r * n + j] - mx);
-                            a_bcast[r * n + j] = e;
-                            sum += e;
-                        }
-                        let inv = 1.0 / sum;
-                        for r in 0..m {
-                            a_bcast[r * n + j] *= inv;
-                        }
-                    }
-                }
-
-                // 3. e_t[m, cg] = a_gather[m, n] @ v[cg, n]^T (direct without transpose copy!).
-                let ga = Strided::lhs(&a_gather, 0, n, 1);
-                let vb = Strided::rhs(av_s, v_off, 1, n);
-                gemm(m, cg, n, &ga, &vb, &mut e_t, cg, false, true);
-
-                // 4. h1[m, cg] = silu(e_t @ w1^T + b1)
-                let et_a = Strided::lhs(&e_t, 0, cg, 1);
-                let w1_b = Strided::rhs(&w1, 0, 1, cg);
-                gemm(m, cg, cg, &et_a, &w1_b, &mut h1, cg, false, true);
-                if let Some(bs) = b1.as_deref() {
-                    for row in h1.chunks_exact_mut(cg) {
-                        for (x, &bv) in row.iter_mut().zip(bs) {
-                            *x = folo_core::cpu::silu(*x + bv);
-                        }
-                    }
-                } else {
-                    for x in &mut h1 {
-                        *x = folo_core::cpu::silu(*x);
-                    }
-                }
-
-                // 5. e_ffn[m, cg] = h1 @ w2^T + b2; e_prime_t = e_t + e_ffn; g_scene = mean_m(e_prime_t)
-                let h1_a = Strided::lhs(&h1, 0, cg, 1);
-                let w2_b = Strided::rhs(&w2, 0, 1, cg);
-                gemm(m, cg, cg, &h1_a, &w2_b, &mut e_ffn, cg, false, true);
-                let gs_out = &mut g_scene[bi * cg..(bi + 1) * cg];
-                gs_out.fill(0.0);
-                for r in 0..m {
-                    let row_et = &mut e_t[r * cg..(r + 1) * cg];
-                    let row_ffn = &e_ffn[r * cg..(r + 1) * cg];
-                    match b2.as_deref() {
-                        Some(bs) => {
-                            for c in 0..cg {
-                                let ep = row_et[c] + (row_ffn[c] + bs[c]);
-                                row_et[c] = ep;
-                                gs_out[c] += ep;
-                            }
-                        }
-                        None => {
-                            for c in 0..cg {
-                                let ep = row_et[c] + row_ffn[c];
-                                row_et[c] = ep;
-                                gs_out[c] += ep;
-                            }
-                        }
-                    }
-                }
-                for g in gs_out.iter_mut() {
-                    *g *= inv_m;
-                }
-
-                // 6. y_ctx[cg, n] = e_prime_t^T[cg, m] @ a_bcast[m, n]
-                let ep_a = Strided::lhs(&e_t, 0, 1, cg);
-                let ab_b = Strided::rhs(&a_bcast, 0, n, 1);
-                let dst_y = &mut y_ctx[bi * cg * n..(bi + 1) * cg * n];
-                gemm(cg, n, m, &ep_a, &ab_b, dst_y, n, false, true);
+            // 1. a_gather = softmax(a_logits, dim=-1) over n for each hyperedge row (AVX2).
+            for r in 0..m {
+                attn_simd::softmax_row_copy(&a_slice[r * n..(r + 1) * n], &mut a_gather[r * n..(r + 1) * n]);
             }
+
+            // 2. a_bcast = softmax(a_logits, dim=1) over m (row-major contiguous AVX2).
+            attn_simd::softmax_cols_row_major(a_slice, a_bcast, m, n, mx_buf, sum_buf);
+
+            // 3. e_t[m, cg] = a_gather[m, n] @ v[cg, n]^T (direct without transpose copy!).
+            let ga = Strided::lhs(a_gather, 0, n, 1);
+            let vb = Strided::rhs(av_s, v_off, 1, n);
+            gemm(m, cg, n, &ga, &vb, e_t, cg, false, true);
+
+            // 4. h1[m, cg] = silu(e_t @ w1^T + b1)
+            let et_a = Strided::lhs(e_t, 0, cg, 1);
+            let w1_b = Strided::rhs(w1, 0, 1, cg);
+            gemm(m, cg, cg, &et_a, &w1_b, h1, cg, false, true);
+            if let Some(bs) = b1 {
+                for row in h1.chunks_exact_mut(cg) {
+                    for (x, &bv) in row.iter_mut().zip(bs) {
+                        *x = folo_core::cpu::silu(*x + bv);
+                    }
+                }
+            } else {
+                for x in h1.iter_mut() {
+                    *x = folo_core::cpu::silu(*x);
+                }
+            }
+
+            // 5. e_ffn[m, cg] = h1 @ w2^T + b2; e_prime_t = e_t + e_ffn; g_scene = mean_m(e_prime_t)
+            let h1_a = Strided::lhs(h1, 0, cg, 1);
+            let w2_b = Strided::rhs(w2, 0, 1, cg);
+            gemm(m, cg, cg, &h1_a, &w2_b, e_ffn, cg, false, true);
+            let gs_out = &mut g_scene[bi * cg..(bi + 1) * cg];
+            gs_out.fill(0.0);
+            for r in 0..m {
+                let row_et = &mut e_t[r * cg..(r + 1) * cg];
+                let row_ffn = &e_ffn[r * cg..(r + 1) * cg];
+                match b2 {
+                    Some(bs) => {
+                        for c in 0..cg {
+                            let ep = row_et[c] + (row_ffn[c] + bs[c]);
+                            row_et[c] = ep;
+                            gs_out[c] += ep;
+                        }
+                    }
+                    None => {
+                        for c in 0..cg {
+                            let ep = row_et[c] + row_ffn[c];
+                            row_et[c] = ep;
+                            gs_out[c] += ep;
+                        }
+                    }
+                }
+            }
+            for g in gs_out.iter_mut() {
+                *g *= inv_m;
+            }
+
+            // 6. y_ctx[cg, n] = e_prime_t^T[cg, m] @ a_bcast[m, n]
+            let ep_a = Strided::lhs(e_t, 0, 1, cg);
+            let ab_b = Strided::rhs(a_bcast, 0, n, 1);
+            let dst_y = &mut y_ctx[bi * cg * n..(bi + 1) * cg * n];
+            gemm(cg, n, m, &ep_a, &ab_b, dst_y, n, false, true);
+        }
+    }
+
+    fn attend_and_scene_cpu_fast(
+        &self,
+        av: &Tensor,
+        b: usize,
+        h: usize,
+        w: usize,
+    ) -> Result<Option<(Tensor, Tensor)>> {
+        let Some(n) = self.cpu_fast_eligible(av, b, h, w) else {
+            return Ok(None);
+        };
+        let (m, cg) = (self.m_edges, self.c_g);
+        let work_len = 2 * m * n + 3 * m * cg + 2 * n;
+        let mut y_ctx = folo_core::cpu::take_buffer(b * cg * n);
+        let mut g_scene = folo_core::cpu::take_buffer(b * cg);
+
+        HYPER_SCRATCH.with(|cell| -> Result<()> {
+            let mut scratch = cell.borrow_mut();
+            if scratch.len() < work_len {
+                scratch.resize(work_len, 0.0);
+            }
+            let work = &mut scratch[..work_len];
+            self.with_av_and_ffn(av, |av_s, w1, b1, w2, b2| {
+                self.compute_attend_and_scene_slices(
+                    av_s,
+                    w1,
+                    b1,
+                    w2,
+                    b2,
+                    b,
+                    n,
+                    work,
+                    &mut y_ctx,
+                    &mut g_scene,
+                );
+            })?;
+            if scratch.capacity() > MAX_HYPER_TLS_ELEMS {
+                *scratch = Vec::new();
+            }
+            Ok(())
         })?;
 
         Ok(Some((Tensor::from_vec(y_ctx, [b, cg, h, w])?, Tensor::from_vec(g_scene, [b, cg])?)))
+    }
+
+    /// Fused `attend_and_scene` writing `y_ctx` straight into C4 `u8` codes (`out_u32` of length
+    /// `>= b * (c_g / 4) * h * w`) using TLS scratch (zero `y_ctx` `Tensor` allocation), returning
+    /// `Some(g_scene)` when executed on the fast CPU path or `None` to fall back.
+    pub(crate) fn attend_and_scene_into_c4(
+        &self,
+        av: &Tensor,
+        b: usize,
+        h: usize,
+        w: usize,
+        grids: &[Grid],
+        out_u32: &mut [u32],
+    ) -> Result<Option<Tensor>> {
+        let Some(n) = self.cpu_fast_eligible(av, b, h, w) else {
+            return Ok(None);
+        };
+        let (m, cg) = (self.m_edges, self.c_g);
+        if !cg.is_multiple_of(4) || grids.len() != cg {
+            return Ok(None);
+        }
+        let total_words = b * (cg / 4) * n;
+        if out_u32.len() < total_words {
+            return Ok(None);
+        }
+        let work_len = 2 * m * n + 3 * m * cg + 2 * n;
+        let y_len = b * cg * n;
+        let mut g_scene = folo_core::cpu::take_buffer(b * cg);
+
+        HYPER_SCRATCH.with(|cell| -> Result<()> {
+            let mut scratch = cell.borrow_mut();
+            if scratch.len() < work_len + y_len {
+                scratch.resize(work_len + y_len, 0.0);
+            }
+            let (work, y_buf) = scratch.split_at_mut(work_len);
+            let y_ctx = &mut y_buf[..y_len];
+            self.with_av_and_ffn(av, |av_s, w1, b1, w2, b2| {
+                self.compute_attend_and_scene_slices(av_s, w1, b1, w2, b2, b, n, work, y_ctx, &mut g_scene);
+                q8::quantize_per_channel(y_ctx, b, cg, n, grids, out_u32);
+            })?;
+            if scratch.capacity() > MAX_HYPER_TLS_ELEMS {
+                *scratch = Vec::new();
+            }
+            Ok(())
+        })?;
+
+        Ok(Some(Tensor::from_vec(g_scene, [b, cg])?))
     }
 
     /// Run P5 hypergraph context; returns `(y_p5 [B, C5, H, W], g_scene [B, C_g])`.
@@ -757,6 +844,75 @@ impl FullPadGate {
         Ok(FullPadGate { proj, c_tgt })
     }
 
+    /// Compute `out[bi * c + ch] = 1.0 + tanh(proj(g_scene)[bi, ch])` directly on CPU `F32` slices with
+    /// zero tensor allocations or Rayon dispatch overhead. Returns `Ok(true)` if computed, `Ok(false)` if
+    /// inputs are not eligible for the CPU `F32` `no_grad` fast path.
+    pub(crate) fn gate_values_cpu(
+        &self,
+        g_scene: &Tensor,
+        b: usize,
+        c: usize,
+        out: &mut [f32],
+    ) -> Result<bool> {
+        let w_t = &self.proj.weight;
+        let b_t = self.proj.bias.as_ref();
+        let eligible = !is_grad_enabled()
+            && b > 0
+            && c > 0
+            && out.len() >= b * c
+            && g_scene.device().is_cpu()
+            && g_scene.dtype() == DType::F32
+            && g_scene.dims().len() == 2
+            && g_scene.dims()[0] == b
+            && w_t.device().is_cpu()
+            && w_t.dtype() == DType::F32
+            && w_t.dims() == [c, g_scene.dims()[1]]
+            && b_t.is_none_or(|bias| {
+                bias.device().is_cpu() && bias.dtype() == DType::F32 && bias.dims() == [c]
+            });
+        if !eligible {
+            return Ok(false);
+        }
+        let cg = g_scene.dims()[1];
+        let w_own = w_t.same_storage(g_scene).then(|| w_t.to_vec::<f32>()).transpose()?;
+        let b_own = b_t
+            .filter(|t| t.same_storage(g_scene) || t.same_storage(w_t))
+            .map(|t| t.to_vec::<f32>())
+            .transpose()?;
+        let mut run = |gs: &[f32], ws: &[f32], bs: Option<&[f32]>| {
+            for bi in 0..b {
+                attn_simd::fullpad_gate_values_row(
+                    ws,
+                    bs,
+                    &gs[bi * cg..(bi + 1) * cg],
+                    c,
+                    cg,
+                    &mut out[bi * c..(bi + 1) * c],
+                );
+            }
+        };
+        let mut run_w = |gs: &[f32], ws: &[f32]| -> folo_core::Result<()> {
+            match (&b_own, b_t) {
+                (Some(v), _) => {
+                    run(gs, ws, Some(v));
+                    Ok(())
+                }
+                (None, Some(t)) => t.with_f32_slice(|bs| run(gs, ws, Some(bs))),
+                (None, None) => {
+                    run(gs, ws, None);
+                    Ok(())
+                }
+            }
+        };
+        g_scene.with_f32_slice(|gs| -> folo_core::Result<()> {
+            match &w_own {
+                Some(v) => run_w(gs, v),
+                None => w_t.with_f32_slice(|ws| run_w(gs, ws))?,
+            }
+        })??;
+        Ok(true)
+    }
+
     /// Modulate `feat [B, C_tgt, H, W]` with `g_scene [B, C_g]`.
     ///
     /// Computes `feat * (1 + tanh(proj(g_scene)))` in `F32` before casting the modulated result back to
@@ -764,47 +920,37 @@ impl FullPadGate {
     /// under `F16` AMP or half-precision inference.
     pub fn forward(&self, feat: &Tensor, g_scene: &Tensor) -> Result<Tensor> {
         let (b, c, h, w) = feat.dims4()?;
-        // Fused single-pass CPU F32 path under `no_grad` (avoids tanh/add_scalar/reshape tensor allocs).
-        if !is_grad_enabled()
-            && b > 0
-            && c > 0
-            && h > 0
-            && w > 0
-            && feat.device().is_cpu()
-            && feat.dtype() == DType::F32
-            && g_scene.device().is_cpu()
-            && g_scene.dtype() == DType::F32
-            && g_scene.dims().len() == 2
-            && g_scene.dims()[0] == b
-            && self.proj.weight.device().is_cpu()
-            && self.proj.weight.dtype() == DType::F32
-            && self.proj.weight.dims().len() == 2
-            && self.proj.weight.dims()[0] == c
-            && self
-                .proj
-                .bias
-                .as_ref()
-                .is_none_or(|bias| bias.device().is_cpu() && bias.dtype() == DType::F32 && bias.dims() == [c])
-        {
-            let raw = self.proj.forward(g_scene)?;
-            let hw = h * w;
-            let mut out = folo_core::cpu::take_buffer(b * c * hw);
-            let gate_vals: Vec<f32> = raw.to_vec::<f32>()?.into_iter().map(|v| 1.0 + v.tanh()).collect();
-            feat.with_f32_slice(|fs| {
-                let scale_plane = |(idx, dst): (usize, &mut [f32])| {
-                    let g = gate_vals[idx];
-                    let src = &fs[idx * hw..(idx + 1) * hw];
-                    for (d, &s) in dst.iter_mut().zip(src) {
-                        *d = s * g;
+        // Fused single-pass CPU F32 path under `no_grad` (zero `proj` tensor allocs or matmul dispatch).
+        if h > 0 && w > 0 && feat.device().is_cpu() && feat.dtype() == DType::F32 {
+            const STACK_GATES: usize = 512;
+            let mut stack_gates = [0.0f32; STACK_GATES];
+            let mut heap_gates = Vec::new();
+            let gates: &mut [f32] = if b * c <= STACK_GATES {
+                &mut stack_gates[..b * c]
+            } else {
+                heap_gates.resize(b * c, 0.0);
+                &mut heap_gates
+            };
+            if self.gate_values_cpu(g_scene, b, c, gates)? {
+                let hw = h * w;
+                let mut out = folo_core::cpu::take_buffer(b * c * hw);
+                let gate_slice: &[f32] = gates;
+                feat.with_f32_slice(|fs| {
+                    let scale_plane = |(idx, dst): (usize, &mut [f32])| {
+                        let g = gate_slice[idx];
+                        let src = &fs[idx * hw..(idx + 1) * hw];
+                        for (d, &s) in dst.iter_mut().zip(src) {
+                            *d = s * g;
+                        }
+                    };
+                    if out.len() >= 32_768 {
+                        out.par_chunks_exact_mut(hw).enumerate().for_each(scale_plane);
+                    } else {
+                        out.chunks_exact_mut(hw).enumerate().for_each(scale_plane);
                     }
-                };
-                if out.len() >= 32_768 {
-                    out.par_chunks_exact_mut(hw).enumerate().for_each(scale_plane);
-                } else {
-                    out.chunks_exact_mut(hw).enumerate().for_each(scale_plane);
-                }
-            })?;
-            return Ok(Tensor::from_vec(out, [b, c, h, w])?);
+                })?;
+                return Ok(Tensor::from_vec(out, [b, c, h, w])?);
+            }
         }
         let g_in = if g_scene.dtype() != self.proj.weight.dtype() && folo_core::autocast_dtype().is_none() {
             g_scene.to_dtype(self.proj.weight.dtype())?
