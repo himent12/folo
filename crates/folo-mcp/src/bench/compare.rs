@@ -59,23 +59,35 @@ fn status_word(s: BenchEntryStatus) -> &'static str {
 
 fn ensure_done(role: &str, entry: &BenchEntry) -> Result<(), Error> {
     if entry.status != BenchEntryStatus::Done {
-        let mut msg = format!(
-            "{role} entry '{}' ({}) is {} and cannot be compared yet",
-            entry.id,
-            entry.name,
-            status_word(entry.status)
-        );
+        let terminal = matches!(entry.status, BenchEntryStatus::Failed | BenchEntryStatus::Stopped);
+        let mut msg = if terminal {
+            format!(
+                "{role} entry '{}' ({}) is {} and cannot be compared",
+                entry.id,
+                entry.name,
+                status_word(entry.status)
+            )
+        } else {
+            format!(
+                "{role} entry '{}' ({}) is {} and cannot be compared yet",
+                entry.id,
+                entry.name,
+                status_word(entry.status)
+            )
+        };
         if let Some(err) = &entry.error {
             msg.push_str(&format!(": {err}"));
         }
-        return Err(Error::new(StatusCode::CONFLICT, "bench_entry_not_done", msg));
+        let err = Error::new(StatusCode::CONFLICT, "bench_entry_not_done", msg);
+        return Err(if terminal { err.hint(super::hints::COMPARE_TERMINAL_HINT) } else { err });
     }
     if entry.score.is_none() {
         return Err(Error::new(
             StatusCode::CONFLICT,
             "bench_entry_not_done",
             format!("{role} entry '{}' ({}) has no score to compare", entry.id, entry.name),
-        ));
+        )
+        .hint(super::hints::COMPARE_TERMINAL_HINT));
     }
     Ok(())
 }
@@ -95,6 +107,7 @@ fn score_of<'a>(role: &str, entry: &'a BenchEntry, res: &'a BenchResult) -> Resu
             "bench_entry_not_done",
             format!("{role} entry '{}' ({}) has no score to compare", entry.id, entry.name),
         )
+        .hint(super::hints::COMPARE_TERMINAL_HINT)
     })
 }
 

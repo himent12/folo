@@ -166,6 +166,13 @@ async fn compare_bench_entries_reports_deltas_and_refuses_unfinished() {
     )
     .await;
     assert_eq!(not_done.body.code, "bench_entry_not_done");
+    let not_done_hint = not_done.body.hint.as_deref().unwrap_or("");
+    assert!(
+        not_done_hint.contains("rerun")
+            && !not_done_hint.contains("wait for")
+            && !not_done_hint.contains("<compare terminal>"),
+        "stopped entry compare hint should suggest inspect/rerun, not waiting: {not_done_hint}"
+    );
 
     // Through a loopback `folo serve` matches embedded comparison.
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

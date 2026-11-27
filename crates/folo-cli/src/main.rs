@@ -776,12 +776,19 @@ mod tests {
         let bench_compare =
             describe::describe(&Cli::command(), &["bench".into(), "compare".into()], false).unwrap();
         assert_eq!(arg(&bench_compare, "min_delta")["requires"], json!(["--fail-on-regression"]));
+        assert_eq!(arg(&bench_compare, "min_delta")["default"], json!("0.0"));
 
         let train_desc = describe::describe(&Cli::command(), &["train".into()], false).unwrap();
         assert_eq!(arg(&train_desc, "max_preempt_retries")["bounds"], json!({ "minimum": 0, "maximum": 20 }));
         assert_eq!(arg(&train_desc, "max_preempt_retries")["requires"], json!(["--cloud"]));
+        assert_eq!(arg(&train_desc, "max_preempt_retries")["default"], json!("3"));
         assert_eq!(arg(&train_desc, "max_hours")["bounds"], json!({ "minimum": 0.25, "maximum": 720.0 }));
+        assert_eq!(arg(&train_desc, "max_hours")["default"], json!("12"));
         assert_eq!(arg(&train_desc, "disk_gb")["bounds"], json!({ "minimum": 10, "maximum": 4096 }));
+        assert_eq!(arg(&train_desc, "auto_batch_target")["default"], json!("0.80"));
+        for flag in ["server", "data_dir", "token", "tls_ca"] {
+            assert_eq!(arg(&train_desc, flag)["requires"], json!(["--cloud"]), "{flag}");
+        }
     }
 
     /// Every entry in `cli::bounds::ARG_BOUNDS` matches a real numeric argument in the clap tree, has no
@@ -923,6 +930,57 @@ mod tests {
             for peer_flag in &expected {
                 assert!(rendered.contains(peer_flag), "{argv:?}: expected {peer_flag} in {rendered}");
             }
+        }
+
+        // Runtime-enforced env-backed CLI requirements (`ARG_CLI_REQUIRES`) and effective defaults
+        // (`ARG_EFFECTIVE_DEFAULTS`) must match visible clap arguments and appear identically in full and scoped
+        // `folo describe`.
+        let mut cli_req_seen = BTreeSet::new();
+        for &(cmd_path, arg_id, req_ids) in cli::bounds::ARG_CLI_REQUIRES {
+            assert!(
+                cli_req_seen.insert((cmd_path, arg_id)) && !seen.contains(&(cmd_path, arg_id)),
+                "duplicate requires entry for {cmd_path} {arg_id}"
+            );
+            let sub_path: Vec<String> =
+                cmd_path.split_whitespace().skip(1).map(ToString::to_string).collect();
+            let scoped = describe::describe(&root, &sub_path, false).unwrap();
+            let from_all = find_cmd(&all, cmd_path).unwrap();
+            let find_arg = |cmd: &serde_json::Value, id: &str| {
+                cmd["args"].as_array().unwrap().iter().find(|a| a["name"] == id).unwrap().clone()
+            };
+            let a_scoped = find_arg(&scoped, arg_id);
+            let a_all = find_arg(from_all, arg_id);
+            assert_eq!(a_scoped["requires"], a_all["requires"], "{cmd_path} {arg_id}");
+            let expected: BTreeSet<String> = req_ids
+                .iter()
+                .map(|req| find_arg(&scoped, req)["long"].as_str().unwrap().to_string())
+                .collect();
+            let actual: BTreeSet<String> = a_scoped["requires"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap().to_string())
+                .collect();
+            assert_eq!(actual, expected, "{cmd_path} {arg_id}");
+        }
+
+        let mut eff_seen = BTreeSet::new();
+        for &(cmd_path, arg_id, val) in cli::bounds::ARG_EFFECTIVE_DEFAULTS {
+            assert!(
+                eff_seen.insert((cmd_path, arg_id)),
+                "duplicate ARG_EFFECTIVE_DEFAULTS for {cmd_path} {arg_id}"
+            );
+            let sub_path: Vec<String> =
+                cmd_path.split_whitespace().skip(1).map(ToString::to_string).collect();
+            let scoped = describe::describe(&root, &sub_path, false).unwrap();
+            let from_all = find_cmd(&all, cmd_path).unwrap();
+            let find_arg = |cmd: &serde_json::Value, id: &str| {
+                cmd["args"].as_array().unwrap().iter().find(|a| a["name"] == id).unwrap().clone()
+            };
+            let a_scoped = find_arg(&scoped, arg_id);
+            let a_all = find_arg(from_all, arg_id);
+            assert_eq!(a_scoped["default"], json!(val), "{cmd_path} {arg_id}");
+            assert_eq!(a_scoped["default"], a_all["default"], "{cmd_path} {arg_id}");
         }
     }
 }

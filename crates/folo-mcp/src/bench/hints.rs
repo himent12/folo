@@ -8,6 +8,10 @@ pub use crate::label::hints::Front;
 /// words.
 pub(super) const ENTRY_COMMANDS: &str = "<entry commands>";
 
+/// Sentinel hint on `bench_entry_not_done` when an entry ended in a terminal non-done state (`failed` or
+/// `stopped`), so [`decorate`] tells the user to inspect or rerun it rather than wait on it.
+pub(super) const COMPARE_TERMINAL_HINT: &str = "<compare terminal>";
+
 /// True when `hint` was written by an upload operation (`ops.rs`) rather than by the HTTP API.
 fn is_upload_hint(hint: &str) -> bool {
     hint.starts_with("entry '") || hint.starts_with("the server may have opened an entry named '")
@@ -17,8 +21,15 @@ fn is_upload_hint(hint: &str) -> bool {
 pub fn decorate(mut e: Error, front: Front) -> Error {
     let mcp = front == Front::Mcp;
     let upload_hint = e.body.hint.as_deref().is_some_and(is_upload_hint);
+    let terminal_compare = e.body.hint.as_deref() == Some(COMPARE_TERMINAL_HINT);
     let hint = if upload_hint {
         None
+    } else if terminal_compare {
+        Some(if mcp {
+            "inspect the entry with bench_entry, rerun it, or pick a `done` entry from get_benchmark"
+        } else {
+            "inspect it with `folo bench status BENCH ENTRY`, rerun it, or pick a `done` entry from `folo bench show BENCH`"
+        })
     } else {
         match e.body.code.as_str() {
             "bench_not_found" => Some(if mcp {
@@ -137,5 +148,22 @@ mod tests {
         let mcp_arg =
             decorate(Error::new(StatusCode::BAD_REQUEST, "invalid_arguments", "bad line"), Front::Mcp);
         assert_eq!(mcp_arg.body.hint.as_deref(), Some("check the tool's inputSchema (tools/list)"));
+
+        // Terminal non-done entries (`failed`/`stopped`) never suggest `--wait`; active ones still do.
+        let terminal = || {
+            Error::conflict("bench_entry_not_done", "candidate entry 'be_2' is failed and cannot be compared")
+                .hint(COMPARE_TERMINAL_HINT)
+        };
+        let cli_term = decorate(terminal(), Front::Cli).body.hint.unwrap();
+        assert!(
+            cli_term.contains("folo bench status BENCH ENTRY") && !cli_term.contains("--wait"),
+            "{cli_term}"
+        );
+        let mcp_term = decorate(terminal(), Front::Mcp).body.hint.unwrap();
+        assert!(mcp_term.contains("rerun") && !mcp_term.contains("wait for"), "{mcp_term}");
+
+        let active = || Error::conflict("bench_entry_not_done", "candidate entry 'be_2' is running");
+        assert!(decorate(active(), Front::Cli).body.hint.unwrap().contains("--wait"));
+        assert!(decorate(active(), Front::Mcp).body.hint.unwrap().contains("wait for"));
     }
 }

@@ -352,6 +352,19 @@ fn push_csv_row(out: &mut String, cols: [&str; 8]) {
 fn render_csv(r: &BenchCompareResult) -> String {
     let mut s = String::new();
     push_csv_row(&mut s, ["section", "metric", "status", "baseline", "candidate", "delta", "unit", "notes"]);
+    push_csv_row(
+        &mut s,
+        [
+            "meta",
+            "entry",
+            "shared",
+            &format!("{} ({})", r.baseline.name, r.baseline.entry_id),
+            &format!("{} ({})", r.candidate.name, r.candidate.entry_id),
+            "",
+            "",
+            "baseline vs candidate",
+        ],
+    );
     let f4 = |v: Option<f32>| v.map_or_else(String::new, |x| format!("{x:.4}"));
     push_csv_row(
         &mut s,
@@ -623,12 +636,20 @@ mod tests {
 
         let csv = render(&r, BenchCompareFormat::Csv);
         assert!(csv.starts_with("section,metric,status,baseline,candidate,delta,unit,notes\n"), "{csv}");
+        assert!(
+            csv.contains(
+                "meta,entry,shared,\"folo-n, v1 (be_1)\",\"folo2-n \"\"v2\"\" (be_2)\",,,baseline vs candidate\n"
+            ),
+            "{csv}"
+        );
         assert!(csv.contains("overall,score,shared,70.0000,76.5000,6.5000,points,be_1 vs be_2\n"), "{csv}");
         assert!(csv.contains("condition,rain,candidate_only,,0.7500,,retention,weight=1.00\n"), "{csv}");
 
         let mut r_warn = sample_compare();
+        r_warn.candidate.name = "model [v2] | test, \"quoted\"".into();
         r_warn.warnings.push("entries ran on different devices".into());
         let csv_warn = render(&r_warn, BenchCompareFormat::Csv);
+        assert!(csv_warn.contains("\"model [v2] | test, \"\"quoted\"\" (be_2)\""), "{csv_warn}");
         assert!(
             csv_warn.contains("warning,comparability,note,,,,,entries ran on different devices\n"),
             "{csv_warn}"

@@ -450,9 +450,37 @@ pub const ARG_REQUIRES: &[(&str, &str, &[&str])] = &[
     ("folo train", "max_preempt_retries", &["cloud"]),
 ];
 
-/// Looks up the peer argument ids required whenever `(cmd_path, arg_id)` is supplied.
+/// Peer arguments required when an env-backed argument is passed explicitly on the command line (enforced at
+/// runtime rather than by clap so ambient environment variables like `FOLO_DATA_DIR` / `FOLO_SERVER` do not break
+/// unrelated local runs).
+pub const ARG_CLI_REQUIRES: &[(&str, &str, &[&str])] = &[
+    ("folo train", "data_dir", &["cloud"]),
+    ("folo train", "server", &["cloud"]),
+    ("folo train", "token", &["cloud"]),
+    ("folo train", "tls_ca", &["cloud"]),
+];
+
+/// Effective default values for conditional `Option<T>` arguments that cannot carry clap `default_value_t`
+/// without tripping `requires = ...` or losing presence detection, keyed by `(command_path, arg_id)`.
+pub const ARG_EFFECTIVE_DEFAULTS: &[(&str, &str, &str)] = &[
+    ("folo train", "auto_batch_target", "0.80"),
+    ("folo train", "max_hours", "12"),
+    ("folo train", "max_preempt_retries", "3"),
+    ("folo bench compare", "min_delta", "0.0"),
+];
+
+/// Looks up the peer argument ids required whenever `(cmd_path, arg_id)` is supplied on the command line.
 pub fn required_args(cmd_path: &str, arg_id: &str) -> &'static [&'static str] {
-    ARG_REQUIRES.iter().find(|&&(p, a, _)| p == cmd_path && a == arg_id).map_or(&[], |&(_, _, reqs)| reqs)
+    ARG_REQUIRES
+        .iter()
+        .chain(ARG_CLI_REQUIRES.iter())
+        .find(|&&(p, a, _)| p == cmd_path && a == arg_id)
+        .map_or(&[], |&(_, _, reqs)| reqs)
+}
+
+/// Looks up the effective default value for a conditional argument, if one is declared.
+pub fn effective_default(cmd_path: &str, arg_id: &str) -> Option<&'static str> {
+    ARG_EFFECTIVE_DEFAULTS.iter().find(|&&(p, a, _)| p == cmd_path && a == arg_id).map(|&(_, _, val)| val)
 }
 
 #[cfg(test)]
