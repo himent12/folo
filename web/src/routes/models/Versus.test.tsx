@@ -185,5 +185,20 @@ describe('Engine speed table', () => {
     expect(await created[1]!.text()).toContain("'=CMD()|calc");
     revokePendingBlobUrls();
     expect(pendingBlobRevokeCount()).toBe(0);
+
+    // CPU-only server throughput reports CPU latency rather than mislabeling it as GPU in UI, Markdown, and CSV.
+    unmount(c);
+    const cpuTable = {
+      ...table,
+      device: 'cpu',
+      device_name: 'Intel Core i7-14700KF',
+      inference: table.inference.map((r) => ({ ...r, device: 'cpu', measured_on: 'Intel Core i7-14700KF' })),
+      training: [],
+    };
+    expect(versusMarkdown(cpuTable)).toContain('CPU end to end, batch 1');
+    expect(versusCsv(cpuTable).rows.at(-1)![2]).toBe('CPU end to end, batch 1');
+    c = mount(Versus, { target, props: { table: cpuTable } });
+    flushSync();
+    expect(target.querySelector('tbody.here')?.textContent).toContain('CPU end to end, batch 1');
   });
 });

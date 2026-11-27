@@ -49,6 +49,8 @@ export interface CompareControllerInput {
   inferenceFor?: (on: RunOn) => InferenceConfig;
   /** True while streaming live video/webcam frames (skips secondary full-candidate re-fetches). */
   isLiveStream?: () => boolean;
+  /** True when a local video has been manually scrubbed ahead of the last detected frame. */
+  isUnsyncedVideoPreview?: () => boolean;
 }
 
 export function createCompareController(input: CompareControllerInput) {
@@ -344,10 +346,12 @@ export function createCompareController(input: CompareControllerInput) {
     return s ? sourceImageKey(s) : null;
   });
   const freshPredA = computed(() => {
+    if (input.isUnsyncedVideoPreview?.()) return null;
     const key = curSourceKey.get();
     return key !== null && input.predSourceKeyA.get() === key ? input.predA.get() : null;
   });
   const freshPredB = computed(() => {
+    if (input.isUnsyncedVideoPreview?.()) return null;
     const key = curSourceKey.get();
     return key !== null && predBSourceKey.get() === key ? predB.get() : null;
   });

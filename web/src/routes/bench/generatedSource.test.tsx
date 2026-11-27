@@ -180,6 +180,21 @@ describe('Bench generated-scene source parity', () => {
     document.querySelector<HTMLFormElement>('dialog[open] form')!.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
     await settle();
     expect(createSpy).not.toHaveBeenCalled();
+
+    // Pressing Enter commits the first 8 valid chips, surfaces the left-out name in the hint, and lets the user submit those 8 valid classes.
+    const clsInput = document.querySelector<HTMLInputElement>('input[id$="-gcls"]')!;
+    clsInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+    flushSync();
+    expect(document.body.textContent).toContain('extra left out');
+    expect(document.querySelector('[role="alert"]')?.textContent?.trim()).toBe('');
+    expect(document.querySelector('.chips')?.classList.contains('invalid')).toBe(false);
+    const submitBtn = document.querySelector<HTMLButtonElement>('dialog[open] button[type="submit"]')!;
+    expect(submitBtn.disabled).toBe(false);
+    document.querySelector<HTMLFormElement>('dialog[open] form')!.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+    await settle();
+    expect(createSpy).toHaveBeenCalledTimes(1);
+    const sent = createSpy.mock.calls[0]![0];
+    expect(sent.source.kind === 'generated' ? sent.source.classes : []).toHaveLength(8);
   });
 
   it('matches server HTTP validation in mock mode (distinct custom case allowed, built-in shape collision and unknown fields rejected)', async () => {

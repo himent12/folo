@@ -47,7 +47,7 @@ const FIX: Record<string, string> = {
   description: 'Shorten the description first',
   max: 'Fix the image limit first',
   genImages: 'Fix the scene count first',
-  genClasses: 'Add at least one class',
+  genClasses: 'Fix the classes first',
   genSeed: 'Fix the seed first',
 };
 
@@ -184,6 +184,10 @@ export default function NewBenchDialog(props: { open?: boolean }) {
     const draft = genClassDraft.get();
     return draft.trim() ? classesLeftOut(genClasses.get(), draft, GENERATED_CLASSES_MAX) : [];
   });
+  const effectiveGenClasses = computed(() => {
+    const pending = genClassDraft.get().trim();
+    return pending ? addClasses(genClasses.get(), pending, GENERATED_CLASSES_MAX) : genClasses.get();
+  });
   // Clear a previous left-out notice once the user removes a chip to make room or switches away from generated scenes.
   effect(() => {
     if (kind.get() !== 'generated' || genClasses.get().length < GENERATED_CLASSES_MAX) {
@@ -197,9 +201,8 @@ export default function NewBenchDialog(props: { open?: boolean }) {
     const k = kind.get();
     if (k === 'generated') {
       const gi = genImages.get();
-      const pending = genClassDraft.get().trim();
-      const effectiveClasses = pending ? addClasses(genClasses.get(), pending, GENERATED_CLASSES_MAX) : genClasses.get();
-      const dropped = pendingLeftOut.get().length ? pendingLeftOut.get() : genLeftOut.get();
+      const effectiveClasses = effectiveGenClasses.get();
+      const dropped = pendingLeftOut.get();
       const shapeDup = generatedShapeCollision(effectiveClasses);
       const genClassesErr = dropped.length
         ? `At most ${GENERATED_CLASSES_MAX} classes: ${dropped.join(', ')} did not fit.`
@@ -232,9 +235,9 @@ export default function NewBenchDialog(props: { open?: boolean }) {
   const maxError = computed(() => (touched.get() || maxText.get().trim() ? errs.get().max : null));
   const genImagesError = computed(() => (touched.get() || genImagesText.get().trim() ? errs.get().genImages : null));
   const genSeedError = computed(() => (touched.get() || genSeed.get().trim() ? errs.get().genSeed : null));
-  /** Surface dropped classes (>8) or shape collisions immediately, not only after Submit. */
+  /** Surface uncommitted >8 draft overflow or built-in shape collisions immediately, not only after Submit. */
   const genClassesError = computed(() =>
-    touched.get() || pendingLeftOut.get().length || genLeftOut.get().length || generatedShapeCollision(genClasses.get()) ? errs.get().genClasses : null,
+    touched.get() || pendingLeftOut.get().length || generatedShapeCollision(effectiveGenClasses.get()) ? errs.get().genClasses : null,
   );
   const sourceWhy = computed(() =>
     kind.get() === 'generated'
@@ -461,9 +464,11 @@ export default function NewBenchDialog(props: { open?: boolean }) {
               for={`${uid}-gcls`}
               error={genClassesError.get()}
               hint={
-                genClasses.get().length >= GENERATED_CLASSES_MAX
-                  ? `${GENERATED_CLASSES_MAX} of ${GENERATED_CLASSES_MAX}: one shape each.`
-                  : `Press Enter or comma to add. Up to ${GENERATED_CLASSES_MAX} distinct classes.`
+                genLeftOut.get().length
+                  ? `At most ${GENERATED_CLASSES_MAX} classes: ${genLeftOut.get().join(', ')} left out.`
+                  : genClasses.get().length >= GENERATED_CLASSES_MAX
+                    ? `${GENERATED_CLASSES_MAX} of ${GENERATED_CLASSES_MAX}: one shape each.`
+                    : `Press Enter or comma to add. Up to ${GENERATED_CLASSES_MAX} distinct classes.`
               }
             >
               <ClassChips

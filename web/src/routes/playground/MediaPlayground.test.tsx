@@ -633,4 +633,94 @@ describe('Playground: Local Video Frame Scrubber & Live Webcam', () => {
       URL.revokeObjectURL = origRevokeUrl;
     }
   });
+
+  it('hides stale Compare classDiff summary and Compare JSON copy after an Auto-off manual video seek', async () => {
+    const origCreateUrl = URL.createObjectURL;
+    const origRevokeUrl = URL.revokeObjectURL;
+    let urlSeq = 0;
+    URL.createObjectURL = vi.fn(() => `blob:mock-cmp-seek-${++urlSeq}`);
+    URL.revokeObjectURL = vi.fn();
+    const ctxStub = {
+      drawImage: vi.fn(),
+      save: vi.fn(),
+      beginPath: vi.fn(),
+      rect: vi.fn(),
+      clip: vi.fn(),
+      restore: vi.fn(),
+    } as unknown as CanvasRenderingContext2D;
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(ctxStub);
+    vi.spyOn(HTMLCanvasElement.prototype, 'toBlob').mockImplementation((cb) => {
+      cb(new Blob(['img'], { type: 'image/jpeg' }));
+    });
+    vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => {});
+    vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => {});
+
+    try {
+      const { api } = mountPlayground('#/playground?model=m_hard_s&compare=1&modelB=m_shapes_n');
+      const predictSpy = vi.spyOn(api, 'predict').mockImplementation(async (_input, opts) => {
+        const modelId = opts?.model_id ?? 'm_hard_s';
+        return {
+          model_id: modelId,
+          image: { width: 320, height: 180 },
+          boxes: [
+            {
+              class: 0,
+              name: modelId === 'm_hard_s' ? 'circle' : 'square',
+              score: 0.9,
+              x1: 10,
+              y1: 10,
+              x2: 60,
+              y2: 60,
+            },
+          ],
+          timing: { preprocess_ms: 1, inference_ms: 4, postprocess_ms: 1, total_ms: 6 },
+          device: 'gpu:0',
+        };
+      });
+      await until(() => target.querySelector('input[accept*="video/mp4"]'), 'video file input');
+
+      // Load a local video clip in Compare mode.
+      const videoInput = [...target.querySelectorAll<HTMLInputElement>('input[type="file"]')].find((i) => i.accept.startsWith('video/mp4'))!;
+      const clip = new File(['video-bytes'], 'compare-seek.mp4', { type: 'video/mp4' });
+      Object.defineProperty(videoInput, 'files', { configurable: true, value: [clip] });
+      videoInput.dispatchEvent(new Event('change', { bubbles: true }));
+      flushSync();
+
+      const bar = await until(() => target.querySelector('[data-media-bar="video"]'), 'video bar');
+      const decoder = target.querySelector<HTMLVideoElement>('video.media-decoder')!;
+      Object.defineProperty(decoder, 'videoWidth', { configurable: true, value: 320 });
+      Object.defineProperty(decoder, 'videoHeight', { configurable: true, value: 180 });
+      Object.defineProperty(decoder, 'duration', { configurable: true, value: 5 });
+      Object.defineProperty(decoder, 'readyState', { configurable: true, value: 4 });
+      decoder.dispatchEvent(new Event('loadedmetadata'));
+      decoder.dispatchEvent(new Event('loadeddata'));
+
+      // Both models predict frame 0 -> Compare classDiff summary and Compare JSON copy button appear.
+      await until(() => predictSpy.mock.calls.length >= 2, 'initial compare predictions');
+      await until(() => target.querySelector('[data-class-diff]'), 'classDiff filter pills');
+      expect(target.querySelector('#pg-compare-summary')).not.toBeNull();
+      expect(target.querySelector('.copy-json')).not.toBeNull();
+
+      // Turn Auto-detect OFF and step forward 1 frame -> preview advances without re-predicting.
+      const autoSwitch = bar.querySelector<HTMLInputElement>('input[role="switch"]')!;
+      autoSwitch.click();
+      flushSync();
+      expect(autoSwitch.checked).toBe(false);
+
+      const callsBefore = predictSpy.mock.calls.length;
+      const stepFwd = bar.querySelector<HTMLButtonElement>('button[aria-label="Step forward 1 frame"]')!;
+      stepFwd.click();
+      flushSync();
+      decoder.dispatchEvent(new Event('seeked'));
+      flushSync();
+
+      expect(predictSpy.mock.calls.length).toBe(callsBefore);
+      // Stale Compare classDiff summary and Detections Compare JSON copy button both clear until Detect frame runs.
+      expect(target.querySelector('[data-class-diff]')).toBeNull();
+      expect(target.querySelector('.copy-json')).toBeNull();
+    } finally {
+      URL.createObjectURL = origCreateUrl;
+      URL.revokeObjectURL = origRevokeUrl;
+    }
+  });
 });

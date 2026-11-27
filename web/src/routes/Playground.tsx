@@ -120,6 +120,7 @@ export default function Playground() {
   let loadVideoFile: (f: File) => void = () => {};
   let startWebcamFn: () => void = () => {};
   let isLiveStreamFn: () => boolean = () => false;
+  let isUnsyncedVideoFn: () => boolean = () => false;
 
   const {
     models,
@@ -245,6 +246,7 @@ export default function Playground() {
     engine,
     inferenceFor: inf.effectiveFor,
     isLiveStream: () => isLiveStreamFn(),
+    isUnsyncedVideoPreview: () => isUnsyncedVideoFn(),
   });
   clearCompare = cmp.clearResults;
   getModelBId = () => cmp.modelBId.peek();
@@ -272,6 +274,7 @@ export default function Playground() {
     void mediaSession.startWebcam();
   };
   isLiveStreamFn = () => mediaSession.liveStreaming.get();
+  isUnsyncedVideoFn = () => mediaSession.mode.get() === 'video' && !mediaSession.frameSynced.get();
 
   let predMatchesSourceFn: () => boolean = () => true;
 
@@ -683,7 +686,7 @@ export default function Playground() {
       summary={cmp.summary.get()}
       modelAName={model.get()?.name ?? 'Model A'}
       modelBName={cmp.modelB.get()?.name ?? 'Model B'}
-      hasAnyResult={predAMatches.get() || predBMatches.get()}
+      hasAnyResult={!isUnsyncedVideoFn() && (predAMatches.get() || predBMatches.get())}
       predictingA={predicting.get()}
       predictingB={cmp.predictingB.get()}
       inspectSide={cmp.inspectSide.get()}
@@ -860,7 +863,7 @@ export default function Playground() {
                 resetButton={resetButton}
                 moreBody={moreBody}
                 compareFacts={
-                  cmp.compare.get() && (predAMatches.get() || predBMatches.get())
+                  cmp.compare.get() && !isUnsyncedVideoFn() && (predAMatches.get() || predBMatches.get())
                     ? {
                         countA: cmp.summary.get().countA,
                         countB: cmp.summary.get().countB,

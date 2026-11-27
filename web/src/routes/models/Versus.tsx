@@ -29,7 +29,7 @@ import { latencyMs, latencyRange, measuredLatency, measuredTraining } from '$lib
 import Button from '$lib/ui/Button';
 import Panel from '$lib/ui/Panel';
 import { toast } from '$lib/ui/toast';
-import { versusCsv, versusMarkdown } from './versusExport';
+import { latencyMetricLabel, versusCsv, versusMarkdown } from './versusExport';
 
 const fmt = (v: VersusRow, x: number) => num(x, v.unit === 'ms' ? (x < 10 ? 2 : 1) : 0);
 /** One format per kind: speed as a ratio ("1.66× faster", "1.09× slower"), memory as a share ("17% less memory"). */
@@ -62,7 +62,7 @@ export default function Versus(props: VersusProps) {
         ? [
             {
               id: 'lat',
-              metric: 'GPU end to end, batch 1',
+              metric: latencyMetricLabel(lat.device),
               value: latencyMs(lat.latency_ms),
               note: `${latencyRange(lat.latency_ms_low, lat.latency_ms_high)} · ${num(lat.samples)} predictions${lat.precision === 'f32' ? '' : ` · ${lat.precision}`}`,
             },

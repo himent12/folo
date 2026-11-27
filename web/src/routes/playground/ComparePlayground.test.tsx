@@ -1,13 +1,17 @@
 // @vitest-environment happy-dom
-import { flush as flushSync } from 'fw';
+import { createRoot, flush as flushSync, signal } from 'fw';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { render } from '../../../framework/testing';
 import { hub } from '$lib/api/index';
 import { MockApi } from '$lib/api/mock';
 import { parse, router } from '$lib/router';
+import { BrowserEngine } from '$lib/inference/browser';
 import { pendingBlobRevokeCount, revokePendingBlobUrls } from '$lib/tableExport';
 import Playground from '../Playground';
 import * as exportMod from './export';
+import { sourceImageKey, type Source } from './source';
+import type { Det } from './viewState';
+import { createCompareController } from './useCompare';
 import { session } from './session';
 
 let target: HTMLElement;
@@ -515,5 +519,82 @@ describe('Playground: Compare A/B and Export', () => {
     expect(target.querySelector('[data-class-diff]')).toBeNull();
     holdSecondB!();
     await until(() => target.querySelector('[data-class-diff]'), 'frame 2 class diff once both fresh');
+  });
+
+  it('clears Compare summary classDiff and compareJson whenever a manual video seek desyncs the preview frame', () => {
+    const unsynced = signal(false);
+    const predA = signal({
+      model_id: 'm_a',
+      image: { width: 640, height: 480 },
+      boxes: [{ class: 0, name: 'circle', score: 0.9, x1: 10, y1: 10, x2: 50, y2: 50 }],
+      timing: { preprocess_ms: 1, inference_ms: 5, postprocess_ms: 1, total_ms: 7 },
+      device: 'gpu:0',
+    } as const);
+    const src = signal<Source | null>({
+      kind: 'file',
+      file: new Blob(['v']),
+      name: 'frame.jpg',
+      url: 'blob:video-frame-1',
+      width: 640,
+      height: 480,
+    });
+    const engine = new BrowserEngine();
+    const srcKey = sourceImageKey(src.get()!);
+    let dispose!: () => void;
+    try {
+      const ctrl = createRoot((d) => {
+        dispose = d;
+        const c = createCompareController({
+          ranked: () => [],
+          choices: () => [],
+          modelA: () => null,
+          modelAId: () => 'm_a',
+          chooseModelA: () => {},
+          runOnA: signal<'server' | 'webgpu' | 'cpu'>('server'),
+          predA: predA as never,
+          predSourceKeyA: signal<string | null>(srcKey),
+          hoverA: signal<Det | null>(null),
+          pickedA: signal<Det | null>(null),
+          resultA: () => ({ boxes: [...predA.get().boxes], ms: 1 }),
+          rowsA: () => predA.get().boxes.map((b, i) => ({ b, i })),
+          o2oA: () => false,
+          source: src,
+          conf: signal(0.25),
+          iou: signal(0.7),
+          maxDet: signal(300),
+          hidden: signal(new Set<number>()),
+          classesA: () => ['circle'],
+          browserOff: () => null,
+          localWeights: signal(new Map<string, File>()),
+          dropLocalB: () => {},
+          badFileB: signal<{ name: string; why: string | null } | null>(null),
+          engine,
+          isUnsyncedVideoPreview: () => unsynced.get(),
+        });
+        c.predB.set({
+          model_id: 'm_b',
+          image: { width: 640, height: 480 },
+          boxes: [{ class: 0, name: 'circle', score: 0.85, x1: 12, y1: 12, x2: 52, y2: 52 }],
+          timing: { preprocess_ms: 1, inference_ms: 4, postprocess_ms: 1, total_ms: 6 },
+          device: 'gpu:0',
+        });
+        c.predBSourceKey.set(srcKey);
+        return c;
+      });
+
+      expect(ctrl.summary.get().classDiff).toEqual({ both: ['circle'], onlyA: [], onlyB: [] });
+      expect(ctrl.compareJson.get()).not.toBeNull();
+
+      // Manual video seek advances preview ahead of captured frame -> both summary.classDiff and compareJson clear to null.
+      unsynced.set(true);
+      flushSync();
+      expect(ctrl.summary.get().classDiff).toBeNull();
+      expect(ctrl.summary.get().countA).toBeNull();
+      expect(ctrl.summary.get().countB).toBeNull();
+      expect(ctrl.compareJson.get()).toBeNull();
+    } finally {
+      dispose?.();
+      engine.dispose();
+    }
   });
 });

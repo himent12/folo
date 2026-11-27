@@ -31,6 +31,11 @@ function leadText(v: VersusRow): string {
   return ahead ? `${a.toFixed(2)}× faster` : `${(1 / a).toFixed(2)}× slower`;
 }
 
+/** Human label for this server's measured batch-1 latency row (GPU vs CPU-only servers). */
+export function latencyMetricLabel(device: string): string {
+  return device === 'cpu' ? 'CPU end to end, batch 1' : 'GPU end to end, batch 1';
+}
+
 /** Builds the exact flat list of loaded `Versus` rows (reference rows + optional live server rows). */
 export function buildVersusReport(table?: ThroughputTable | null): { rows: VersusReportRow[]; serverDevice: string | null } {
   const rows: VersusReportRow[] = versusYolo26n.map((v) => {
@@ -55,7 +60,7 @@ export function buildVersusReport(table?: ThroughputTable | null): { rows: Versu
   if (lat) {
     rows.push({
       source: 'server',
-      metric: 'GPU end to end, batch 1',
+      metric: latencyMetricLabel(lat.device),
       unit: 'ms',
       folo: latencyMs(lat.latency_ms),
       yolo: 'not run here',
