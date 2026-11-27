@@ -381,7 +381,18 @@ impl FoloApp {
             .tooltip(crate::controls::tip("Redo box edit", Some("Ctrl Shift Z")))
         };
 
-        let discard_btn = if !dirty || busy {
+        let discard_disabled = !dirty || busy;
+        let save_disabled = !dirty || locked || busy;
+        for (key, disabled) in [("label-discard", discard_disabled), ("label-save", save_disabled)] {
+            let dis_key = format!("{key}-disabled");
+            if disabled && self.fh(key, cx).is_focused(window) {
+                window.focus(&self.fh(dis_key, cx));
+            } else if !disabled && self.fh(&dis_key, cx).is_focused(window) {
+                window.focus(&self.fh(key, cx));
+            }
+        }
+
+        let discard_btn = if discard_disabled {
             self.button_disabled(
                 "label-discard",
                 "Discard",
@@ -405,7 +416,7 @@ impl FoloApp {
             .tooltip(crate::controls::tip("Revert unsaved edits (undoable with Ctrl+Z)", None))
         };
 
-        let save_btn = if !dirty || locked || busy {
+        let save_btn = if save_disabled {
             self.button_disabled(
                 "label-save",
                 if busy { "Saving…" } else { "Save" },
@@ -757,6 +768,7 @@ impl FoloApp {
                             .flex()
                             .flex_wrap()
                             .flex_none()
+                            .max_w_full()
                             .items_center()
                             .gap(px(6.))
                             .child(load_btn)
@@ -854,6 +866,7 @@ impl FoloApp {
                             .flex()
                             .flex_wrap()
                             .flex_none()
+                            .max_w_full()
                             .items_center()
                             .gap(px(6.))
                             .child(stay_btn)

@@ -32,6 +32,14 @@ pub(super) fn run_slot_color(t: &Theme, slot: usize) -> Hsla {
     t.chart_series[RUN_SLOTS[slot % RUN_SLOTS.len()]]
 }
 
+/// Legend scope label distinguishing resting (`latest`) values from hovered (`cursor`) values.
+pub(crate) fn compare_legend_scope(hover: Option<f32>, has_data: bool) -> Option<&'static str> {
+    if !has_data {
+        return None;
+    }
+    if hover.is_some_and(f32::is_finite) { Some("cursor") } else { Some("latest") }
+}
+
 pub(super) fn slot_swatch(color: Hsla, slot: usize) -> AnyElement {
     crate::ui::line_swatch(color, slot == 1, slot == 2, if slot == 0 { 2.5 } else { 2.0 }).into_any_element()
 }
@@ -323,12 +331,21 @@ impl FoloApp {
             let best_el = match &r.best {
                 Some(b) => div()
                     .id(("cmp-chip-best", slot))
+                    .flex_none()
                     .tooltip(crate::controls::tip(
                         format!("Best mAP50-95: {} at epoch {}", f3(b.map50_95), b.epoch),
                         None,
                     ))
-                    .child(text(ty::SM, t.text_secondary).tnum().child(format!("best {}", f3(b.map50_95)))),
-                None => div().id(("cmp-chip-best", slot)).child(text(ty::SM, t.text_tertiary).child("–")),
+                    .child(
+                        text(ty::SM, t.text_secondary)
+                            .tnum()
+                            .whitespace_nowrap()
+                            .child(format!("best {}", f3(b.map50_95))),
+                    ),
+                None => div()
+                    .id(("cmp-chip-best", slot))
+                    .flex_none()
+                    .child(text(ty::SM, t.text_tertiary).whitespace_nowrap().child("–")),
             };
             let chip = div()
                 .flex()
@@ -629,23 +646,21 @@ impl FoloApp {
                 None => crate::charts::value_at(pts, None, 0.0, x_max).map(f3),
             }
         };
-        let legend_scope = |hv: Option<f32>| -> String {
-            match hv {
-                Some(f) if f.is_finite() => match x_axis {
-                    CompareXAxis::Epochs => format!("@ ep {}", (x_max * f).round() as i64),
-                    CompareXAxis::Progress => format!("@ {:.0}%", (x_max * f).clamp(0.0, 100.0)),
-                },
-                _ => "latest".into(),
-            }
-        };
         let map_hv = hover_of("cmp-map");
         let loss_hv = hover_of("cmp-loss");
+        let map_has_data = map_pts.iter().any(|p| !p.is_empty());
+        let loss_has_data = loss_arcs.iter().any(|p| !p.is_empty());
+        // Fixed-width neutral scope ("latest" at rest, "cursor" while hovering — the chart's own
+        // axis chip reports the snapped coordinate) so hovering never re-wraps or shifts the plot.
+        let scope_el = |scope: &'static str| {
+            div().w(px(44.)).flex_none().child(text(ty::XS, t.text_tertiary).whitespace_nowrap().child(scope))
+        };
         let map_legend = div()
             .flex()
             .flex_wrap()
             .items_center()
             .gap(px(12.))
-            .child(text(ty::XS, t.text_tertiary).tnum().whitespace_nowrap().child(legend_scope(map_hv)))
+            .when_some(compare_legend_scope(map_hv, map_has_data), |d, s| d.child(scope_el(s)))
             .children(chosen.iter().enumerate().map(|(slot, r)| {
                 let val = legend_val(&map_pts[slot], map_hv);
                 legend_item(&r.name, slot, val)
@@ -655,7 +670,7 @@ impl FoloApp {
             .flex_wrap()
             .items_center()
             .gap(px(12.))
-            .child(text(ty::XS, t.text_tertiary).tnum().whitespace_nowrap().child(legend_scope(loss_hv)))
+            .when_some(compare_legend_scope(loss_hv, loss_has_data), |d, s| d.child(scope_el(s)))
             .children(chosen.iter().enumerate().map(|(slot, r)| {
                 let val = if smooth_on {
                     let sm = crate::charts::smoothed(&loss_arcs[slot], COMPARE_LOSS_EMA);

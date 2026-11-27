@@ -2,7 +2,7 @@
 
 use folo_ui::prelude::FluentBuilder;
 use folo_ui::{
-    AnyElement, Context, FontWeight, InteractiveElement, IntoElement, ParentElement,
+    AnyElement, Context, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString,
     StatefulInteractiveElement, Styled, Window, div, px,
 };
 
@@ -14,6 +14,11 @@ use crate::app::{FoloApp, act};
 use crate::controls::Btn;
 use crate::theme::{Theme, ty};
 use crate::ui::*;
+
+/// Badge label for the highest-mAP run in the comparison table.
+pub(crate) fn compare_best_badge_label(same_ds: bool) -> &'static str {
+    if same_ds { "best" } else { "best in dataset" }
+}
 
 impl FoloApp {
     pub(super) fn run_compare_table(
@@ -146,7 +151,7 @@ impl FoloApp {
                             })
                             .flatten();
                         let best_badge = is_win.then(|| {
-                            let label = if same_ds { "best" } else { "best in dataset" };
+                            let label = compare_best_badge_label(same_ds);
                             let tip_text = if same_ds {
                                 format!("Highest mAP50-95 among compared runs ({})", f3(b.map50_95))
                             } else {
@@ -156,7 +161,7 @@ impl FoloApp {
                                 )
                             };
                             div()
-                                .id(("cmp-best-badge", i))
+                                .id(SharedString::from(format!("cmp-best-badge-{}", r.id)))
                                 .flex_none()
                                 .tooltip(crate::controls::tip(tip_text, None))
                                 .child(badge(&t, label, Tone::Success))
@@ -258,7 +263,7 @@ impl FoloApp {
             .child(row_frame("Epochs", false, epoch_cells))
             .child(row_frame("Duration", false, dur_cells));
 
-        for (row_idx, hp) in diff_rows.iter().enumerate() {
+        for hp in &diff_rows {
             let is_sci = hp.label == "Learning rate";
             let cells: Vec<AnyElement> = hp
                 .values
@@ -282,13 +287,15 @@ impl FoloApp {
                             .into_any_element()
                     };
                     div()
-                        .id(("cmp-hp-diff", row_idx * 8 + i))
+                        .id(SharedString::from(format!("cmp-hp-{}-{}", hp.label, chosen[i].id)))
                         .flex()
                         .items_center()
                         .justify_end()
                         .gap(px(6.))
                         .min_w_0()
-                        .tooltip(crate::controls::tip(val.clone(), None))
+                        .when(val.chars().count() > 10, |d| {
+                            d.tooltip(crate::controls::tip(val.clone(), None))
+                        })
                         .when(off, |d| {
                             d.child(div().size(px(6.)).flex_none().rounded_full().bg(t.accent_solid))
                         })
@@ -321,7 +328,7 @@ impl FoloApp {
             rows = rows
                 .child(div().px(px(16.)).py(px(6.)).border_b_1().border_color(t.line_subtle).child(toggle));
             if show_same {
-                for (row_idx, hp) in same_rows.iter().enumerate() {
+                for hp in &same_rows {
                     let is_sci = hp.label == "Learning rate";
                     let cells: Vec<AnyElement> = hp
                         .values
@@ -341,12 +348,14 @@ impl FoloApp {
                                     .into_any_element()
                             };
                             div()
-                                .id(("cmp-hp-same", row_idx * 8 + i))
+                                .id(SharedString::from(format!("cmp-hp-{}-{}", hp.label, chosen[i].id)))
                                 .flex()
                                 .items_center()
                                 .justify_end()
                                 .min_w_0()
-                                .tooltip(crate::controls::tip(val.clone(), None))
+                                .when(val.chars().count() > 10, |d| {
+                                    d.tooltip(crate::controls::tip(val.clone(), None))
+                                })
                                 .child(value_el)
                                 .into_any_element()
                         })

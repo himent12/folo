@@ -556,12 +556,30 @@ impl WindowsWindow {
                 Some(context_ptr as *const _),
             )
         };
+        let destroy_owner = |owner: Option<HWND>| {
+            if let Some(owner) = owner {
+                // SAFETY: the hidden owner window is ours and not yet attached to a WindowInner.
+                let _ = unsafe { DestroyWindow(owner) };
+            }
+        };
         let this = match context.inner.take() {
             Some(Ok(this)) => this,
-            Some(Err(e)) => return Err(e),
-            None => return Err(anyhow::anyhow!("window creation failed: {:?}", created.err())),
+            Some(Err(e)) => {
+                destroy_owner(owner);
+                return Err(e);
+            }
+            None => {
+                destroy_owner(owner);
+                return Err(anyhow::anyhow!("window creation failed: {:?}", created.err()));
+            }
         };
-        let hwnd = created?;
+        let hwnd = match created {
+            Ok(hwnd) => hwnd,
+            Err(e) => {
+                destroy_owner(owner);
+                return Err(e.into());
+            }
+        };
         this.owner.set(owner);
         drop_target::register(&this);
         configure_dwm_dark_mode(hwnd, appearance);

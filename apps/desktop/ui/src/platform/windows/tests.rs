@@ -694,33 +694,66 @@ fn deactivation_and_cancel_mode_disarm_caption_button_press() {
     destroy(hwnd);
 }
 
-/// Off-screen windows carry `WS_EX_NOACTIVATE` (without `WS_EX_APPWINDOW`), answer `WM_MOUSEACTIVATE`
-/// with `MA_NOACTIVATE`, stay off every display, and never take foreground or active focus on launch.
+/// Off-screen windows carry `WS_EX_NOACTIVATE` (without `WS_EX_APPWINDOW`), use a hidden
+/// non-activating owner off every display, answer `WM_MOUSEACTIVATE` with `MA_NOACTIVATE`, stay
+/// visible off-screen without taking foreground/active focus on both immediate (`show: true`) and
+/// deferred (`show: false` -> `activate()`) launches, and destroy their owner on close.
 #[test]
 fn offscreen_window_sets_noactivate_and_does_not_take_foreground() {
     let platform = platform();
-    let window = platform
-        .open_windows_window_offscreen(WindowParams { show: true, ..hidden_params() })
-        .expect("open off-screen window");
-    let hwnd = window.hwnd();
-    pump();
+    for immediate_show in [true, false] {
+        let window = platform
+            .open_windows_window_offscreen(WindowParams { show: immediate_show, ..hidden_params() })
+            .expect("open off-screen window");
+        let hwnd = window.hwnd();
+        if !immediate_show {
+            // SAFETY: plain query.
+            assert!(!unsafe { IsWindowVisible(hwnd) }.as_bool(), "hidden before activate()");
+            window.activate();
+        }
+        pump();
 
-    // SAFETY: plain read-only queries on our own window.
-    let ex_style = WINDOW_EX_STYLE(unsafe { GetWindowLongW(hwnd, GWL_EXSTYLE) } as u32);
-    assert!(ex_style.contains(WS_EX_NOACTIVATE), "off-screen window must set WS_EX_NOACTIVATE: {ex_style:?}");
-    assert!(!ex_style.contains(WS_EX_APPWINDOW), "off-screen window must omit WS_EX_APPWINDOW: {ex_style:?}");
+        // SAFETY: plain read-only queries on our own window.
+        assert!(
+            unsafe { IsWindowVisible(hwnd) }.as_bool(),
+            "off-screen window must be visible (immediate_show={immediate_show})"
+        );
+        let ex_style = WINDOW_EX_STYLE(unsafe { GetWindowLongW(hwnd, GWL_EXSTYLE) } as u32);
+        assert!(
+            ex_style.contains(WS_EX_NOACTIVATE),
+            "off-screen window must set WS_EX_NOACTIVATE: {ex_style:?}"
+        );
+        assert!(
+            !ex_style.contains(WS_EX_APPWINDOW),
+            "off-screen window must omit WS_EX_APPWINDOW: {ex_style:?}"
+        );
 
-    // SAFETY: sending WM_MOUSEACTIVATE to our own window on its thread.
-    let ma = unsafe { SendMessageW(hwnd, WM_MOUSEACTIVATE, Some(WPARAM(0)), Some(LPARAM(0))) };
-    assert_eq!(ma.0, MA_NOACTIVATE as isize, "WM_MOUSEACTIVATE must return MA_NOACTIVATE off screen");
+        // SAFETY: querying the hidden owner window created alongside `hwnd`.
+        let owner = unsafe { GetWindow(hwnd, GW_OWNER) }.expect("off-screen window must have an owner");
+        assert!(!owner.is_invalid(), "owner HWND must be valid");
+        assert!(!unsafe { IsWindowVisible(owner) }.as_bool(), "owner window must remain hidden");
+        let owner_ex = WINDOW_EX_STYLE(unsafe { GetWindowLongW(owner, GWL_EXSTYLE) } as u32);
+        assert!(owner_ex.contains(WS_EX_NOACTIVATE), "owner must set WS_EX_NOACTIVATE: {owner_ex:?}");
+        let owner_rect = super::offscreen::window_rect(owner);
+        assert!(!super::offscreen::on_a_display(&owner_rect), "owner must stay off displays: {owner_rect:?}");
 
-    let rect = super::offscreen::window_rect(hwnd);
-    assert!(!super::offscreen::on_a_display(&rect), "off-screen window must remain off displays: {rect:?}");
+        // SAFETY: sending WM_MOUSEACTIVATE to our own window on its thread.
+        let ma = unsafe { SendMessageW(hwnd, WM_MOUSEACTIVATE, Some(WPARAM(0)), Some(LPARAM(0))) };
+        assert_eq!(ma.0, MA_NOACTIVATE as isize, "WM_MOUSEACTIVATE must return MA_NOACTIVATE off screen");
 
-    // SAFETY: plain foreground/active queries.
-    let (fg, active) = unsafe { (GetForegroundWindow(), GetActiveWindow()) };
-    assert_ne!(fg, hwnd, "off-screen launch must never take foreground focus");
-    assert_ne!(active, hwnd, "off-screen launch must never activate the window");
+        let rect = super::offscreen::window_rect(hwnd);
+        assert!(
+            !super::offscreen::on_a_display(&rect),
+            "off-screen window must remain off displays: {rect:?}"
+        );
 
-    destroy(hwnd);
+        // SAFETY: plain foreground/active queries.
+        let (fg, active) = unsafe { (GetForegroundWindow(), GetActiveWindow()) };
+        assert_ne!(fg, hwnd, "off-screen launch must never take foreground focus");
+        assert_ne!(active, hwnd, "off-screen launch must never activate the window");
+
+        destroy(hwnd);
+        // SAFETY: plain window validity check.
+        assert!(!unsafe { IsWindow(Some(owner)) }.as_bool(), "closing off-screen window destroys its owner");
+    }
 }

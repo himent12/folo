@@ -301,13 +301,24 @@ fn chart_controls_hyperparam_diff_partial_failure_and_viewports() {
 
 #[test]
 fn playtest_r11_mixed_dataset_tooltips_and_chip_vs_legend_labels() {
+    use crate::screens::runs::{compare_best_badge_label, compare_legend_scope};
+    use folo_ui::{MouseMoveEvent, PlatformInput, Primitive};
+
+    // Explicit badge and legend scope labels distinguish same vs mixed datasets and resting vs hovered.
+    assert_eq!(compare_best_badge_label(true), "best");
+    assert_eq!(compare_best_badge_label(false), "best in dataset");
+    assert_eq!(compare_legend_scope(None, true), Some("latest"));
+    assert_eq!(compare_legend_scope(Some(0.5), true), Some("cursor"));
+    assert_eq!(compare_legend_scope(Some(f32::NAN), true), Some("latest"));
+    assert_eq!(compare_legend_scope(None, false), None);
+    assert_eq!(compare_legend_scope(Some(0.5), false), None);
+
     for (w, h, mode) in [(960.0_f32, 620.0_f32, Mode::Dark), (1280.0, 800.0, Mode::Light)] {
         let (mut app, win) = open_with(Arc::new(MockBackend::new(4200, true)), w, h, mode);
         drive(&mut app, win, |this, win, cx| this.open_run_compare(None, win, cx));
         settle(&mut app, win);
 
-        // Select 4 runs across mixed datasets with long device names and identical settings expanded,
-        // and verify both resting ("latest") and hovered ("@ ep ...") legend states render cleanly.
+        // Select 4 runs across mixed datasets with long device names and identical settings expanded.
         drive(&mut app, win, |this, _, cx| {
             let runs = this.store.runs.ready_mut().expect("runs loaded");
             assert!(runs.len() >= RUN_COMPARE_MAX);
@@ -329,19 +340,65 @@ fn playtest_r11_mixed_dataset_tooltips_and_chip_vs_legend_labels() {
         });
         settle(&mut app, win);
 
-        drive(&mut app, win, |this, _, cx| {
-            this.run_compare.hover = Some(0.5);
-            this.run_compare.hover_on = Some("cmp-map");
-            cx.notify();
-        });
+        // Record chart plot bounds (largest stroked path / curve area) before hovering.
+        let path_tops_before: Vec<f64> = app
+            .scene(win.into())
+            .primitives
+            .iter()
+            .filter_map(|p| match p {
+                Primitive::Path(path) if f64::from(path.bounds.size.width) > 120. => {
+                    Some(f64::from(path.bounds.origin.y))
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(!path_tops_before.is_empty(), "chart series paths painted at {w}x{h}");
+
+        // Move the real pointer onto the first painted chart curve to activate hover.
+        let hover_pt = app
+            .scene(win.into())
+            .primitives
+            .iter()
+            .find_map(|p| match p {
+                Primitive::Path(path) if f64::from(path.bounds.size.width) > 120. => Some(point(
+                    px((f64::from(path.bounds.origin.x) + f64::from(path.bounds.size.width) * 0.5) as f32),
+                    px((f64::from(path.bounds.origin.y) + f64::from(path.bounds.size.height) * 0.5) as f32),
+                )),
+                _ => None,
+            })
+            .expect("chart curve hit point");
+        app.simulate_input(
+            win.into(),
+            PlatformInput::MouseMove(MouseMoveEvent {
+                position: hover_pt,
+                pressed_button: None,
+                modifiers: Default::default(),
+            }),
+        );
         settle(&mut app, win);
 
-        drive(&mut app, win, |this, _, cx| {
-            this.run_compare.x_axis = CompareXAxis::Progress;
-            this.run_compare.hover = Some(0.75);
-            this.run_compare.hover_on = Some("cmp-loss");
-            cx.notify();
-        });
-        settle(&mut app, win);
+        let hover_active =
+            drive(&mut app, win, |this, _, _| (this.run_compare.hover, this.run_compare.hover_on));
+        assert!(
+            hover_active.0.is_some() && hover_active.1.is_some(),
+            "real pointer move over chart activates hover at {w}x{h}: {hover_active:?}"
+        );
+
+        // Fixed-width legend scope ("latest" <-> "cursor") must leave chart plot Y coordinates stable.
+        let path_tops_after: Vec<f64> = app
+            .scene(win.into())
+            .primitives
+            .iter()
+            .filter_map(|p| match p {
+                Primitive::Path(path) if f64::from(path.bounds.size.width) > 120. => {
+                    Some(f64::from(path.bounds.origin.y))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(path_tops_before.len(), path_tops_after.len());
+        for (a, b) in path_tops_before.iter().zip(path_tops_after.iter()) {
+            assert!((a - b).abs() < 0.5, "hover shifted chart plot vertically at {w}x{h}: {a} -> {b}");
+        }
     }
 }
