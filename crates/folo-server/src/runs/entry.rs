@@ -80,6 +80,11 @@ impl RunEntry {
         self.state.lock().unwrap().file.last_metrics
     }
 
+    /// Opt-in GPU VRAM-budget auto-batch settings requested when the run was created.
+    pub fn auto_batch(&self) -> crate::store::AutoBatchOptions {
+        self.state.lock().unwrap().file.auto_batch
+    }
+
     pub(super) fn persist(&self, st: &RunState) {
         let bytes = serde_json::to_vec_pretty(&st.file).expect("runs serialize");
         let path = self.dir.join("run.json");

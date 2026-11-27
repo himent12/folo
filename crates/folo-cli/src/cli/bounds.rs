@@ -257,8 +257,6 @@ pub const VAL_IMGSZ: NumericBounds = NumericBounds::int_min_multiple(IMGSZ_STRID
 
 /// `folo train` bounds (matching `folo_vision::TrainConfig::validate` and `folo_data::AugmentConfig::validate`).
 pub const TRAIN_EPOCHS: NumericBounds = NumericBounds::int_range(1, 10_000);
-/// `folo train --batch`.
-pub const TRAIN_BATCH: NumericBounds = NumericBounds::int_range(1, 1024);
 /// `folo train --auto-batch-target`.
 pub const TRAIN_AUTO_BATCH_TARGET: NumericBounds = NumericBounds::float_range(
     folo_vision::train::MIN_AUTO_BATCH_UTILIZATION,

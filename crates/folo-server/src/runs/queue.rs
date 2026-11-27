@@ -154,7 +154,7 @@ impl Runs {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn register_with_auto_batch(
+    pub(super) fn register_with_auto_batch(
         &self,
         config: TrainConfig,
         dataset: DatasetRef,

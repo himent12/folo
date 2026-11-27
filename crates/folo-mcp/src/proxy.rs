@@ -546,6 +546,23 @@ impl Store for HttpStore {
         id: &str,
         fields: &serde_json::Map<String, serde_json::Value>,
     ) -> Result<Run, Error> {
+        let wants_auto_batch = fields
+            .get("batch")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|s| s.eq_ignore_ascii_case("auto"))
+            || fields.get("auto_batch").is_some_and(|v| !v.is_null())
+            || fields.get("auto_batch_target").is_some_and(|v| !v.is_null());
+        if wants_auto_batch && !self.has_feature(FEATURE_TRAIN_AUTO_BATCH)? {
+            return Err(Error::new(
+                StatusCode::NOT_IMPLEMENTED,
+                "not_implemented",
+                format!(
+                    "the folo serve at {} is too old for GPU VRAM auto-batch (`batch: \"auto\"` / `auto_batch`)",
+                    self.base()
+                ),
+            )
+            .hint("update folo serve, or omit auto-batch fields when resuming"));
+        }
         let mut body = fields.clone();
         body.insert("resume_run_id".into(), id.into());
         self.post("/runs", &serde_json::Value::Object(body))

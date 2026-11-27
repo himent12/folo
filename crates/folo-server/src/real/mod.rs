@@ -285,6 +285,11 @@ impl RealStore {
         RealStore::open_inner(data_dir, folo_cloud::providers(), cloud::Tuning::default(), true)
     }
 
+    #[cfg(test)]
+    pub(crate) fn runs_for_test(&self) -> &Arc<Runs> {
+        &self.runs
+    }
+
     /// [`RealStore::open`] without opening the `bench/` folder or starting the benchmark worker threads: used by
     /// `folo mcp --confine`, which refuses every benchmark tool.
     pub fn open_without_benches(data_dir: PathBuf) -> RealStore {

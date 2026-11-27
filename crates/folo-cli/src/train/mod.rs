@@ -61,7 +61,7 @@ pub fn train(args: TrainArgs, out: Out) -> Result<(), CliError> {
     watch_stop_file(&run_dir, stop);
     nb.store(trainer.batches_per_epoch() as u64, Ordering::Relaxed);
     let auto_batch_info =
-        progress::auto_batch_json(trainer.config(), trainer.auto_batch_plan(), trainer.accumulate());
+        progress::auto_batch_json(trainer.config(), trainer.auto_batch_plan(), trainer.accumulate(), !fresh);
     if let Some(ab) = &auto_batch_info {
         let mut rec = ab.clone();
         if let Some(obj) = rec.as_object_mut() {

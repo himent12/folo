@@ -209,6 +209,19 @@ pub(super) fn check_resume_flags(args: &TrainArgs, stored: &TrainConfig) -> Resu
                 crate::cli::BatchArg::Fixed(n) => (field("batch"), json!(n)),
             },
             "auto_batch_target" => {
+                if let Some(t) = args.auto_batch_target
+                    && !crate::cli::bounds::TRAIN_AUTO_BATCH_TARGET.contains_f64(t)
+                {
+                    return Err(CliError::new(
+                        ExitCode::Usage,
+                        "invalid_config",
+                        format!(
+                            "--auto-batch-target must be finite in {}..={}, got {t}",
+                            folo_vision::train::MIN_AUTO_BATCH_UTILIZATION,
+                            folo_vision::train::MAX_AUTO_BATCH_UTILIZATION
+                        ),
+                    ));
+                }
                 if !stored.auto_batch {
                     (json!(null), json!(args.auto_batch_target))
                 } else {

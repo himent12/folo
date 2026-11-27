@@ -1,13 +1,12 @@
 //! Deterministic generated-image benchmark source (docs/BENCH.md).
 //!
-//! Renders synthetic scenes using [`folo_data::synthetic::SyntheticDataset`] (FOLO's IEEE-deterministic shapes
+//! Renders synthetic scenes using [`folo_data::synthetic::generate`] (FOLO's IEEE-deterministic shapes
 //! generator — zero duplicate rasterizer) and encodes each frame as a canonical baseline JPEG via
 //! [`crate::conditions::encode_jpeg`] with pixel `xyxy` ground-truth boxes. Same `(spec, seed)` produces
 //! byte-identical images and bit-identical boxes across runs, machines, and thread counts.
 
 use folo_api::BBox;
-use folo_data::synthetic::{SyntheticConfig, SyntheticDataset, shapes_for};
-use folo_data::{Dataset, Split};
+use folo_data::synthetic::{SyntheticConfig, generate, shapes_for};
 use image::RgbImage;
 use rayon::prelude::*;
 
@@ -107,34 +106,81 @@ pub struct GeneratedImage {
     pub boxes: Vec<BBox>,
 }
 
+/// Validated handle to a deterministic generated-image source that renders bounded chunks on demand so large
+/// benchmarks (`images = 5000`, `imgsz = 4096`) never buffer every encoded frame in RAM at once.
+#[derive(Clone, Debug)]
+pub struct GeneratedSource {
+    cfg: SyntheticConfig,
+}
+
+impl GeneratedSource {
+    /// Validates `spec` and returns a handle ready to render scene ranges deterministically.
+    pub fn new(spec: &GeneratedSourceSpec) -> Result<Self, String> {
+        Ok(Self { cfg: spec.to_synthetic_config()? })
+    }
+
+    /// Class names of the generated scenes, in class-id order.
+    pub fn classes(&self) -> &[String] {
+        self.cfg.class_names()
+    }
+
+    /// Total number of scenes in this source.
+    pub fn len(&self) -> usize {
+        self.cfg.images
+    }
+
+    /// Whether the source has zero scenes (always `false` after validation).
+    pub fn is_empty(&self) -> bool {
+        self.cfg.images == 0
+    }
+
+    /// Bounded parallel batch size chosen from image resolution so peak uncompressed + JPEG memory stays modest
+    /// (32 images at 640px, down to 4 images at 4096px).
+    pub fn chunk_size(&self) -> usize {
+        let side = self.cfg.imgsz as usize;
+        let bytes_per_img = side.saturating_mul(side).saturating_mul(3).max(1);
+        ((64 * 1024 * 1024) / bytes_per_img).clamp(4, 32)
+    }
+
+    /// Renders scenes in `range` deterministically in parallel, returning images in index order.
+    pub fn render_range(&self, range: std::ops::Range<usize>) -> Result<Vec<GeneratedImage>, String> {
+        if range.end > self.cfg.images {
+            return Err(format!("scene range {:?} exceeds total scenes ({})", range, self.cfg.images));
+        }
+        range
+            .into_par_iter()
+            .map(|i| {
+                let sample = generate(&self.cfg, i).map_err(|e| format!("generating scene {i}: {e}"))?;
+                let (width, height) = (sample.image.width, sample.image.height);
+                let rgb = RgbImage::from_raw(width, height, sample.image.data)
+                    .ok_or_else(|| format!("generated scene {i} has unexpected pixel buffer size"))?;
+                let jpeg = encode_jpeg(&rgb).map_err(|e| format!("encoding scene {i}: {e}"))?;
+                let (wf, hf) = (width as f32, height as f32);
+                let boxes = sample
+                    .boxes
+                    .into_iter()
+                    .filter_map(|b| {
+                        let [x1, y1, x2, y2] = b.pixel_xyxy(width, height);
+                        let (x1, x2) = (x1.clamp(0.0, wf), x2.clamp(0.0, wf));
+                        let (y1, y2) = (y1.clamp(0.0, hf), y2.clamp(0.0, hf));
+                        (x2 - x1 >= 1.0 && y2 - y1 >= 1.0).then_some(BBox { class: b.class, x1, y1, x2, y2 })
+                    })
+                    .collect();
+                Ok(GeneratedImage { file: format!("{i:06}.jpg"), width, height, jpeg, boxes })
+            })
+            .collect()
+    }
+}
+
 /// Generates every scene described by `spec` deterministically in parallel using `folo-data`'s procedural shapes
 /// generator. Returns `(class_names, images)` in index order (`0..spec.images`).
+///
+/// For large benchmarks, prefer [`GeneratedSource`] + [`GeneratedSource::render_range`] in bounded chunks so
+/// encoded frames can be written incrementally instead of buffered in RAM.
 pub fn generate_images(spec: &GeneratedSourceSpec) -> Result<(Vec<String>, Vec<GeneratedImage>), String> {
-    let cfg = spec.to_synthetic_config()?;
-    let classes = cfg.class_names().to_vec();
-    let ds = SyntheticDataset::new(cfg, Split::Val).map_err(|e| e.to_string())?;
-    let images = (0..ds.len())
-        .into_par_iter()
-        .map(|i| {
-            let sample = ds.get(i).map_err(|e| format!("generating scene {i}: {e}"))?;
-            let (width, height) = (sample.image.width, sample.image.height);
-            let rgb = RgbImage::from_raw(width, height, sample.image.data)
-                .ok_or_else(|| format!("generated scene {i} has unexpected pixel buffer size"))?;
-            let jpeg = encode_jpeg(&rgb).map_err(|e| format!("encoding scene {i}: {e}"))?;
-            let (wf, hf) = (width as f32, height as f32);
-            let boxes = sample
-                .boxes
-                .into_iter()
-                .filter_map(|b| {
-                    let [x1, y1, x2, y2] = b.pixel_xyxy(width, height);
-                    let (x1, x2) = (x1.clamp(0.0, wf), x2.clamp(0.0, wf));
-                    let (y1, y2) = (y1.clamp(0.0, hf), y2.clamp(0.0, hf));
-                    (x2 - x1 >= 1.0 && y2 - y1 >= 1.0).then_some(BBox { class: b.class, x1, y1, x2, y2 })
-                })
-                .collect();
-            Ok(GeneratedImage { file: format!("{i:06}.jpg"), width, height, jpeg, boxes })
-        })
-        .collect::<Result<Vec<_>, String>>()?;
+    let src = GeneratedSource::new(spec)?;
+    let classes = src.classes().to_vec();
+    let images = src.render_range(0..src.len())?;
     Ok((classes, images))
 }
 
@@ -169,9 +215,21 @@ mod tests {
         }
 
         // Different seed produces different scenes.
-        let other = GeneratedSourceSpec { seed: 43, ..spec };
+        let other = GeneratedSourceSpec { seed: 43, ..spec.clone() };
         let (_, im3) = generate_images(&other).unwrap();
         assert_ne!(im1[0].jpeg, im3[0].jpeg);
+
+        // Chunked streaming via `GeneratedSource::render_range` matches full generation byte for byte.
+        let src = GeneratedSource::new(&spec).unwrap();
+        assert_eq!(src.len(), 6);
+        assert!(src.chunk_size() >= 4 && src.chunk_size() <= 32);
+        let mut streamed = Vec::new();
+        for start in (0..src.len()).step_by(2) {
+            let end = (start + 2).min(src.len());
+            streamed.extend(src.render_range(start..end).unwrap());
+        }
+        assert_eq!(streamed, im1);
+        assert!(src.render_range(0..7).is_err());
     }
 
     #[test]

@@ -125,8 +125,13 @@ struct GeneratedSourceBody {
 }
 
 fn parse_generated_bench(body: serde_json::Value) -> Result<CreateGeneratedBench> {
-    let raw: CreateGeneratedBody = serde_json::from_value(body)
-        .map_err(|e| Error::new(StatusCode::BAD_REQUEST, "invalid_body", e.to_string()))?;
+    let raw: CreateGeneratedBody = serde_json::from_value(body).map_err(|e| {
+        Error::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_body",
+            format!("Failed to deserialize the JSON body into the target type: {e}"),
+        )
+    })?;
     debug_assert_eq!(raw.source.kind, "generated");
     let images = match (raw.source.images, raw.max_images) {
         (Some(a), Some(b)) if a != b => {
@@ -176,8 +181,13 @@ async fn create(State(st): State<AppState>, ApiJson(body): ApiJson<serde_json::V
         let req = parse_generated_bench(body)?;
         blocking(&st, move |s| s.benches()?.create_generated(req)).await?
     } else {
-        let req: CreateBench = serde_json::from_value(body)
-            .map_err(|e| Error::new(StatusCode::BAD_REQUEST, "invalid_body", e.to_string()))?;
+        let req: CreateBench = serde_json::from_value(body).map_err(|e| {
+            Error::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "invalid_body",
+                format!("Failed to deserialize the JSON body into the target type: {e}"),
+            )
+        })?;
         blocking(&st, move |s| s.benches()?.create(s, req)).await?
     };
     Ok((StatusCode::CREATED, Json(bench)).into_response())

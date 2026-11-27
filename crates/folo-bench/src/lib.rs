@@ -25,8 +25,8 @@ pub mod source;
 
 pub use conditions::{Condition, Rendered};
 pub use source::{
-    DEFAULT_CLASSES, DEFAULT_IMAGES, DEFAULT_IMGSZ, GeneratedImage, GeneratedSourceSpec, MAX_IMGSZ,
-    MIN_IMGSZ, generate_images,
+    DEFAULT_CLASSES, DEFAULT_IMAGES, DEFAULT_IMGSZ, GeneratedImage, GeneratedSource, GeneratedSourceSpec,
+    MAX_IMGSZ, MIN_IMGSZ, generate_images,
 };
 
 /// The version of what this crate computes: the pixels of every condition and every definition of the score.

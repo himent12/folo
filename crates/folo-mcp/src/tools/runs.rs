@@ -36,7 +36,7 @@ impl Inner {
         }
         let mut batch_was_auto = false;
         if let Some(Value::String(s)) = args.get("batch") {
-            if s == "auto" {
+            if s.eq_ignore_ascii_case("auto") {
                 if args.get("auto_batch").and_then(Value::as_bool) == Some(false) {
                     return Err(Error::new(
                         http::StatusCode::BAD_REQUEST,

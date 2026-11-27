@@ -111,6 +111,98 @@ fn train_batch_auto_cpu_fallback_and_validation() {
     );
 }
 
+/// Resuming an auto-batch checkpoint reports `"probed": false, "resumed": true` (never `"fallback": "cpu"`)
+/// in both the `auto_batch` event and `done.auto_batch`, and rejects `--auto-batch-target NaN`.
+#[test]
+fn train_batch_auto_resume_reports_resumed_and_rejects_nan_target() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let tiny = tiny_run();
+    let root = TestDir::new("cli-train-auto-batch-resume");
+    let run_dir = root.join("auto-resume");
+    std::fs::create_dir_all(&run_dir).unwrap();
+
+    // Produce a real 1-of-2 epoch auto-batch checkpoint deterministically (stop right after epoch 1).
+    let ds = folo_data::open_splits(&tiny.data, &folo_data::OpenOptions::default(), &folo_data::Split::ALL)
+        .unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_after_ep1 = stop.clone();
+    let cfg = folo_vision::TrainConfig {
+        name: "auto-resume".into(),
+        dataset: folo_api::json::path(&tiny.data),
+        arch: "folo-n".into(),
+        epochs: 3,
+        batch: 2,
+        auto_batch: true,
+        auto_batch_target: 0.75,
+        imgsz: 64,
+        device: "cpu".into(),
+        workers: 0,
+        ..folo_vision::TrainConfig::default()
+    };
+    let data = folo_vision::TrainData {
+        train: Arc::new(ds.split(folo_data::Split::Train).clone()),
+        val: Arc::new(ds.split(folo_data::Split::Val).clone()),
+        classes: ds.classes.clone(),
+    };
+    let opts = folo_vision::TrainOptions {
+        run_dir: Some(run_dir.clone()),
+        stop,
+        events: Some(Box::new(move |ev| {
+            if let folo_api::RunEvent::Epoch(ep) = ev
+                && ep.epoch >= 1
+            {
+                stop_after_ep1.store(true, Ordering::Relaxed);
+            }
+        })),
+        ..folo_vision::TrainOptions::default()
+    };
+    let summary = folo_vision::Trainer::new(cfg, data, opts).unwrap().run().unwrap();
+    assert!(
+        (1..3).contains(&summary.epochs_completed),
+        "expected partial run, got {}",
+        summary.epochs_completed
+    );
+    let ckpt = run_dir.join("weights/last.folo");
+    assert!(ckpt.is_file());
+
+    // `--auto-batch-target NaN` on `--resume` is rejected upfront.
+    let (code, lines, _) = folo(&[
+        "train",
+        "--json",
+        "--resume",
+        s(&ckpt),
+        "--auto-batch-target",
+        "NaN",
+        "--device",
+        "cpu",
+        "--workers",
+        "0",
+    ]);
+    assert_eq!(code, 2, "{lines:?}");
+    assert_eq!(lines.last().unwrap()["error"]["code"], "invalid_config");
+
+    // Resuming emits `auto_batch` with `resumed: true` and NO `fallback: "cpu"`.
+    let (code, lines, stderr) =
+        folo(&["train", "--json", "--resume", s(&ckpt), "--device", "cpu", "--workers", "0"]);
+    assert_eq!(code, 0, "{stderr}");
+    let ab = lines
+        .iter()
+        .find(|l| l["event"] == "auto_batch")
+        .unwrap_or_else(|| panic!("expected auto_batch event in {lines:?}"));
+    assert_eq!(ab["probed"], false);
+    assert_eq!(ab["resumed"], true);
+    assert!(ab.get("fallback").is_none(), "resumed run must not emit fallback=cpu: {ab}");
+    assert_eq!(ab["chosen_batch"], 2);
+
+    let done = lines.last().unwrap();
+    assert_eq!(done["event"], "done");
+    assert_eq!(done["epochs_completed"], 3);
+    assert_eq!(done["auto_batch"]["resumed"], true);
+    assert!(done["auto_batch"].get("fallback").is_none());
+}
+
 /// `folo quantize` wires selective-`f32` calibration policies (`auto`, `p5-tail`, `none`, `--f32-conv`),
 /// surfaces `f32_convs` / `f32_mac_fraction` / `f32_layers` in `--json`, rejects invalid inputs, and produces a
 /// valid int8 model that evaluates with `folo val --precision int8`.

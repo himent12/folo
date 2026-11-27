@@ -669,4 +669,12 @@ async fn train_auto_batch_schema_validation_and_proxy_capability() {
         )
         .unwrap_err();
     assert_eq!(e.body.code, "not_implemented");
+
+    // Resuming with auto-batch fields against an older server is also refused with `not_implemented`.
+    for resume_fields in
+        [json!({ "batch": "auto" }), json!({ "auto_batch": true }), json!({ "auto_batch_target": 0.75 })]
+    {
+        let e = http.resume_run("run_1", resume_fields.as_object().unwrap()).unwrap_err();
+        assert_eq!(e.body.code, "not_implemented", "{resume_fields}");
+    }
 }

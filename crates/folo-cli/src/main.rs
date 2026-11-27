@@ -652,12 +652,13 @@ mod tests {
         );
         assert_eq!(
             arg(&bcreate, "label_job")["conflicts_with"],
-            json!(["--data", "--dataset", "--generated"])
+            json!(["--data", "--dataset", "--generated", "--split"])
         );
         assert_eq!(
             arg(&bcreate, "generated")["conflicts_with"],
-            json!(["--data", "--dataset", "--label-job"])
+            json!(["--data", "--dataset", "--label-job", "--split"])
         );
+        assert_eq!(arg(&bcreate, "split")["conflicts_with"], json!(["--generated", "--label-job"]));
         assert_eq!(arg(&bcreate, "generated")["aliases"], json!(["--synthetic"]));
 
         // `dataset check`: `warn` alias on `warning` enum value.
@@ -755,9 +756,12 @@ mod tests {
         );
         assert_eq!(arg(&quantize, "images")["bounds"], json!({ "minimum": 1 }));
         assert_eq!(arg(&quantize, "batch")["bounds"], json!({ "minimum": 1 }));
+        assert_eq!(arg(&quantize, "max_f32_macs")["bounds"], json!({ "minimum": 0.0, "maximum": 1.0 }));
 
         let bench_create =
             describe::describe(&Cli::command(), &["bench".into(), "create".into()], false).unwrap();
+        assert_eq!(arg(&bench_create, "images")["bounds"], json!({ "minimum": 1, "maximum": 5000 }));
+        assert_eq!(arg(&bench_create, "imgsz")["bounds"], json!({ "minimum": 32, "maximum": 4096 }));
         assert_eq!(arg(&bench_create, "max_images")["bounds"], json!({ "minimum": 1, "maximum": 5000 }));
         assert_eq!(
             arg(&bench_create, "seed")["bounds"],

@@ -412,88 +412,11 @@ impl Store for MockStore {
                 "auto_batch is not supported for cloud runs yet (pass an explicit integer `batch` for cloud compute)",
             ));
         }
-        self.create_run(config)
+        self.create_run_inner(config, auto_batch)
     }
 
-    fn create_run(&self, mut config: TrainConfig) -> Result<Run> {
-        let ds = self.dataset(&config.dataset_id)?;
-        crate::store::check_run_name(&config.name)?;
-        self.validate(&config)?;
-        // A cloud run rents an offer of its connection, and its worker checks `amp`.
-        let offer = match &config.compute {
-            Some(c) => Some((self.cloud_offer(&config, c)?, c.clone())),
-            None => None,
-        };
-        // As the real store: a fine-tune takes the weights' architecture.
-        if let Some(w) = &config.weights {
-            config.arch = self.get_model(w)?.arch;
-        }
-        self.check_amp(&config)?;
-        let meta = ds.meta();
-        if meta.classes.is_empty() || meta.splits.train == 0 {
-            return Err(Error::new(
-                StatusCode::BAD_REQUEST,
-                "invalid_config",
-                format!("dataset_id: '{}' has no classes or no training images", meta.id),
-            ));
-        }
-        if config.name.trim().is_empty() {
-            config.name = crate::store::default_run_name(&meta.name, config.arch);
-        }
-        // Ids are allocated under the runs write lock so concurrent creates cannot pick the same one, and model
-        // ids are checked against every model that exists or will exist when a run completes.
-        let mut runs = self.runs.write().unwrap();
-        let id = unique_id("run", fnv1a(config.name.as_bytes()) ^ unix_now().to_bits(), |id| {
-            runs.iter().any(|r| r.0.id == id)
-        });
-        let models_taken: std::collections::HashSet<String> = self
-            .models
-            .read()
-            .unwrap()
-            .iter()
-            .map(|m| m.model.id.clone())
-            .chain(runs.iter().filter_map(|r| r.0.model_id.clone()))
-            .collect();
-        let model_id = unique_id("m", fnv1a(id.as_bytes()), |m| models_taken.contains(m));
-        let spe = steps_per_epoch(meta.splits.train, config.batch);
-        let quality = 0.45 + 0.4 * (fnv1a(meta.id.as_bytes()) % 100) as f32 / 100.0;
-        let curve = Curve::new(fnv1a(id.as_bytes()), quality, meta.classes.len(), &config, spe);
-        let device = match (&offer, config.device.as_str()) {
-            (Some((o, _)), _) => format!("NVIDIA GeForce {} (vulkan)", o.gpu),
-            (None, "cpu") => "CPU".to_string(),
-            _ => DEVICE.to_string(),
-        };
-        // A cloud run hands over for 3 phases before it trains and 2 after, outside the training queue.
-        let clock = match offer {
-            Some(_) => LiveClock::new(6.0, 3.0 * PHASE_S, 0.0, false, 0.0).with_tail(2.0 * PHASE_S),
-            None => LiveClock::new(6.0, 2.0, 0.0, false, 0.0),
-        };
-        let cloud = offer.map(|(o, c)| SimCloud::new(&id, &c.connection_id, o, c.max_hours));
-        let local = cloud.is_none();
-        let mut sim = SimRun::new(
-            id,
-            config,
-            meta.classes.clone(),
-            spe,
-            curve,
-            device,
-            Some(model_id),
-            true,
-            Timeline::Live(std::sync::Mutex::new(clock)),
-        )
-        .resolved_for(meta.splits.train);
-        if let Some(c) = cloud {
-            sim = sim.with_cloud(c);
-        }
-        let run = Arc::new(sim);
-        runs.push((Arc::clone(&run), Arc::clone(&ds)));
-        drop(runs);
-        if local {
-            let mut queue = self.queue.lock().unwrap();
-            queue.push(Arc::clone(&run));
-            runs::reschedule(&queue, std::time::Instant::now());
-        }
-        Ok(run.to_api())
+    fn create_run(&self, config: TrainConfig) -> Result<Run> {
+        self.create_run_inner(config, crate::store::AutoBatchOptions::default())
     }
 
     fn get_run(&self, id: &str) -> Result<Run> {
@@ -504,7 +427,10 @@ impl Store for MockStore {
         let (run, ds) = self.run(id)?;
         crate::cli::check_optimizer(&run.config)?;
         let weights = run.config.weights.as_deref().map(mock_weights);
-        Ok(crate::cli::train_command(&run.config, &ds.meta().path, ds.meta().format, weights.as_deref()))
+        let cmd =
+            crate::cli::train_command(&run.config, &ds.meta().path, ds.meta().format, weights.as_deref());
+        let ab = run.auto_batch.enabled.then_some(run.auto_batch);
+        Ok(crate::cli::with_auto_batch(cmd, &run.config, ab))
     }
 
     fn stop_run(&self, id: &str) -> Result<Run> {
@@ -775,5 +701,93 @@ impl Store for MockStore {
             DatasetEntry::Disk(_, idx) => Some(idx.root.clone()),
             DatasetEntry::Proc { .. } => None,
         })
+    }
+}
+
+impl MockStore {
+    fn create_run_inner(
+        &self,
+        mut config: TrainConfig,
+        auto_batch: crate::store::AutoBatchOptions,
+    ) -> Result<Run> {
+        let ds = self.dataset(&config.dataset_id)?;
+        crate::store::check_run_name(&config.name)?;
+        self.validate(&config)?;
+        // A cloud run rents an offer of its connection, and its worker checks `amp`.
+        let offer = match &config.compute {
+            Some(c) => Some((self.cloud_offer(&config, c)?, c.clone())),
+            None => None,
+        };
+        // As the real store: a fine-tune takes the weights' architecture.
+        if let Some(w) = &config.weights {
+            config.arch = self.get_model(w)?.arch;
+        }
+        self.check_amp(&config)?;
+        let meta = ds.meta();
+        if meta.classes.is_empty() || meta.splits.train == 0 {
+            return Err(Error::new(
+                StatusCode::BAD_REQUEST,
+                "invalid_config",
+                format!("dataset_id: '{}' has no classes or no training images", meta.id),
+            ));
+        }
+        if config.name.trim().is_empty() {
+            config.name = crate::store::default_run_name(&meta.name, config.arch);
+        }
+        // Ids are allocated under the runs write lock so concurrent creates cannot pick the same one, and model
+        // ids are checked against every model that exists or will exist when a run completes.
+        let mut runs = self.runs.write().unwrap();
+        let id = unique_id("run", fnv1a(config.name.as_bytes()) ^ unix_now().to_bits(), |id| {
+            runs.iter().any(|r| r.0.id == id)
+        });
+        let models_taken: std::collections::HashSet<String> = self
+            .models
+            .read()
+            .unwrap()
+            .iter()
+            .map(|m| m.model.id.clone())
+            .chain(runs.iter().filter_map(|r| r.0.model_id.clone()))
+            .collect();
+        let model_id = unique_id("m", fnv1a(id.as_bytes()), |m| models_taken.contains(m));
+        let spe = steps_per_epoch(meta.splits.train, config.batch);
+        let quality = 0.45 + 0.4 * (fnv1a(meta.id.as_bytes()) % 100) as f32 / 100.0;
+        let curve = Curve::new(fnv1a(id.as_bytes()), quality, meta.classes.len(), &config, spe);
+        let device = match (&offer, config.device.as_str()) {
+            (Some((o, _)), _) => format!("NVIDIA GeForce {} (vulkan)", o.gpu),
+            (None, "cpu") => "CPU".to_string(),
+            _ => DEVICE.to_string(),
+        };
+        // A cloud run hands over for 3 phases before it trains and 2 after, outside the training queue.
+        let clock = match offer {
+            Some(_) => LiveClock::new(6.0, 3.0 * PHASE_S, 0.0, false, 0.0).with_tail(2.0 * PHASE_S),
+            None => LiveClock::new(6.0, 2.0, 0.0, false, 0.0),
+        };
+        let cloud = offer.map(|(o, c)| SimCloud::new(&id, &c.connection_id, o, c.max_hours));
+        let local = cloud.is_none();
+        let mut sim = SimRun::new(
+            id,
+            config,
+            meta.classes.clone(),
+            spe,
+            curve,
+            device,
+            Some(model_id),
+            true,
+            Timeline::Live(std::sync::Mutex::new(clock)),
+        )
+        .with_auto_batch(auto_batch)
+        .resolved_for(meta.splits.train);
+        if let Some(c) = cloud {
+            sim = sim.with_cloud(c);
+        }
+        let run = Arc::new(sim);
+        runs.push((Arc::clone(&run), Arc::clone(&ds)));
+        drop(runs);
+        if local {
+            let mut queue = self.queue.lock().unwrap();
+            queue.push(Arc::clone(&run));
+            runs::reschedule(&queue, std::time::Instant::now());
+        }
+        Ok(run.to_api())
     }
 }

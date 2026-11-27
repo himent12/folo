@@ -145,8 +145,12 @@ impl Store for RealStore {
         let cmd = crate::cli::with_ema_run_fraction(cmd, crate::cli::recorded_ema_run_fraction(e.dir()));
         // A run continued from a distillation run's checkpoint keeps its teacher.
         let cmd = crate::cli::with_distill(cmd, crate::cli::recorded_distill(e.dir()));
-        // A run started with GPU VRAM-budget auto-batch repeats with `--batch auto`.
-        Ok(crate::cli::with_auto_batch(cmd, crate::cli::recorded_auto_batch(e.dir())))
+        // A run started with GPU VRAM-budget auto-batch repeats with its auto-batch flags (both while queued
+        // before `config.json` exists and once started).
+        let persisted_auto = e.auto_batch();
+        let auto_batch = crate::cli::recorded_auto_batch(e.dir())
+            .or_else(|| persisted_auto.enabled.then_some(persisted_auto));
+        Ok(crate::cli::with_auto_batch(cmd, &config, auto_batch))
     }
 
     fn benchmark(&self, req: BenchmarkRequest) -> Result<BenchmarkReport> {
@@ -469,6 +473,13 @@ impl Store for RealStore {
         let _files = self.files.read().unwrap_or_else(|p| p.into_inner());
         let (entry, wanted) = self.runs.resume_config(id, fields)?;
         let Some(compute) = wanted.compute.clone() else { return self.runs.resume(&entry, wanted) };
+        if entry.auto_batch().enabled {
+            return Err(Error::new(
+                StatusCode::BAD_REQUEST,
+                "invalid_config",
+                "auto_batch is not supported for cloud runs yet (resume this run locally, or start a new cloud run with an explicit integer `batch`)",
+            ));
+        }
         cloud::check_device(&wanted)?;
         let (connected, offer) = self.cloud.target(&compute)?;
         // The dataset as it is now (a run whose dataset is no longer registered uploads without a fingerprint).

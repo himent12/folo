@@ -9,7 +9,7 @@ use axum::http::StatusCode;
 use folo_api::{
     Bench, BenchDesign, BenchImage, BenchImagePage, BenchSource, CreateBench, DesignBench, Split, UpdateBench,
 };
-use folo_bench::{Condition, GeneratedImage, GeneratedSourceSpec, conditions};
+use folo_bench::{Condition, GeneratedSourceSpec, conditions};
 use rayon::prelude::*;
 
 use crate::error::{Error, Result};
@@ -159,8 +159,9 @@ impl Benches {
         self.commit_bench(dir, made)
     }
 
-    /// `POST /api/bench/benchmarks` with `source.kind == "generated"`: renders deterministic synthetic scenes
-    /// directly via `folo-bench::generate_images` (backed by `folo-data::synthetic`) without registering a dataset.
+    /// `POST /api/bench/benchmarks` with `source.kind == "generated"`: renders deterministic synthetic scenes in
+    /// bounded parallel chunks via `folo-bench::GeneratedSource` (backed by `folo-data::synthetic`) without
+    /// registering a dataset or buffering all encoded JPEGs in RAM.
     pub fn create_generated(&self, req: CreateGeneratedBench) -> Result<Bench> {
         let (name, description, _max, plan) = check_create(
             &req.name,
@@ -169,18 +170,18 @@ impl Benches {
             req.source.seed,
             req.plan.as_ref(),
         )?;
-        let (classes, generated) = folo_bench::generate_images(&req.source).map_err(invalid)?;
-        if classes.len() > MAX_CLASSES {
+        let generated = folo_bench::GeneratedSource::new(&req.source).map_err(invalid)?;
+        if generated.classes().len() > MAX_CLASSES {
             return Err(source::empty(
                 format!(
                     "generated source has {} classes; a benchmark takes at most {MAX_CLASSES}",
-                    classes.len()
+                    generated.classes().len()
                 ),
                 "make the benchmark from a source with fewer classes",
             ));
         }
         let (id, dir) = self.claim_bench_dir(&name)?;
-        let made = self.fill_generated(&dir, &id, name, description, req.source, plan, classes, generated);
+        let made = self.fill_generated(&dir, &id, name, description, req.source, plan, &generated);
         self.commit_bench(dir, made)
     }
 
@@ -234,7 +235,8 @@ impl Benches {
         Ok(bench)
     }
 
-    /// Writes deterministically generated JPEG scenes into `dir/images/` and persists `bench.json` last.
+    /// Renders and writes deterministically generated JPEG scenes into `dir/images/` in bounded chunks (retaining
+    /// only lightweight [`ImageRecord`] metadata between chunks) and persists `bench.json` last.
     #[allow(clippy::too_many_arguments)]
     fn fill_generated(
         &self,
@@ -244,29 +246,38 @@ impl Benches {
         description: String,
         spec: GeneratedSourceSpec,
         plan: folo_api::BenchPlan,
-        classes: Vec<String>,
-        generated: Vec<GeneratedImage>,
+        generated: &folo_bench::GeneratedSource,
     ) -> Result<BenchFile> {
         let images_dir = dir.join("images");
         std::fs::create_dir_all(&images_dir).map_err(|e| io_error("creating", &images_dir, e))?;
+        let classes = generated.classes().to_vec();
         let n_classes = classes.len();
-        let images = generated
-            .par_iter()
-            .enumerate()
-            .map(|(k, im)| {
-                let to = images_dir.join(&im.file);
-                std::fs::write(&to, &im.jpeg).map_err(|e| io_error("writing", &to, e))?;
-                Ok(ImageRecord {
-                    id: (k + 1).to_string(),
-                    file: im.file.clone(),
-                    width: im.width,
-                    height: im.height,
-                    bytes: im.jpeg.len() as u64,
-                    sha256: sha256(&im.jpeg),
-                    boxes: source::clip_truth(&im.boxes, n_classes, (im.width, im.height)),
+        let total = generated.len();
+        let chunk_size = generated.chunk_size();
+        let mut images = Vec::with_capacity(total);
+        for start in (0..total).step_by(chunk_size) {
+            let end = (start + chunk_size).min(total);
+            let batch = generated.render_range(start..end).map_err(invalid)?;
+            let records = batch
+                .par_iter()
+                .enumerate()
+                .map(|(offset, im)| {
+                    let k = start + offset;
+                    let to = images_dir.join(&im.file);
+                    std::fs::write(&to, &im.jpeg).map_err(|e| io_error("writing", &to, e))?;
+                    Ok(ImageRecord {
+                        id: (k + 1).to_string(),
+                        file: im.file.clone(),
+                        width: im.width,
+                        height: im.height,
+                        bytes: im.jpeg.len() as u64,
+                        sha256: sha256(&im.jpeg),
+                        boxes: source::clip_truth(&im.boxes, n_classes, (im.width, im.height)),
+                    })
                 })
-            })
-            .collect::<Result<Vec<_>>>()?;
+                .collect::<Result<Vec<_>>>()?;
+            images.extend(records);
+        }
         let file = BenchFile {
             version: VERSION,
             id: id.to_string(),

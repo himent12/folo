@@ -193,6 +193,8 @@ pub struct SimRun {
     notes: Mutex<Vec<LogLine>>,
     /// A cloud run's hand-over ([`SimRun::with_cloud`]).
     cloud: Option<SimCloud>,
+    /// Opt-in GPU VRAM-budget auto-batch settings requested when the run was created.
+    pub auto_batch: crate::store::AutoBatchOptions,
 }
 
 /// Why a live (cloud) run failed.
@@ -228,7 +230,14 @@ impl SimRun {
             deleted: AtomicBool::new(false),
             notes: Mutex::default(),
             cloud: None,
+            auto_batch: crate::store::AutoBatchOptions::default(),
         }
+    }
+
+    /// Attaches opt-in auto-batch settings to this simulated run.
+    pub fn with_auto_batch(mut self, auto_batch: crate::store::AutoBatchOptions) -> SimRun {
+        self.auto_batch = auto_batch;
+        self
     }
 
     /// The same run as a cloud run with this hand-over (a live one stays `running` while it collects and releases:

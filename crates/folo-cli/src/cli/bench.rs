@@ -97,7 +97,7 @@ pub struct BenchCreateArgs {
     #[arg(long, value_name = "PATH")]
     pub data: Option<String>,
     /// The split of the dataset to take [default: val].
-    #[arg(long, value_enum)]
+    #[arg(long, value_enum, conflicts_with_all = ["label_job", "generated"])]
     pub split: Option<SplitArg>,
     /// A labeling job's id: its labeled images, with their boxes as truth.
     #[arg(long, value_name = "ID")]
