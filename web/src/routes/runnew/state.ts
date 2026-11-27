@@ -6,6 +6,7 @@ import { ApiError, hub } from '$lib/api/index';
 import { Resource } from '$lib/api/resource';
 import { runsChanged } from '$lib/api/runs';
 import type { Arch, Augment, DatasetImage, Optimizer, TrainConfig } from '$lib/api/types';
+import { archNameSuffix, archWithFamily, isFolo2Arch, supportsFolo2 } from '$lib/arch';
 import { hasCloud } from '$lib/cloud';
 import { sentence } from '$lib/format';
 import { fitFix, isOom, oomCalibration, vramForecaster, type OomFix } from '$lib/oom';
@@ -56,7 +57,7 @@ export function runNewState() {
     return () => io.disconnect();
   });
 
-  const arch = signal<Arch>(draft?.arch ?? 'folo-s');
+  const arch = signal<Arch>(init.arch);
   /** Number inputs bind `null` when cleared (the form's errors say so). */
   const epochs = signal<number>(draft ? (draft.epochs as number) : 100);
   const batch = signal(draft?.batch ?? '16');
@@ -97,6 +98,13 @@ export function runNewState() {
   // Each read for its stats, kept current; one whose folder is missing is marked, and Start waits (lib/api/datasetReads).
   const datasets = followedDatasets();
   const system = new Resource((s) => hub.api.system(s));
+  const folo2Supported = computed(() => supportsFolo2(system.data));
+  // If an older server without `folo2_arch` is reached with a stale `?arch=folo2-*` link or draft, step back to v1 cleanly.
+  effect(() => {
+    if (system.data && !folo2Supported.get() && isFolo2Arch(untrack(() => arch.get()))) {
+      arch.set(archWithFamily(untrack(() => arch.get()), 'folo'));
+    }
+  });
   // Run on (servers with the `cloud` feature): this machine or a cloud connection, its GPU and the time limit.
   const cloudPick = new CloudPick(() => system.data);
   if (draft) cloudPick.restore(draft.cloud);
@@ -238,8 +246,9 @@ export function runNewState() {
   // name typed over it that is taken gets a warning under the field (runnew/name).
   effect(() => {
     // The dataset's part gives way first, so a long dataset name keeps the size (and a few numbers) in the limit.
-    const ds = clipName(runName(dataset.get()?.name ?? ''), MAX_RUN_NAME - 4) || 'run';
-    const auto = uniqueName(`${ds}-${arch.get().replace('folo-', '')}`, taken.get());
+    const suffix = archNameSuffix(arch.get());
+    const ds = clipName(runName(dataset.get()?.name ?? ''), Math.max(8, MAX_RUN_NAME - (suffix.length + 3))) || 'run';
+    const auto = uniqueName(`${ds}-${suffix}`, taken.get());
     if (!untrack(() => nameEdited.get())) name.set(auto);
   });
 
@@ -413,7 +422,13 @@ export function runNewState() {
   const { served, estimating } = serverEstimate(
     config,
     estKey,
-    () => canEstimate.get() && prefilled.get() && !pendingWeights.get() && !noFigures.get() && (!onCloud.get() || !!cloudPick.compute),
+    () =>
+      canEstimate.get() &&
+      prefilled.get() &&
+      !pendingWeights.get() &&
+      !noFigures.get() &&
+      !(onCloud.get() && isFolo2Arch(arch.get())) &&
+      (!onCloud.get() || !!cloudPick.compute),
     ampEstimated,
   );
   const closeEff = computed(() => closeMosaicShown(errors.get(), served.get(), estKey.get(), augment.get(), epochs.get()));
@@ -622,6 +637,7 @@ export function runNewState() {
     sumOpen,
     datasets,
     system,
+    folo2Supported,
     cloudPick,
     cloudOn,
     onCloud,

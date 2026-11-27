@@ -51,6 +51,7 @@ import {
   type CloudTimeline,
 } from './cloud';
 import { applyQueueMove } from '../queue';
+import { archScaleRank, isFolo2Arch } from '../../arch';
 import { trainCommand } from '../../trainCli';
 import { MockServer } from './server';
 import { STALE_AFTER } from './scenario';
@@ -173,7 +174,7 @@ export class MockTrainingApi extends MockServer {
       this.#checkAmp(c);
       const now = Date.now();
       const id = `run_${(hash(c.name + now + this.state.nextId++) & 0xffff).toString(16).padStart(4, '0')}`;
-      const sizeIdx = ['folo-n', 'folo-s', 'folo-m', 'folo-l', 'folo-x'].indexOf(c.arch);
+      const sizeIdx = Math.max(0, archScaleRank(c.arch));
       const p: RunProfile = withResolved({
         id,
         name: c.name,
@@ -238,6 +239,8 @@ export class MockTrainingApi extends MockServer {
   #compute(c: TrainConfig, refuse = true): { conn: CloudConnection; offer: CloudOffer; hours: number } | null {
     const want = c.compute;
     if (!want || !this.state.cloudOn) return null;
+    if (isFolo2Arch(c.arch))
+      throw new ApiError(400, 'invalid_config', 'folo2 architectures are not supported for cloud runs yet (train locally, or use folo-n..folo-x for cloud compute)');
     const conn = this.#connection(want.connection_id);
     if (conn.status === 'error') throw new ApiError(422, 'cloud_auth_failed', conn.error ?? `${conn.name} rejected the credentials`, 'Check the connection in Settings › Cloud.');
     const offer = this.#offersOf(conn).find((o) => o.id === want.offer_id);

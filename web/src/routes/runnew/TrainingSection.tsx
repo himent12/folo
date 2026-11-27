@@ -8,6 +8,7 @@ import CircleAlert from '$icons/circle-alert';
 import { bindable, computed, css, field, type Signal } from 'fw';
 import type { Resource } from '$lib/api/resource';
 import type { Arch, Capabilities, Dataset, Optimizer, Run, SystemInfo } from '$lib/api/types';
+import { isFolo2Arch } from '$lib/arch';
 import { deviceName, pricePerHour, sentence, usd } from '$lib/format';
 import { availabilityNote, maxCost, menuOrder, offerLine, validHours } from '$lib/cloud';
 import { prefs } from '$lib/prefs';
@@ -175,10 +176,17 @@ export default function TrainingSection(props: TrainingSectionProps) {
                 ]}
               />
               {props.errors.runon ? (
-                <p class="sw-err" id="runon-error" role="alert">
-                  <CircleAlert size={14} strokeWidth={1.75} aria-hidden="true" />
-                  <span>{props.errors.runon}</span>
-                </p>
+                <div class="dev-line">
+                  <p class="sw-err" id="runon-error" role="alert">
+                    <CircleAlert size={14} strokeWidth={1.75} aria-hidden="true" />
+                    <span>{props.errors.runon}</span>
+                  </p>
+                  {props.onCloud && isFolo2Arch(props.arch) ? (
+                    <Button size="sm" onclick={() => cloudPick.choose(LOCAL)}>
+                      Use This machine
+                    </Button>
+                  ) : null}
+                </div>
               ) : cloudPick.lost ? (
                 <p class="dev-hint" id="runon-hint">
                   {cloudPick.lost}
@@ -201,7 +209,7 @@ export default function TrainingSection(props: TrainingSectionProps) {
                 </p>
               ) : (
                 <p class="dev-hint" id="runon-hint">
-                  This server’s own GPU or CPU.
+                  {isFolo2Arch(props.arch) ? 'This server’s own GPU or CPU. Cloud runs currently support FOLO v1 only.' : 'This server’s own GPU or CPU.'}
                 </p>
               )}
             </div>

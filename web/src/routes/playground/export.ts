@@ -7,12 +7,14 @@ import { downloadBlob as downloadBlobShared, downloadText, safeFilename, toJson 
 import { toast } from '$lib/ui/toast';
 import type { ViewBox } from '$lib/detect/DetectionView';
 import type { CompareViewMode } from './compare';
-import { score } from './predict';
 import { imageBlob, type Source } from './source';
+import { formatBoxChipText, type TrackTrail } from './tracking';
 
 export interface AnnotatedLayer {
   boxes: readonly ViewBox[];
   truth?: readonly ViewBox[];
+  /** Optional short per-track motion trails drawn underneath tracked boxes. */
+  trails?: readonly TrackTrail[];
   classes: readonly string[];
   labels: boolean;
   scores: boolean;
@@ -107,6 +109,40 @@ export function drawAnnotations(
     ctx.restore();
   }
 
+  // Short per-track motion trails underneath boxes (fading tail-to-head with dark halo for contrast).
+  if (layer.trails?.length) {
+    ctx.save();
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    for (const trail of layer.trails) {
+      const pts = trail.points;
+      if (pts.length < 2) continue;
+      const color = classColor(trail.class);
+      for (let i = 1; i < pts.length; i++) {
+        const a = pts[i - 1]!;
+        const b = pts[i]!;
+        const t = i / (pts.length - 1);
+        ctx.globalAlpha = 0.2 + 0.65 * t;
+        ctx.beginPath();
+        ctx.moveTo(ox + a.x, oy + a.y);
+        ctx.lineTo(ox + b.x, oy + b.y);
+        ctx.lineWidth = haloW;
+        ctx.strokeStyle = classHalo;
+        ctx.stroke();
+        ctx.lineWidth = Math.max(1.5, strokeW * 0.9);
+        ctx.strokeStyle = color;
+        ctx.stroke();
+      }
+      const head = pts[pts.length - 1]!;
+      ctx.globalAlpha = 0.95;
+      ctx.beginPath();
+      ctx.arc(ox + head.x, oy + head.y, Math.max(2.5, strokeW * 1.25), 0, Math.PI * 2);
+      ctx.fillStyle = color;
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
   // Predictions: halo + class-colored stroke.
   for (const b of layer.boxes) {
     const x = ox + b.x1;
@@ -127,8 +163,7 @@ export function drawAnnotations(
     ctx.textBaseline = 'middle';
     const placed: { x: number; y: number; w: number; h: number }[] = [];
     for (const b of layer.boxes) {
-      const clsName = layer.classes[b.class] ?? `class ${b.class}`;
-      const text = layer.scores && b.score !== undefined ? `${clsName} ${score(b.score)}` : clsName;
+      const text = formatBoxChipText(b, layer.classes, layer.scores);
       const tw = ctx.measureText(text).width;
       const cw = Math.ceil(tw + padX * 2);
       const cx = Math.max(ox + 2, Math.min(ox + width - cw - 2, ox + b.x1));

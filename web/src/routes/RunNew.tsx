@@ -79,6 +79,7 @@ function RunNewForm() {
             <ModelSection
               bind:arch={s.arch}
               bind:weights={s.weights}
+              folo2Supported={s.folo2Supported.get()}
               tp={s.tp}
               oomRun={s.oomRun.get()}
               was={s.was}

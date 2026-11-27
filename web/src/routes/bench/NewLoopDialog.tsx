@@ -20,6 +20,7 @@ import { bindable, computed, createUniqueId, css, effect, onCleanup, signal, tic
 import { ApiError } from '$lib/api/client';
 import { hub } from '$lib/api/index';
 import type { Arch, Bench, BenchEntry, BenchLoop, BenchSelfLabeling, Dataset, LabelJob, Model, Split, StartBenchLoop } from '$lib/api/types';
+import { biggerArchInFamily, isFolo2Arch, V1_ARCHES, V2_ARCHES } from '$lib/arch';
 import { GENERATIONS_MAX } from '$lib/bench/rules';
 import { conf, count, num } from '$lib/format';
 import { FROM_SCRATCH } from '$lib/lineage';
@@ -47,7 +48,7 @@ export interface NewLoopDialogProps {
   onstarted: (loop: BenchLoop) => void;
 }
 
-const ARCHS: Arch[] = ['folo-n', 'folo-s', 'folo-m', 'folo-l', 'folo-x'];
+const ARCHS: readonly Arch[] = V1_ARCHES;
 const SPLIT_WORD: Record<Split, string> = { train: 'Train', val: 'Validation', test: 'Test' };
 const POOL_OPTIONS: { value: 'dataset' | 'label_job'; label: string }[] = [
   { value: 'dataset', label: 'Dataset split' },
@@ -277,12 +278,13 @@ export default function NewLoopDialog(props: NewLoopDialogProps) {
 
   const bigger = computed(() => {
     const t = teacher.get();
-    return t ? ARCHS[ARCHS.indexOf(t.arch) + 1] : undefined;
+    return t ? biggerArchInFamily(t.arch) : undefined;
   });
   const archOptions = computed(() => {
     const ta = teacher.get()?.arch;
     const big = bigger.get();
-    return ARCHS.map((a) => ({ value: a, label: a === ta ? `${a} · the teacher’s size` : a === big ? `${a} · the next bigger model` : a }));
+    const list = ta && isFolo2Arch(ta) ? [...V2_ARCHES, ...ARCHS] : ARCHS;
+    return list.map((a) => ({ value: a, label: a === ta ? `${a} · the teacher’s size` : a === big ? `${a} · the next bigger model` : a }));
   });
   const weightOptions = computed(() => {
     const a = arch.get();

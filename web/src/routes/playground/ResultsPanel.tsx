@@ -315,7 +315,7 @@ export default function ResultsPanel(props: ResultsPanelProps) {
                           class:hot={props.activeIdx === i()}
                           class:on={props.selectedIdx === i()}
                           aria-selected={props.selectedIdx === i() ? 'true' : undefined}
-                          aria-label={`${b().name}, score ${score(b().score)}, ${px(b().x2 - b().x1)} by ${px(b().y2 - b().y1)} pixels`}
+                          aria-label={`${b().track_id !== undefined ? `track #${b().track_id}, ` : ''}${b().name}, score ${score(b().score)}, ${px(b().x2 - b().x1)} by ${px(b().y2 - b().y1)} pixels`}
                           onpointerenter={(e) => {
                             // A tap is not a hover: on touch the selection alone marks the row.
                             if (e.pointerType !== 'touch') setHover(b());
@@ -329,6 +329,7 @@ export default function ResultsPanel(props: ResultsPanelProps) {
                           <td class="lead">
                             <span class="cls">
                               <Swatch color={classColor(b().class)} />
+                              {b().track_id !== undefined ? <span class="track-id mono">#{b().track_id}</span> : null}
                               <span class="truncate">{b().name}</span>
                             </span>
                           </td>
@@ -537,6 +538,12 @@ css`
     align-items: center;
     gap: var(--space-2);
     max-width: 180px;
+  }
+  .track-id {
+    flex-shrink: 0;
+    font-size: var(--type-sm-size);
+    font-variant-numeric: tabular-nums;
+    color: var(--text-secondary);
   }
   .score {
     display: inline-flex;

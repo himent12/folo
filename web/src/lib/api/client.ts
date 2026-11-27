@@ -68,6 +68,7 @@ import type {
   TrainConfig,
   UpdateLabelJob,
 } from './types';
+import { isArch } from '$lib/arch';
 import type { AccessWatch } from './access';
 import type { Reachability } from './reach';
 import { BENCH_EVENTS, LABEL_EVENTS, openEventStream, RUN_EVENTS, type EventHandlers } from './sse';
@@ -355,7 +356,7 @@ export class HttpApi implements Api {
     return openEventStream(url, events, handlers, undefined, undefined, watch);
   }
 
-  async #req<T>(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
+  async #req<T>(method: string, path: string, body?: unknown, signal?: AbortSignal, onResponse?: (res: Response) => void): Promise<T> {
     const init: RequestInit = { method, signal, headers: { accept: 'application/json' } };
     if (body instanceof FormData) init.body = body;
     else if (body !== undefined) {
@@ -386,6 +387,7 @@ export class HttpApi implements Api {
       const err = (json as { error?: { code?: string; message?: string; hint?: string } } | undefined)?.error;
       throw new ApiError(res.status, err?.code ?? `http_${res.status}`, err?.message ?? `Request failed (HTTP ${res.status}).`, err?.hint, request);
     }
+    onResponse?.(res);
     return json as T;
   }
 
@@ -440,8 +442,13 @@ export class HttpApi implements Api {
   async models(signal?: AbortSignal) {
     return this.#list<Model>('/models', 'models', signal);
   }
-  model(id: string, signal?: AbortSignal) {
-    return this.#req<Model>('GET', `/models/${encodeURIComponent(id)}`, undefined, signal);
+  async model(id: string, signal?: AbortSignal) {
+    let headerArch: string | null = null;
+    const m = await this.#req<Model>('GET', `/models/${encodeURIComponent(id)}`, undefined, signal, (res) => {
+      headerArch = res.headers.get('x-folo-arch')?.trim() ?? null;
+    });
+    // folo-server emits the exact `folo2-*` architecture in `x-folo-arch` alongside the wire `folo_api::Arch` field.
+    return isArch(headerArch) && headerArch !== m.arch ? { ...m, arch: headerArch } : m;
   }
   modelEval(id: string, signal?: AbortSignal) {
     return this.#req<ModelEval>('GET', `/models/${encodeURIComponent(id)}/eval`, undefined, signal);

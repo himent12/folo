@@ -34,6 +34,7 @@ import { synthEvaluation, toModelEval } from './evaluation';
 import { MockLabeling, mockAgents } from './label';
 import { MockBench } from './bench';
 import { BENCH_FEATURE, BENCH_GENERATED_FEATURE } from '../../bench/rules';
+import { FOLO2_FEATURE } from '../../arch';
 import { renderImage } from './render';
 import { hash, smoothNoise } from './rng';
 import { GPU_NAME, archInfo, bestOf, epochAt, progressAt, toRun, type RunProfile } from './runs';
@@ -213,7 +214,7 @@ export class MockServer {
         features: [
           ...(this.scenario === 'no-throughput'
             ? ['export_onnx_switches', 'queue_control', 'weights_onnx']
-            : ['export_onnx_switches', 'export_dynamic_axes', 'queue_control', 'weights_onnx', 'throughput', 'run_estimate', 'benchmark', 'run_cli']),
+            : ['export_onnx_switches', 'export_dynamic_axes', 'queue_control', 'weights_onnx', 'throughput', 'run_estimate', 'benchmark', 'run_cli', FOLO2_FEATURE]),
           // The in-browser runtime in this build (the name requested of the server; lib/inference `wasmFromSystem`).
           ...(this.scenario === 'no-wasm' ? [] : ['web_wasm']),
           ...(this.labeling() ? [LABEL_FEATURE] : []),

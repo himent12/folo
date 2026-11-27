@@ -52,6 +52,7 @@ import { usePlaygroundSelection } from './playground/useSelection';
 import { usePlaygroundSheet } from './playground/useSheetState';
 import { useSinglePredict } from './playground/useSinglePredict';
 import { usePlaygroundSource } from './playground/useSource';
+import { useTracking, type TrackingController } from './playground/useTracking';
 import { useWasmAvailability } from './playground/useWasmProbe';
 import {
   areDefaultThresholds,
@@ -203,12 +204,13 @@ export default function Playground() {
 
   const samples = sampleImages(model);
 
+  let trackingRef: TrackingController | null = null;
   const result = computed(() => {
     const p = pred.get();
     if (!p) return null;
     const t0 = performance.now();
-    // An end-to-end (o2o) model predicts without NMS (docs/MODEL.md §6.6): an IoU of 1 suppresses nothing, as the server.
-    const boxes = filterDetections(p.boxes, { conf: conf.get(), iou: o2o.get() ? 1 : iou.get(), maxDet: maxDet.get() });
+    const tracked = trackingRef?.boxesFor(p) ?? null;
+    const boxes = tracked ?? filterDetections(p.boxes, { conf: conf.get(), iou: o2o.get() ? 1 : iou.get(), maxDet: maxDet.get() });
     return { boxes, ms: performance.now() - t0 };
   });
   const kept = computed(() => result.get()?.boxes ?? []);
@@ -255,15 +257,18 @@ export default function Playground() {
   const mediaSession = useMediaSession({
     onFrame: (f) => setLiveFrame(f.blob, f.name, f.width, f.height, mediaSession.mode.peek() === 'webcam' ? 'webcam' : 'video'),
     isPredicting: () => predicting.get() || (cmp.compare.get() && cmp.predictingB.get()),
-    isInferenceBlocked: () =>
-      !modelId.get() ||
-      !!error.get() ||
-      weightsMissing.get() ||
-      (cmp.compare.get() && (!cmp.modelBId.get() || !!cmp.errorB.get() || cmp.weightsMissingB.get())),
+    isInferenceBlocked: () => !modelId.get() || !!error.get() || weightsMissing.get() || (cmp.compare.get() && (!cmp.modelBId.get() || !!cmp.errorB.get() || cmp.weightsMissingB.get())),
     hasValidResult: () => !!pred.peek() && (!cmp.compare.peek() || !!cmp.predB.peek()),
     lastLatencyMs: () => pred.peek()?.timing.total_ms ?? null,
     onStopped: () => seg.set(source.peek()?.kind ?? 'file'),
+    onTrackReset: () => trackingRef?.reset(),
   });
+  const tracking = (trackingRef = useTracking({
+    engine, browserOff: () => browserOff.get(), mediaMode: () => mediaSession.mode.get(),
+    mediaKey: () => `${mediaSession.mode.get()}:${mediaSession.sessionSeq.get()}`,
+    modelId: () => modelId.get(), classes: () => classes.get(), pred: () => pred.get(),
+    conf: () => conf.get(), iou: () => iou.get(), maxDet: () => maxDet.get(), o2o: () => o2o.get(),
+  }));
   stopMedia = () => mediaSession.stopAll(false);
   loadVideoFile = (f) => {
     prepareMediaSource('video');
@@ -608,16 +613,11 @@ export default function Playground() {
 
   const timingBody = () => (
     <PlaygroundTiming
-      compare={cmp.compare.get()}
-      narrow={narrow.current}
-      modelA={model.get()}
-      modelB={cmp.modelB.get()}
-      predA={isUnsyncedVideoFn() ? null : pred.get()}
-      predB={isUnsyncedVideoFn() ? null : cmp.predB.get()}
-      predictingA={predicting.get()}
-      predictingB={cmp.predictingB.get()}
+      compare={cmp.compare.get()} narrow={narrow.current} modelA={model.get()} modelB={cmp.modelB.get()}
+      predA={isUnsyncedVideoFn() ? null : pred.get()} predB={isUnsyncedVideoFn() ? null : cmp.predB.get()}
+      predictingA={predicting.get()} predictingB={cmp.predictingB.get()}
       resultMsA={isUnsyncedVideoFn() ? null : (result.get()?.ms ?? null)}
-      adapter={engine.info?.adapter}
+      adapter={engine.info?.adapter} engineInfo={engine.info}
     />
   );
 
@@ -635,28 +635,23 @@ export default function Playground() {
     const isCam = mediaSession.mode.get() === 'webcam';
     const isPreview = !isCam && !mediaSession.frameSynced.get() && !mediaSession.playing.get();
     const showBoxes = isCam ? predAMatches.get() || mediaSession.camActive.get() : mediaSession.frameSynced.get();
+    const h = hidden.get();
+    const activeTrails = showBoxes && tracking.enabled.get() ? tracking.trails.get().filter((t) => !h.has(t.class)) : undefined;
     return (
       <LiveMediaCanvas
-        video={mediaSession.videoEl.get()}
-        mode={isCam ? 'webcam' : 'video'}
+        video={mediaSession.videoEl.get()} mode={isCam ? 'webcam' : 'video'}
         active={isCam ? mediaSession.camActive.get() : mediaSession.playing.get()}
-        starting={isCam && mediaSession.camStarting.get()}
-        paused={isCam && mediaSession.camPaused.get()}
-        preview={isPreview}
-        renderTick={mediaSession.previewTick.get()}
+        starting={isCam && mediaSession.camStarting.get()} paused={isCam && mediaSession.camPaused.get()}
+        preview={isPreview} renderTick={mediaSession.previewTick.get()}
         error={isCam ? mediaSession.camErr.get() : mediaSession.videoErr.get()}
-        boxes={showBoxes ? rows.get().map((r) => r.b) : []}
-        classes={classes.get()}
-        labels={labels.get()}
-        scores={scores.get()}
-        fps={mediaSession.fps.get()}
-        latencyMs={mediaSession.latencyMs.get()}
-        onRetry={() => void mediaSession.startWebcam()}
-        onDismiss={() => mediaSession.stopWebcam()}
+        boxes={showBoxes ? rows.get().map((r) => r.b) : []} trails={activeTrails}
+        classes={classes.get()} labels={labels.get()} scores={scores.get()}
+        fps={mediaSession.fps.get()} latencyMs={mediaSession.latencyMs.get()}
+        onRetry={() => void mediaSession.startWebcam()} onDismiss={() => mediaSession.stopWebcam()}
       />
     );
   };
-  const mediaBar = () => <MediaBar media={mediaSession} predicting={predicting.get() || (cmp.compare.get() && cmp.predictingB.get())} />;
+  const mediaBar = () => <MediaBar media={mediaSession} predicting={predicting.get() || (cmp.compare.get() && cmp.predictingB.get())} tracking={tracking} />;
   const batchBar = () => <BatchFilmstrip batch={batch} hasModel={!!modelId.get()} compare={cmp.compare.get()} />;
 
   const intro = () => <span>Run a model on any image, video, or live camera. Thresholds re-filter instantly in the browser.</span>;

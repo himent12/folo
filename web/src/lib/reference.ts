@@ -6,13 +6,18 @@
 import type { Arch } from '$lib/api/types';
 import { modelSize } from '$lib/benchmarks';
 
-/** Params and GFLOPs at 640 px: docs/BENCHMARKS.md for n and s, docs/MODEL.md's table (few classes) for the others. */
+/** Params and GFLOPs at 640 px: docs/BENCHMARKS.md for v1 n/s, docs/MODEL.md's scaling tables for v1 m/l/x and v2 n..x. */
 export const archSpec: Record<Arch, { params: number; gflops: number }> = {
   'folo-n': modelSize['folo-n']!,
   'folo-s': modelSize['folo-s']!,
   'folo-m': { params: 20_050_000, gflops: 68.0 },
   'folo-l': { params: 25_310_000, gflops: 86.9 },
   'folo-x': { params: 56_880_000, gflops: 195.3 },
+  'folo2-n': { params: 2_850_000, gflops: 6.9 },
+  'folo2-s': { params: 9_850_000, gflops: 22.4 },
+  'folo2-m': { params: 20_800_000, gflops: 70.5 },
+  'folo2-l': { params: 26_200_000, gflops: 90.0 },
+  'folo2-x': { params: 58_800_000, gflops: 201.5 },
 };
 
 /** Images per second of a training phase: with mosaic, without (close mosaic), and validation. */
@@ -82,9 +87,31 @@ export function referenceRates(arch: Arch, imgsz: number, amp: boolean, cpu: boo
 }
 
 const MiB = 2 ** 20;
-/** Activations per 640 px image in f32, from the training-step peaks (n, s), Studio's ratios for m / l / x. */
-const ACT_MIB: Record<Arch, number> = { 'folo-n': 214.6, 'folo-s': 399.8, 'folo-m': 757.5, 'folo-l': 989.0, 'folo-x': 1683.4 };
-const AMP_ACT: Record<Arch, number> = { 'folo-n': 0.58, 'folo-s': 0.56, 'folo-m': 0.56, 'folo-l': 0.56, 'folo-x': 0.56 };
+/** Activations per 640 px image in f32, from the training-step peaks (n, s), Studio's ratios for m / l / x and v2. */
+const ACT_MIB: Record<Arch, number> = {
+  'folo-n': 214.6,
+  'folo-s': 399.8,
+  'folo-m': 757.5,
+  'folo-l': 989.0,
+  'folo-x': 1683.4,
+  'folo2-n': 228.0,
+  'folo2-s': 420.0,
+  'folo2-m': 790.0,
+  'folo2-l': 1030.0,
+  'folo2-x': 1750.0,
+};
+const AMP_ACT: Record<Arch, number> = {
+  'folo-n': 0.58,
+  'folo-s': 0.56,
+  'folo-m': 0.56,
+  'folo-l': 0.56,
+  'folo-x': 0.56,
+  'folo2-n': 0.58,
+  'folo2-s': 0.56,
+  'folo2-m': 0.56,
+  'folo2-l': 0.56,
+  'folo2-x': 0.56,
+};
 
 /** Peak GPU memory of a training run: 16 bytes per parameter plus the activations of the batch. */
 export function referenceVram(arch: Arch, imgsz: number, batch: number, amp: boolean): number {

@@ -51,6 +51,7 @@ describe('runnew/newPrefill', () => {
     expect(parseInitialQuery(q, null, sampleDraft)).toEqual({
       fromId: null,
       datasetId: 'ds_b',
+      arch: 'folo-m',
       queryImgsz: true,
       imgsz: '960',
       imgszChosen: true,
@@ -62,6 +63,7 @@ describe('runnew/newPrefill', () => {
     expect(parseInitialQuery(q, sampleDraft, sampleDraft)).toEqual({
       fromId: null,
       datasetId: 'ds_a',
+      arch: 'folo-m',
       queryImgsz: false,
       imgsz: '640',
       imgszChosen: false,

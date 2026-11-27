@@ -425,7 +425,7 @@ describe('BrowserEngine', () => {
       },
     };
     const e = new BrowserEngine(async () => mod, pixels);
-    expect(e.capabilities).toEqual({ tiled: null, tta: null });
+    expect(e.capabilities).toEqual({ tiled: null, tta: null, tracker: null });
 
     const sahiRes = await e.predict({
       ...req('m1', null),
@@ -435,7 +435,7 @@ describe('BrowserEngine', () => {
         tile: { tileSize: 512, overlap: 0.3, fullImage: false },
       },
     });
-    expect(e.capabilities).toEqual({ tiled: true, tta: true });
+    expect(e.capabilities).toEqual({ tiled: true, tta: true, tracker: false });
     expect(tiledCalls).toEqual([{ conf: 0.01, iou: 1, maxDet: 1000, tileSize: 512, overlap: 0.3, fullImage: false }]);
     expect(sahiRes.inference).toEqual({ mode: 'sahi', tile_size: 512, overlap: 0.3, full_image: false });
 
@@ -460,7 +460,7 @@ describe('BrowserEngine', () => {
         inference: { ...DEFAULT_INFERENCE_CONFIG, mode: 'sahi' },
       }),
     ).rejects.toMatchObject({ status: 501, code: 'wasm_sahi_unsupported' });
-    expect(e.capabilities).toEqual({ tiled: false, tta: false });
+    expect(e.capabilities).toEqual({ tiled: false, tta: false, tracker: false });
 
     await expect(
       e.predict({
@@ -493,7 +493,7 @@ describe('BrowserEngine', () => {
     // Repeated uncached loads (tag: null) must not churn `capabilities` object references once flags are known.
     await e.predict({ ...req('m1', null), tag: null });
     const firstCaps = e.capabilities;
-    expect(firstCaps).toEqual({ tiled: true, tta: true });
+    expect(firstCaps).toEqual({ tiled: true, tta: true, tracker: false });
     await e.predict({ ...req('m1', null), tag: null });
     expect(e.capabilities).toBe(firstCaps);
   });

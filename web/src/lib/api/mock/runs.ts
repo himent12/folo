@@ -428,4 +428,9 @@ export const archInfo = {
   'folo-m': { params: 20_050_000, flops: 68.0, ms: 4.6 },
   'folo-l': { params: 25_310_000, flops: 86.9, ms: 6.1 },
   'folo-x': { params: 56_970_000, flops: 194.9, ms: 11.3 },
+  'folo2-n': { params: 2_850_000, flops: 6.9, ms: 1.5 },
+  'folo2-s': { params: 9_850_000, flops: 22.4, ms: 2.5 },
+  'folo2-m': { params: 20_800_000, flops: 70.5, ms: 4.9 },
+  'folo2-l': { params: 26_200_000, flops: 90.0, ms: 6.5 },
+  'folo2-x': { params: 58_800_000, flops: 201.5, ms: 11.9 },
 } as const;
