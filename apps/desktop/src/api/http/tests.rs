@@ -631,3 +631,45 @@ fn external_bench_entry_parts_and_finish_hit_their_paths() {
     assert_eq!(fetched.score.as_ref().unwrap().total, 64.2);
     assert!(requests.recv().unwrap().starts_with("GET /api/bench/benchmarks/bn_1/entries/be_ext1 "));
 }
+
+#[test]
+fn http_create_generated_bench_posts_exact_generated_source_schema() {
+    let bench_json = r#"{"id":"bn_gen1","name":"Synth 16","description":"","classes":["circle","square"],"created":"2026-11-27T00:00:00Z","source":{"kind":"dataset","dataset_id":"generated","split":null},"source_name":"generated (16×320px, varied aspect, seed 9)","images":16,"boxes":48,"class_boxes":[24,24],"plan":{"conditions":[],"rationale":null,"designed_by":null},"seed":9,"fingerprint":"abc","entries":0,"best":null,"active":false}"#;
+    let reply = format!(
+        "HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{bench_json}",
+        bench_json.len()
+    );
+    let (url, requests) = canned_server(vec![reply.into_bytes()]);
+    let api = HttpBackend::new(&url);
+    let created = api
+        .create_generated_bench(&CreateGeneratedBench {
+            name: "Synth 16".into(),
+            description: String::new(),
+            source: GeneratedBenchSource {
+                kind: "generated",
+                images: 16,
+                classes: vec!["circle".into(), "square".into()],
+                imgsz: 320,
+                seed: 9,
+                vary_aspect: true,
+            },
+            plan: None,
+        })
+        .unwrap();
+    assert_eq!(created.id, "bn_gen1");
+    assert_eq!(
+        created.source,
+        BenchSource::Dataset { dataset_id: GENERATED_BENCH_SOURCE_ID.into(), split: None }
+    );
+    let raw = requests.recv().unwrap();
+    assert!(raw.starts_with("POST /api/bench/benchmarks "), "{raw}");
+    let (_, body) = raw.split_once("\r\n\r\n").expect("HTTP body");
+    let v: serde_json::Value = serde_json::from_str(body).expect("valid JSON request body");
+    assert_eq!(v["name"], "Synth 16");
+    assert_eq!(v["source"]["kind"], "generated");
+    assert_eq!(v["source"]["images"], 16);
+    assert_eq!(v["source"]["imgsz"], 320);
+    assert_eq!(v["source"]["seed"], 9);
+    assert_eq!(v["source"]["vary_aspect"], true);
+    assert_eq!(v["source"]["classes"], serde_json::json!(["circle", "square"]));
+}

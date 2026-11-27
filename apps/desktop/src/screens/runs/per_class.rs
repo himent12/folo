@@ -150,6 +150,17 @@ impl FoloApp {
             PerClass::Loading => loading_rows(&t, "per-class", 6).into_any_element(),
         };
         let qualifier = epoch.map(|e| format!("epoch {e}"));
+        let export_counts = self
+            .store
+            .run_data
+            .get(&r.id)
+            .and_then(|l| l.ready())
+            .filter(|d| !d.metrics.epochs.is_empty())
+            .map(|d| {
+                (d.metrics.epochs.len(), d.metrics.epochs.last().is_some_and(|e| !e.val.per_class.is_empty()))
+            });
+        let export_footer =
+            export_counts.map(|(n, has_pc)| self.run_metrics_export_footer(r, n, has_pc, window, cx));
         panel(&t)
             .flex_1()
             .min_w_0()
@@ -161,6 +172,7 @@ impl FoloApp {
                     .when_some(qualifier, |d, q| d.child(text(ty::SM, t.text_tertiary).tnum().child(q))),
             )
             .child(body)
+            .children(export_footer)
             .into_any_element()
     }
 

@@ -33,11 +33,26 @@ pub enum BenchTab {
 /// benchmark should be held out from training).
 pub const BENCH_SPLITS: [Split; 3] = [Split::Val, Split::Test, Split::Train];
 
+/// Long-side image resolution presets offered for generated benchmarks (`32..=4096`, default `640`).
+pub const BENCH_GEN_IMGSZ: [u32; 4] = [256, 320, 640, 1024];
+
+/// Which source mode the New benchmark form is configuring.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum BenchSourceKind {
+    /// Existing dataset split or labeled images from a labeling job.
+    #[default]
+    Existing,
+    /// Deterministic procedural scenes generated on the server (`source.kind == "generated"`).
+    Generated,
+}
+
 /// The New benchmark form on the Benchmarks page.
 pub struct NewBenchForm {
     pub name: Entity<TextInput>,
     /// Bumped on every opening: a late answer only touches its own form.
     pub seq: u64,
+    /// Existing dataset/job source vs deterministic server-side generated scenes.
+    pub source_kind: BenchSourceKind,
     /// One of [`FoloApp::bench_sources`] (the datasets, then the labeling jobs with labeled
     /// images); none while there was none to pick.
     ///
@@ -45,6 +60,16 @@ pub struct NewBenchForm {
     pub source: Option<SourceId>,
     /// Index into [`BENCH_SPLITS`] (a dataset's split; a labeling job has none).
     pub split: usize,
+    /// Generated source: image count (`1..=5000`, default `"64"`).
+    pub gen_images: Entity<TextInput>,
+    /// Generated source: index into [`BENCH_GEN_IMGSZ`] (default `2` -> `640`).
+    pub gen_imgsz: usize,
+    /// Generated source: comma-separated class names (`1..=8`, default `"circle, square, triangle"`).
+    pub gen_classes: Entity<TextInput>,
+    /// Generated source: deterministic RNG seed (`0..=2^53 - 1`, default `"0"`).
+    pub gen_seed: Entity<TextInput>,
+    /// Generated source: mix aspect ratios (`1:1`, `4:3`, `3:4`, `16:9`, `3:2`) instead of square.
+    pub gen_vary_aspect: bool,
     pub submitting: bool,
     pub error: Option<ApiError>,
 }

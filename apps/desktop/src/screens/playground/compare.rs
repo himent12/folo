@@ -21,6 +21,35 @@ pub enum CompareSideTab {
     ModelB,
 }
 
+/// Per-class presence bucket in Compare A/B when both models have fresh predictions.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompareClassStatus {
+    Both,
+    OnlyA,
+    OnlyB,
+}
+
+impl CompareClassStatus {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Both => "Both",
+            Self::OnlyA => "Only A",
+            Self::OnlyB => "Only B",
+        }
+    }
+}
+
+/// Filter over the Compare A/B per-class diff table (`All`, `Both`, `Only A`, `Only B`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum CompareClassFilter {
+    #[default]
+    All,
+    Both,
+    OnlyA,
+    OnlyB,
+}
+
 /// Completed prediction request parameters so stale cached results (old device, IoU, or floor)
 /// are never reused on re-enable or exported under new thresholds.
 #[derive(Clone, Debug, PartialEq)]
@@ -73,6 +102,8 @@ pub struct PlayCompareState {
     /// Dedicated local-inference ticket line for Model B so A and B never supersede each other.
     pub line_b: Arc<AtomicU64>,
     pub side_tab: CompareSideTab,
+    /// Active class-diff filter (`All`, `Both`, `Only A`, `Only B`) in Compare A/B Delta tab.
+    pub class_filter: CompareClassFilter,
     pub hover_b: Option<usize>,
     pub hover_b_from_stage: bool,
     pub view_b: Rc<Cell<Option<Bounds<Pixels>>>>,
@@ -95,6 +126,7 @@ impl Default for PlayCompareState {
             fetched_floor_b: 0.05,
             line_b: Arc::new(AtomicU64::new(0)),
             side_tab: CompareSideTab::Summary,
+            class_filter: CompareClassFilter::All,
             hover_b: None,
             hover_b_from_stage: false,
             view_b: Rc::new(Cell::new(None)),
@@ -120,6 +152,7 @@ impl PlayCompareState {
         self.hover_b = None;
         self.hover_b_from_stage = false;
         self.side_tab = CompareSideTab::Summary;
+        self.class_filter = CompareClassFilter::All;
     }
 
     pub fn clear_hover(&mut self) {
@@ -129,7 +162,7 @@ impl PlayCompareState {
 }
 
 /// Per-class detection comparison row matched by class name.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct CompareClassRow {
     pub name: String,
     /// Class index for palette color swatch (prefers Model A's class index, then Model B's).
@@ -137,6 +170,12 @@ pub struct CompareClassRow {
     pub count_a: Option<usize>,
     pub count_b: Option<usize>,
     pub delta: Option<isize>,
+    /// Class-diff bucket (`Both`, `OnlyA`, `OnlyB`) when both models are loaded.
+    pub status: Option<CompareClassStatus>,
+    /// Mean confidence of Model A's visible detections in this class (when count_a > 0).
+    pub mean_score_a: Option<f32>,
+    /// Mean confidence of Model B's visible detections in this class (when count_b > 0).
+    pub mean_score_b: Option<f32>,
 }
 
 /// Concise A vs B comparison summary: counts, latencies, speedup, and shared/unique classes.
@@ -159,6 +198,25 @@ pub struct CompareSummary {
     pub only_a_classes: Vec<String>,
     pub only_b_classes: Vec<String>,
     pub classes: Vec<CompareClassRow>,
+}
+
+impl CompareSummary {
+    /// Returns class rows matching `filter` (`All` keeps every row; `Both`/`OnlyA`/`OnlyB`
+    /// require both models loaded and match the row's [`CompareClassStatus`]).
+    pub fn filtered_classes(&self, filter: CompareClassFilter) -> Vec<&CompareClassRow> {
+        match filter {
+            CompareClassFilter::All => self.classes.iter().collect(),
+            CompareClassFilter::Both => {
+                self.classes.iter().filter(|r| r.status == Some(CompareClassStatus::Both)).collect()
+            }
+            CompareClassFilter::OnlyA => {
+                self.classes.iter().filter(|r| r.status == Some(CompareClassStatus::OnlyA)).collect()
+            }
+            CompareClassFilter::OnlyB => {
+                self.classes.iter().filter(|r| r.status == Some(CompareClassStatus::OnlyB)).collect()
+            }
+        }
+    }
 }
 
 /// Picks a sensible default Model B for `model_a`: prefers another model with the same class
@@ -190,17 +248,39 @@ pub fn summarize_comparison(
     let has_a = pred_a.is_some() && boxes_a.is_some();
     let has_b = pred_b.is_some() && boxes_b.is_some();
 
-    let mut by_name: BTreeMap<String, (u32, usize, usize)> = BTreeMap::new();
+    #[derive(Default)]
+    struct ClassAccum {
+        color_class: u32,
+        count_a: usize,
+        sum_a: f64,
+        fin_a: usize,
+        count_b: usize,
+        sum_b: f64,
+        fin_b: usize,
+    }
+    let mut by_name: BTreeMap<String, ClassAccum> = BTreeMap::new();
     if let Some(boxes) = boxes_a.filter(|_| has_a) {
         for b in boxes {
             let key = if b.name.trim().is_empty() { format!("class {}", b.class) } else { b.name.clone() };
-            by_name.entry(key).and_modify(|e| e.1 += 1).or_insert((b.class, 1, 0));
+            let (s, fin) = if b.score.is_finite() { (f64::from(b.score), 1) } else { (0.0, 0) };
+            let entry = by_name
+                .entry(key)
+                .or_insert_with(|| ClassAccum { color_class: b.class, ..Default::default() });
+            entry.count_a += 1;
+            entry.sum_a += s;
+            entry.fin_a += fin;
         }
     }
     if let Some(boxes) = boxes_b.filter(|_| has_b) {
         for b in boxes {
             let key = if b.name.trim().is_empty() { format!("class {}", b.class) } else { b.name.clone() };
-            by_name.entry(key).and_modify(|e| e.2 += 1).or_insert((b.class, 0, 1));
+            let (s, fin) = if b.score.is_finite() { (f64::from(b.score), 1) } else { (0.0, 0) };
+            let entry = by_name
+                .entry(key)
+                .or_insert_with(|| ClassAccum { color_class: b.class, ..Default::default() });
+            entry.count_b += 1;
+            entry.sum_b += s;
+            entry.fin_b += fin;
         }
     }
 
@@ -208,8 +288,8 @@ pub fn summarize_comparison(
     let mut only_a_classes = Vec::new();
     let mut only_b_classes = Vec::new();
     if has_a && has_b {
-        for (name, &(_, ca, cb)) in &by_name {
-            match (ca > 0, cb > 0) {
+        for (name, acc) in &by_name {
+            match (acc.count_a > 0, acc.count_b > 0) {
                 (true, true) => shared_classes.push(name.clone()),
                 (true, false) => only_a_classes.push(name.clone()),
                 (false, true) => only_b_classes.push(name.clone()),
@@ -220,12 +300,27 @@ pub fn summarize_comparison(
 
     let mut classes: Vec<CompareClassRow> = by_name
         .into_iter()
-        .map(|(name, (color_class, a, b))| CompareClassRow {
-            name,
-            color_class,
-            count_a: has_a.then_some(a),
-            count_b: has_b.then_some(b),
-            delta: (has_a && has_b).then_some(b as isize - a as isize),
+        .map(|(name, acc)| {
+            let status = if has_a && has_b {
+                match (acc.count_a > 0, acc.count_b > 0) {
+                    (true, true) => Some(CompareClassStatus::Both),
+                    (true, false) => Some(CompareClassStatus::OnlyA),
+                    (false, true) => Some(CompareClassStatus::OnlyB),
+                    (false, false) => None,
+                }
+            } else {
+                None
+            };
+            CompareClassRow {
+                name,
+                color_class: acc.color_class,
+                count_a: has_a.then_some(acc.count_a),
+                count_b: has_b.then_some(acc.count_b),
+                delta: (has_a && has_b).then_some(acc.count_b as isize - acc.count_a as isize),
+                status,
+                mean_score_a: (has_a && acc.fin_a > 0).then(|| (acc.sum_a / acc.fin_a as f64) as f32),
+                mean_score_b: (has_b && acc.fin_b > 0).then(|| (acc.sum_b / acc.fin_b as f64) as f32),
+            }
         })
         .collect();
     classes.sort_by(|x, y| {
@@ -372,11 +467,23 @@ pub fn compare_detections_json(
         height: u32,
     }
     #[derive(serde::Serialize)]
+    struct ClassDiffCounts {
+        both: usize,
+        only_a: usize,
+        only_b: usize,
+    }
+    #[derive(serde::Serialize)]
     struct ClassExport<'a> {
         name: &'a str,
         count_a: Option<usize>,
         count_b: Option<usize>,
         delta: Option<isize>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        status: Option<CompareClassStatus>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        mean_score_a: Option<f32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        mean_score_b: Option<f32>,
     }
     #[derive(serde::Serialize)]
     struct SummaryExport<'a> {
@@ -389,6 +496,8 @@ pub fn compare_detections_json(
         cold_a: Option<bool>,
         cold_b: Option<bool>,
         speedup_ratio: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        class_diff: Option<ClassDiffCounts>,
         shared_classes: &'a [String],
         only_a_classes: &'a [String],
         only_b_classes: &'a [String],
@@ -449,6 +558,11 @@ pub fn compare_detections_json(
             cold_a: summary.cold_a,
             cold_b: summary.cold_b,
             speedup_ratio: summary.speedup_ratio,
+            class_diff: (summary.count_a.is_some() && summary.count_b.is_some()).then_some(ClassDiffCounts {
+                both: summary.shared_classes.len(),
+                only_a: summary.only_a_classes.len(),
+                only_b: summary.only_b_classes.len(),
+            }),
             shared_classes: &summary.shared_classes,
             only_a_classes: &summary.only_a_classes,
             only_b_classes: &summary.only_b_classes,
@@ -460,6 +574,9 @@ pub fn compare_detections_json(
                     count_a: c.count_a,
                     count_b: c.count_b,
                     delta: c.delta,
+                    status: c.status,
+                    mean_score_a: c.mean_score_a,
+                    mean_score_b: c.mean_score_b,
                 })
                 .collect(),
         },
@@ -629,5 +746,216 @@ mod tests {
         assert!(v["comparison"]["speedup_ratio"].is_null());
         assert_eq!(v["a"]["cold"], true);
         assert_eq!(v["b"]["cold"], false);
+    }
+
+    #[test]
+    fn class_diff_status_filtering_and_json_payload_cover_both_only_a_and_only_b() {
+        let a_boxes = vec![fake_box(0, "circle", 0.90), fake_box(1, "square", 0.80)];
+        let b_boxes =
+            vec![fake_box(0, "circle", 0.95), fake_box(0, "circle", 0.85), fake_box(2, "triangle", 0.70)];
+        let pa = fake_pred("m_a", 12.0, a_boxes.clone());
+        let pb = fake_pred("m_b", 10.0, b_boxes.clone());
+        let ra: Vec<&ScoredBox> = a_boxes.iter().collect();
+        let rb: Vec<&ScoredBox> = b_boxes.iter().collect();
+
+        let summary = summarize_comparison(Some(&ra), Some(&rb), Some(&pa), Some(&pb));
+        assert_eq!(summary.filtered_classes(CompareClassFilter::All).len(), 3);
+        let both = summary.filtered_classes(CompareClassFilter::Both);
+        assert_eq!(both.len(), 1);
+        assert_eq!(both[0].name, "circle");
+        assert_eq!(both[0].status, Some(CompareClassStatus::Both));
+        assert!((both[0].mean_score_a.unwrap() - 0.90).abs() < 1e-4);
+        assert!((both[0].mean_score_b.unwrap() - 0.90).abs() < 1e-4);
+
+        let only_a = summary.filtered_classes(CompareClassFilter::OnlyA);
+        assert_eq!(only_a.len(), 1);
+        assert_eq!(only_a[0].name, "square");
+        assert_eq!(only_a[0].status, Some(CompareClassStatus::OnlyA));
+
+        let only_b = summary.filtered_classes(CompareClassFilter::OnlyB);
+        assert_eq!(only_b.len(), 1);
+        assert_eq!(only_b[0].name, "triangle");
+        assert_eq!(only_b[0].status, Some(CompareClassStatus::OnlyB));
+
+        let json = compare_detections_json(
+            "val_001.png",
+            (640, 480),
+            0.25,
+            Some(0.7),
+            None,
+            &summary,
+            Some(&CompareSideExport {
+                model: "shapes-n",
+                model_id: "m_a",
+                iou: Some(0.7),
+                pred: &pa,
+                boxes: &ra,
+            }),
+            Some(&CompareSideExport {
+                model: "shapes-s",
+                model_id: "m_b",
+                iou: Some(0.7),
+                pred: &pb,
+                boxes: &rb,
+            }),
+        )
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["comparison"]["class_diff"]["both"], 1);
+        assert_eq!(v["comparison"]["class_diff"]["only_a"], 1);
+        assert_eq!(v["comparison"]["class_diff"]["only_b"], 1);
+        let rows = v["comparison"]["classes"].as_array().unwrap();
+        assert!(rows.iter().any(|r| r["name"] == "circle" && r["status"] == "both"));
+        assert!(rows.iter().any(|r| r["name"] == "square" && r["status"] == "only_a"));
+        assert!(rows.iter().any(|r| r["name"] == "triangle" && r["status"] == "only_b"));
+    }
+
+    #[test]
+    fn playground_compare_renders_class_diff_filters_and_exports_ab_json() {
+        use crate::app::Route;
+        use crate::app::tests::{drive, open};
+        use crate::store::Load;
+
+        let (mut app, window) = open();
+        let dir = folo_test_support::TestDir::new("desktop-play-cmp-diff-ui");
+        drive(&mut app, window, |this, w, cx| {
+            this.navigate(Route::Playground, w, cx);
+            this.set_play_compare(true, cx);
+        });
+        for _ in 0..4 {
+            app.frame(window.into());
+            app.run_until_idle();
+        }
+        drive(&mut app, window, |this, _, cx| {
+            let ds = this.play_sample_dataset().expect("sample dataset for default model");
+            let img = this
+                .store
+                .images
+                .get(&ds)
+                .and_then(|l| l.ready())
+                .and_then(|list| list.first())
+                .map(|m| m.id.clone())
+                .unwrap_or_else(|| "img_00801".into());
+            this.play_dataset_image(&ds, &img, cx);
+        });
+        for _ in 0..4 {
+            app.frame(window.into());
+            app.run_until_idle();
+        }
+        // Inject deterministic real-shaped A & B predictions covering Both, Only A, and Only B.
+        drive(&mut app, window, |this, _, cx| {
+            let mid_a = this.play_shown_model().map(|m| m.id.clone()).unwrap_or_else(|| "m_a".into());
+            let mid_b = this.play_shown_model_b().map(|m| m.id.clone()).unwrap_or_else(|| "m_b".into());
+            this.play_pred = Load::Ready(fake_pred(
+                &mid_a,
+                11.0,
+                vec![fake_box(0, "circle", 0.91), fake_box(1, "square", 0.82)],
+            ));
+            this.play_compare.pred_b = Load::Ready(fake_pred(
+                &mid_b,
+                8.5,
+                vec![fake_box(0, "circle", 0.94), fake_box(2, "triangle", 0.77)],
+            ));
+            cx.notify();
+        });
+        app.frame(window.into());
+
+        drive(&mut app, window, |this, _, _| {
+            let keys: Vec<String> = this.focus.borrow().keys().map(|k| k.to_string()).collect();
+            for expected in [
+                "play-cmp-cls-all",
+                "play-cmp-cls-both",
+                "play-cmp-cls-a",
+                "play-cmp-cls-b",
+                "play-export-json",
+                "play-copy-json",
+            ] {
+                assert!(keys.iter().any(|k| k == expected), "missing {expected} in {keys:?}");
+            }
+        });
+
+        let out = dir.path().join("compare-ab.json");
+        app.platform().answer_prompts(Some(vec![out.clone()]));
+        drive(&mut app, window, |this, _, cx| this.export_play_json(cx));
+        app.run_until_idle();
+        let text = std::fs::read_to_string(&out).expect("compare JSON written");
+        let v: serde_json::Value = serde_json::from_str(&text).expect("valid JSON");
+        assert_eq!(v["mode"], "compare");
+        assert_eq!(v["comparison"]["class_diff"]["both"], 1);
+        assert_eq!(v["comparison"]["class_diff"]["only_a"], 1);
+        assert_eq!(v["comparison"]["class_diff"]["only_b"], 1);
+        drive(&mut app, window, |this, _, _| {
+            assert!(this.toasts.iter().any(|t| t.title == "Exported A/B compare JSON"));
+        });
+    }
+
+    #[test]
+    fn playground_compare_delta_ignores_stale_side_during_rerun_interval() {
+        use crate::app::Route;
+        use crate::app::tests::{drive, open};
+        use crate::store::Load;
+
+        let (mut app, window) = open();
+        drive(&mut app, window, |this, w, cx| {
+            this.navigate(Route::Playground, w, cx);
+            this.set_play_compare(true, cx);
+        });
+        for _ in 0..4 {
+            app.frame(window.into());
+            app.run_until_idle();
+        }
+        drive(&mut app, window, |this, _, cx| {
+            let ds = this.play_sample_dataset().expect("sample dataset");
+            this.play_dataset_image(&ds, "img_00801", cx);
+        });
+        for _ in 0..4 {
+            app.frame(window.into());
+            app.run_until_idle();
+        }
+        // Simulate an in-flight setting change (device switch): Model A already answered fresh for
+        // the new target while Model B still holds an older Load::Ready prediction from the old target.
+        drive(&mut app, window, |this, _, cx| {
+            let mid_a = this.play_model.clone().unwrap();
+            let mid_b = this.play_compare.model_b.clone().unwrap();
+            let img_gen =
+                this.play_compare.pred_a_meta.as_ref().expect("loaded image populates pred_a_meta").image_gen;
+            let iou_bits = this.play_iou.to_bits();
+            let floor = this.play_conf.min(crate::app::PLAY_CONF_FLOOR);
+            this.play_pred_pending = false;
+            this.play_compare.pred_b_pending = false;
+            this.play_pred = Load::Ready(fake_pred(&mid_a, 9.0, vec![fake_box(0, "circle", 0.91)]));
+            this.play_compare.pred_a_meta = Some(PlayPredMeta {
+                image_gen: img_gen,
+                model_id: mid_a,
+                iou_bits,
+                target: this.play_target,
+                floor,
+            });
+            // Model B still has a Ready prediction, but from a different device target (stale!).
+            let stale_target = Some(crate::local::Target::Cpu);
+            assert_ne!(stale_target, this.play_target);
+            this.play_compare.pred_b =
+                Load::Ready(fake_pred(&mid_b, 12.0, vec![fake_box(1, "square", 0.88)]));
+            this.play_compare.pred_b_meta = Some(PlayPredMeta {
+                image_gen: img_gen,
+                model_id: mid_b,
+                iou_bits,
+                target: stale_target,
+                floor,
+            });
+            this.focus.borrow_mut().clear();
+            cx.notify();
+        });
+        app.frame(window.into());
+
+        drive(&mut app, window, |this, _, _| {
+            assert!(this.pred_a_is_fresh());
+            assert!(!this.pred_b_is_fresh(), "stale Model B must not be treated as fresh");
+            let keys: Vec<String> = this.focus.borrow().keys().map(|k| k.to_string()).collect();
+            assert!(
+                !keys.iter().any(|k| k == "play-cmp-cls-both"),
+                "Both/Only A/Only B filter chips must not mix fresh A with stale B: {keys:?}"
+            );
+        });
     }
 }

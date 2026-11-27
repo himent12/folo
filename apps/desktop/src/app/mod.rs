@@ -102,6 +102,7 @@ pub use forms::{
 };
 pub use navigation::{Route, Section};
 pub use playground::{IMAGE_FORMATS, PLAY_CONF_FLOOR};
+pub(crate) use playground_compare::{export_default_dir, picked_save};
 pub use preferences::{follow_system_appearance, is_dark};
 pub use sidebar::logo;
 

@@ -976,6 +976,8 @@ version = "0.1.0"
 dependencies = [
  "folo-api",
  "http",
+ "rustls",
+ "rustls-pki-types",
  "serde",
  "serde_json",
  "ureq",

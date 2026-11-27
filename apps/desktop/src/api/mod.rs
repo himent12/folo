@@ -94,6 +94,36 @@ pub struct PredictRequest {
     pub max_det: u32,
 }
 
+/// Feature flag advertised on `/api/system` when `POST /api/bench/benchmarks` accepts
+/// `source.kind == "generated"` (`docs/API.md`).
+pub const FEATURE_BENCH_GENERATED_SOURCE: &str = "bench_generated_source";
+
+/// Synthetic `dataset_id` persisted in `BenchSource::Dataset` for benchmarks created from
+/// deterministic generated scenes (`docs/API.md`).
+pub const GENERATED_BENCH_SOURCE_ID: &str = "generated";
+
+/// Deterministic generated-image source payload for `POST /api/bench/benchmarks` (`docs/API.md`).
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct GeneratedBenchSource {
+    pub kind: &'static str,
+    pub images: u32,
+    pub classes: Vec<String>,
+    pub imgsz: u32,
+    pub seed: u64,
+    pub vary_aspect: bool,
+}
+
+/// `POST /api/bench/benchmarks` request for `source.kind == "generated"` (`docs/API.md`).
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct CreateGeneratedBench {
+    pub name: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    pub source: GeneratedBenchSource,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan: Option<BenchPlan>,
+}
+
 /// Options for `POST /api/models/{id}/export` (`folo-f16` or `onnx` with ONNX switches).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ModelExportOptions {
@@ -267,6 +297,9 @@ pub trait Backend: Send + Sync + 'static {
     }
     fn create_bench(&self, _req: &CreateBench) -> ApiResult<Bench> {
         Err(no_bench())
+    }
+    fn create_generated_bench(&self, _req: &CreateGeneratedBench) -> ApiResult<Bench> {
+        Err(ApiError::new("not_supported", "This server doesn't support generated benchmarks"))
     }
     fn update_bench(&self, _id: &str, _req: &UpdateBench) -> ApiResult<Bench> {
         Err(no_bench())

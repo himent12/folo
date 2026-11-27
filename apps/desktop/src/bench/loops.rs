@@ -2,7 +2,7 @@
 
 use folo_ui::Context;
 
-use super::create::{SourceChoice, SourceId, SourcePick};
+use super::create::{SourceChoice, SourceId, SourcePick, is_generated_source};
 use super::load::route_bench;
 use super::merge::upsert_loop;
 use super::run::model_teaches;
@@ -14,6 +14,9 @@ use crate::ui::Tone;
 /// Whether `picked`'s loop pool (a dataset's train split or a labeling job's labeled images)
 /// overlaps the source frozen into benchmark `b`.
 pub fn loop_pool_overlaps(b: &Bench, picked: &SourcePick) -> bool {
+    if is_generated_source(&b.source) {
+        return false;
+    }
     match (picked, &b.source) {
         (SourcePick::Dataset { id, .. }, BenchSource::Dataset { dataset_id, split }) => {
             id == dataset_id && split.unwrap_or(Split::Val) == Split::Train
@@ -79,6 +82,7 @@ impl FoloApp {
         let usable =
             |s: &SourcePick| s.pool_images() > 0 && b.as_ref().is_none_or(|b| !loop_pool_likely_empty(b, s));
         let own = b.as_ref().and_then(|b| match &b.source {
+            _ if is_generated_source(&b.source) => None,
             BenchSource::Dataset { dataset_id, .. } => Some(SourceId::Dataset(dataset_id.clone())),
             BenchSource::LabelJob { .. } => None,
         });

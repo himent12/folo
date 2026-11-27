@@ -78,8 +78,17 @@ pub fn agent_name(a: LabelAgentId) -> &'static str {
     }
 }
 
-/// Where a benchmark's images came from: "shapes-1k · val".
+/// True when `b` was created from a server-side generated synthetic scene source.
+pub fn is_generated_bench(b: &Bench) -> bool {
+    crate::bench::is_generated_source(&b.source)
+}
+
+/// Where a benchmark's images came from: "shapes-1k · val", "rejects · labeling job",
+/// or "generated (64×640px, seed 0)".
 pub fn source_line(b: &Bench) -> String {
+    if is_generated_bench(b) {
+        return if b.source_name.trim().is_empty() { "generated".to_string() } else { b.source_name.clone() };
+    }
     match &b.source {
         BenchSource::Dataset { split, .. } => {
             format!("{} · {}", b.source_name, split.map_or("val", |s| s.as_str()))

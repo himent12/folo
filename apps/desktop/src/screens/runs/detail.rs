@@ -369,14 +369,27 @@ impl FoloApp {
                 body = body.child(div().h(px(560.)).child(skeleton(&t, "charts")));
             }
         }
-        // Rows 4 and 5: the samples (two thirds) beside each class's AP, and the log (two thirds)
-        // beside the config. Below 1120 px each row stacks, as the chart rows do.
+        // Rows 4 and 5: the samples (two thirds) beside each class's AP, and the log + Checkpoint
+        // CLI (two thirds) beside the config. Below 1120 px each row stacks, as the chart rows do.
         let stack = window.viewport_size().width < px(1120.);
         let samples = self.samples_panel(&r, window, cx);
         let per_class = self.per_class_panel(&r, !stack, window, cx);
-        let logs = self.logs_panel(&r, !stack, window, cx);
+        let ckpt_cli = self.run_checkpoint_cli_panel(&r, window, cx);
+        let logs = self.logs_panel(&r, !stack, ckpt_cli.is_some(), window, cx);
+        let logs_col = match ckpt_cli {
+            Some(cli) => div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(px(16.))
+                .child(logs)
+                .child(cli)
+                .into_any_element(),
+            None => logs,
+        };
         let config = self.config_panel(&r, &ds_name, window, cx);
-        body = body.child(two_thirds(samples, per_class, stack)).child(two_thirds(logs, config, stack));
+        body = body.child(two_thirds(samples, per_class, stack)).child(two_thirds(logs_col, config, stack));
         self.page_frame(&t, header, body, cx)
     }
 

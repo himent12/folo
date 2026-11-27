@@ -1,6 +1,8 @@
 //! Interactive Export & Inference CLI Command Builder UI panel on the Model Detail screen.
 
 pub(crate) mod command;
+#[cfg(test)]
+mod tests;
 
 use std::rc::Rc;
 
@@ -17,8 +19,9 @@ use crate::theme::{radius, theme, ty};
 use crate::ui::*;
 
 pub use command::{
-    CliExportFormat, MODEL_CLI_CONF, MODEL_CLI_IOU, ModelCliMode, ModelCliState, PredictPrecision,
-    QuantMethod, ServerExportSupport, build_model_cli, check_server_export_support, predict_uses_iou,
+    CliExportFormat, MODEL_CLI_CONF, MODEL_CLI_IOU, ModelCliMode, ModelCliState, PredictInt8Target,
+    PredictPrecision, QuantF32MacBudget, QuantF32Policy, QuantMethod, ServerExportSupport, build_model_cli,
+    check_server_export_support, predict_uses_iou,
 };
 
 impl FoloApp {
@@ -156,7 +159,14 @@ impl FoloApp {
                 Some(badge(&t, "opset 17", Tone::Neutral))
             }
             ModelCliMode::Export if self.model_cli.export_format == CliExportFormat::Int8Quantize => {
-                Some(badge(&t, "CPU int8", Tone::Neutral))
+                let label = match self.model_cli.quant_f32_policy {
+                    QuantF32Policy::Auto => {
+                        format!("CPU int8 · {} f32", self.model_cli.quant_f32_macs.label())
+                    }
+                    QuantF32Policy::P5Tail => "CPU int8 · P5 f32".to_string(),
+                    QuantF32Policy::None => "CPU int8 · full".to_string(),
+                };
+                Some(badge(&t, label, Tone::Neutral))
             }
             ModelCliMode::Predict if self.model_cli.predict_sahi => Some(badge(&t, "SAHI", Tone::Accent)),
             ModelCliMode::Predict if self.model_cli.predict_tta => Some(badge(&t, "TTA", Tone::Accent)),
@@ -381,16 +391,77 @@ impl FoloApp {
                     cx,
                     Rc::new(|this, i, _, cx| {
                         this.model_cli.quant_method = QuantMethod::ALL[i.min(QuantMethod::ALL.len() - 1)];
+                        this.model_cli.predict_int8_target = PredictInt8Target::QuantizedOutput;
                         cx.notify();
                     }),
                 );
-                Some(
+                let pol_labels: Vec<&str> = QuantF32Policy::ALL.iter().map(|p| p.label()).collect();
+                let pol_idx = QuantF32Policy::ALL
+                    .iter()
+                    .position(|&p| p == self.model_cli.quant_f32_policy)
+                    .unwrap_or(0);
+                let pol_seg = self.segmented(
+                    "model-cli-quant-f32-policy",
+                    &pol_labels,
+                    pol_idx,
+                    window,
+                    cx,
+                    Rc::new(|this, i, _, cx| {
+                        this.model_cli.quant_f32_policy =
+                            QuantF32Policy::ALL[i.min(QuantF32Policy::ALL.len() - 1)];
+                        this.model_cli.predict_int8_target = PredictInt8Target::QuantizedOutput;
+                        cx.notify();
+                    }),
+                );
+                let macs_ctl = (self.model_cli.quant_f32_policy == QuantF32Policy::Auto).then(|| {
+                    let m_labels: Vec<&str> = QuantF32MacBudget::ALL.iter().map(|b| b.label()).collect();
+                    let m_idx = QuantF32MacBudget::ALL
+                        .iter()
+                        .position(|&b| b == self.model_cli.quant_f32_macs)
+                        .unwrap_or(0);
+                    let m_seg = self.segmented(
+                        "model-cli-quant-f32-macs",
+                        &m_labels,
+                        m_idx,
+                        window,
+                        cx,
+                        Rc::new(|this, i, _, cx| {
+                            this.model_cli.quant_f32_macs =
+                                QuantF32MacBudget::ALL[i.min(QuantF32MacBudget::ALL.len() - 1)];
+                            this.model_cli.predict_int8_target = PredictInt8Target::QuantizedOutput;
+                            cx.notify();
+                        }),
+                    );
                     div()
                         .flex()
                         .items_center()
                         .gap(px(8.))
-                        .child(text(ty::SM, t.text_tertiary).child("Calibration method"))
-                        .child(seg)
+                        .child(text(ty::SM, t.text_tertiary).child("F32 MAC budget"))
+                        .child(m_seg)
+                });
+                Some(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap(px(12.))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(8.))
+                                .child(text(ty::SM, t.text_tertiary).child("Calibration"))
+                                .child(seg),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(8.))
+                                .child(text(ty::SM, t.text_tertiary).child("Selective f32"))
+                                .child(pol_seg),
+                        )
+                        .children(macs_ctl)
                         .into_any_element(),
                 )
             }
@@ -498,28 +569,116 @@ impl FoloApp {
                 cx.notify();
             }),
         );
-        let int8_cal_control = (self.model_cli.predict_precision == PredictPrecision::Int8
-            && !command::model_is_int8_file(m))
-        .then(|| {
-            let q_labels: Vec<&str> = QuantMethod::ALL.iter().map(|q| q.label()).collect();
-            let q_idx = QuantMethod::ALL.iter().position(|&q| q == self.model_cli.quant_method).unwrap_or(0);
-            let q_seg = self.segmented(
-                "model-cli-predict-quant-method",
-                &q_labels,
-                q_idx,
-                window,
-                cx,
-                Rc::new(|this, i, _, cx| {
-                    this.model_cli.quant_method = QuantMethod::ALL[i.min(QuantMethod::ALL.len() - 1)];
-                    cx.notify();
-                }),
-            );
-            div()
-                .flex()
-                .items_center()
-                .gap(px(8.))
-                .child(text(ty::SM, t.text_tertiary).child("Calibration"))
-                .child(q_seg)
+        let int8_cal_control = (self.model_cli.predict_precision == PredictPrecision::Int8).then(|| {
+            let already_int8 = command::model_is_int8_file(m);
+            let target_ctl = already_int8.then(|| {
+                let t_labels: Vec<&str> = PredictInt8Target::ALL.iter().map(|x| x.label()).collect();
+                let t_idx = PredictInt8Target::ALL
+                    .iter()
+                    .position(|&x| x == self.model_cli.predict_int8_target)
+                    .unwrap_or(0);
+                let t_seg = self.segmented(
+                    "model-cli-predict-int8-target",
+                    &t_labels,
+                    t_idx,
+                    window,
+                    cx,
+                    Rc::new(|this, i, _, cx| {
+                        this.model_cli.predict_int8_target =
+                            PredictInt8Target::ALL[i.min(PredictInt8Target::ALL.len() - 1)];
+                        cx.notify();
+                    }),
+                );
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(text(ty::SM, t.text_tertiary).child("Checkpoint"))
+                    .child(t_seg)
+            });
+            let show_quant_opts =
+                !already_int8 || self.model_cli.predict_int8_target == PredictInt8Target::QuantizedOutput;
+            let quant_opts = show_quant_opts.then(|| {
+                let q_labels: Vec<&str> = QuantMethod::ALL.iter().map(|q| q.label()).collect();
+                let q_idx =
+                    QuantMethod::ALL.iter().position(|&q| q == self.model_cli.quant_method).unwrap_or(0);
+                let q_seg = self.segmented(
+                    "model-cli-predict-quant-method",
+                    &q_labels,
+                    q_idx,
+                    window,
+                    cx,
+                    Rc::new(|this, i, _, cx| {
+                        this.model_cli.quant_method = QuantMethod::ALL[i.min(QuantMethod::ALL.len() - 1)];
+                        cx.notify();
+                    }),
+                );
+                let pol_labels: Vec<&str> = QuantF32Policy::ALL.iter().map(|p| p.label()).collect();
+                let pol_idx = QuantF32Policy::ALL
+                    .iter()
+                    .position(|&p| p == self.model_cli.quant_f32_policy)
+                    .unwrap_or(0);
+                let pol_seg = self.segmented(
+                    "model-cli-predict-quant-f32-policy",
+                    &pol_labels,
+                    pol_idx,
+                    window,
+                    cx,
+                    Rc::new(|this, i, _, cx| {
+                        this.model_cli.quant_f32_policy =
+                            QuantF32Policy::ALL[i.min(QuantF32Policy::ALL.len() - 1)];
+                        cx.notify();
+                    }),
+                );
+                let macs_ctl = (self.model_cli.quant_f32_policy == QuantF32Policy::Auto).then(|| {
+                    let m_labels: Vec<&str> = QuantF32MacBudget::ALL.iter().map(|b| b.label()).collect();
+                    let m_idx = QuantF32MacBudget::ALL
+                        .iter()
+                        .position(|&b| b == self.model_cli.quant_f32_macs)
+                        .unwrap_or(0);
+                    let m_seg = self.segmented(
+                        "model-cli-predict-quant-f32-macs",
+                        &m_labels,
+                        m_idx,
+                        window,
+                        cx,
+                        Rc::new(|this, i, _, cx| {
+                            this.model_cli.quant_f32_macs =
+                                QuantF32MacBudget::ALL[i.min(QuantF32MacBudget::ALL.len() - 1)];
+                            cx.notify();
+                        }),
+                    );
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .child(text(ty::SM, t.text_tertiary).child("F32 MAC budget"))
+                        .child(m_seg)
+                });
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(10.))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(text(ty::SM, t.text_tertiary).child("Calibration"))
+                            .child(q_seg),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(text(ty::SM, t.text_tertiary).child("Selective f32"))
+                            .child(pol_seg),
+                    )
+                    .children(macs_ctl)
+            });
+            div().flex().flex_wrap().items_center().gap(px(10.)).children(target_ctl).children(quant_opts)
         });
 
         let conf = self.model_cli.predict_conf;

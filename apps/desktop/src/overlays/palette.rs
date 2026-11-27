@@ -232,6 +232,87 @@ impl FoloApp {
                 }),
             });
         }
+        // Page-scoped export and CLI quick-copy actions on Run detail and Playground Compare.
+        if let Route::Run(id) = &self.route
+            && let Some(r) = self.store.run(id)
+        {
+            if let Some(d) = self.store.run_data.get(id).and_then(|l| l.ready())
+                && !d.metrics.epochs.is_empty()
+            {
+                let rid_csv = id.clone();
+                items.push(PaletteItem {
+                    group: "Actions",
+                    icon: "icons/download.svg",
+                    title: "Export run metrics (CSV)".into(),
+                    detail: format!("{} · {} epochs", r.name, d.metrics.epochs.len()),
+                    keys: &[],
+                    action: act(move |this, _, cx| this.export_run_metrics_csv(&rid_csv, cx)),
+                });
+                if d.metrics.epochs.last().is_some_and(|e| !e.val.per_class.is_empty()) {
+                    let rid_pc = id.clone();
+                    items.push(PaletteItem {
+                        group: "Actions",
+                        icon: "icons/download.svg",
+                        title: "Export run per-class AP (CSV)".into(),
+                        detail: r.name.clone(),
+                        keys: &[],
+                        action: act(move |this, _, cx| this.export_run_per_class_csv(&rid_pc, cx)),
+                    });
+                }
+                let rid_json = id.clone();
+                items.push(PaletteItem {
+                    group: "Actions",
+                    icon: "icons/file-text.svg",
+                    title: "Export run metrics (JSON)".into(),
+                    detail: format!("{} · config & epochs", r.name),
+                    keys: &[],
+                    action: act(move |this, _, cx| this.export_run_metrics_json(&rid_json, cx)),
+                });
+            }
+            if r.model_id.is_some() {
+                let rid_val = id.clone();
+                items.push(PaletteItem {
+                    group: "Actions",
+                    icon: "icons/copy.svg",
+                    title: "Copy checkpoint val CLI".into(),
+                    detail: "folo val for this run's checkpoint".into(),
+                    keys: &[],
+                    action: act(move |this, _, cx| {
+                        this.copy_run_checkpoint_cli(
+                            &rid_val,
+                            crate::screens::runs::CheckpointCliMode::Val,
+                            cx,
+                        )
+                    }),
+                });
+                let rid_pred = id.clone();
+                items.push(PaletteItem {
+                    group: "Actions",
+                    icon: "icons/copy.svg",
+                    title: "Copy checkpoint predict CLI".into(),
+                    detail: "folo predict for this run's checkpoint".into(),
+                    keys: &[],
+                    action: act(move |this, _, cx| {
+                        this.copy_run_checkpoint_cli(
+                            &rid_pred,
+                            crate::screens::runs::CheckpointCliMode::Predict,
+                            cx,
+                        )
+                    }),
+                });
+            }
+        }
+        if matches!(self.route, Route::Playground) && self.play_compare.enabled && self.has_play_export_json()
+        {
+            items.push(PaletteItem {
+                group: "Actions",
+                icon: "icons/file-text.svg",
+                title: "Export A/B compare JSON".into(),
+                detail: "Per-class diff (Both / Only A / Only B) and detections".into(),
+                keys: &[],
+                action: act(|this, _, cx| this.export_play_json(cx)),
+            });
+        }
         // The open page's run or dataset can be deleted from here too (a run once it isn't active).
         let page_delete =
             match &self.route {

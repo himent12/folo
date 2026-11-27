@@ -315,6 +315,10 @@ impl Backend for HttpBackend {
         self.post_slow("/bench/benchmarks", req)
     }
 
+    fn create_generated_bench(&self, req: &CreateGeneratedBench) -> ApiResult<Bench> {
+        self.post_slow("/bench/benchmarks", req)
+    }
+
     fn update_bench(&self, id: &str, req: &UpdateBench) -> ApiResult<Bench> {
         self.put(&format!("/bench/benchmarks/{}", seg(id)), req)
     }
