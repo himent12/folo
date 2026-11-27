@@ -216,7 +216,7 @@ export default function NewBenchDialog(props: { open?: boolean }) {
       toast.success('Benchmark created', `${created.name} · ${imagesText(created.images)} · the default plan`);
       if (alive && seq === submitSeq && router.location.path === startPath) router.go(`/benchmarks/${created.id}`);
     } catch (err) {
-      if (!alive || seq !== submitSeq || hub.epoch !== epoch) return;
+      if (!alive || seq !== submitSeq || hub.epoch !== epoch || connecting.peek()) return;
       error.set(err);
     } finally {
       if (alive && seq === submitSeq) busy.set(false);

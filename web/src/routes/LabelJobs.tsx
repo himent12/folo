@@ -76,6 +76,7 @@ export default function LabelJobs() {
   const askedNew = computed(() => router.route.name === 'label-jobs' && router.route.query.get('new') === '1');
   effect(() => {
     if (!askedNew.get()) return;
+    if (hub.mode === 'connecting' && hub.connectError === null) return;
     untrack(() => {
       if (!unsupported.peek() && hub.mode !== 'connecting') creating.set(true);
       const q = new URLSearchParams(router.route.query);
@@ -200,7 +201,7 @@ export default function LabelJobs() {
         actions={() => (
           <>
             {!unsupported.get() ? (
-              <Gate reason={offline.get() ? OFFLINE_REASON : null}>
+              <Gate reason={offline.get() ? OFFLINE_REASON : hub.mode === 'connecting' ? 'Connecting to server' : null}>
                 {(why) => (
                   <Button variant="primary" icon={Plus} disabled={!!why()} aria-describedby={why()} onclick={() => creating.set(true)}>
                     {phone.current ? 'New job' : 'New labeling job'}

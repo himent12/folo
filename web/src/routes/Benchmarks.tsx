@@ -87,6 +87,7 @@ export default function Benchmarks() {
   const creating = signal(false);
   effect(() => {
     if (router.route.name !== 'benchmarks' || router.route.query.get('new') !== '1') return;
+    if (hub.mode === 'connecting' && hub.connectError === null) return;
     untrack(() => {
       if (!unavailable.peek() && hub.mode !== 'connecting') creating.set(true);
       const q = new URLSearchParams(router.route.query);
@@ -281,7 +282,7 @@ export default function Benchmarks() {
               <Menu icon={Download} text={phone.current ? undefined : 'Export'} label="Export benchmarks" items={exportItems} />
             ) : null}
             {!unavailable.get() ? (
-              <Gate reason={offline.get() ? OFFLINE_REASON : null}>
+              <Gate reason={offline.get() ? OFFLINE_REASON : hub.mode === 'connecting' ? 'Connecting to server' : null}>
                 {(why) => (
                   <Button variant="primary" icon={Plus} disabled={!!why()} aria-describedby={why()} onclick={() => creating.set(true)}>
                     {phone.current ? 'New' : 'New benchmark'}
