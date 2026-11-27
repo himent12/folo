@@ -621,6 +621,42 @@ describe('Playtest R28 regressions', () => {
       const obs = tracking.getObservations();
       expect(obs).toHaveLength(1);
       expect(obs[0]!.timestamp_ms).toBeGreaterThan(0);
+
+      // Rewind from clip end while an onended encode is in flight -> old 5000 ms encode MUST be dropped.
+      t = 5;
+      holdNextBlob = true;
+      media.videoEvents.onended();
+      await until(() => releaseBlob !== null, 'end-of-clip encode in flight');
+      const endBlob = releaseBlob!;
+      releaseBlob = null;
+      const framesBeforeRewind = frameSeqCounter;
+      Object.defineProperty(fakeVideo, 'paused', { configurable: true, value: true });
+      vi.spyOn(fakeVideo, 'play').mockResolvedValue(undefined);
+      media.togglePlay();
+      expect(media.awaitingCapture.get()).toBe(true);
+      endBlob();
+      await tick();
+      flushSync();
+      expect(frameSeqCounter).toBe(framesBeforeRewind);
+      expect(media.awaitingCapture.get()).toBe(true);
+
+      // Turning Auto OFF while an in-flight encode is pending during playback drops the encode and keeps frameSynced false.
+      t = 2.0;
+      media.playing.set(true);
+      holdNextBlob = true;
+      void media.detectCurrentFrame();
+      await until(() => releaseBlob !== null, 'in-flight encode during playback');
+      const midBlob = releaseBlob!;
+      releaseBlob = null;
+      const framesBeforeAutoOff = frameSeqCounter;
+      media.autoDetect.set(false);
+      flushSync();
+      expect(media.frameSynced.get()).toBe(false);
+      midBlob();
+      await tick();
+      flushSync();
+      expect(frameSeqCounter).toBe(framesBeforeAutoOff);
+      expect(media.frameSynced.get()).toBe(false);
     } finally {
       URL.createObjectURL = origCreateUrl;
       URL.revokeObjectURL = origRevokeUrl;

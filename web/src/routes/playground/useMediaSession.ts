@@ -337,12 +337,15 @@ export function useMediaSession(input: UseMediaSessionInput) {
     if (mode.peek() !== 'video') return;
     if (!auto) {
       untrack(() => {
+        if (playing.peek() || awaitingCapture.peek()) {
+          captureSeq++;
+          frameSynced.set(false);
+        }
         clearLiveTimer();
         scrubThrottle.cancel();
         tracker.reset();
         fps.set(0);
         latencyMs.set(0);
-        if (playing.peek() || awaitingCapture.peek()) frameSynced.set(false);
       });
       return;
     }
@@ -611,6 +614,7 @@ export function useMediaSession(input: UseMediaSessionInput) {
     if (!el) return;
     if (el.paused) {
       if (duration.peek() > 0 && el.currentTime >= duration.peek() - 0.01) {
+        captureSeq++;
         pendingForwardStep = false;
         lastEmittedVideoTime = null;
         videoFrameCount = 0;
@@ -623,7 +627,10 @@ export function useMediaSession(input: UseMediaSessionInput) {
       tracker.reset();
       fps.set(0);
       latencyMs.set(0);
-      if (!autoDetect.peek()) frameSynced.set(false);
+      if (!autoDetect.peek()) {
+        captureSeq++;
+        frameSynced.set(false);
+      }
       void el.play().catch(() => {});
     } else {
       el.pause();
@@ -712,7 +719,10 @@ export function useMediaSession(input: UseMediaSessionInput) {
       ensureFrameObserver(e.currentTarget, videoSeq);
       playing.set(true);
       if (autoDetect.peek()) scheduleNextLiveTick();
-      else frameSynced.set(false);
+      else {
+        captureSeq++;
+        frameSynced.set(false);
+      }
     },
     onpause: () => {
       if (mode.peek() !== 'video') return;
