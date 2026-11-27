@@ -1,4 +1,6 @@
 // @vitest-environment happy-dom
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { boundsFor, placeTip, tooltip } from './tooltip';
 
@@ -304,6 +306,51 @@ describe('tooltip', () => {
     tA.destroy();
     tB.destroy();
     a.remove();
+    b.remove();
+  });
+
+  it('hides the shared tooltip from the accessibility tree and clears stale text on dismissal and unmount', () => {
+    vi.useFakeTimers();
+    const a = document.createElement('button');
+    const b = document.createElement('button');
+    document.body.append(a, b);
+    const tA = tooltip(a, 'Change since the previous epoch.');
+    const tB = tooltip(b, 'Next tip');
+
+    // Hover and show -> visible in a11y tree with its text.
+    a.dispatchEvent(new PointerEvent('pointerenter'));
+    vi.advanceTimersByTime(500);
+    const tip = document.getElementById('folo-tooltip')!;
+    expect(tip.hasAttribute('data-show')).toBe(true);
+    expect(tip.hidden).toBe(false);
+    expect(tip.textContent).toBe('Change since the previous epoch.');
+
+    // Route unmount while hovered (`destroy()`): tooltip is hidden and stale text is cleared.
+    tA.destroy();
+    a.remove();
+    expect(tip.hasAttribute('data-show')).toBe(false);
+    expect(tip.hidden).toBe(true);
+    expect(tip.textContent).toBe('');
+
+    // Re-showing on another anchor restores visibility cleanly, and Escape hides + clears it again.
+    b.dispatchEvent(new PointerEvent('pointerenter'));
+    vi.advanceTimersByTime(500);
+    expect(tip.hasAttribute('data-show')).toBe(true);
+    expect(tip.hidden).toBe(false);
+    expect(tip.textContent).toBe('Next tip');
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    expect(tip.hasAttribute('data-show')).toBe(false);
+    expect(tip.hidden).toBe(true);
+    expect(tip.textContent).toBe('');
+
+    // base.css must keep `.folo-tooltip` at `display: none` when not shown so author CSS never overrides `[popover]:not(:popover-open)`.
+    const baseCss = readFileSync(resolve(import.meta.dirname, '../design/base.css'), 'utf8');
+    const baseRule = baseCss.match(/\.folo-tooltip\s*\{([^}]*)\}/)?.[1] ?? '';
+    const showRule = baseCss.match(/\.folo-tooltip\[data-show\]\s*\{([^}]*)\}/)?.[1] ?? '';
+    expect(baseRule).toMatch(/\bdisplay:\s*none\b/);
+    expect(showRule).toMatch(/\bdisplay:\s*flex\b/);
+
+    tB.destroy();
     b.remove();
   });
 

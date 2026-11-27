@@ -3,7 +3,7 @@
  * view (plus a little overscan) are in the DOM, and `onrange` asks for the items they show. Roving focus: arrows /
  * PageUp / PageDown / Home / End move, Enter or click opens. The tile's content is the caller's (`tile`).
  */
-import { computed, css, effect, For, Index, signal, tick, untrack } from 'fw';
+import { batch, computed, css, effect, For, Index, signal, tick, untrack } from 'fw';
 
 export type Density = 's' | 'm' | 'l';
 
@@ -103,40 +103,54 @@ export default function TileGrid(props: TileGridProps) {
 
   function measure(fromScroll = false) {
     if (!el) return;
+    const nextWidth = el.clientWidth;
     const nextTop = el.getBoundingClientRect().top;
     const nextScrollY = window.scrollY;
-    if (fromScroll) {
-      // Prefer `window.scrollY` delta so layout shifts above the grid don't skew scroll direction; fall back to
-      // grid-top delta for environments where scroll position is simulated via element geometry.
-      const dy = nextScrollY - lastScrollY;
-      const prevTop = top.peek();
-      if (dy > 0 || (dy === 0 && nextTop < prevTop)) {
-        scrollDir.set(1);
-        scrollSeq.set((n) => n + 1);
-      } else if (dy < 0 || (dy === 0 && nextTop > prevTop)) {
-        scrollDir.set(-1);
-        scrollSeq.set((n) => n + 1);
-      }
-    }
-    lastScrollY = nextScrollY;
-    top.set(nextTop);
     const tb = resolveToolbar();
-    head.set(tb ? Math.max(0, tb.getBoundingClientRect().bottom) : 0);
-    vh.set(window.innerHeight);
+    const nextHead = tb ? Math.max(0, tb.getBoundingClientRect().bottom) : 0;
+    const nextVh = window.innerHeight;
+    batch(() => {
+      if (fromScroll) {
+        // Prefer `window.scrollY` delta so layout shifts above the grid don't skew scroll direction; fall back to
+        // grid-top delta for environments where scroll position is simulated via element geometry.
+        const dy = nextScrollY - lastScrollY;
+        const prevTop = top.peek();
+        if (dy > 0 || (dy === 0 && nextTop < prevTop)) {
+          scrollDir.set(1);
+          scrollSeq.set((n) => n + 1);
+        } else if (dy < 0 || (dy === 0 && nextTop > prevTop)) {
+          scrollDir.set(-1);
+          scrollSeq.set((n) => n + 1);
+        }
+      }
+      lastScrollY = nextScrollY;
+      width.set(nextWidth);
+      top.set(nextTop);
+      head.set(nextHead);
+      vh.set(nextVh);
+    });
   }
 
   effect(() => {
     let raf = 0;
     let sawScroll = false;
+    let disposed = false;
     const scheduleMeasure = (isScroll: boolean) => {
+      if (disposed) return;
       const firstScrollInFrame = isScroll && !sawScroll;
       if (isScroll) sawScroll = true;
+      if (typeof requestAnimationFrame === 'undefined') {
+        const scrolled = sawScroll;
+        sawScroll = false;
+        measure(scrolled);
+        return;
+      }
       if (!raf) {
         raf = requestAnimationFrame(() => {
           const scrolled = sawScroll;
           raf = 0;
           sawScroll = false;
-          measure(scrolled);
+          if (!disposed) measure(scrolled);
         });
       }
       // Signal scroll activity before frame N+1's rAF callbacks run (after queueing TileGrid's own measurement rAF)
@@ -145,11 +159,24 @@ export default function TileGrid(props: TileGridProps) {
     };
     const onScroll = () => scheduleMeasure(true);
     const onResize = () => scheduleMeasure(false);
+    // Defer ResizeObserver width updates to the next animation frame: `.grid` derives its own `style:height` from
+    // `width`, so writing `width` synchronously inside a ResizeObserver callback mutates the observed element's
+    // height in the same layout pass and triggers Chromium's "ResizeObserver loop completed with undelivered notifications."
+    const ro =
+      typeof ResizeObserver === 'undefined' || !el
+        ? null
+        : new ResizeObserver(() => {
+            if (el && el.clientWidth !== width.peek()) scheduleMeasure(false);
+          });
     measure(false);
+    if (el) ro?.observe(el);
     window.addEventListener('scroll', onScroll, { passive: true });
     window.addEventListener('resize', onResize);
     return () => {
-      if (raf) cancelAnimationFrame(raf);
+      disposed = true;
+      if (raf && typeof cancelAnimationFrame !== 'undefined') cancelAnimationFrame(raf);
+      raf = 0;
+      ro?.disconnect();
       window.removeEventListener('scroll', onScroll);
       window.removeEventListener('resize', onResize);
     };
@@ -246,7 +273,6 @@ export default function TileGrid(props: TileGridProps) {
     <div
       class={`grid d-${props.density}`}
       ref={(e) => (el = e)}
-      bind:clientWidth={width}
       style:height={`${rows.get() * rowH.get() - (rows.get() ? GAP : 0)}px`}
       role="grid"
       aria-label="Images"
