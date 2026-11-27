@@ -298,11 +298,9 @@ impl FoloApp {
 
         let pred_a = self.play_pred.ready().cloned();
         let pred_b = self.play_compare.pred_b.ready().cloned();
+        let eff_class = self.play_effective_class();
         let vis_a: Option<Vec<crate::api::ScoredBox>> = pred_a.as_ref().map(|p| {
-            super::page::filter_detections(&p.boxes, self.play_conf, self.play_class)
-                .into_iter()
-                .cloned()
-                .collect()
+            super::page::filter_detections(&p.boxes, self.play_conf, eff_class).into_iter().cloned().collect()
         });
         let vis_b: Option<Vec<crate::api::ScoredBox>> =
             pred_b.as_ref().map(|p| self.filter_detections_b(&p.boxes).into_iter().cloned().collect());
@@ -315,6 +313,48 @@ impl FoloApp {
         let refs_b: Option<Vec<&crate::api::ScoredBox>> =
             fresh_b.and(vis_b.as_ref()).map(|v| v.iter().collect());
         let summary = summarize_comparison(refs_a.as_deref(), refs_b.as_deref(), fresh_a, fresh_b);
+
+        let class_scope_bar = eff_class.map(|cid| {
+            let cname = self.play_class_name(cid).unwrap_or_else(|| format!("class {cid}"));
+            let clear = self.button(
+                "play-cmp-class-clear",
+                "Clear",
+                Btn::Secondary,
+                None,
+                window,
+                cx,
+                act(|this, w, cx| {
+                    this.set_play_single_class(None, cx);
+                    this.focus_key("play-boxes", w, cx);
+                }),
+            );
+            div()
+                .px(px(12.))
+                .py(px(6.))
+                .border_b_1()
+                .border_color(t.line_subtle)
+                .bg(t.bg_inset)
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap(px(6.))
+                .child(
+                    div()
+                        .min_w_0()
+                        .flex_1()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .child(class_swatch(t, cid, 8.))
+                        .child(
+                            text(ty::XS, t.text_secondary)
+                                .min_w_0()
+                                .ellipsis()
+                                .child(format!("Class filter: {cname} (A & B by name)")),
+                        ),
+                )
+                .child(clear)
+        });
 
         let tab_idx = match self.play_compare.side_tab {
             CompareSideTab::Summary => 0,
@@ -351,6 +391,9 @@ impl FoloApp {
             }
         };
 
+        if eff_class.is_none() && self.fh("play-cmp-class-clear", cx).is_focused(window) {
+            window.focus(&self.fh("play-boxes", cx));
+        }
         let export_bar = self.play_export_bar(t, window, cx);
         div()
             .flex()
@@ -376,6 +419,7 @@ impl FoloApp {
                     .child(boxes_chip)
                     .child(labels_chip),
             )
+            .children(class_scope_bar)
             .child(export_bar)
             .child(div().px(px(12.)).py(px(8.)).child(tabs))
             .child(body)

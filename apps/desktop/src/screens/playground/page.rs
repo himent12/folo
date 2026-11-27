@@ -41,9 +41,70 @@ pub(crate) fn detections_json(
 }
 
 impl FoloApp {
+    /// Active effective class filter for Model A detections across the stage overlay, detection
+    /// rail, hover indexing, Compare A/B, and exports. When batch mode is active with
+    /// `BatchQaFilter::ByClass(cid)`, that class filter applies uniformly everywhere.
+    pub(crate) fn play_effective_class(&self) -> Option<u32> {
+        if self.play_batch.is_active() {
+            self.play_batch.effective_class(self.play_class)
+        } else {
+            self.play_class
+        }
+    }
+
+    /// True when batch mode has a non-`All` QA filter active that currently matches zero images.
+    pub(crate) fn play_batch_qa_zero_match(&self) -> bool {
+        self.play_batch.is_active()
+            && self.play_batch.qa_filter != super::batch_qa::BatchQaFilter::All
+            && self.play_batch_filtered_indices().is_empty()
+    }
+
+    /// True when batch mode has a non-`All` QA filter active and either zero images match OR the
+    /// currently loaded `play_image` belongs to a batch item outside the filtered set (for example,
+    /// while its matching replacement image is still loading asynchronously or failed to load).
+    pub(crate) fn play_stage_excluded_by_qa(&self) -> bool {
+        if !self.play_batch.is_active() || self.play_batch.qa_filter == super::batch_qa::BatchQaFilter::All {
+            return false;
+        }
+        let filtered = self.play_batch_filtered_indices();
+        if filtered.is_empty() {
+            return true;
+        }
+        match self.play_image.as_ref().and_then(|img| img.batch_ref) {
+            Some((bid, idx)) if bid == self.play_batch.batch_id => !filtered.contains(&idx),
+            _ => false,
+        }
+    }
+
+    /// Resolves the display name of Model A class `cid` from Model A's class list, the current
+    /// prediction, or any fresh batch result (used for Compare A/B cross-model name matching).
+    pub(crate) fn play_class_name(&self, cid: u32) -> Option<String> {
+        self.play_shown_model()
+            .and_then(|m| m.classes.get(cid as usize))
+            .filter(|s| !s.trim().is_empty())
+            .cloned()
+            .or_else(|| {
+                self.play_pred
+                    .ready()
+                    .and_then(|p| p.boxes.iter().find(|b| b.class == cid && !b.name.trim().is_empty()))
+                    .map(|b| b.name.clone())
+            })
+            .or_else(|| {
+                self.play_batch.items.iter().find_map(|item| match &item.status {
+                    super::batch::BatchItemStatus::Done(res) => res
+                        .pred
+                        .boxes
+                        .iter()
+                        .find(|b| b.class == cid && !b.name.trim().is_empty())
+                        .map(|b| b.name.clone()),
+                    _ => None,
+                })
+            })
+    }
+
     /// Boxes of the current prediction that pass the confidence threshold and active class filter.
     pub(crate) fn visible_boxes(&self, p: &PredictResponse, active: Option<usize>) -> Vec<DrawBox> {
-        filter_detections(&p.boxes, self.play_conf, self.play_class)
+        filter_detections(&p.boxes, self.play_conf, self.play_effective_class())
             .into_iter()
             .enumerate()
             .map(|(i, b)| DrawBox {
@@ -188,10 +249,11 @@ impl FoloApp {
     /// While the keyboard is in use the focused row leads (a pointer hover left on another row
     /// doesn't win); otherwise the hover does, as in the inspector.
     pub fn play_active(&self, window: &Window, cx: &mut Context<Self>) -> Option<usize> {
+        let eff_class = self.play_effective_class();
         let n = self
             .play_pred
             .ready()
-            .map_or(0, |p| filter_detections(&p.boxes, self.play_conf, self.play_class).len());
+            .map_or(0, |p| filter_detections(&p.boxes, self.play_conf, eff_class).len());
         let focused = (0..n).find(|i| self.fh(format!("det-{i}"), cx).is_focused(window));
         let hover = self.play_hover.filter(|&i| i < n);
         if self.kb { focused.or(hover) } else { hover.or(focused) }

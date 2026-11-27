@@ -226,18 +226,32 @@ const BLOCKED_PLACEHOLDER_REASON: &str =
 const BLOCKED_COMMA_CLASS_REASON: &str =
     "Selected class contains a comma, which `folo dataset filter` splits into multiple names";
 
+fn cli_source_format(fmt: DatasetFormat) -> Option<&'static str> {
+    match fmt {
+        DatasetFormat::Auto => None,
+        DatasetFormat::Yolo => Some("yolo"),
+        DatasetFormat::Coco => Some("coco"),
+    }
+}
+
 /// Builds a verified, shell-safe `folo dataset` CLI command matching `crates/folo-cli/src/cli/dataset.rs`.
 pub fn build_dataset_cli(ds: &Dataset, state: &DatasetCliState) -> BuiltDatasetCli {
     let mut notes: Vec<String> = Vec::new();
     let (input_arg, mut needs_replace) = quote_or_placeholder(&ds.path, "<dataset>", &mut notes);
+    let src_fmt = cli_source_format(ds.format);
 
     match state.mode {
         DatasetCliMode::Convert => {
             let suffix = state.convert_to.cli_value();
             let (out_arg, out_placeholder) = resolve_output_arg(&ds.path, suffix, &mut notes);
             needs_replace |= out_placeholder;
-            let cmd =
-                format!("folo dataset convert {input_arg} {out_arg} --to {}", state.convert_to.cli_value());
+            let mut parts = vec!["folo dataset convert".to_string(), input_arg, out_arg];
+            if let Some(from) = src_fmt {
+                parts.push("--from".to_string());
+                parts.push(from.to_string());
+            }
+            parts.push("--to".to_string());
+            parts.push(state.convert_to.cli_value().to_string());
             let hint = format!(
                 "Converts {} to {} (images are copied unchanged; output folder must be new or empty).",
                 ds.format.label(),
@@ -245,7 +259,7 @@ pub fn build_dataset_cli(ds: &Dataset, state: &DatasetCliState) -> BuiltDatasetC
             );
             let quote_note = (!notes.is_empty()).then(|| notes.join(" "));
             BuiltDatasetCli {
-                command: cmd,
+                command: parts.join(" "),
                 hint,
                 copy_blocked: needs_replace.then_some(BLOCKED_PLACEHOLDER_REASON),
                 quote_note,
@@ -256,14 +270,13 @@ pub fn build_dataset_cli(ds: &Dataset, state: &DatasetCliState) -> BuiltDatasetC
             let test = SPLIT_TEST_PRESETS[state.split_test_idx.min(SPLIT_TEST_PRESETS.len() - 1)];
             let (out_arg, out_placeholder) = resolve_output_arg(&ds.path, "split", &mut notes);
             needs_replace |= out_placeholder;
-            let mut parts = vec![
-                "folo dataset split".to_string(),
-                input_arg,
-                "--out".to_string(),
-                out_arg,
-                "--val".to_string(),
-                val.to_string(),
-            ];
+            let mut parts = vec!["folo dataset split".to_string(), input_arg, "--out".to_string(), out_arg];
+            if let Some(from) = src_fmt {
+                parts.push("--from".to_string());
+                parts.push(from.to_string());
+            }
+            parts.push("--val".to_string());
+            parts.push(val.to_string());
             if test != "0.0" {
                 parts.push("--test".to_string());
                 parts.push(test.to_string());
@@ -286,6 +299,10 @@ pub fn build_dataset_cli(ds: &Dataset, state: &DatasetCliState) -> BuiltDatasetC
             needs_replace |= out_placeholder;
             let mut comma_block: Option<String> = None;
             let mut parts = vec!["folo dataset filter".to_string(), input_arg, "--out".to_string(), out_arg];
+            if let Some(from) = src_fmt {
+                parts.push("--from".to_string());
+                parts.push(from.to_string());
+            }
             if let Some(sp) = state.filter_split {
                 let s = match sp {
                     Split::Train => "train",
@@ -345,6 +362,10 @@ pub fn build_dataset_cli(ds: &Dataset, state: &DatasetCliState) -> BuiltDatasetC
         }
         DatasetCliMode::DedupCheck => {
             let mut parts = vec!["folo dataset check".to_string(), input_arg];
+            if let Some(fmt) = src_fmt {
+                parts.push("--format".to_string());
+                parts.push(fmt.to_string());
+            }
             if state.check_perceptual {
                 parts.push("--perceptual".to_string());
                 let bits = DHASH_PRESETS[state.check_dhash_idx.min(DHASH_PRESETS.len() - 1)];
@@ -853,15 +874,15 @@ mod tests {
         st.sync_dataset(&ds);
         assert_eq!(st.convert_to, DatasetTargetFormat::Coco);
 
-        // 1. Convert: strips data.yaml to derive sibling output dir and quotes spaces safely.
+        // 1. Convert: strips data.yaml to derive sibling output dir, emits --from yolo, and quotes spaces safely.
         let conv = build_dataset_cli(&ds, &st);
         assert_eq!(
             conv.command,
-            "folo dataset convert \"/data/my shapes/data.yaml\" \"/data/my shapes-coco\" --to coco"
+            "folo dataset convert \"/data/my shapes/data.yaml\" \"/data/my shapes-coco\" --from yolo --to coco"
         );
         assert!(conv.quote_note.is_none());
 
-        // 2. Split: includes --out, --val, optional --test and --to.
+        // 2. Split: includes --out, --from, --val, optional --test and --to.
         st.mode = DatasetCliMode::Split;
         st.split_val_idx = 1; // 0.2
         st.split_test_idx = 1; // 0.1
@@ -869,10 +890,10 @@ mod tests {
         let sp = build_dataset_cli(&ds, &st);
         assert_eq!(
             sp.command,
-            "folo dataset split \"/data/my shapes/data.yaml\" --out \"/data/my shapes-split\" --val 0.2 --test 0.1 --to voc"
+            "folo dataset split \"/data/my shapes/data.yaml\" --out \"/data/my shapes-split\" --from yolo --val 0.2 --test 0.1 --to voc"
         );
 
-        // 3. Filter: uses exact verified flags --split, --include-class, --min-box-area, --drop-empty-images.
+        // 3. Filter: uses exact verified flags --from, --split, --include-class, --min-box-area, --drop-empty-images.
         st.mode = DatasetCliMode::Filter;
         st.filter_split = Some(Split::Train);
         st.filter_class_mode = FilterClassMode::Include;
@@ -882,10 +903,10 @@ mod tests {
         let flt = build_dataset_cli(&ds, &st);
         assert_eq!(
             flt.command,
-            "folo dataset filter \"/data/my shapes/data.yaml\" --out \"/data/my shapes-filtered\" --split train --include-class \"stop sign\" --min-box-area 0.0025 --drop-empty-images"
+            "folo dataset filter \"/data/my shapes/data.yaml\" --out \"/data/my shapes-filtered\" --from yolo --split train --include-class \"stop sign\" --min-box-area 0.0025 --drop-empty-images"
         );
 
-        // 4. Dedup check: uses real `folo dataset check --perceptual [--dhash-threshold] [--fix-dry-run]`.
+        // 4. Dedup check: uses real `folo dataset check --format <fmt> --perceptual [--dhash-threshold] [--fix-dry-run]`.
         st.mode = DatasetCliMode::DedupCheck;
         st.check_perceptual = true;
         st.check_dhash_idx = 0; // 4 bits (non-default -> emitted)
@@ -893,8 +914,16 @@ mod tests {
         let chk = build_dataset_cli(&ds, &st);
         assert_eq!(
             chk.command,
+            "folo dataset check \"/data/my shapes/data.yaml\" --format yolo --perceptual --dhash-threshold 4 --fix-dry-run"
+        );
+
+        // 4b. Auto format omits explicit --from / --format flags.
+        ds.format = DatasetFormat::Auto;
+        assert_eq!(
+            build_dataset_cli(&ds, &st).command,
             "folo dataset check \"/data/my shapes/data.yaml\" --perceptual --dhash-threshold 4 --fix-dry-run"
         );
+        ds.format = DatasetFormat::Yolo;
 
         // 5a. Leading '<' path never bypasses quote_path (safely quoted instead of raw shell redirection).
         ds.path = "<bad;id>/data.yaml".into();
@@ -902,25 +931,25 @@ mod tests {
         let angle_cmd = build_dataset_cli(&ds, &st);
         assert_eq!(
             angle_cmd.command,
-            "folo dataset convert \"<bad;id>/data.yaml\" \"<bad;id>-coco\" --to coco"
+            "folo dataset convert \"<bad;id>/data.yaml\" \"<bad;id>-coco\" --from yolo --to coco"
         );
         assert!(angle_cmd.copy_blocked.is_none());
 
         // 5b. Unquotable shell-unsafe path falls back to placeholders and blocks clipboard copying.
         ds.path = "/data/bad`$(rm -rf)/data.yaml".into();
         let unsafe_cmd = build_dataset_cli(&ds, &st);
-        assert_eq!(unsafe_cmd.command, "folo dataset convert <dataset> <output> --to coco");
+        assert_eq!(unsafe_cmd.command, "folo dataset convert <dataset> <output> --from yolo --to coco");
         assert!(unsafe_cmd.quote_note.is_some());
         assert!(unsafe_cmd.copy_blocked.is_some());
 
-        // 6. Standard COCO manifest under `annotations/` derives sibling of the dataset root.
+        // 6. Standard COCO manifest under `annotations/` derives sibling of the dataset root and emits --from coco.
         ds.path = "/data/coco/annotations/instances_train.json".into();
         ds.format = DatasetFormat::Coco;
         st.convert_to = DatasetTargetFormat::Yolo;
         let coco_conv = build_dataset_cli(&ds, &st);
         assert_eq!(
             coco_conv.command,
-            "folo dataset convert /data/coco/annotations/instances_train.json /data/coco-yolo --to yolo"
+            "folo dataset convert /data/coco/annotations/instances_train.json /data/coco-yolo --from coco --to yolo"
         );
         assert!(coco_conv.copy_blocked.is_none());
 

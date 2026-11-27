@@ -424,12 +424,13 @@ impl FoloApp {
         let running = self.play_batch.running;
         let model_id = self.play_model.clone();
         let e2e = self.play_shown_model().is_some_and(|m| self.model_e2e(m));
+        let eff_class = self.play_batch.effective_class(self.play_class);
         let summary = self.play_batch.summary(
             model_id.as_deref(),
             self.play_iou,
             self.play_target,
             self.play_conf,
-            self.play_class,
+            eff_class,
             e2e,
         );
 
@@ -567,15 +568,18 @@ impl FoloApp {
         let qa_filter_row = self.play_batch_qa_filter_row(t, &qa_counts, window, cx);
         let filter_active = self.play_batch.qa_filter != super::batch_qa::BatchQaFilter::All;
         let counter_label = if filter_active {
-            match filtered.iter().position(|&i| i == active) {
-                Some(pos) => format!("{} / {} ({total} total)", pos + 1, filtered.len()),
-                None => format!("{} / {total} · {} match", active + 1, filtered.len()),
+            if filtered.is_empty() {
+                format!("0 / 0 ({total} total)")
+            } else {
+                match filtered.iter().position(|&i| i == active) {
+                    Some(pos) => format!("{} / {} ({total} total)", pos + 1, filtered.len()),
+                    None => format!("{} / {total} · {} match", active + 1, filtered.len()),
+                }
             }
         } else {
             format!("{} / {total}", active + 1)
         };
 
-        let eff_class = self.play_batch.effective_class(self.play_class);
         if !filtered.is_empty() && self.fh("play-batch-qa-reset", cx).is_focused(window) {
             window.focus(&self.fh("play-batch-qa-all", cx));
         }

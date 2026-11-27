@@ -142,6 +142,9 @@ impl FoloApp {
     /// guarding unsaved edits via `PendingImageSwitch` and giving clear status feedback when all
     /// images are already labeled.
     pub fn request_jump_next_unlabeled(&mut self, job_id: &str, cx: &mut Context<Self>) {
+        if self.label.mutating {
+            return;
+        }
         let Some(all) = self.label.images.get(job_id).and_then(|l| l.ready()).cloned() else {
             return;
         };

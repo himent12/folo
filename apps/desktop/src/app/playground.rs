@@ -402,8 +402,14 @@ impl FoloApp {
         self.play_hover_from_stage = false;
     }
 
-    /// Sets the Playground threshold, cancelling in-flight batch runs and refetching when it drops
-    /// below what was fetched (filtering is local only above that floor).
+    /// True while a Playground image (single file, dataset sample, or batch item) is decoding/loading.
+    pub(crate) fn is_play_image_loading(&self) -> bool {
+        self.play_loading.is_some()
+    }
+
+    /// Sets the Playground threshold, cancelling in-flight batch runs, reconciling the staged batch
+    /// frame against any active QA filter, and refetching when it drops below what was fetched
+    /// (filtering is local only above that floor).
     pub fn set_play_conf(&mut self, conf: f32, cx: &mut Context<Self>) {
         let changed = (self.play_conf - conf).abs() > f32::EPSILON;
         self.play_conf = conf;
@@ -413,11 +419,14 @@ impl FoloApp {
         }
         self.clear_play_hover();
         self.play_compare.clear_hover();
-        if conf < self.play_fetched_floor - 1e-6 {
-            self.run_predict(cx);
-        }
-        if self.play_compare.enabled && conf < self.play_compare.fetched_floor_b - 1e-6 {
-            self.run_predict_b(cx);
+        let switched = changed && self.reconcile_play_batch_active(cx);
+        if !switched {
+            if conf < self.play_fetched_floor - 1e-6 {
+                self.run_predict(cx);
+            }
+            if self.play_compare.enabled && conf < self.play_compare.fetched_floor_b - 1e-6 {
+                self.run_predict_b(cx);
+            }
         }
     }
 
@@ -433,9 +442,11 @@ impl FoloApp {
         if !e2e {
             self.play_batch.invalidate_mismatched_iou(self.play_iou);
         }
-        self.run_predict(cx);
-        if self.play_compare.enabled {
-            self.run_predict_b(cx);
+        if !self.reconcile_play_batch_active(cx) {
+            self.run_predict(cx);
+            if self.play_compare.enabled {
+                self.run_predict_b(cx);
+            }
         }
     }
 
@@ -482,7 +493,10 @@ impl FoloApp {
                 Some(t) => crate::local::predict(api, &req, t, generation, &ticket),
                 None => api.predict(&req),
             },
-            move |this, r, _| this.play_pred_answered_with_meta(seq, key, Some(meta), r),
+            move |this, r, cx| {
+                this.play_pred_answered_with_meta(seq, key, Some(meta), r);
+                this.reconcile_play_batch_active(cx);
+            },
         );
     }
 
