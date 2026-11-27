@@ -113,9 +113,9 @@ pub fn convert(ds: &LoadedDataset, out: &Path, to: Format) -> Result<Converted> 
                 let lbl_dir = out.join("labels").join(split.as_str());
                 mkdir(&lbl_dir)?;
                 d.entries().par_iter().zip(&names).try_for_each(|(e, name)| {
-                    let mut text = String::with_capacity(e.boxes.len() * 40);
+                    let mut text = String::with_capacity(e.boxes.len() * 48);
                     for b in &e.boxes {
-                        let _ = writeln!(text, "{} {:.6} {:.6} {:.6} {:.6}", b.class, b.cx, b.cy, b.w, b.h);
+                        let _ = writeln!(text, "{} {} {} {} {}", b.class, b.cx, b.cy, b.w, b.h);
                     }
                     let p = lbl_dir.join(Path::new(name).with_extension("txt"));
                     std::fs::write(&p, text).map_err(|e| DataError::io(&p, e))
@@ -184,7 +184,7 @@ pub fn convert(ds: &LoadedDataset, out: &Path, to: Format) -> Result<Converted> 
     Ok(Converted { root: out.to_path_buf(), format: to, splits, boxes })
 }
 
-fn mkdir(p: &Path) -> Result<()> {
+pub(crate) fn mkdir(p: &Path) -> Result<()> {
     std::fs::create_dir_all(p).map_err(|e| DataError::io(p, e))
 }
 

@@ -379,10 +379,27 @@ impl LoadedDataset {
         crate::audit::audit_dataset(self)
     }
 
+    /// Audits this dataset with custom [`crate::audit::AuditOptions`], including optional 64-bit `dHash`
+    /// perceptual near-duplicate and cross-split leakage detection. See [`crate::audit::audit_dataset_with`].
+    pub fn audit_with(&self, opts: &crate::audit::AuditOptions) -> crate::audit::AuditReport {
+        crate::audit::audit_dataset_with(self, opts)
+    }
+
     /// Re-splits this dataset into deterministic multi-label stratified `train` / `val` / `test` splits.
     /// See [`crate::split::split_dataset`].
     pub fn split_stratified(&self, config: &crate::split::SplitConfig) -> Result<LoadedDataset> {
         crate::split::split_dataset(self, config)
+    }
+
+    /// Remaps, unifies, or drops classes on this dataset. See [`crate::curate::remap_classes`].
+    pub fn remap_classes(&self, config: &crate::curate::RemapConfig) -> Result<LoadedDataset> {
+        crate::curate::remap_classes(self, config)
+    }
+
+    /// Filters this dataset into a subset by class, split, box area/size, or image dimensions.
+    /// See [`crate::curate::filter_dataset`].
+    pub fn filter(&self, config: &crate::curate::FilterConfig) -> Result<LoadedDataset> {
+        crate::curate::filter_dataset(self, config)
     }
 }
 

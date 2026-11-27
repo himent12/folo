@@ -24,9 +24,10 @@ the determinism rules.
 | `src/loader.rs` | `DataLoader`: worker threads, batches identical for a seed and epoch whatever the worker count |
 | `src/ram_cache.rs` | `--cache ram`: decoded, resized training images kept in memory |
 | `src/synthetic/` | `mod.rs` (the shapes generator, `write_yolo`, `SyntheticDataset`), `raster.rs` (rasteriser, backgrounds), `math.rs` (sine, cosine and powers of two from basic operations), `tests.rs` (golden digests) |
-| `src/audit.rs` | `LoadedDataset::audit()` / `audit_dataset`: streaming 128-bit content-hash duplicate and cross-split (`train`↔`val`/`test`) leakage audit |
+| `src/audit.rs` | `LoadedDataset::audit()` / `audit_dataset` / `audit_dataset_with`: streaming 128-bit content-hash duplicate and cross-split (`train`↔`val`/`test`) leakage audit plus optional 64-bit `dHash` perceptual near-duplicate detection (`dhash_image`, `dhash_file`, `hamming_distance`) |
 | `src/check.rs` | `folo dataset check`: one `CheckIssue` per problem (including cross-split leakage and VOC diagnostics) |
 | `src/convert.rs` | `convert::convert`: writes an opened dataset as YOLO, COCO, or Pascal VOC (CLI `folo dataset convert` targets YOLO / COCO) |
+| `src/curate/` | `mod.rs` (`remap_classes`, `filter_dataset`, `write_filtered`) and `merge.rs` (`merge_datasets`, `write_merged`, `merge_paths`): multi-dataset merging (YOLO / COCO / VOC -> YOLO) with class unification/remapping and collision-safe exclusive writes, plus subset filtering |
 | `src/split.rs` | `split_dataset`, `split_indices`, `write_split`: seeded multi-label stratified `train`/`val`/`test` splitting |
 | `src/unfinished.rs` | The `.folo-unfinished` marker: `claim`, every writer's first step, makes it in an empty folder; readers refuse it |
 | `src/pack.rs` | A dataset as one tar stream in the canonical YOLO layout, for another FOLO server |
@@ -37,7 +38,7 @@ the determinism rules.
 | `src/paths.rs` | Path helpers shared by `folo dataset check --json` and the server |
 | `src/rng.rs` | xoshiro256++ seeded through SplitMix64 |
 | `src/error.rs` | `DataError` and `Result` |
-| `tests/` | `formats.rs` (YOLO / COCO parsing, detection, EXIF), `voc_split_audit.rs` (Pascal VOC XML, stratified splitting, duplicate & leakage audit), `augment.rs` (boxes stay on their pixels), `loader.rs` (determinism, shutdown), `golden.rs` (digests of the loader's batches, bit for bit), `pack.rs`, `synthetic.rs`, `tools.rs` (check and convert), `unfinished.rs` (`.folo-unfinished` marker claim and refusal), `guard.rs` (its own binary: a guard stays installed for the process), `fixtures/jpeg/` (JPEG decoder parity fixtures embedded by `src/image.rs` unit tests), `common/` (helpers) |
+| `tests/` | `formats.rs` (YOLO / COCO parsing, detection, EXIF), `voc_split_audit.rs` (Pascal VOC XML, stratified splitting, duplicate & leakage audit), `curate_and_dhash.rs` (multi-dataset merge, class remap, subset filter, perceptual `dHash` near-duplicate leakage), `augment.rs` (boxes stay on their pixels), `loader.rs` (determinism, shutdown), `golden.rs` (digests of the loader's batches, bit for bit), `pack.rs`, `synthetic.rs`, `tools.rs` (check and convert), `unfinished.rs` (`.folo-unfinished` marker claim and refusal), `guard.rs` (its own binary: a guard stays installed for the process), `fixtures/jpeg/` (JPEG decoder parity fixtures embedded by `src/image.rs` unit tests), `common/` (helpers) |
 | `benches/pipeline.rs` | Stage timings and `DataLoader` images/s |
 | `examples/` | `shapes.rs` (the MODEL.md §10.6 shapes dataset), `synth_sheet.rs` (a contact sheet of synthetic images), `aug_stats.rs` (statistics of the training transform's output), `open_time.rs` (times opening a dataset), `loader_profile.rs` (time and allocations of each stage of a training sample) |
 
