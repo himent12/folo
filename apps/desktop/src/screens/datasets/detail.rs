@@ -486,6 +486,7 @@ impl FoloApp {
                 this.ds_hover_tile = None;
             }),
         );
+        let quick_pills = self.dataset_balance_quick_pills(&ds, window, cx);
         let content = match self.ds_tab {
             DsTab::Images => self.image_browser(&ds, window, cx),
             DsTab::Statistics => self.dataset_stats(&ds, &health, window, cx),
@@ -501,7 +502,9 @@ impl FoloApp {
             // ends above it, so a focused bottom row is never under it.
             .pb(px(if self.kb { 48. } else { 16. }))
             .child(header)
-            .child(div().flex().child(tabs))
+            .child(
+                div().flex().items_center().justify_between().gap(px(12.)).child(tabs).children(quick_pills),
+            )
             .child(div().flex_1().min_h_0().flex().flex_col().child(content))
             .into_any_element()
     }

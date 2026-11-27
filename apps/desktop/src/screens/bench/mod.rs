@@ -19,3 +19,4 @@ mod page;
 mod plan;
 
 pub use error_analysis::{EntryImageFilter, EntryImageOrder, entry_image_matches_filter};
+pub(crate) use error_analysis::{MATCH_IOU_THRESHOLD, box_iou};

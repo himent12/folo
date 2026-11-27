@@ -287,11 +287,12 @@ impl FoloApp {
                 ),
             )));
 
+        let export_cli = self.export_cli_panel(&m, window, cx);
         let body = match self.store.evals.get(id) {
             Some(Load::Ready(ev)) => {
                 let ev = ev.clone();
                 // The precision-recall panel (the plot and its class table), the confusion matrix and
-                // its lists, then the Details: each a full-width panel.
+                // its lists, then the Details and Export & CLI builder: each a full-width panel.
                 let pr = self.pr_panel(&m, &ev, window, cx);
                 let cm = self.confusion_panel(&m, &ev, window, cx);
                 let details = self.details_panel(&m, Some(&ev), window, cx);
@@ -303,6 +304,7 @@ impl FoloApp {
                     .child(div().flex().child(pr))
                     .child(div().flex().child(cm))
                     .child(details)
+                    .child(export_cli)
                     .into_any_element()
             }
             Some(Load::Failed(e)) if e.code == "not_supported" => {
@@ -321,6 +323,7 @@ impl FoloApp {
                         Tone::Neutral,
                     )))
                     .child(details)
+                    .child(export_cli)
                     .into_any_element()
             }
             Some(Load::Failed(e)) => {
@@ -333,6 +336,7 @@ impl FoloApp {
                     .child(kpis)
                     .child(self.error_panel(&e, "eval-retry", window, cx))
                     .child(details)
+                    .child(export_cli)
                     .into_any_element()
             }
             _ => {
@@ -344,6 +348,7 @@ impl FoloApp {
                     .child(kpis)
                     .child(div().h(px(360.)).child(skeleton(&t, "eval")))
                     .child(details)
+                    .child(export_cli)
                     .into_any_element()
             }
         };

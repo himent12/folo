@@ -140,6 +140,36 @@ impl Backend for HttpBackend {
         self.post(&format!("/models/{}/export", seg(id)), &folo_api::ExportRequest { format })
     }
 
+    fn export_model_with_options(&self, id: &str, opts: ModelExportOptions) -> ApiResult<ExportResult> {
+        if opts.format != "onnx" {
+            return self.export_model(id, opts.format);
+        }
+        #[derive(Serialize)]
+        struct OnnxExportBody {
+            format: folo_api::ExportFormat,
+            #[serde(skip_serializing_if = "std::ops::Not::not")]
+            decode: bool,
+            #[serde(skip_serializing_if = "std::ops::Not::not")]
+            dynamic: bool,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            dynamic_batch: Option<bool>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            dynamic_hw: Option<bool>,
+            #[serde(skip_serializing_if = "std::ops::Not::not")]
+            half: bool,
+        }
+        let both_dynamic = opts.dynamic_batch && opts.dynamic_hw;
+        let body = OnnxExportBody {
+            format: folo_api::ExportFormat::Onnx,
+            decode: opts.decode,
+            dynamic: both_dynamic,
+            dynamic_batch: (!both_dynamic && opts.dynamic_batch).then_some(true),
+            dynamic_hw: (!both_dynamic && opts.dynamic_hw).then_some(true),
+            half: opts.half,
+        };
+        self.post(&format!("/models/{}/export", seg(id)), &body)
+    }
+
     fn is_remote(&self) -> bool {
         self.not_an_address.is_none() && !is_loopback(&self.base)
     }
@@ -150,6 +180,30 @@ impl Backend for HttpBackend {
         }
         let q = if format == "onnx" { "onnx" } else { "f16" };
         Some(self.url(&format!("/models/{}/weights?format={q}", seg(id))))
+    }
+
+    fn export_download_url_with_options(&self, id: &str, opts: ModelExportOptions) -> Option<String> {
+        if self.not_an_address.is_some() {
+            return None;
+        }
+        if opts.format != "onnx" {
+            return self.export_download_url(id, opts.format);
+        }
+        // `GET /api/models/{id}/weights?format=onnx` only supports uniform `dynamic=true` (both axes).
+        if opts.dynamic_batch != opts.dynamic_hw {
+            return None;
+        }
+        let mut url = self.url(&format!("/models/{}/weights?format=onnx", seg(id)));
+        if opts.decode {
+            url.push_str("&decode=true");
+        }
+        if opts.dynamic_batch && opts.dynamic_hw {
+            url.push_str("&dynamic=true");
+        }
+        if opts.half {
+            url.push_str("&half=true");
+        }
+        Some(url)
     }
 
     fn runs(&self) -> ApiResult<Vec<Run>> {

@@ -65,6 +65,8 @@ mod select_driving;
 #[cfg(test)]
 mod select_tests;
 mod sidebar;
+#[cfg(test)]
+mod sprint14_tests;
 mod start_from;
 #[cfg(test)]
 pub(crate) mod tests;
@@ -406,6 +408,9 @@ pub struct FoloApp {
     pub sample_view: SampleView,
     /// The validation samples' minimum confidence for a prediction to be drawn.
     pub sample_conf: f32,
+    /// Error-explorer filter pill and sort order on a run's Validation samples panel.
+    pub sample_error_filter: crate::screens::runs::SampleErrorFilter,
+    pub sample_sort: crate::screens::runs::SampleSort,
     pub log_filter: LogFilter,
     /// Live search input for a run's Logs panel.
     pub log_search: Entity<TextInput>,
@@ -445,6 +450,8 @@ pub struct FoloApp {
     pub export_open: bool,
     /// In-flight model exports `(model_id, format)` so triggers show progress and block duplicates.
     pub exporting: std::collections::HashSet<(String, &'static str)>,
+    /// Model Detail interactive Export & Inference CLI command builder state.
+    pub model_cli: crate::screens::models::ModelCliState,
     pub pr_hover: Option<f32>,
     /// The class isolated on the PR chart (hovered or focused in the per-class table).
     pub pr_focus: Option<u32>,
@@ -803,6 +810,8 @@ impl FoloApp {
             // Every prediction the server keeps for a sample (docs/API.md: score >= 0.25), the slider's
             // floor, as Studio starts (it started at 0.3 here, so Desktop drew fewer boxes than Studio).
             sample_conf: crate::screens::runs::SAMPLE_CONF.0,
+            sample_error_filter: crate::screens::runs::SampleErrorFilter::All,
+            sample_sort: crate::screens::runs::SampleSort::Default,
             log_filter: LogFilter::All,
             log_search,
             log_cache: crate::screens::runs::LogFilterCache::default(),
@@ -824,6 +833,7 @@ impl FoloApp {
             model_classes_expanded: Default::default(),
             export_open: false,
             exporting: Default::default(),
+            model_cli: Default::default(),
             pr_hover: None,
             pr_focus: None,
             pr_pin: None,

@@ -94,6 +94,22 @@ pub struct PredictRequest {
     pub max_det: u32,
 }
 
+/// Options for `POST /api/models/{id}/export` (`folo-f16` or `onnx` with ONNX switches).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ModelExportOptions {
+    pub format: &'static str,
+    pub decode: bool,
+    pub dynamic_batch: bool,
+    pub dynamic_hw: bool,
+    pub half: bool,
+}
+
+impl ModelExportOptions {
+    pub fn plain(format: &'static str) -> Self {
+        Self { format, decode: false, dynamic_batch: false, dynamic_hw: false, half: false }
+    }
+}
+
 pub trait Backend: Send + Sync + 'static {
     /// Where the data comes from, for the status bar ("Mock data", "127.0.0.1:7878").
     fn describe(&self) -> String;
@@ -112,6 +128,10 @@ pub trait Backend: Send + Sync + 'static {
     fn models(&self) -> ApiResult<Vec<Model>>;
     fn model_eval(&self, id: &str) -> ApiResult<ModelEval>;
     fn export_model(&self, id: &str, format: &str) -> ApiResult<ExportResult>;
+    /// Exports a model with optional ONNX switches (`decode`, `dynamic_batch`, `dynamic_hw`, `half`).
+    fn export_model_with_options(&self, id: &str, opts: ModelExportOptions) -> ApiResult<ExportResult> {
+        self.export_model(id, opts.format)
+    }
     /// Whether this backend talks to a server on another machine (its filesystem paths are not local).
     fn is_remote(&self) -> bool {
         false
@@ -119,6 +139,10 @@ pub trait Backend: Send + Sync + 'static {
     /// HTTP download URL for an exported model (`GET /api/models/{id}/weights?format=f16|onnx`).
     fn export_download_url(&self, _id: &str, _format: &str) -> Option<String> {
         None
+    }
+    /// HTTP download URL for an exported model with matching ONNX query flags when supported.
+    fn export_download_url_with_options(&self, id: &str, opts: ModelExportOptions) -> Option<String> {
+        self.export_download_url(id, opts.format)
     }
 
     fn runs(&self) -> ApiResult<Vec<Run>>;
