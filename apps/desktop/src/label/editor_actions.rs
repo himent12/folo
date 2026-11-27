@@ -47,7 +47,7 @@ impl FoloApp {
 
     /// Resolves the currently active image id in `job_id`'s review workspace (keeping a dirty image
     /// active even if a concurrent SSE update moved it outside the current filter).
-    fn active_label_image_id(&self, job_id: &str) -> Option<String> {
+    pub(super) fn active_label_image_id(&self, job_id: &str) -> Option<String> {
         if self.label.editor.is_dirty()
             && self.label.editor.job_id.as_deref() == Some(job_id)
             && let Some(dirty_id) = self.label.editor.image_id.as_deref()
@@ -69,7 +69,8 @@ impl FoloApp {
     }
 
     /// Handles Ctrl-modified review shortcuts (`Ctrl+Z` undo, `Ctrl+Shift+Z` / `Ctrl+Y` redo,
-    /// `Ctrl+S` save edits) while `Route::LabelJob(job_id)` is open and no modal/form is active.
+    /// `Ctrl+S` save edits, `Ctrl+D` duplicate selected box) while `Route::LabelJob(job_id)` is
+    /// open and no modal/form is active.
     pub(crate) fn handle_label_review_shortcut(
         &mut self,
         job_id: &str,
@@ -98,6 +99,12 @@ impl FoloApp {
                 }
                 true
             }
+            ("d" | "D", false) => {
+                if self.label.selected_box.as_ref().is_some_and(|s| s.image_id == active_id) {
+                    self.duplicate_selected_label_box(job_id, &active_id, cx);
+                }
+                true
+            }
             _ => false,
         }
     }
@@ -121,6 +128,8 @@ impl FoloApp {
         match key {
             "left" => self.request_step_label_image(job_id, -1, cx),
             "right" | "s" | "S" => self.request_step_label_image(job_id, 1, cx),
+            "u" | "U" => self.request_jump_next_unlabeled(job_id, cx),
+            "p" | "P" => self.copy_prev_frame_label_boxes(job_id, &active_id, cx),
             "a" | "A" => self.approve_label_image(job_id, &active_id, true, cx),
             "d" | "D" => {
                 self.label.editor.cancel_draw();
@@ -262,6 +271,9 @@ impl FoloApp {
     ) {
         match switch {
             PendingImageSwitch::SelectImage(id) => self.select_label_image(id, cx),
+            PendingImageSwitch::JumpToImage { image_id, clear_filters } => {
+                self.jump_to_label_image(job_id, image_id, clear_filters, cx)
+            }
             PendingImageSwitch::Step(delta) => self.step_label_image(job_id, delta, cx),
             PendingImageSwitch::SetFilter(f) => {
                 self.label.img_filter = f;

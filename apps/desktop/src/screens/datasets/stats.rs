@@ -215,7 +215,8 @@ impl FoloApp {
                                 }),
                             ))
                             .child(self.dataset_balance_strip(&t, ds, &s, window, cx))
-                            .child(class_rows),
+                            .child(class_rows)
+                            .child(self.dataset_report_export_footer(ds, window, cx)),
                     )
                     .child(
                         div()
@@ -254,7 +255,8 @@ impl FoloApp {
                                         cx,
                                     )),
                             ),
-                    ),
+                    )
+                    .child(self.dataset_curate_cli_panel(ds, window, cx)),
             )
             .into_any_element()
     }

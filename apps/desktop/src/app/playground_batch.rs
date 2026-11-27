@@ -420,15 +420,32 @@ impl FoloApp {
         cx.notify();
     }
 
-    /// Steps backward (`delta = -1`) or forward (`delta = +1`) through the batch filmstrip (wrapping).
-    pub fn step_play_batch(&mut self, delta: i32, cx: &mut Context<Self>) {
-        let len = self.play_batch.items.len();
-        if len < 2 {
+    /// Sets the active Batch QA filter and jumps to the first matching image when the currently
+    /// active item falls outside the filtered set.
+    pub fn set_play_batch_qa_filter(
+        &mut self,
+        filter: crate::screens::playground::BatchQaFilter,
+        cx: &mut Context<Self>,
+    ) {
+        self.play_batch.qa_filter = filter;
+        let filtered = self.play_batch_filtered_indices();
+        if !filtered.is_empty() && !filtered.contains(&self.play_batch.active) {
+            self.select_play_batch_item(filtered[0], cx);
             return;
         }
-        let cur = self.play_batch.active.min(len - 1) as i32;
-        let next = (cur + delta).rem_euclid(len as i32) as usize;
-        self.select_play_batch_item(next, cx);
+        cx.notify();
+    }
+
+    /// Steps backward (`delta = -1`) or forward (`delta = +1`) through the filtered batch filmstrip
+    /// (wrapping within the active QA filter).
+    pub fn step_play_batch(&mut self, delta: i32, cx: &mut Context<Self>) {
+        if self.play_batch.items.len() < 2 {
+            return;
+        }
+        let filtered = self.play_batch_filtered_indices();
+        if let Some(next) = self.play_batch.next_filtered_index(&filtered, delta) {
+            self.select_play_batch_item(next, cx);
+        }
     }
 
     /// Loads the currently active batch item onto the Playground stage (reusing its cached fresh
@@ -861,6 +878,20 @@ impl FoloApp {
             return;
         };
         self.save_batch_export_file("Batch CSV", csv.into_bytes(), suggested, summary, cx);
+    }
+
+    /// Prompts for a save path and writes the filtered per-image Batch Summary CSV off the UI thread.
+    pub fn export_play_batch_summary_csv(&mut self, cx: &mut Context<Self>) {
+        let Some((csv, suggested, summary)) = self.build_play_batch_summary_csv() else {
+            self.toast(
+                Tone::Neutral,
+                "Nothing to export",
+                Some("No batch images match the active QA filter.".into()),
+                cx,
+            );
+            return;
+        };
+        self.save_batch_export_file("Batch Summary CSV", csv.into_bytes(), suggested, summary, cx);
     }
 
     fn save_batch_export_file(

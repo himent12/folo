@@ -67,6 +67,8 @@ mod select_tests;
 mod sidebar;
 #[cfg(test)]
 mod sprint14_tests;
+#[cfg(test)]
+mod sprint16_tests;
 mod start_from;
 #[cfg(test)]
 pub(crate) mod tests;
@@ -390,6 +392,8 @@ pub struct FoloApp {
     pub ds_hover_tile: Option<String>,
     /// Filtered and sorted image indices cached for the dataset grid.
     pub ds_filter_cache: RefCell<Option<crate::screens::datasets::DatasetFilterCache>>,
+    /// Dataset Detail verified Curate / Convert CLI command builder state.
+    pub ds_cli: crate::screens::datasets::DatasetCliState,
     pub grid_scroll: folo_ui::UniformListScrollHandle,
     pub ds_scroll_anchor: Option<data::DatasetScrollAnchor>,
     pub grid_width: Rc<std::cell::Cell<Pixels>>,
@@ -804,6 +808,7 @@ impl FoloApp {
             ds_tile: 168.,
             ds_hover_tile: None,
             ds_filter_cache: RefCell::new(None),
+            ds_cli: Default::default(),
             grid_scroll: folo_ui::UniformListScrollHandle::new(),
             ds_scroll_anchor: None,
             grid_width: Rc::new(std::cell::Cell::new(px(900.))),

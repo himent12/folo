@@ -46,6 +46,7 @@ pub struct BoxDraft {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum PendingImageSwitch {
     SelectImage(String),
+    JumpToImage { image_id: String, clear_filters: bool },
     Step(i32),
     SetFilter(LabelImageFilter),
     SetClassFilter(Option<u32>),
@@ -297,6 +298,25 @@ impl LabelEditor {
         let idx = next.len() - 1;
         self.push_edit(next);
         idx
+    }
+
+    /// Appends `boxes` to `draft` as one atomic undo step and returns how many were added.
+    pub fn add_boxes_atomic(&mut self, boxes: Vec<BBox>) -> usize {
+        if boxes.is_empty() {
+            return 0;
+        }
+        let added = boxes.len();
+        let mut next = self.draft.clone();
+        next.extend(boxes);
+        if self.push_edit(next) { added } else { 0 }
+    }
+
+    /// Duplicates `draft[index]` with smart edge-aware offset, pushing one undo step and returning
+    /// the newly appended box's index.
+    pub fn duplicate_box(&mut self, index: usize, img_w: f32, img_h: f32) -> Option<usize> {
+        let orig = *self.draft.get(index)?;
+        let dup = super::sequence::duplicate_box_coords(orig, img_w, img_h)?;
+        Some(self.add_box(dup))
     }
 
     /// Updates `draft[index].class = class`. Returns `true` if the class actually changed.

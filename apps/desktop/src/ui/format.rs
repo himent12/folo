@@ -321,6 +321,37 @@ fn score_decimals(top: f32) -> usize {
     if top > 0. { ((-(top as f64).log10() - 1e-6).ceil() + 1.).clamp(3., 5.) as usize } else { 3 }
 }
 
+/// Appends one RFC 4180 CSV field to `out`, quoting whenever the value contains `,`, `"`, `\n`, or `\r`.
+pub fn push_csv_field(out: &mut String, field: &str) {
+    if field.contains([',', '"', '\n', '\r']) {
+        out.push('"');
+        for ch in field.chars() {
+            if ch == '"' {
+                out.push('"');
+            }
+            out.push(ch);
+        }
+        out.push('"');
+    } else {
+        out.push_str(field);
+    }
+}
+
+/// Neutralizes leading characters that spreadsheet apps can interpret as formulas (`=`, `+`, `-`,
+/// `@`, `\t`, `\r`, or whitespace followed by a formula trigger) before RFC 4180 CSV serialization.
+pub fn push_csv_safe_text(out: &mut String, field: &str) {
+    let needs_prefix = field.starts_with(['=', '+', '-', '@', '\t', '\r'])
+        || field.trim_start().starts_with(['=', '+', '-', '@']);
+    if needs_prefix {
+        let mut safe = String::with_capacity(field.len() + 1);
+        safe.push('\'');
+        safe.push_str(field);
+        push_csv_field(out, &safe);
+    } else {
+        push_csv_field(out, field);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

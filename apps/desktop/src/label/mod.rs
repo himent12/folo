@@ -7,6 +7,7 @@ mod editor_actions;
 mod editor_geom;
 mod forms;
 mod load;
+mod sequence;
 mod state;
 mod stream;
 
@@ -21,4 +22,5 @@ pub use editor_geom::{TransformKind, handle_points, hit_resize_handle};
 pub(crate) use load::merge_log_lines;
 #[cfg(test)]
 pub use load::route_label;
+pub use sequence::previous_labeled_frame;
 pub use state::{LabelImageFilter, LabelJobFilter, LabelState, SelectedBox};
