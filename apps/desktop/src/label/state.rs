@@ -128,6 +128,8 @@ pub struct LabelState {
     pub review_error: Option<ApiError>,
     /// Interactive bounding-box draft, undo/redo stacks, active draw tool/class, and drag preview.
     pub editor: LabelEditor,
+    /// Deferred route navigation executed on the next render frame after resolving unsaved edits.
+    pub pending_nav: Option<super::editor::PendingRouteNav>,
 
     // Agent runner controls
     pub agent_id: Option<LabelAgentId>,
@@ -198,6 +200,7 @@ impl Default for LabelState {
             pending_advance: None,
             review_error: None,
             editor: LabelEditor::default(),
+            pending_nav: None,
             agent_id: None,
             model_idx: 0,
             effort: LabelEffort::Low,

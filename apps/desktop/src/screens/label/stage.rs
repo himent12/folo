@@ -152,6 +152,12 @@ impl FoloApp {
                         return;
                     }
                     if locked {
+                        if this.label.editor.tool == EditTool::Select
+                            && this.label.selected_box.take().is_some()
+                        {
+                            cx.notify();
+                            return;
+                        }
                         this.label.review_error = Some(ApiError::new(
                             "label_job_active",
                             "The agent is labeling this image right now.",

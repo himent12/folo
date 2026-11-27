@@ -602,6 +602,7 @@ impl FoloApp {
                 cx,
                 act(|this, _, cx| {
                     this.run_compare.ids.clear();
+                    this.run_compare.pinned_run = None;
                     cx.notify();
                 }),
             );

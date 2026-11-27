@@ -31,6 +31,9 @@ pub enum CompareXAxis {
 pub struct RunCompareState {
     /// Pinned/selected run IDs in slot order (`ids[0]` is the baseline).
     pub ids: Vec<String>,
+    /// True once default runs have been seeded for this session (so removing the last chip shows
+    /// the empty state instead of immediately re-seeding defaults).
+    pub seeded: bool,
     /// Whether the Runs table shows row selection checkboxes for multi-run compare.
     pub select_mode: bool,
     /// Optional run ID highlighted/isolated across overlaid charts.
@@ -53,6 +56,7 @@ impl Default for RunCompareState {
     fn default() -> Self {
         Self {
             ids: Vec::new(),
+            seeded: false,
             select_mode: false,
             pinned_run: None,
             map_metric: CompareMapMetric::Map50_95,
@@ -267,44 +271,72 @@ fn fmt_batch(r: &Run) -> String {
 }
 
 /// Builds the full hyperparameter diff table rows across `runs`.
+///
+/// Compares canonical IDs / exact numeric values (not formatted display labels) so distinct
+/// datasets, pretrained models with matching display names, or fine-grained numeric settings never
+/// falsely collapse to identical.
 pub fn hyperparam_rows(
     runs: &[Run],
     dataset_name: impl Fn(&Run) -> String,
     model_name: impl Fn(&str) -> String,
 ) -> Vec<HyperparamRow> {
-    let make = |label: &'static str, f: &dyn Fn(&Run) -> String| -> HyperparamRow {
-        let values: Vec<String> = runs.iter().map(f).collect();
-        let base = values.first().map(String::as_str).unwrap_or("");
+    let make = |label: &'static str, f: &dyn Fn(&Run) -> (String, String)| -> HyperparamRow {
+        let pairs: Vec<(String, String)> = runs.iter().map(f).collect();
+        let base_key = pairs.first().map(|p| p.0.as_str()).unwrap_or("");
         let off_base: Vec<bool> =
-            values.iter().enumerate().map(|(i, v)| i > 0 && v.as_str() != base).collect();
-        let differs = values.iter().any(|v| v.as_str() != base);
+            pairs.iter().enumerate().map(|(i, (k, _))| i > 0 && k.as_str() != base_key).collect();
+        let differs = pairs.iter().any(|(k, _)| k.as_str() != base_key);
+        let values = pairs.into_iter().map(|(_, v)| v).collect();
         HyperparamRow { label, values, differs, off_base }
     };
 
     vec![
-        make("Dataset", &|r| dataset_name(r)),
-        make("Architecture", &|r| r.config.arch.as_str().to_string()),
-        make("Image size", &|r| format!("{} px", r.config.imgsz)),
-        make("Batch", &fmt_batch),
-        make("Learning rate", &fmt_lr_value),
-        make("Optimizer", &fmt_optimizer),
-        make("Precision", &|r| if r.config.amp { "mixed (f16)".into() } else { "f32".into() }),
+        make("Dataset", &|r| (r.config.dataset_id.clone(), dataset_name(r))),
+        make("Architecture", &|r| {
+            let a = r.config.arch.as_str().to_string();
+            (a.clone(), a)
+        }),
+        make("Image size", &|r| (r.config.imgsz.to_string(), format!("{} px", r.config.imgsz))),
+        make("Batch", &|r| (r.config.batch.to_string(), fmt_batch(r))),
+        make("Learning rate", &|r| {
+            let lr0 = r.resolved.as_ref().map_or(r.config.lr0 as f64, |s| s.lr0);
+            (lr0.to_bits().to_string(), fmt_lr_value(r))
+        }),
+        make("Optimizer", &|r| {
+            let key = format!("{:?}:{:?}", r.config.optimizer, r.resolved.as_ref().map(|s| s.optimizer));
+            (key, fmt_optimizer(r))
+        }),
+        make("Precision", &|r| {
+            (r.config.amp.to_string(), if r.config.amp { "mixed (f16)".into() } else { "f32".into() })
+        }),
         make("Head", &|r| {
-            if r.config.head == Head::O2o { "end-to-end (no NMS)".into() } else { "one-to-many + NMS".into() }
+            let disp = if r.config.head == Head::O2o {
+                "end-to-end (no NMS)".into()
+            } else {
+                "one-to-many + NMS".into()
+            };
+            (format!("{:?}", r.config.head), disp)
         }),
         make("Pretrained weights", &|r| {
-            r.config.weights.as_deref().map_or_else(|| "none".into(), &model_name)
+            let key = r.config.weights.clone().unwrap_or_default();
+            let disp = r.config.weights.as_deref().map_or_else(|| "none".into(), &model_name);
+            (key, disp)
         }),
         make("Mosaic / mixup", &|r| {
             let a = &r.config.augment;
-            format!(
+            let key = format!("{}:{}", a.mosaic.to_bits(), a.mixup.to_bits());
+            let disp = format!(
                 "{} / {}",
                 if a.mosaic <= 0.0 { "off".into() } else { crate::ui::fmt_aug(a.mosaic) },
                 crate::ui::fmt_aug(a.mixup)
-            )
+            );
+            (key, disp)
         }),
-        make("Seed", &|r| r.config.seed.to_string()),
-        make("Device", &|r| if r.device.is_empty() { r.config.device.clone() } else { r.device.clone() }),
+        make("Seed", &|r| (r.config.seed.to_string(), r.config.seed.to_string())),
+        make("Device", &|r| {
+            let d = if r.device.is_empty() { r.config.device.clone() } else { r.device.clone() };
+            (d.clone(), d)
+        }),
     ]
 }
 

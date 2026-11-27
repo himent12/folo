@@ -5,6 +5,7 @@
 //! guards when stepping between images or receiving concurrent SSE updates.
 
 use crate::api::{BBox, LabelImage, label_box_revision};
+use crate::app::Route;
 
 use super::state::LabelImageFilter;
 
@@ -47,6 +48,17 @@ pub enum PendingImageSwitch {
     Step(i32),
     SetFilter(LabelImageFilter),
     SetClassFilter(Option<u32>),
+    Navigate(Route),
+    Back,
+    Forward,
+}
+
+/// Deferred route navigation executed on the next render frame (when `&mut Window` is available).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum PendingRouteNav {
+    Navigate(Route),
+    Back,
+    Forward,
 }
 
 /// Exact structural equality for bounding-box lists (using bit patterns for floats so NaN or
@@ -106,6 +118,10 @@ pub struct LabelEditor {
     pub image_id: Option<String>,
     /// Last known server boxes for `(job_id, image_id)`.
     pub base: Vec<BBox>,
+    /// Server box revision this draft was originally edited against. Kept unchanged across SSE
+    /// updates while dirty so a plain Save (`Ctrl+S`) cannot silently overwrite another client's
+    /// concurrent edits; only refreshed on clean sync, Discard, Save confirmation, or explicit overwrite.
+    pub expect_rev: String,
     /// Working boxes currently rendered and edited.
     pub draft: Vec<BBox>,
     /// Past snapshots for `Ctrl+Z` (most recent last).
@@ -129,6 +145,7 @@ impl LabelEditor {
         self.job_id = None;
         self.image_id = None;
         self.base.clear();
+        self.expect_rev.clear();
         self.draft.clear();
         self.undo.clear();
         self.redo.clear();
@@ -192,6 +209,7 @@ impl LabelEditor {
             self.job_id = Some(job_id.to_string());
             self.image_id = Some(image.id.clone());
             self.base = image.boxes.clone();
+            self.expect_rev = label_box_revision(&image.boxes);
             self.draft = image.boxes.clone();
             self.undo.clear();
             self.redo.clear();
@@ -206,15 +224,21 @@ impl LabelEditor {
         if same_boxes(&self.draft, &self.base) {
             // Clean draft: adopt the fresh server boxes transparently.
             self.base = image.boxes.clone();
+            self.expect_rev = label_box_revision(&image.boxes);
             self.draft = image.boxes.clone();
             self.undo.clear();
             self.redo.clear();
             self.changed_elsewhere = false;
         } else if !saving {
-            // Dirty draft changed elsewhere (another tab, CLI, or agent): keep user's edits safe,
-            // update `base` so Discard shows the new server labels and Save uses the current expect.
+            // Dirty draft changed elsewhere (another tab, CLI, or agent): keep user's edits safe
+            // and keep `expect_rev` at the revision this draft was edited against so a plain Ctrl+S
+            // cannot silently overwrite the remote edit; update `base` so Discard adopts server boxes
+            // and explicit Overwrite can send `base_revision()`.
             self.base = image.boxes.clone();
             self.changed_elsewhere = !same_boxes(&self.draft, &self.base);
+            if !self.changed_elsewhere {
+                self.expect_rev = label_box_revision(&self.base);
+            }
         }
     }
 
@@ -228,9 +252,10 @@ impl LabelEditor {
             self.undo.remove(0);
         }
         self.redo.clear();
+        self.pending_switch = None;
         if !self.is_dirty() {
             self.changed_elsewhere = false;
-            self.pending_switch = None;
+            self.expect_rev = label_box_revision(&self.base);
         }
         true
     }
@@ -279,6 +304,7 @@ impl LabelEditor {
         if !self.is_dirty() {
             self.changed_elsewhere = false;
             self.pending_switch = None;
+            self.expect_rev = label_box_revision(&self.base);
         }
         true
     }
@@ -295,6 +321,7 @@ impl LabelEditor {
         if !self.is_dirty() {
             self.changed_elsewhere = false;
             self.pending_switch = None;
+            self.expect_rev = label_box_revision(&self.base);
         }
         true
     }
@@ -304,6 +331,7 @@ impl LabelEditor {
         self.drawing = None;
         self.pending_switch = None;
         self.changed_elsewhere = false;
+        self.expect_rev = label_box_revision(&self.base);
         let base = self.base.clone();
         self.push_edit(base)
     }
@@ -311,6 +339,7 @@ impl LabelEditor {
     /// Marks the current draft as saved after the server confirms `PUT /api/label/jobs/{id}/images/{img}`.
     /// Keeps the undo stack intact so the user can still undo past a save and re-save.
     pub fn commit_saved(&mut self, saved_boxes: Vec<BBox>) {
+        self.expect_rev = label_box_revision(&saved_boxes);
         self.base = saved_boxes.clone();
         self.draft = saved_boxes;
         self.changed_elsewhere = false;

@@ -2,7 +2,7 @@
 
 use folo_ui::Context;
 
-use super::editor::{EditTool, PendingImageSwitch};
+use super::editor::{EditTool, PendingImageSwitch, PendingRouteNav};
 use super::state::{LabelImageFilter, SelectedBox};
 use crate::api::*;
 use crate::app::FoloApp;
@@ -22,8 +22,21 @@ impl FoloApp {
         Some(im)
     }
 
-    /// Resolves the currently active image id in `job_id`'s filtered review list.
+    /// Resolves the currently active image id in `job_id`'s review workspace (keeping a dirty image
+    /// active even if a concurrent SSE update moved it outside the current filter).
     fn active_label_image_id(&self, job_id: &str) -> Option<String> {
+        if self.label.editor.is_dirty()
+            && self.label.editor.job_id.as_deref() == Some(job_id)
+            && let Some(dirty_id) = self.label.editor.image_id.as_deref()
+            && self
+                .label
+                .images
+                .get(job_id)
+                .and_then(|l| l.ready())
+                .is_some_and(|list| list.iter().any(|im| im.id == dirty_id))
+        {
+            return Some(dirty_id.to_string());
+        }
         let shown = self.current_filtered_label_images(job_id);
         self.label
             .selected_image
@@ -142,6 +155,14 @@ impl FoloApp {
 
     /// Guards stepping to prev/next image when unsaved box edits exist.
     pub fn request_step_label_image(&mut self, job_id: &str, delta: i32, cx: &mut Context<Self>) {
+        let shown = self.current_filtered_label_images(job_id);
+        let cur_in_shown =
+            self.label.selected_image.as_deref().is_some_and(|sel| shown.iter().any(|im| im.id == sel));
+        // If stepping would stay on the exact same image (0 images, or 1 image that is already open),
+        // do nothing instead of raising a false unsaved-edits prompt.
+        if shown.is_empty() || (shown.len() == 1 && cur_in_shown) {
+            return;
+        }
         if self.label.editor.is_dirty() {
             self.label.editor.pending_switch = Some(PendingImageSwitch::Step(delta));
             cx.notify();
@@ -185,15 +206,17 @@ impl FoloApp {
         cx.notify();
     }
 
-    /// Resolves a pending image/filter switch: either saves edits first or discards them and continues.
+    /// Resolves a pending image/filter/route switch: either saves edits first or discards them and continues.
     pub fn resolve_pending_label_switch(&mut self, job_id: &str, save_first: bool, cx: &mut Context<Self>) {
+        if self.label.mutating {
+            return;
+        }
         let Some(switch) = self.label.editor.pending_switch.take() else {
             return;
         };
         if save_first {
             if let Some(active_id) = self.label.editor.image_id.clone() {
-                self.label.editor.pending_switch = Some(switch);
-                self.save_label_edits(job_id, &active_id, false, cx);
+                self.save_label_edits_inner(job_id, &active_id, false, false, Some(switch), cx);
                 return;
             }
         } else {
@@ -223,11 +246,43 @@ impl FoloApp {
                 self.reconcile_selected_label_image(job_id);
                 cx.notify();
             }
+            PendingImageSwitch::Navigate(route) => {
+                self.label.pending_nav = Some(PendingRouteNav::Navigate(route));
+                cx.notify();
+            }
+            PendingImageSwitch::Back => {
+                self.label.pending_nav = Some(PendingRouteNav::Back);
+                cx.notify();
+            }
+            PendingImageSwitch::Forward => {
+                self.label.pending_nav = Some(PendingRouteNav::Forward);
+                cx.notify();
+            }
         }
     }
 
-    /// Saves the local draft boxes for `image_id` via `PUT /api/label/jobs/{id}/images/{img}`.
+    /// Saves the local draft boxes for `image_id` via `PUT /api/label/jobs/{id}/images/{img}`,
+    /// using the revision this draft was originally edited against (so concurrent remote edits
+    /// return `409 label_boxes_changed` instead of being silently overwritten).
     pub fn save_label_edits(&mut self, job_id: &str, image_id: &str, advance: bool, cx: &mut Context<Self>) {
+        self.save_label_edits_inner(job_id, image_id, advance, false, None, cx);
+    }
+
+    /// Explicitly overwrites remote changes with the local draft after the user saw the conflict
+    /// warning banner (`expect` is refreshed to the latest server `base_revision()`).
+    pub fn save_label_edits_overwrite(&mut self, job_id: &str, image_id: &str, cx: &mut Context<Self>) {
+        self.save_label_edits_inner(job_id, image_id, false, true, None, cx);
+    }
+
+    fn save_label_edits_inner(
+        &mut self,
+        job_id: &str,
+        image_id: &str,
+        advance: bool,
+        overwrite: bool,
+        then_switch: Option<PendingImageSwitch>,
+        cx: &mut Context<Self>,
+    ) {
         if self.label.mutating {
             return;
         }
@@ -240,14 +295,19 @@ impl FoloApp {
             cx.notify();
             return;
         }
-        let expect = Some(self.label.editor.base_revision());
+        self.label.editor.pending_switch = None;
+        let expect = Some(if overwrite {
+            self.label.editor.base_revision()
+        } else {
+            self.label.editor.expect_rev.clone()
+        });
         let boxes = self.label.editor.draft.clone();
         let next_after = if advance { self.next_image_after(job_id, image_id) } else { None };
         // `Approve` / `Save & next` marks the image reviewed; plain `Save` (`Ctrl+S`) preserves the
         // image's current review state so an image in the `To review` filter doesn't jump away mid-edit.
         let reviewed = if advance { Some(true) } else { Some(im.reviewed) };
         let req = UpdateLabelImage { boxes: Some(boxes), reviewed, expect };
-        self.send_label_image_update(job_id, image_id, req, next_after, false, cx);
+        self.send_label_image_update(job_id, image_id, req, next_after, then_switch, false, cx);
     }
 
     /// Sets the active drawing class and, when a box is selected, reclassifies it in the local draft.
@@ -419,18 +479,29 @@ impl FoloApp {
             self.label.editor.cancel_draw();
             return;
         };
-        let Some((w, h)) = self
+        let Some((w, h, locked)) = self
             .label
             .images
             .get(&job_id)
             .and_then(|l| l.ready())
             .and_then(|list| list.iter().find(|i| i.id == image_id))
-            .map(|im| (im.width.max(1) as f32, im.height.max(1) as f32))
+            .map(|im| {
+                (im.width.max(1) as f32, im.height.max(1) as f32, im.status == LabelImageStatus::Labeling)
+            })
         else {
             self.label.editor.cancel_draw();
             return;
         };
         let was_moved = self.label.editor.drawing.as_ref().is_some_and(|d| d.moved);
+        if self.label.mutating || locked {
+            self.label.editor.cancel_draw();
+            if locked && was_moved {
+                self.label.review_error =
+                    Some(ApiError::new("label_job_active", "The agent is labeling this image right now."));
+            }
+            cx.notify();
+            return;
+        }
         if let Some(new_idx) = self.label.editor.finish_draw(w, h) {
             let rev = self.label.editor.draft_revision();
             self.label.selected_box = Some(SelectedBox { image_id, index: new_idx, revision: rev });

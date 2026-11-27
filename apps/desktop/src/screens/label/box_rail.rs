@@ -113,6 +113,8 @@ impl FoloApp {
             .collect();
 
         // Class picker: sets active draw class, and when a box is selected reclassifies it too.
+        // Uses a compact Select dropdown for > 9 classes (avoiding crowding the 360 px rail), or
+        // quick 1–9 chips for <= 9 classes.
         let class_picker = (!disabled && !job.classes.is_empty()).then(|| {
             let active_cls = sel_box
                 .and_then(|s| draft_boxes.get(s).map(|b| b.class))
@@ -120,8 +122,7 @@ impl FoloApp {
                 as usize;
             let heading = if sel_box.is_some() { "Reclassify (1–9)" } else { "Draw class (1–9)" };
 
-            // Full dropdown when > 9 classes (or always available as a crisp picker for any class).
-            let select_el = (job.classes.len() > 9).then(|| {
+            let picker_body: AnyElement = if job.classes.len() > 9 {
                 let options: Vec<(SharedString, Option<SharedString>)> = job
                     .classes
                     .iter()
@@ -145,25 +146,28 @@ impl FoloApp {
                         this.set_label_draw_class(&j, &i, idx as u32, cx);
                     }),
                 )
-            });
-
-            let chips = job.classes.iter().enumerate().take(9).map(|(ci, name)| {
-                let (j, i) = (jid.clone(), img_id.clone());
-                let cls_u32 = ci as u32;
-                let cur = active_cls == ci;
-                self.chip(
-                    &format!("label-recls-{ci}"),
-                    format!("{} {name}", ci + 1),
-                    cur,
-                    Some(cls_u32),
-                    None,
-                    window,
-                    cx,
-                    act(move |this, _, cx| this.set_label_draw_class(&j, &i, cls_u32, cx)),
-                )
                 .into_any_element()
-            });
+            } else {
+                let chips = job.classes.iter().enumerate().map(|(ci, name)| {
+                    let (j, i) = (jid.clone(), img_id.clone());
+                    let cls_u32 = ci as u32;
+                    let cur = active_cls == ci;
+                    self.chip(
+                        &format!("label-recls-{ci}"),
+                        format!("{} {name}", ci + 1),
+                        cur,
+                        Some(cls_u32),
+                        None,
+                        window,
+                        cx,
+                        act(move |this, _, cx| this.set_label_draw_class(&j, &i, cls_u32, cx)),
+                    )
+                    .into_any_element()
+                });
+                div().flex().flex_wrap().gap(px(4.)).children(chips).into_any_element()
+            };
             div()
+                .flex_none()
                 .p(px(8.))
                 .border_t_1()
                 .border_color(t.line_subtle)
@@ -171,8 +175,7 @@ impl FoloApp {
                 .flex_col()
                 .gap(px(6.))
                 .child(overline(t, heading))
-                .children(select_el)
-                .child(div().flex().flex_wrap().gap(px(4.)).children(chips))
+                .child(picker_body)
         });
 
         div()
@@ -224,6 +227,7 @@ impl FoloApp {
             .children(class_picker)
             .child(
                 div()
+                    .flex_none()
                     .p(px(6.))
                     .border_t_1()
                     .border_color(t.line_subtle)

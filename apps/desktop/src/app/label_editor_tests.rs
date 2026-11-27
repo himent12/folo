@@ -267,8 +267,8 @@ fn unsaved_switch_guard_conflict_recovery_and_viewports() {
     });
     settle(&mut app, window);
 
-    // User's draft must be preserved intact, conflict error shown, and server base refreshed so a
-    // retry Save succeeds cleanly.
+    // User's draft must be preserved intact, conflict error shown, and an ordinary Save must STILL
+    // refuse with 409 instead of silently overwriting remote boxes — only explicit Overwrite succeeds!
     drive(&mut app, window, |this, _, cx| {
         assert_eq!(this.label.review_error.as_ref().map(|e| e.code.as_str()), Some("label_boxes_changed"));
         assert_eq!(
@@ -277,8 +277,18 @@ fn unsaved_switch_guard_conflict_recovery_and_viewports() {
             "409 conflict must preserve the user's draft boxes"
         );
         assert!(this.label.editor.changed_elsewhere, "server refresh flags changed_elsewhere");
-        // Retrying Save now sends the refreshed base revision and succeeds!
+        // Plain Ctrl+S / Save still sends the original expect_rev -> rejected with 409.
         this.save_label_edits("lb_4f10", &first_id, false, cx);
+    });
+    settle(&mut app, window);
+    drive(&mut app, window, |this, _, cx| {
+        assert_eq!(
+            this.label.review_error.as_ref().map(|e| e.code.as_str()),
+            Some("label_boxes_changed"),
+            "plain Save must not silently overwrite concurrent remote edits"
+        );
+        // Explicit "Overwrite server boxes" uses refreshed base_revision and succeeds!
+        this.save_label_edits_overwrite("lb_4f10", &first_id, cx);
     });
     settle(&mut app, window);
     drive(&mut app, window, |this, _, _| {
@@ -325,4 +335,94 @@ fn unsaved_switch_guard_conflict_recovery_and_viewports() {
         });
         settle(&mut a, win);
     }
+}
+
+#[test]
+fn route_exit_guard_sse_filter_eviction_dirty_delete_and_many_classes() {
+    let api = Arc::new(MockBackend::new(4200, true));
+    let (mut app, window) = open_with(api, 1280., 800., Mode::Dark);
+
+    drive(&mut app, window, |this, w, cx| this.navigate(Route::LabelJob("lb_4f10".into()), w, cx));
+    settle(&mut app, window);
+
+    // 1. Dirty draft guards navigate(), back(), and Esc; Discard executes deferred navigation on next frame.
+    drive(&mut app, window, |this, w, cx| {
+        this.label.editor.add_box(BBox { class: 0, x1: 8., y1: 8., x2: 48., y2: 48. });
+        assert!(this.label.editor.is_dirty());
+        this.navigate(Route::Overview, w, cx);
+        assert_eq!(this.route, Route::LabelJob("lb_4f10".into()), "navigate blocked while dirty");
+        assert_eq!(this.label.editor.pending_switch, Some(PendingImageSwitch::Navigate(Route::Overview)));
+        this.back(w, cx);
+        assert_eq!(this.route, Route::LabelJob("lb_4f10".into()), "back blocked while dirty");
+        assert_eq!(this.label.editor.pending_switch, Some(PendingImageSwitch::Back));
+        this.resolve_pending_label_switch("lb_4f10", false, cx);
+    });
+    settle(&mut app, window);
+    assert_eq!(
+        drive(&mut app, window, |this, _, _| this.route.clone()),
+        Route::Overview,
+        "Discard executed deferred Back navigation cleanly"
+    );
+
+    // 2. Concurrent SSE update marking a dirty image reviewed under ToReview keeps the dirty draft open.
+    drive(&mut app, window, |this, w, cx| {
+        this.navigate(Route::LabelJob("lb_4f10".into()), w, cx);
+    });
+    settle(&mut app, window);
+    let dirty_id = drive(&mut app, window, |this, _, cx| {
+        this.label.img_filter = LabelImageFilter::ToReview;
+        this.reconcile_selected_label_image("lb_4f10");
+        let id = this.label.selected_image.clone().expect("unreviewed image");
+        let _ = this.ensure_label_editor_synced("lb_4f10", &id);
+        this.label.editor.add_box(BBox { class: 0, x1: 15., y1: 15., x2: 55., y2: 55. });
+        // Simulate SSE marking this image reviewed from another client.
+        if let Some(im) = this
+            .label
+            .images
+            .get_mut("lb_4f10")
+            .and_then(|l| l.ready_mut())
+            .and_then(|list| list.iter_mut().find(|i| i.id == id))
+        {
+            im.reviewed = true;
+        }
+        this.reconcile_selected_label_image("lb_4f10");
+        cx.notify();
+        id
+    });
+    settle(&mut app, window);
+    drive(&mut app, window, |this, _, _| {
+        assert_eq!(
+            this.label.selected_image.as_deref(),
+            Some(dirty_id.as_str()),
+            "dirty image stays selected even when SSE moves it out of ToReview"
+        );
+        assert!(this.label.editor.is_dirty_for("lb_4f10", &dirty_id));
+    });
+
+    // 3. Removing a dirty image resets label.editor so filters never deadlock.
+    drive(&mut app, window, |this, _, cx| {
+        this.delete_label_image("lb_4f10", &dirty_id, cx);
+    });
+    settle(&mut app, window);
+    drive(&mut app, window, |this, _, _| {
+        assert!(!this.label.editor.is_dirty(), "deleting a dirty image clears editor dirty state");
+        assert!(this.label.editor.image_id.as_deref() != Some(dirty_id.as_str()));
+    });
+
+    // 4. Jobs with > 9 classes render the Select class picker dropdown instead of 9 wrapped chips.
+    drive(&mut app, window, |this, _, cx| {
+        this.label.img_filter = LabelImageFilter::All;
+        if let Some(job) = this.label.jobs.ready_mut().and_then(|l| l.iter_mut().find(|j| j.id == "lb_4f10"))
+        {
+            job.classes = (0..12).map(|i| format!("defect_class_{i}")).collect();
+        }
+        this.reconcile_selected_label_image("lb_4f10");
+        cx.notify();
+    });
+    settle(&mut app, window);
+    drive(&mut app, window, |this, _, _| {
+        let keys: Vec<String> = this.focus.borrow().keys().map(|k| k.to_string()).collect();
+        assert!(keys.iter().any(|k| k == "label-class-picker"), "Select picker rendered for >9 classes");
+        assert!(keys.iter().any(|k| k == "label-rm-img"), "Remove image footer remains mounted");
+    });
 }

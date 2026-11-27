@@ -199,7 +199,21 @@ impl FoloApp {
             )
             .child(div().flex().flex_wrap().items_center().gap(px(6.)).children(class_chips));
 
-        if shown.is_empty() {
+        // If the user has unsaved edits on an image that a concurrent SSE update moved outside the
+        // current filter, keep that dirty image open so the draft is never silently discarded.
+        let dirty_outside = (self.label.editor.is_dirty()
+            && self.label.editor.job_id.as_deref() == Some(jid.as_str()))
+        .then(|| {
+            let dirty_id = self.label.editor.image_id.as_deref()?;
+            if shown.iter().any(|im| im.id == dirty_id) {
+                None
+            } else {
+                all_images.iter().find(|im| im.id == dirty_id).cloned()
+            }
+        })
+        .flatten();
+
+        if shown.is_empty() && dirty_outside.is_none() {
             let jid_reset = jid.clone();
             let reset = self.button(
                 "label-imgs-reset",
@@ -236,14 +250,19 @@ impl FoloApp {
                 .into_any_element();
         }
 
-        // Resolve the active image inside `shown` and sync the interactive editor.
-        let cur_pos = self
-            .label
-            .selected_image
-            .as_deref()
-            .and_then(|sel| shown.iter().position(|im| im.id == sel))
-            .unwrap_or(0);
-        let active = shown[cur_pos].clone();
+        // Resolve the active image (keeping any dirty outside-filter image visible until resolved)
+        // and sync the interactive editor.
+        let (cur_pos, active) = if let Some(dirty_im) = dirty_outside {
+            (None, dirty_im)
+        } else {
+            let pos = self
+                .label
+                .selected_image
+                .as_deref()
+                .and_then(|sel| shown.iter().position(|im| im.id == sel))
+                .unwrap_or(0);
+            (Some(pos), shown[pos].clone())
+        };
         if self.label.selected_image.as_deref() != Some(active.id.as_str()) {
             self.label.selected_image = Some(active.id.clone());
             self.label.selected_box = None;
@@ -286,7 +305,10 @@ impl FoloApp {
             cx,
             act(move |this, _, cx| this.request_step_label_image(&jid_next, 1, cx)),
         );
-        let counter = format!("{} of {}", int(cur_pos as u64 + 1), int(shown.len() as u64));
+        let counter = match cur_pos {
+            Some(pos) => format!("{} of {}", int(pos as u64 + 1), int(shown.len() as u64)),
+            None => "Outside filter".to_string(),
+        };
 
         let locked = active.status == LabelImageStatus::Labeling;
         let busy = self.label.mutating;
@@ -614,6 +636,50 @@ impl FoloApp {
             );
         }
         if changed_elsewhere {
+            let (j_ov, i_ov) = (jid.clone(), active.id.clone());
+            let (j_ld, i_ld) = (jid.clone(), active.id.clone());
+            let overwrite_btn = if busy || locked {
+                self.button_disabled(
+                    "label-overwrite-edits",
+                    "Overwrite server boxes",
+                    Btn::Primary,
+                    None,
+                    if locked { "Agent is labeling this image" } else { "Saving…" },
+                    window,
+                    cx,
+                )
+            } else {
+                self.button(
+                    "label-overwrite-edits",
+                    "Overwrite server boxes",
+                    Btn::Primary,
+                    Some("icons/check.svg"),
+                    window,
+                    cx,
+                    act(move |this, _, cx| this.save_label_edits_overwrite(&j_ov, &i_ov, cx)),
+                )
+            };
+            let load_btn = if busy {
+                self.button_disabled(
+                    "label-load-server",
+                    "Load server boxes",
+                    Btn::Secondary,
+                    None,
+                    "Saving…",
+                    window,
+                    cx,
+                )
+            } else {
+                self.button(
+                    "label-load-server",
+                    "Load server boxes",
+                    Btn::Secondary,
+                    None,
+                    window,
+                    cx,
+                    act(move |this, _, cx| this.discard_label_edits(&j_ld, &i_ld, cx)),
+                )
+            };
             notices.push(
                 div()
                     .mx(px(14.))
@@ -622,37 +688,70 @@ impl FoloApp {
                     .rounded(px(radius::MD))
                     .bg(t.warning_muted)
                     .flex()
+                    .flex_wrap()
                     .items_center()
+                    .justify_between()
                     .gap(px(8.))
-                    .child(icon("icons/info.svg", 14., t.warning_solid))
                     .child(
-                        text(ty::SM, t.warning_text)
-                            .whitespace_normal()
-                            .child("Boxes changed on the server while you edited. Save overwrites with yours; Discard loads the latest."),
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .min_w_0()
+                            .child(icon("icons/info.svg", 14., t.warning_solid))
+                            .child(
+                                text(ty::SM, t.warning_text)
+                                    .whitespace_normal()
+                                    .child("Boxes changed on the server while you edited. Choose whether to overwrite with your draft or load the latest server boxes."),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .child(load_btn)
+                            .child(overwrite_btn),
                     ),
             );
         }
         if has_pending_switch {
             let j_save = jid.clone();
             let j_disc = jid.clone();
-            let save_cont = self.button(
-                "label-sw-save",
-                "Save & continue",
-                Btn::Primary,
-                Some("icons/check.svg"),
-                window,
-                cx,
-                act(move |this, _, cx| this.resolve_pending_label_switch(&j_save, true, cx)),
-            );
-            let disc_cont = self.button(
-                "label-sw-discard",
-                "Discard",
-                Btn::Danger,
-                None,
-                window,
-                cx,
-                act(move |this, _, cx| this.resolve_pending_label_switch(&j_disc, false, cx)),
-            );
+            let save_cont = if busy || locked {
+                self.button_disabled(
+                    "label-sw-save",
+                    "Save & continue",
+                    Btn::Primary,
+                    None,
+                    if locked { "Agent is labeling this image" } else { "Saving…" },
+                    window,
+                    cx,
+                )
+            } else {
+                self.button(
+                    "label-sw-save",
+                    "Save & continue",
+                    Btn::Primary,
+                    Some("icons/check.svg"),
+                    window,
+                    cx,
+                    act(move |this, _, cx| this.resolve_pending_label_switch(&j_save, true, cx)),
+                )
+            };
+            let disc_cont = if busy {
+                self.button_disabled("label-sw-discard", "Discard", Btn::Danger, None, "Saving…", window, cx)
+            } else {
+                self.button(
+                    "label-sw-discard",
+                    "Discard",
+                    Btn::Danger,
+                    None,
+                    window,
+                    cx,
+                    act(move |this, _, cx| this.resolve_pending_label_switch(&j_disc, false, cx)),
+                )
+            };
             let stay_btn = self.button(
                 "label-sw-stay",
                 "Stay",

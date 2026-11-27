@@ -106,7 +106,22 @@ impl FoloApp {
     }
 
     /// Ensures `label.selected_image` points to a valid image in the current filtered set (or None if empty).
+    /// Keeps an image with unsaved local edits selected as long as it still exists in the job so a
+    /// concurrent SSE status update never silently discards the user's draft.
     pub fn reconcile_selected_label_image(&mut self, job_id: &str) {
+        if self.label.editor.is_dirty()
+            && self.label.editor.job_id.as_deref() == Some(job_id)
+            && let Some(dirty_id) = self.label.editor.image_id.as_deref()
+            && self
+                .label
+                .images
+                .get(job_id)
+                .and_then(|l| l.ready())
+                .is_some_and(|list| list.iter().any(|im| im.id == dirty_id))
+        {
+            self.label.selected_image = Some(dirty_id.to_string());
+            return;
+        }
         let shown = self.current_filtered_label_images(job_id);
         if shown.is_empty() {
             self.label.selected_image = None;
@@ -185,6 +200,7 @@ impl FoloApp {
             self.save_label_edits(job_id, image_id, advance, cx);
             return;
         }
+        self.label.editor.pending_switch = None;
         let next_after = if advance { self.next_image_after(job_id, image_id) } else { None };
         let expect = Some(label_box_revision(&im.boxes));
         let req = if im.status == LabelImageStatus::Labeled {
@@ -192,7 +208,7 @@ impl FoloApp {
         } else {
             UpdateLabelImage { boxes: Some(im.boxes.clone()), reviewed: Some(true), expect }
         };
-        self.send_label_image_update(job_id, image_id, req, next_after, false, cx);
+        self.send_label_image_update(job_id, image_id, req, next_after, None, false, cx);
     }
 
     pub(super) fn next_image_after(&self, job_id: &str, current_id: &str) -> Option<String> {
@@ -202,12 +218,14 @@ impl FoloApp {
         shown.get(pos + 1).or_else(|| pos.checked_sub(1).and_then(|p| shown.get(p))).map(|im| im.id.clone())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn send_label_image_update(
         &mut self,
         job_id: &str,
         image_id: &str,
         req: UpdateLabelImage,
         advance_to: Option<String>,
+        then_switch: Option<super::editor::PendingImageSwitch>,
         clear_box: bool,
         cx: &mut Context<Self>,
     ) {
@@ -259,7 +277,6 @@ impl FoloApp {
                         }
                         this.refresh_label_jobs(cx);
                         if on_job {
-                            let pending_sw = this.label.editor.pending_switch.take();
                             if fresh {
                                 if this.label.editor.is_for(&jid2, &iid2) {
                                     this.label.editor.commit_saved(saved_boxes);
@@ -278,8 +295,14 @@ impl FoloApp {
                                         this.label.selected_box = None;
                                     }
                                 }
+                            } else if this.label.editor.is_for(&jid2, &iid2) {
+                                // SSE for our save (or a newer remote update) landed while `mutating` was
+                                // true: advance `base` to our confirmed save first, then re-sync against
+                                // the latest cached image so `is_dirty` clears immediately if they match.
+                                this.label.editor.commit_saved(saved_boxes);
+                                let _ = this.ensure_label_editor_synced(&jid2, &iid2);
                             }
-                            if let Some(pending_sw) = pending_sw {
+                            if let Some(pending_sw) = then_switch {
                                 this.execute_pending_label_switch(&jid2, pending_sw, cx);
                             } else if let Some(next_id) = advance_to
                                 && (still_pending_advance
@@ -343,6 +366,9 @@ impl FoloApp {
                     Ok(()) => {
                         if let Some(list) = this.label.images.get_mut(&jid2).and_then(|l| l.ready_mut()) {
                             list.retain(|i| i.id != iid2);
+                        }
+                        if this.label.editor.is_for(&jid2, &iid2) {
+                            this.label.editor.reset();
                         }
                         if on_job {
                             if this.label.selected_image.as_deref() == Some(iid2.as_str()) {

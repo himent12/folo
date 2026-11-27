@@ -107,7 +107,8 @@ impl FoloApp {
                         .child(label.to_string()),
                 );
             for c in cells {
-                row = row.child(div().flex_1().min_w(px(110.)).flex().justify_end().child(c));
+                row =
+                    row.child(div().flex_1().min_w(px(110.)).overflow_hidden().flex().justify_end().child(c));
             }
             row
         };
@@ -255,6 +256,7 @@ impl FoloApp {
                         .child(
                             text(ty::SM, if i == 0 || off { t.text_primary } else { t.text_tertiary })
                                 .when(off, |d| d.font_weight(FontWeight::MEDIUM))
+                                .min_w_0()
                                 .tnum()
                                 .ellipsis()
                                 .child(val.clone()),
@@ -293,6 +295,7 @@ impl FoloApp {
                         .iter()
                         .map(|val| {
                             text(ty::SM, t.text_tertiary)
+                                .min_w_0()
                                 .tnum()
                                 .ellipsis()
                                 .child(val.clone())

@@ -33,6 +33,13 @@ impl Render for FoloApp {
         if let Some(r) = self.route_pending.take() {
             self.navigate(r, window, cx);
         }
+        if let Some(nav) = self.label.pending_nav.take() {
+            match nav {
+                crate::label::PendingRouteNav::Navigate(r) => self.navigate(r, window, cx),
+                crate::label::PendingRouteNav::Back => self.back(window, cx),
+                crate::label::PendingRouteNav::Forward => self.forward(window, cx),
+            }
+        }
         self.sync_frame_appearance(window);
         // Not from under the close question (a dialog that finished behind it): it keeps the focus.
         if std::mem::take(&mut self.restore_pending) && self.confirm_close.is_none() {

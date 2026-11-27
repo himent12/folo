@@ -135,6 +135,15 @@ impl FoloApp {
         if route == self.route {
             return;
         }
+        // Guard unsaved bounding-box edits before leaving an active labeling job.
+        if matches!(&self.route, Route::LabelJob(_))
+            && !self.route_gone(&self.route)
+            && self.label.editor.is_dirty()
+        {
+            self.label.editor.pending_switch = Some(crate::label::PendingImageSwitch::Navigate(route));
+            cx.notify();
+            return;
+        }
         let prev = std::mem::replace(&mut self.route, route);
         // Runs opens on all runs, unless coming up from one of them: a filter (one the queue
         // toast set, say) doesn't wait there to make the list look empty later.
@@ -167,6 +176,14 @@ impl FoloApp {
     }
 
     pub fn back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(&self.route, Route::LabelJob(_))
+            && !self.route_gone(&self.route)
+            && self.label.editor.is_dirty()
+        {
+            self.label.editor.pending_switch = Some(crate::label::PendingImageSwitch::Back);
+            cx.notify();
+            return;
+        }
         // Past the pages of what was deleted since, and the page already open.
         while let Some(r) = self.history.pop() {
             if r != self.route && !self.route_gone(&r) {
@@ -193,6 +210,15 @@ impl FoloApp {
     /// Re-opens the page most recently left with [`Self::back`] (`Alt+→`), skipping any route that
     /// was deleted since or matches the current page.
     pub fn forward(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(&self.route, Route::LabelJob(_))
+            && !self.route_gone(&self.route)
+            && self.label.editor.is_dirty()
+            && self.forward_history.iter().any(|r| r != &self.route && !self.route_gone(r))
+        {
+            self.label.editor.pending_switch = Some(crate::label::PendingImageSwitch::Forward);
+            cx.notify();
+            return;
+        }
         while let Some(r) = self.forward_history.pop() {
             if r != self.route && !self.route_gone(&r) {
                 let prev = std::mem::replace(&mut self.route, r);

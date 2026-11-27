@@ -78,6 +78,7 @@ impl FoloApp {
             }
         }
         self.run_compare.ids = ids;
+        self.run_compare.seeded = true;
         self.run_compare.select_mode = false;
         self.run_compare.pinned_run = None;
         self.run_compare.hover = None;
@@ -87,6 +88,9 @@ impl FoloApp {
 
     /// Toggles a run in/out of the compare selection (capped at `RUN_COMPARE_MAX`).
     pub fn toggle_run_compare_pin(&mut self, id: String, cx: &mut Context<Self>) {
+        if let Some(runs) = self.store.runs.ready() {
+            self.run_compare.ids = reconcile_compare_runs(&self.run_compare.ids, runs);
+        }
         if let Some(pos) = self.run_compare.ids.iter().position(|x| x == &id) {
             self.run_compare.ids.remove(pos);
             if self.run_compare.pinned_run.as_deref() == Some(id.as_str()) {
@@ -105,13 +109,18 @@ impl FoloApp {
             return;
         }
         self.run_compare.ids.push(id);
+        self.run_compare.seeded = true;
         cx.notify();
     }
 
     /// Adds a run to the active comparison.
     pub fn run_compare_add(&mut self, id: String, cx: &mut Context<Self>) {
+        if let Some(runs) = self.store.runs.ready() {
+            self.run_compare.ids = reconcile_compare_runs(&self.run_compare.ids, runs);
+        }
         if !self.run_compare.ids.contains(&id) && self.run_compare.ids.len() < RUN_COMPARE_MAX {
             self.run_compare.ids.push(id);
+            self.run_compare.seeded = true;
             cx.notify();
         }
     }
@@ -119,6 +128,7 @@ impl FoloApp {
     /// Removes a run from the active comparison.
     pub fn run_compare_remove(&mut self, id: &str, cx: &mut Context<Self>) {
         self.run_compare.ids.retain(|x| x != id);
+        self.run_compare.seeded = true;
         if self.run_compare.pinned_run.as_deref() == Some(id) {
             self.run_compare.pinned_run = None;
         }
@@ -160,10 +170,14 @@ impl FoloApp {
             return self.page_frame(&t, header, body, cx);
         };
 
-        // Reconcile persisted IDs against live runs; auto-populate if empty on direct `--open runs-compare`.
+        // Reconcile persisted IDs against live runs; seed defaults once on direct `--open runs-compare`
+        // (never re-seed after the user intentionally removes all chips).
         let mut reconciled = reconcile_compare_runs(&self.run_compare.ids, &all_runs);
-        if reconciled.is_empty() && all_runs.len() >= 2 && self.run_compare.ids.is_empty() {
+        if !self.run_compare.seeded && reconciled.is_empty() && all_runs.len() >= 2 {
             reconciled = default_compare_runs(&all_runs, None);
+            self.run_compare.seeded = true;
+        } else if !reconciled.is_empty() {
+            self.run_compare.seeded = true;
         }
         if reconciled != self.run_compare.ids {
             self.run_compare.ids = reconciled.clone();
@@ -526,21 +540,18 @@ impl FoloApp {
         map_chart.readout = false;
         map_chart.x_ticks = Some(6);
 
-        // 2. Training loss overlaid chart.
+        // 2. Training loss overlaid chart (share Arc<Vec> between chart series and legend EMA cache).
+        let loss_arcs: Vec<Arc<Vec<(f32, f32)>>> = loss_pts.into_iter().map(Arc::new).collect();
         let loss_series: Vec<Series> = chosen
             .iter()
             .enumerate()
             .map(|(slot, r)| {
                 let color = run_slot_color(&t, slot);
-                style_series(
-                    Series::new(r.name.clone(), color, Arc::new(loss_pts[slot].clone())).smooth(ema),
-                    slot,
-                    r,
-                )
+                style_series(Series::new(r.name.clone(), color, loss_arcs[slot].clone()).smooth(ema), slot, r)
             })
             .collect();
-        let loss_max = loss_pts.iter().flat_map(|p| p.iter()).map(|p| p.1).fold(0.0f32, f32::max);
-        let loss_min = loss_pts
+        let loss_max = loss_arcs.iter().flat_map(|p| p.iter()).map(|p| p.1).fold(0.0f32, f32::max);
+        let loss_min = loss_arcs
             .iter()
             .flat_map(|p| p.iter())
             .map(|p| p.1)
@@ -564,28 +575,40 @@ impl FoloApp {
         loss_chart.readout = false;
         loss_chart.x_ticks = Some(6);
 
-        // Per-run legends reading value at hover cursor (or latest).
+        // Per-run legends: when hovering, use `value_near` so runs without data at the cursor show
+        // no stale endpoint value; match slot 2's dotted swatch as well as slot 1's dashed swatch.
+        let legend_item = |name: &str, slot: usize, val: Option<String>| {
+            let color = run_slot_color(&t, slot);
+            div()
+                .flex()
+                .items_center()
+                .gap(px(5.))
+                .child(crate::ui::line_swatch(color, slot == 1, slot == 2, if slot == 0 { 2.5 } else { 2.0 }))
+                .child(text(ty::SM, t.text_secondary).whitespace_nowrap().child(name.to_string()))
+                .when_some(val, |d, v| d.child(crate::ui::sci(ty::SM, t.text_primary, v)))
+        };
+        let legend_val = |pts: &[(f32, f32)], hv: Option<f32>| -> Option<String> {
+            match hv {
+                Some(f) if f.is_finite() => crate::charts::value_near(pts, x_max * f, x_max).map(f3),
+                Some(_) => None,
+                None => crate::charts::value_at(pts, None, 0.0, x_max).map(f3),
+            }
+        };
         let map_legend = div().flex().flex_wrap().items_center().gap(px(12.)).children(
             chosen.iter().enumerate().map(|(slot, r)| {
-                let val = crate::charts::value_at(&map_pts[slot], hover_of("cmp-map"), 0.0, x_max).map(f3);
-                crate::ui::legend_value(&t, &r.name, run_slot_color(&t, slot), slot == 1, val)
+                let val = legend_val(&map_pts[slot], hover_of("cmp-map"));
+                legend_item(&r.name, slot, val)
             }),
         );
         let loss_legend = div().flex().flex_wrap().items_center().gap(px(12.)).children(
             chosen.iter().enumerate().map(|(slot, r)| {
                 let val = if smooth_on {
-                    let pts_arc = Arc::new(loss_pts[slot].clone());
-                    crate::charts::value_at(
-                        &crate::charts::smoothed(&pts_arc, COMPARE_LOSS_EMA),
-                        hover_of("cmp-loss"),
-                        0.0,
-                        x_max,
-                    )
-                    .map(f3)
+                    let sm = crate::charts::smoothed(&loss_arcs[slot], COMPARE_LOSS_EMA);
+                    legend_val(&sm, hover_of("cmp-loss"))
                 } else {
-                    crate::charts::value_at(&loss_pts[slot], hover_of("cmp-loss"), 0.0, x_max).map(f3)
+                    legend_val(&loss_arcs[slot], hover_of("cmp-loss"))
                 };
-                crate::ui::legend_value(&t, &r.name, run_slot_color(&t, slot), slot == 1, val)
+                legend_item(&r.name, slot, val)
             }),
         );
 
@@ -665,23 +688,40 @@ impl FoloApp {
                 .is_none_or(|l| l.is_loading() || matches!(l, crate::store::Load::Idle))
         });
 
+        // Wrapping chart header (`min_h` instead of fixed 40 px) so segmented controls never clip
+        // or overlap the legend below at 960–1120 px.
+        let chart_head = |title: &str, controls: folo_ui::Div| {
+            div()
+                .min_h(px(40.))
+                .px(px(16.))
+                .py(px(6.))
+                .border_b_1()
+                .border_color(t.line_subtle)
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .justify_between()
+                .gap(px(8.))
+                .child(text(ty::SM, t.text_primary).font_weight(FontWeight::MEDIUM).child(title.to_string()))
+                .child(controls)
+        };
+
         let map_card = panel(&t).flex_1().min_w_0().child(
             div()
                 .w_full()
                 .flex()
                 .flex_col()
                 .min_w_0()
-                .child(
-                    panel_header(&t, "Validation mAP").child(
-                        div()
-                            .flex()
-                            .flex_wrap()
-                            .items_center()
-                            .gap(px(6.))
-                            .child(map_metric_seg)
-                            .child(x_axis_seg),
-                    ),
-                )
+                .child(chart_head(
+                    "Validation mAP",
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap(px(6.))
+                        .child(map_metric_seg)
+                        .child(x_axis_seg),
+                ))
                 .child(div().px(px(16.)).pt(px(8.)).child(map_legend))
                 .child(div().px(px(12.)).pb(px(8.)).child(line_chart(&t, map_chart)))
                 .when(any_loading, |d| {
@@ -700,23 +740,23 @@ impl FoloApp {
                 .flex()
                 .flex_col()
                 .min_w_0()
-                .child(
-                    panel_header(&t, "Training loss").child(
-                        div()
-                            .flex()
-                            .flex_wrap()
-                            .items_center()
-                            .gap(px(6.))
-                            .child(loss_part_seg)
-                            .child(loss_smooth_seg)
-                            .child(loss_scale_seg),
-                    ),
-                )
+                .child(chart_head(
+                    "Training loss",
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap(px(6.))
+                        .child(loss_part_seg)
+                        .child(loss_smooth_seg)
+                        .child(loss_scale_seg),
+                ))
                 .child(div().px(px(16.)).pt(px(8.)).child(loss_legend))
                 .child(div().px(px(12.)).pb(px(8.)).child(line_chart(&t, loss_chart))),
         );
 
-        let stack = window.viewport_size().width < px(1120.);
+        // Stack charts whenever two side-by-side cards wouldn't comfortably fit their control rows.
+        let stack = self.content_width(window) < 1040.;
         if stack {
             div().flex().flex_col().gap(px(16.)).child(map_card).child(loss_card).into_any_element()
         } else {

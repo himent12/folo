@@ -694,6 +694,7 @@ fn preload_run_compare(app: &mut FoloApp) {
             app.store.run_data.insert(id.clone(), data.into());
         }
         app.run_compare.ids = ids;
+        app.run_compare.seeded = true;
     }
     app.store.runs = runs_res.into();
     app.store.models = api.models().into();

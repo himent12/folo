@@ -176,8 +176,22 @@ fn chart_controls_hyperparam_diff_partial_failure_and_viewports() {
     assert!(rows.iter().any(|r| r.label == "Batch"));
     let _ = same_dataset(&selected);
 
-    // Render RunCompare across toggles, partial metric load failure, and both target viewports.
-    for (w, h, mode) in [(1280.0_f32, 800.0_f32, Mode::Dark), (1120.0, 780.0, Mode::Light)] {
+    // Canonical diff check: two runs with different dataset_ids that share the same display name
+    // must still be marked `differs == true`.
+    let mut r_a = selected[0].clone();
+    let mut r_b = selected[0].clone();
+    r_a.config.dataset_id = "ds_one".into();
+    r_b.config.dataset_id = "ds_two".into();
+    let canon_rows = hyperparam_rows(&[r_a, r_b], |_| "same-name".into(), |m| m.to_string());
+    let ds_row = canon_rows.iter().find(|r| r.label == "Dataset").unwrap();
+    assert!(ds_row.differs, "distinct dataset IDs with same display name must still diff");
+    assert_eq!(ds_row.off_base, vec![false, true]);
+
+    // Render RunCompare across toggles, removing all chips to empty state, external-delete cap
+    // reconciliation, partial metric failure + Retry, and 960/1120/1280 viewports.
+    for (w, h, mode) in
+        [(960.0_f32, 620.0_f32, Mode::Dark), (1120.0, 780.0, Mode::Light), (1280.0, 800.0, Mode::Dark)]
+    {
         let (mut app, win) = open_with(Arc::new(MockBackend::new(4200, true)), w, h, mode);
         drive(&mut app, win, |this, w, cx| this.open_run_compare(None, w, cx));
         settle(&mut app, win);
@@ -196,7 +210,7 @@ fn chart_controls_hyperparam_diff_partial_failure_and_viewports() {
         settle(&mut app, win);
 
         // Inject a partial metric load failure for one compared run -> Retry button appears without
-        // hiding the other runs' curves.
+        // hiding the other runs' curves, and retrying reloads metrics cleanly.
         let failed_id = drive(&mut app, win, |this, _, cx| {
             let fid = this.run_compare.ids[1].clone();
             this.store
@@ -206,11 +220,52 @@ fn chart_controls_hyperparam_diff_partial_failure_and_viewports() {
             fid
         });
         settle(&mut app, win);
-        drive(&mut app, win, |this, _, _| {
+        drive(&mut app, win, |this, _, cx| {
             let keys: Vec<String> = this.focus.borrow().keys().map(|k| k.to_string()).collect();
             assert!(
                 keys.iter().any(|k| k == &format!("run-cmp-mretry-{failed_id}")),
                 "failed run gets per-run Retry button: {keys:?}"
+            );
+            this.store.run_data.remove(&failed_id);
+            this.ensure_run_data(&failed_id, cx);
+        });
+        settle(&mut app, win);
+        drive(&mut app, win, |this, _, _| {
+            assert!(
+                this.store.run_data.get(&failed_id).and_then(|l| l.ready()).is_some(),
+                "retrying failed run metrics reloads cleanly"
+            );
+        });
+
+        // External deletion of a pinned run is reconciled before enforcing the 4-run cap.
+        drive(&mut app, win, |this, _, cx| {
+            let live_runs = this.store.runs.ready().unwrap().clone();
+            let mut ids: Vec<String> = live_runs.iter().take(3).map(|r| r.id.clone()).collect();
+            ids.push("run_deleted_externally".into());
+            this.run_compare.ids = ids;
+            let fourth = live_runs[3].id.clone();
+            this.toggle_run_compare_pin(fourth.clone(), cx);
+            assert!(
+                this.run_compare.ids.contains(&fourth),
+                "externally deleted pinned run must be pruned before cap check"
+            );
+            assert_eq!(this.run_compare.ids.len(), RUN_COMPARE_MAX);
+        });
+
+        // Removing every run keeps the selection empty (does not snap defaults back in).
+        drive(&mut app, win, |this, _, cx| {
+            let ids = this.run_compare.ids.clone();
+            for id in ids {
+                this.run_compare_remove(&id, cx);
+            }
+        });
+        settle(&mut app, win);
+        drive(&mut app, win, |this, _, _| {
+            assert!(this.run_compare.ids.is_empty(), "removing all chips must stay empty");
+            let keys: Vec<String> = this.focus.borrow().keys().map(|k| k.to_string()).collect();
+            assert!(
+                keys.iter().any(|k| k == "run-cmp-empty-back"),
+                "empty compare state renders cleanly: {keys:?}"
             );
         });
     }
