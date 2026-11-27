@@ -35,7 +35,8 @@
 //! The device is a parameter: inputs, the loss and the optimizers follow the model's device, which
 //! [`place_model`] sets (`Module::to_device`).
 //!
-//! Files: `config.rs` ([`TrainConfig`], [`OptimizerChoice`]), `setup.rs` ([`Trainer::new`], [`Trainer::resume`]),
+//! Files: `config/` ([`TrainConfig`], [`OptimizerChoice`]), `setup.rs` ([`Trainer::new`], [`Trainer::resume`]),
+//! `auto_batch/` (GPU VRAM-budget auto-batch prober: `mod.rs` planner + `footprint.rs` analytic estimator),
 //! `epoch.rs` (one epoch), `run.rs` ([`Trainer::run`]: epochs, validation, early stopping), `checkpoint.rs`
 //! ([`Trainer::save_checkpoint`]), `writer/` (the epoch's files, off the training thread), `events.rs`
 //! ([`EventSink`]), `feed.rs` (staging batches for a GPU), `device.rs` ([`place_model`], [`amp_support`]),
@@ -64,8 +65,8 @@ mod writer;
 
 pub use auto_batch::{
     AutoBatchPlan, AutoBatchRequest, BatchLimitFactor, DEFAULT_AUTO_BATCH_UTILIZATION, HeadroomSummary,
-    MAX_AUTO_BATCH, MAX_AUTO_BATCH_UTILIZATION, MIN_AUTO_BATCH_UTILIZATION, MemoryFootprint, auto_batch_plan,
-    estimate_training_footprint, probe_batch_size,
+    MAX_AUTO_BATCH, MAX_AUTO_BATCH_CLASSES, MAX_AUTO_BATCH_UTILIZATION, MIN_AUTO_BATCH_UTILIZATION,
+    MemoryFootprint, auto_batch_plan, estimate_training_footprint, probe_batch_size,
 };
 
 pub use config::{

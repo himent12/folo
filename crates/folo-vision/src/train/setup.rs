@@ -279,12 +279,30 @@ impl Trainer {
         // Wired GPU auto-batch sizing (opt-in on new runs; resumed runs keep their checkpointed batch/schedule).
         let auto_batch_plan = if !is_resume && cfg.auto_batch {
             if let Some(ctx) = folo_gpu::context_for(device) {
-                let teacher_arch = cfg.distill.as_ref().and_then(|d| {
-                    let path = super::resolve_teacher(&d.teacher).ok()?;
-                    let file = ModelFile::open(&path).ok()?;
-                    Some(file.metadata().arch.clone())
-                });
-                let req = super::AutoBatchRequest::from_train_config(&cfg, nc, n_train, teacher_arch, None)?;
+                let (teacher_arch, teacher_head) = match &cfg.distill {
+                    Some(d) => {
+                        let path = super::resolve_teacher(&d.teacher)?;
+                        let file = ModelFile::open(&path)?;
+                        let mconf = &file.metadata().config;
+                        let head = if mconf.has_o2o() {
+                            crate::model::HeadMode::O2o
+                        } else {
+                            crate::model::HeadMode::O2m
+                        };
+                        (Some(mconf.scale.clone()), Some(head))
+                    }
+                    None => (None, None),
+                };
+                let orig_nbs = cfg.nbs;
+                let orig_eff_wd = cfg.effective_wd(cfg.accumulate());
+                let req = super::AutoBatchRequest::from_train_config(
+                    &cfg,
+                    nc,
+                    n_train,
+                    teacher_arch,
+                    teacher_head,
+                    None,
+                )?;
                 let plan = super::auto_batch_plan(&req, &ctx.memory_budget())?;
                 if !plan.fits {
                     return Err(Error::Config(format!(
@@ -294,10 +312,16 @@ impl Trainer {
                     )));
                 }
                 if plan.needs_reclaim {
-                    let _ = ctx.release_memory();
+                    ctx.release_memory().map_err(|e| Error::Core(e.into()))?;
                 }
                 cfg.batch = plan.chosen_batch;
                 cfg.nbs = plan.nominal_batch;
+                cfg.val_batch = plan.chosen_val_batch;
+                // When clamping a `requested_batch > nbs` run raises `cfg.nbs` to preserve effective batch, pin
+                // `wd_eff` to the original effective weight decay so regularization strength stays invariant too.
+                if cfg.wd_eff.is_none() && plan.nominal_batch != orig_nbs {
+                    cfg.wd_eff = Some(orig_eff_wd);
+                }
                 pending_logs.push((LogLevel::Info, plan.summary_line()));
                 Some(plan)
             } else {
