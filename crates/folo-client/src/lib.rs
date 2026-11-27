@@ -14,6 +14,7 @@
 pub mod transfer;
 
 use std::ops::Range;
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use folo_api::{ApiError, ErrorBody};
@@ -209,16 +210,55 @@ impl Client {
     /// [`Client::new`] with its own timeouts: `connect` to establish a connection, `request` for a whole call,
     /// body included.
     pub fn with_timeouts(base: &str, connect: Duration, request: Duration) -> Client {
+        Self::build(base, connect, request, None)
+    }
+
+    /// [`Client::with_timeouts`] trusting the PEM root certificate(s) in `ca_pem` instead of the bundled web PKI
+    /// roots (for self-signed or private-CA `folo serve --tls-cert` workers).
+    pub fn with_tls_ca_pem(
+        base: &str,
+        connect: Duration,
+        request: Duration,
+        ca_pem: &[u8],
+    ) -> std::result::Result<Client, String> {
+        let certs = parse_ca_pem(ca_pem)?;
+        Ok(Self::build(base, connect, request, Some(certs)))
+    }
+
+    /// [`Client::with_tls_ca_pem`] reading the PEM CA bundle from `ca_path`.
+    pub fn with_tls_ca_file(
+        base: &str,
+        connect: Duration,
+        request: Duration,
+        ca_path: &Path,
+    ) -> std::result::Result<Client, String> {
+        let label = folo_api::json::path(ca_path);
+        let pem = std::fs::read(ca_path).map_err(|e| format!("could not read TLS CA file '{label}': {e}"))?;
+        let certs = parse_ca_pem(&pem).map_err(|why| format!("invalid TLS CA file '{label}': {why}"))?;
+        Ok(Self::build(base, connect, request, Some(certs)))
+    }
+
+    fn build(
+        base: &str,
+        connect: Duration,
+        request: Duration,
+        ca_certs: Option<Vec<ureq::tls::Certificate<'static>>>,
+    ) -> Client {
         // Never follow HTTP redirects: FOLO endpoints do not redirect, and following one would risk treating a
         // proxy or captive portal's answer as the server's (or sending requests to an unexpected host).
-        let agent = ureq::Agent::config_builder()
+        let mut builder = ureq::Agent::config_builder()
             .http_status_as_error(false)
             .max_redirects(0)
             .max_redirects_will_error(false)
             .timeout_connect(Some(connect))
-            .timeout_global(Some(request))
-            .build()
-            .into();
+            .timeout_global(Some(request));
+        if let Some(certs) = ca_certs {
+            let tls = ureq::tls::TlsConfig::builder()
+                .root_certs(ureq::tls::RootCerts::new_with_certs(&certs))
+                .build();
+            builder = builder.tls_config(tls);
+        }
+        let agent = builder.build().into();
         Client { base: base.trim_end_matches('/').to_string(), token: None, agent, deadline: None }
     }
 
@@ -604,6 +644,21 @@ impl Client {
         };
         Ok(StreamedPart { written, total, etag })
     }
+}
+
+fn parse_ca_pem(pem: &[u8]) -> std::result::Result<Vec<ureq::tls::Certificate<'static>>, String> {
+    let mut certs = Vec::new();
+    for item in ureq::tls::parse_pem(pem) {
+        match item {
+            Ok(ureq::tls::PemItem::Certificate(cert)) => certs.push(cert),
+            Ok(_) => {}
+            Err(e) => return Err(format!("invalid PEM certificate: {e}")),
+        }
+    }
+    if certs.is_empty() {
+        return Err("no PEM certificates found".into());
+    }
+    Ok(certs)
 }
 
 fn parse_ascii_u64(s: &str) -> Option<u64> {

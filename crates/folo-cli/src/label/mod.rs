@@ -218,7 +218,7 @@ fn open(conn: &LabelServerArgs, store: bool) -> Result<Session, CliError> {
             Ok(Session { labels, local: Some(lock), data_dir })
         }
         Ok(Acquire::InUse { url: Some(url) })
-            if serve_lock::serves(&url, &data_dir, conn.token.as_deref()) =>
+            if serve_lock::serves(&url, &data_dir, conn.token.as_deref(), None) =>
         {
             Ok(Session { labels: http(&url), local: None, data_dir })
         }

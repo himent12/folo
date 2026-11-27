@@ -118,6 +118,12 @@ pub struct ServeArgs {
     /// reverse proxy that keeps its own Host. Other names are refused (forbidden_host) against DNS rebinding.
     #[arg(long = "allow-host", value_name = "NAME", value_parser = NonEmptyStringValueParser::new())]
     pub allow_host: Vec<String>,
+    /// PEM certificate chain file to serve HTTPS natively (must be paired with --tls-key).
+    #[arg(long = "tls-cert", env = "FOLO_TLS_CERT", value_name = "PATH", requires = "tls_key")]
+    pub tls_cert: Option<PathBuf>,
+    /// PEM private key file matching --tls-cert (PKCS#8, PKCS#1, or SEC1; must be paired with --tls-cert).
+    #[arg(long = "tls-key", env = "FOLO_TLS_KEY", value_name = "PATH", requires = "tls_cert")]
+    pub tls_key: Option<PathBuf>,
 }
 
 /// `folo describe`.
@@ -900,6 +906,10 @@ pub struct McpArgs {
     /// With --server: the token that `folo serve` was started with (`--token`), sent as `Authorization: Bearer`.
     #[arg(long, env = "FOLO_TOKEN", hide_env_values = true, value_parser = NonEmptyStringValueParser::new())]
     pub token: Option<String>,
+    /// PEM CA certificate file to trust when connecting to an https:// `folo serve` (for self-signed or private-CA
+    /// certificates).
+    #[arg(long = "tls-ca", env = "FOLO_TLS_CA", value_name = "PATH", conflicts_with = "mock")]
+    pub tls_ca: Option<PathBuf>,
     /// Embedded mode: device of `predict`, `predict_batch` and `val`: auto (the GPU when one can hold the model,
     /// else the CPU), cpu or gpu:<n>. Training runs use their own `device` setting.
     #[arg(long, env = "FOLO_DEVICE", default_value = "auto")]

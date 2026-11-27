@@ -243,14 +243,16 @@ again (as Cloudflare's `52x` are).
 
 ### `remote`
 A FOLO server you run yourself: `folo serve --host 0.0.0.0 --token <secret> --tensor-cores` on the machine with the
-GPU (add `--tensor-cores` if you want to train with `amp: true`).
+GPU (add `--tensor-cores` if you want to train with `amp: true`, and `--tls-cert <cert.pem> --tls-key <key.pem>` to
+serve HTTPS natively).
 - **Credentials**: its `url` (required) and `token` (optional; required when the remote server runs with `--token` /
   `FOLO_TOKEN`). `url` must start with `https://` or `http://`, contain no embedded `user:password@`, no query string
-  or `#fragment`, and no spaces or control characters. Use `https://` across networks you do not control (put the
-  server behind a TLS proxy or a tunnel); `http://` is accepted, with a warning in the connection's `note` unless the
-  host is `localhost`, loopback (`127.0.0.0/8`, `::1`), RFC 1918 private IPv4, IPv4 link-local, or IPv6 unique-local
-  (`fc00::/7`) / link-local (`fe80::/10`). Pointing an `https://` URL at a plain-HTTP `folo serve` fails the TLS
-  handshake with a clear hint to use `http://` or add a TLS proxy.
+  or `#fragment`, and no spaces or control characters. Use `https://` across networks you do not control (serve TLS
+  natively with `--tls-cert` / `--tls-key`, or put the server behind a TLS proxy or a tunnel); `http://` is accepted,
+  with a warning in the connection's `note` unless the host is `localhost`, loopback (`127.0.0.0/8`, `::1`), RFC 1918
+  private IPv4, IPv4 link-local, or IPv6 unique-local (`fc00::/7`) / link-local (`fe80::/10`). Pointing an `https://`
+  URL at a plain-HTTP `folo serve` fails the TLS handshake with a clear hint to use `http://`, enable `--tls-cert` /
+  `--tls-key`, or add a TLS proxy.
 - **Offers**: one offer — id `"gpu"` for the GPU `device: auto` selects, or `"cpu"` when the remote server has no
   usable GPU — with no price.
 - No instance is launched or terminated; runs wait in that server's own queue. What a run leaves there stays
@@ -265,18 +267,23 @@ GPU (add `--tensor-cores` if you want to train with `amp: true`).
 ### Adding a provider
 A provider is one type implementing `folo_cloud::Provider` (check credentials, list offers, launch, look up, find
 by name, terminate) plus an entry in `folo_cloud::providers()`. The lifecycle above is provider-agnostic
-(`folo_server::cloud`), and tests run it against an in-process worker. Providers that expose a raw TCP port
-instead of an HTTPS endpoint (Vast.ai, Lambda) need TLS on the worker first and are not included yet. A new id
+(`folo_server::cloud`), and tests run it against an in-process worker. `folo serve` now supports native TLS
+(`--tls-cert` / `--tls-key`); providers that expose a raw TCP port instead of an HTTPS endpoint (Vast.ai, Lambda) are
+not included yet. A new id
 also goes into the provider lists that tests assert (`crates/folo-cloud/src/lib.rs`, `crates/folo-cli/tests/cloud.rs`
 and `crates/folo-server/tests/mock_cloud.rs`), and its mock offers into `MockStore::offers_of`
 (`crates/folo-server/src/mock/mod.rs`).
 
-## Securing a server (`--token`)
+## Securing a server (`--token` and native TLS)
 `folo serve --token <secret>` (or `FOLO_TOKEN`) requires `Authorization: Bearer <secret>` on every `/api` request
 except `GET /api/health`; anything else is `401 unauthorized`. Use it whenever the server listens beyond loopback.
+To encrypt traffic natively without an external proxy, pass `--tls-cert <cert.pem>` (`FOLO_TLS_CERT`) and
+`--tls-key <key.pem>` (`FOLO_TLS_KEY`): `folo serve` validates the PEM certificate chain and matching private key
+upfront (never falling back to plaintext HTTP) and serves HTTPS + SSE directly via pure-Rust `rustls`.
 A server on loopback answers only loopback `Host` names (docs/API.md, Conventions); one reached through a tunnel
 that keeps its own `Host` needs `--allow-host <name>`, and `--token` too.
-The comparison is constant-time and the token is never logged. `folo mcp --server <url> --token <secret>` and the
+The comparison is constant-time and the token is never logged. `folo mcp --server <url> --token <secret>` (plus
+`--tls-ca <ca.pem>` / `FOLO_TLS_CA` for self-signed or private-CA servers) and the
 `remote` provider send it. Studio and Desktop do not sign in to a token-protected server yet: such a server is for
 API clients (Studio served by one says "Not connected" and why, instead of failing on every screen).
 
@@ -313,8 +320,9 @@ folo cloud terminate ci_8a2f           # manual kill switch if needed
 
 **Connect a remote FOLO server:**
 ```sh
-# On the remote GPU machine (put behind TLS across untrusted networks):
-FOLO_TOKEN="$(openssl rand -hex 32)" folo serve --host 0.0.0.0 --port 7878 --tensor-cores
+# On the remote GPU machine (native TLS with --tls-cert / --tls-key across untrusted networks):
+FOLO_TOKEN="$(openssl rand -hex 32)" folo serve --host 0.0.0.0 --port 7878 --tensor-cores \
+  --tls-cert /etc/folo/fullchain.pem --tls-key /etc/folo/privkey.pem
 
 # On your local machine:
 folo cloud connect remote --name lab-4090 \

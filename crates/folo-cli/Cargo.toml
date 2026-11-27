@@ -39,6 +39,7 @@ base64.workspace = true
 folo-core.workspace = true
 image.workspace = true
 jsonschema.workspace = true
+rcgen.workspace = true
 
 [[bin]]
 name = "folo"

@@ -51,8 +51,8 @@ impl Provider for Remote {
                     required: true,
                     placeholder: Some("https://gpu-box.example.com:7878".into()),
                     help: Some(
-                        "The address of its `folo serve`; use https:// (a TLS proxy or a tunnel) across networks you \
-                         do not control."
+                        "The address of its `folo serve`; use https:// (`--tls-cert` / `--tls-key`, a TLS proxy, or \
+                         a tunnel) across networks you do not control."
                             .into(),
                     ),
                 },
@@ -159,7 +159,8 @@ impl Server {
         (!self.https && !is_local(&self.host)).then(|| {
             format!(
                 "{} is reached over http://: the token and your data cross the network unencrypted. Use https:// \
-                 (a TLS proxy or a tunnel) unless this network is yours.",
+                 (start the server with --tls-cert / --tls-key, or use a TLS proxy or tunnel) unless this network \
+                 is yours.",
                 self.host
             )
         })
@@ -196,7 +197,9 @@ impl Server {
         // broken records are not that, and keep the general cause.
         let tls = self.https && why.contains("InvalidContentType");
         let cause = if tls {
-            "it seems to speak plain HTTP: use http://, or put a TLS proxy in front of it".to_string()
+            "it seems to speak plain HTTP: use http://, start the server with --tls-cert / --tls-key, or put a TLS \
+             proxy in front of it"
+                .to_string()
         } else {
             "is `folo serve --host 0.0.0.0` running there?".to_string()
         };

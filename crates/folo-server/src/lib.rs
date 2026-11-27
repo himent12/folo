@@ -45,6 +45,7 @@ mod stats;
 pub mod store;
 pub mod system;
 pub mod throughput;
+pub mod tls;
 mod uploads;
 mod util;
 pub mod web;
@@ -76,6 +77,7 @@ pub use mock::MockStore;
 pub use real::RealStore;
 pub use runs::STOP_REQUESTED;
 pub use store::Store;
+pub use tls::{TlsConfig, TlsError, TlsErrorKind};
 
 /// Which browser origins may call the API.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -487,16 +489,7 @@ impl Server {
         listener: TcpListener,
         signal: impl Future<Output = ()> + Send + 'static,
     ) -> std::io::Result<()> {
-        if !self.token
-            && let Ok(addr) = listener.local_addr()
-            && !addr.ip().is_loopback()
-        {
-            tracing::warn!(
-                %addr,
-                "the API has no token and listens beyond loopback: anyone who can reach this port can use it \
-                 (start the server with --token)"
-            );
-        }
+        self.warn_unprotected_listener(&listener);
         let shutdown = self.shutdown.clone();
         let served = axum::serve(listener, self.router)
             .with_graceful_shutdown(async move {
@@ -508,6 +501,34 @@ impl Server {
         let store = self.store.clone();
         let _ = tokio::task::spawn_blocking(move || store.shutdown()).await;
         served
+    }
+
+    /// Serves over HTTPS using `tls` until `signal` resolves, then ends open SSE streams, drains in-flight
+    /// connections and shuts the store down ([`Store::shutdown`]).
+    pub async fn serve_tls(
+        self,
+        listener: TcpListener,
+        tls: TlsConfig,
+        signal: impl Future<Output = ()> + Send + 'static,
+    ) -> std::io::Result<()> {
+        self.warn_unprotected_listener(&listener);
+        let served = tls::serve_tls(listener, self.router, tls, self.shutdown.clone(), signal).await;
+        let store = self.store.clone();
+        let _ = tokio::task::spawn_blocking(move || store.shutdown()).await;
+        served
+    }
+
+    fn warn_unprotected_listener(&self, listener: &TcpListener) {
+        if !self.token
+            && let Ok(addr) = listener.local_addr()
+            && !addr.ip().is_loopback()
+        {
+            tracing::warn!(
+                %addr,
+                "the API has no token and listens beyond loopback: anyone who can reach this port can use it \
+                 (start the server with --token)"
+            );
+        }
     }
 }
 

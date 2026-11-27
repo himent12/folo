@@ -10,6 +10,20 @@ use crate::{data_dir, default_data_dir, serve_lock};
 /// `--json`); logs go to stderr.
 pub(crate) fn mcp(args: McpArgs) -> Result<(), CliError> {
     init_tracing();
+    if let Some(ca) = &args.tls_ca {
+        if ca.as_os_str().is_empty() {
+            return Err(CliError::new(ExitCode::Usage, "usage", "--tls-ca must not be empty")
+                .hint("pass the path to a PEM CA certificate file to --tls-ca (or FOLO_TLS_CA)"));
+        }
+        if !ca.exists() {
+            return Err(CliError::new(
+                ExitCode::NotFound,
+                "path_not_found",
+                format!("TLS CA file '{}' does not exist", folo_api::json::path(ca)),
+            )
+            .hint("pass an existing PEM CA certificate file to --tls-ca (or FOLO_TLS_CA)"));
+        }
+    }
     if args.tensor_cores && args.server.is_none() {
         // As `folo serve --tensor-cores`: before anything creates the GPU context.
         folo_gpu::context::request_tensor_cores();
@@ -21,7 +35,11 @@ pub(crate) fn mcp(args: McpArgs) -> Result<(), CliError> {
         args.data_dir.clone().unwrap_or_else(default_data_dir)
     };
     let mut backend = match (&args.server, args.mock) {
-        (Some(url), _) => folo_mcp::Backend::Proxy { url: url.clone(), token: args.token.clone() },
+        (Some(url), _) => folo_mcp::Backend::Proxy {
+            url: url.clone(),
+            token: args.token.clone(),
+            tls_ca: args.tls_ca.clone(),
+        },
         (None, true) => folo_mcp::Backend::Mock,
         (None, false) => folo_mcp::Backend::Real,
     };
@@ -31,10 +49,12 @@ pub(crate) fn mcp(args: McpArgs) -> Result<(), CliError> {
         folo_mcp::Backend::Real => match serve_lock::acquire(&data_dir) {
             Ok(serve_lock::Acquire::Held(lock)) => Some(lock),
             Ok(serve_lock::Acquire::InUse { url: Some(url) })
-                if !args.confine && serve_lock::serves(&url, &data_dir, args.token.as_deref()) =>
+                if !args.confine
+                    && serve_lock::serves(&url, &data_dir, args.token.as_deref(), args.tls_ca.as_deref()) =>
             {
                 tracing::info!(%url, "a folo serve owns the data dir: using it (as --server)");
-                backend = folo_mcp::Backend::Proxy { url, token: args.token.clone() };
+                backend =
+                    folo_mcp::Backend::Proxy { url, token: args.token.clone(), tls_ca: args.tls_ca.clone() };
                 None
             }
             Ok(serve_lock::Acquire::InUse { url }) => return Err(data_dir_in_use(&data_dir, url.as_deref())),

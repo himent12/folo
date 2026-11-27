@@ -9,10 +9,11 @@ scraping. It exposes the same operations as the CLI and `docs/API.md`, with the 
 { "mcpServers": { "folo": { "command": "folo", "args": ["mcp"] } } }
 ```
 
-`folo mcp [--data-dir DIR] [--mock] [--read-only] [--confine] [--server http://127.0.0.1:7878 [--token SECRET]]
+`folo mcp [--data-dir DIR] [--mock] [--read-only] [--confine] [--server http://127.0.0.1:7878 [--token SECRET] [--tls-ca PATH]]
 [--device auto] [--tensor-cores]`.
 `--server` (env `FOLO_SERVER`) forwards calls to a running `folo serve`, with `--token` (env `FOLO_TOKEN`) when the
-server requires authentication. `--device` (env `FOLO_DEVICE`: `auto`, `cpu`, `gpu:<n>`) is where the embedded real store runs `predict`,
+server requires authentication and `--tls-ca` (env `FOLO_TLS_CA`) to trust a custom PEM CA certificate when connecting
+to a self-signed or private-CA `https://` server. `--device` (env `FOLO_DEVICE`: `auto`, `cpu`, `gpu:<n>`) is where the embedded real store runs `predict`,
 `predict_batch` and `val`; each training run has its own `device`. `--tensor-cores` (env `FOLO_GPU_TENSOR_CORES=1`)
 asks for the GPU's tensor cores in embedded mode, as `folo serve --tensor-cores` does: `train { amp: true }` needs
 them (`folo_info`'s `capabilities.amp` says whether they are on). They have to be asked for before the GPU is

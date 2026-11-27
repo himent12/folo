@@ -12,7 +12,8 @@ it.
 
 | Path | What it holds |
 |---|---|
-| `src/lib.rs` | `Server` (the router and its middleware: token, origin, `Host`, CORS, compression, logging), `Options`, `WebSource` |
+| `src/lib.rs` | `Server` (the router and its middleware: token, origin, `Host`, CORS, compression, logging; `serve` and `serve_tls`), `Options`, `WebSource` |
+| `src/tls.rs` | Native TLS (`rustls` + `ring`): `TlsConfig` upfront PEM cert/key validation and the HTTPS accept + graceful drain loop (`serve_tls`) |
 | `src/routes/` | The `/api` router (`mod.rs`: `api()`, `blocking()`, `OriginalUri` in `404`/`405` fallbacks) and handler files grouped by area: `system.rs` (health, system, throughput, benchmark probes), `datasets.rs` (datasets + shared `serve_image` with strong `ETag` / `304` / `412`), `models.rs` (models with conditional `ETag` / `304`, weights downloads, and `POST /api/val`), `runs.rs` (runs + `/runs/estimate`), `inference.rs`, `uploads.rs`, `cloud.rs`, `label.rs`, `bench.rs` |
 | `src/store.rs` | The `Store` trait (everything a handler can ask, with `501 not_implemented` defaults for optional parts) and pre-serialized `SseFrame` payloads |
 | `src/real/` | `RealStore`: `mod.rs` (the struct, `open_with_cloud`, parallel startup indexing, the data dir layout), `store.rs` (its `Store` impl), `datasets.rs`, `registry.rs` (`datasets.json` + stat-validated cache), `thumbs.rs` (bounded LRU thumbnail cache), `deletion.rs`, `training.rs`, `models.rs`, `uploads.rs`, `gpu_idle.rs`, `tests.rs` |
@@ -108,7 +109,7 @@ live next to the code (`src/**/tests.rs` and `mod tests` blocks). Each folder un
 | `cloud`, `mock_cloud`, `worker` | The cloud control plane against in-process workers; the mock's cloud; what a cloud worker serves |
 | `label`, `label_live` | Agent labeling with scripted agents; the real Claude Code, Codex and Antigravity CLIs |
 | `bench` | Vision benchmarks end to end with tiny datasets, untrained models and scripted agents |
-| `token`, `real_system` | `folo serve --token`; `/api/system` `capabilities` (checks the refusal without a GPU) |
+| `tls`, `token`, `real_system` | Native TLS (`Server::serve_tls`, HTTPS + `--token`, SSE streaming, graceful shutdown); `folo serve --token`; `/api/system` `capabilities` (checks the refusal without a GPU) |
 
 The tests in `label_live.rs` are `#[ignore]`d: they need the CLI installed and signed in, and they spend tokens.
 Run one with `cargo test -p folo-server --test label_live -- --ignored --nocapture claude` (or `codex` /

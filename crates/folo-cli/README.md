@@ -104,7 +104,7 @@ bash tools/test-tmp.sh cargo test -p folo-cli   # as CI runs them: fails if a te
 | test | covers |
 |---|---|
 | `src/main.rs`, `src/train/tests.rs`, inline `mod tests` | Unit tests: the clap tree, `train` defaults against the API's `TrainConfig` and `describe` (`src/main.rs`), `--set` and `--resume` (`src/train/tests.rs`), and the modules' own `mod tests` |
-| `tests/cli.rs` | Global conventions: JSON lines on stdout, stable exit codes |
+| `tests/cli.rs`, `tests/tls.rs` | Global conventions: JSON lines on stdout, stable exit codes; native TLS (`folo serve --tls-cert / --tls-key`, `folo mcp --tls-ca`) |
 | `tests/cli_values.rs` | Multi-value flags in every documented form |
 | `tests/studio_cli.rs` | Studio's "CLI command" strings (`web/src/lib/trainCli.fixtures.json`) parse with the real tree |
 | `tests/engine.rs` (+ `engine/infer.rs`, `engine/score.rs`) | `train`, `val`, `predict`, `export`, `quantize`, `--score consensus`, and the weights plumbing end to end on a tiny synthetic dataset |

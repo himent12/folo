@@ -76,6 +76,8 @@ pub enum Backend {
         url: String,
         /// The token it was started with (`--token`), if any.
         token: Option<String>,
+        /// Optional PEM CA certificate file to trust for `https://` servers (`--tls-ca`).
+        tls_ca: Option<PathBuf>,
     },
 }
 
@@ -85,9 +87,12 @@ impl std::fmt::Debug for Backend {
         match self {
             Backend::Real => f.write_str("Real"),
             Backend::Mock => f.write_str("Mock"),
-            Backend::Proxy { url, token } => {
-                f.debug_struct("Proxy").field("url", url).field("token", &token.is_some()).finish()
-            }
+            Backend::Proxy { url, token, tls_ca } => f
+                .debug_struct("Proxy")
+                .field("url", url)
+                .field("token", &token.is_some())
+                .field("tls_ca", &tls_ca.is_some())
+                .finish(),
         }
     }
 }
@@ -128,13 +133,13 @@ pub fn build(backend: Backend, opts: Options) -> Result<FoloMcp, String> {
     Ok(match backend {
         Backend::Real => FoloMcp::new(Arc::new(open_real_store(&opts)), None, opts),
         Backend::Mock => FoloMcp::new(Arc::new(MockStore::new()), None, opts),
-        Backend::Proxy { url, token } => {
+        Backend::Proxy { url, token, tls_ca } => {
             if let Err(why) = folo_client::check_base_url(&url) {
                 return Err(format!(
                     "--server (or FOLO_SERVER) must be a valid http:// or https:// URL of a `folo serve` ({why})"
                 ));
             }
-            let http = Arc::new(proxy::HttpStore::new(&url, token.as_deref()));
+            let http = Arc::new(proxy::HttpStore::with_tls_ca(&url, token.as_deref(), tls_ca.as_deref())?);
             let store: Arc<dyn Store> = http.clone();
             FoloMcp::new(store, Some(http), opts)
         }

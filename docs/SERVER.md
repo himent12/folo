@@ -8,7 +8,8 @@ folo-cli and folo-mcp sit on it. The contracts live elsewhere and are not repeat
 [crates/folo-server/README.md](../crates/folo-server/README.md).
 
 ```text
-lib.rs             Server: the router and its middleware, Options, AppState, serve
+lib.rs             Server: the router and its middleware, Options, AppState, serve / serve_tls
+tls.rs             native TLS (rustls + ring): TlsConfig PEM validation and HTTPS accept / graceful drain loop
 routes/            one module per area of API.md (datasets, models, runs, inference, system, uploads, label, cloud,
                    bench); routes::blocking runs a Store call on tokio's blocking pool; mod.rs reports full request
                    paths via OriginalUri on 404/405; routes/models.rs serves weak-ETag conditional JSON responses
@@ -258,7 +259,7 @@ labeling job read through the `Store` and graded by folo-bench. `Benches` is the
 
 ### Shutdown order
 When `Ctrl+C` or `SIGTERM` resolves `shutdown_signal()`:
-1. `Server::serve` (`lib.rs`) sets the `watch` shutdown channel (`shutdown.send_replace(true)`), ending all open SSE streams, and lets `axum::serve` drain in-flight HTTP requests.
+1. `Server::serve` (`lib.rs`) / `Server::serve_tls` (`tls.rs`) sets the `watch` shutdown channel (`shutdown.send_replace(true)`), ending all open SSE streams and any pending TLS handshakes, and lets `axum::serve` (or `hyper-util` `GracefulShutdown` for HTTPS) drain in-flight HTTP requests.
 2. `Server::serve` runs `Store::shutdown()` on tokio's blocking pool (`RealStore::shutdown` in `real/store.rs`):
    1. `uploads.shutdown()` — closes and deletes in-progress upload sessions and joins their unpacker threads.
    2. `cloud.shutdown()` — sets `Halt`, lets `training` runs keep training on their workers and leaves `collecting` runs' instances alive so the next server recovers them and finishes collecting weights (earlier phases release their instances), stops `folo-cloud-reaper`, waits up to `cloud::SHUTDOWN_WAIT` (30 s) for tracked executors and the reaper, and joins those that finished (in-flight `folo-cloud-copy-*` threads are cancelled separately and may outlive their executor).
@@ -296,5 +297,5 @@ layer polls runs instead. The tools, resources and prompts are in [MCP.md](MCP.m
 - `real_runs/`: the real store's runs, models and inference end to end on a tiny synthetic dataset;
 - `cloud/`: the cloud control plane against in-process workers;
 - `label/` and `bench/`: agent labeling and vision benchmarks over HTTP, with scripted agents;
-- single files: `issues.rs`, `mock_cloud.rs`, `real_datasets.rs`, `real_system.rs`, `token.rs`, `transfer.rs`,
+- single files: `issues.rs`, `mock_cloud.rs`, `real_datasets.rs`, `real_system.rs`, `tls.rs`, `token.rs`, `transfer.rs`,
   `uploads.rs`, `weights.rs`, `worker.rs` and the ignored `label_live.rs`.
