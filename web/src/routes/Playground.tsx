@@ -91,6 +91,7 @@ export default function Playground() {
   let weightsInput!: HTMLInputElement;
   const where = computed(() => whereLabel(pred.get()));
   const badFile = signal<{ name: string; why: string | null } | null>(null);
+  const badFileB = signal<{ name: string; why: string | null } | null>(null);
 
   const predicting = signal(false);
   const error = signal<unknown>(null);
@@ -197,24 +198,32 @@ export default function Playground() {
     const input = e.currentTarget;
     const f = input.files?.[0];
     input.value = '';
-    const id = weightsTarget.peek() === 'b' ? cmp.modelBId.peek() : modelId.peek();
+    const side = weightsTarget.peek();
+    const id = side === 'b' ? cmp.modelBId.peek() : modelId.peek();
     if (!f || !id) return;
     const seq = (weightPickSeq.get(id) ?? 0) + 1;
     weightPickSeq.set(id, seq);
     if (!(await looksLikeFolo(f))) {
-      if (!isDestroyed() && weightPickSeq.get(id) === seq) badFile.set({ name: f.name, why: null });
+      if (!isDestroyed() && weightPickSeq.get(id) === seq) {
+        if (side === 'b') badFileB.set({ name: f.name, why: null });
+        else if (modelId.peek() === id) badFile.set({ name: f.name, why: null });
+      }
       return;
     }
     if (isDestroyed() || weightPickSeq.get(id) !== seq) return;
-    badFile.set(null);
+    if (side === 'b') badFileB.set(null);
+    else if (modelId.peek() === id) badFile.set(null);
     localWeights.set(new Map(localWeights.peek()).set(id, f));
   }
 
-  function dropLocal(id: string, f: File, e: unknown) {
-    const next = new Map(localWeights.peek());
-    next.delete(id);
-    localWeights.set(next);
-    badFile.set({ name: f.name, why: e instanceof Error ? sentence(e.message) : null });
+  function dropLocal(id: string, f: File, e: unknown, targetBad: Signal<{ name: string; why: string | null } | null> = badFile) {
+    const cur = localWeights.peek();
+    if (cur.get(id) === f) {
+      const next = new Map(cur);
+      next.delete(id);
+      localWeights.set(next);
+    }
+    targetBad.set({ name: f.name, why: e instanceof Error ? sentence(e.message) : null });
   }
 
   const result = computed(() => {
@@ -241,6 +250,8 @@ export default function Playground() {
     chooseModelA: chooseModel,
     runOnA: runOn,
     predA: pred,
+    hoverA: hover,
+    pickedA: picked,
     resultA: () => result.get(),
     rowsA: () => rows.get(),
     o2oA: () => o2o.get(),
@@ -252,7 +263,8 @@ export default function Playground() {
     classesA: () => classes.get(),
     browserOff: () => browserOff.get(),
     localWeights,
-    dropLocal,
+    dropLocalB: (id, f, e) => dropLocal(id, f, e, badFileB),
+    badFileB,
     engine,
   });
   clearCompare = cmp.clearResults;
@@ -295,6 +307,7 @@ export default function Playground() {
     localWeights,
     retryTick,
     restored,
+    consumeReuse: cmp.consumeReuseA,
     pred,
     predicting,
     error,
@@ -304,7 +317,7 @@ export default function Playground() {
     picked,
     conf,
     engine,
-    dropLocal,
+    dropLocal: (id, f, e) => dropLocal(id, f, e, badFile),
   });
 
   // Out of GPU memory on the server (507): this browser has its own device, and a smaller model of the same classes
@@ -345,19 +358,27 @@ export default function Playground() {
   function pickFromImage(i: number) {
     const b = kept.peek()[i];
     if (!b) return;
-    if (cmp.compare.peek()) cmp.inspectSide.set('a');
+    const switched = cmp.compare.peek() && cmp.inspectSide.peek() !== 'a';
+    if (switched) cmp.inspectSide.set('a');
     const next = picked.peek() === b ? null : b;
     picked.set(next);
-    if (next) scrollRowIntoView(rowEl(i), narrow.peek());
+    if (next) {
+      if (switched) queueMicrotask(() => scrollRowIntoView(rowEl(i), narrow.peek()));
+      else scrollRowIntoView(rowEl(i), narrow.peek());
+    }
   }
 
   function pickFromImageB(i: number) {
     const b = cmp.keptB.peek()[i];
     if (!b) return;
-    cmp.inspectSide.set('b');
+    const switched = cmp.inspectSide.peek() !== 'b';
+    if (switched) cmp.inspectSide.set('b');
     const next = cmp.pickedB.peek() === b ? null : b;
     cmp.pickedB.set(next);
-    if (next) scrollRowIntoView(rowEl(i), narrow.peek());
+    if (next) {
+      if (switched) queueMicrotask(() => scrollRowIntoView(rowEl(i), narrow.peek()));
+      else scrollRowIntoView(rowEl(i), narrow.peek());
+    }
   }
 
   function onrowkey(e: KeyboardEvent, k: number) {
@@ -432,6 +453,10 @@ export default function Playground() {
         compare: cmp.compare.peek(),
         compareView: cmp.compareView.peek(),
         splitPct: cmp.splitPct.peek(),
+        viewportW: cmp.zoom.viewportW.peek(),
+        viewportH: cmp.zoom.viewportH.peek(),
+        zoomZ: cmp.zoom.z.peek(),
+        zoomNx: cmp.zoom.nx.peek(),
         source: s,
         src: src.peek(),
         dims: d,
@@ -444,6 +469,8 @@ export default function Playground() {
         boxesB: cmp.rowsB.peek().map((r) => r.b),
         classesA: classes.peek(),
         classesB: cmp.classesB.peek(),
+        onlyA: only.peek(),
+        onlyB: cmp.onlyB.peek(),
         truthBoxes: truthBoxes.peek(),
         labels: labels.peek(),
         scores: scores.peek(),
@@ -500,15 +527,72 @@ export default function Playground() {
     </>
   );
 
+  function toggleClassB(cB: number) {
+    const nameB = cmp.classesB.peek()[cB];
+    const idxA = nameB !== undefined ? classes.peek().indexOf(nameB) : -1;
+    toggleClass(idxA >= 0 ? idxA : cB);
+  }
+
   const classList = () => (
     <ClassList
-      result={result.get()}
-      counts={counts.get()}
-      pred={pred.get()}
-      hidden={hidden.get()}
-      classes={classes.get()}
-      maxCount={maxCount.get()}
-      toggleClass={toggleClass}
+      result={showingB.get() ? cmp.resultB.get() : result.get()}
+      counts={showingB.get() ? cmp.countsB.get() : counts.get()}
+      pred={showingB.get() ? cmp.predB.get() : pred.get()}
+      hidden={showingB.get() ? cmp.hiddenB.get() : hidden.get()}
+      classes={showingB.get() ? cmp.classesB.get() : classes.get()}
+      maxCount={showingB.get() ? cmp.maxCountB.get() : maxCount.get()}
+      toggleClass={showingB.get() ? toggleClassB : toggleClass}
+    />
+  );
+
+  // Stable snippet reference so `<CompareStage>` never remounts when Model A's `pred` or `dims` object identity changes.
+  const compareStage = () => (
+    <CompareStage
+      source={source.get()!}
+      src={src.get()}
+      dims={dims.get()!}
+      sourceName={sourceName.get()}
+      onImageLoad={(ok) => imageError.set(!ok)}
+      view={cmp.compareView.get()}
+      bind:splitPct={cmp.splitPct}
+      zoom={cmp.zoom}
+      labels={labels.get()}
+      scores={scores.get()}
+      truthBoxes={truthBoxes.get()}
+      modelA={model.get()}
+      predA={pred.get()}
+      keptA={kept.get()}
+      visibleCountA={rows.get().length}
+      classesA={classes.get()}
+      onlyA={only.get()}
+      activeIdxA={activeIdx.get()}
+      selectedIdxA={selectedIdx.get()}
+      predictingA={predicting.get()}
+      errorA={error.get()}
+      onHoverA={(b) => hover.set(b)}
+      onSelectA={pickFromImage}
+      modelB={cmp.modelB.get()}
+      predB={cmp.predB.get()}
+      keptB={cmp.keptB.get()}
+      visibleCountB={cmp.rowsB.get().length}
+      classesB={cmp.classesB.get()}
+      onlyB={cmp.onlyB.get()}
+      activeIdxB={cmp.activeIdxB.get()}
+      selectedIdxB={cmp.selectedIdxB.get()}
+      predictingB={cmp.predictingB.get()}
+      errorB={cmp.errorB.get()}
+      weightsMissingB={cmp.weightsMissingB.get()}
+      badFileB={badFileB.get()}
+      runOnB={cmp.runOnB.get()}
+      onHoverB={(b) => cmp.hoverB.set(b)}
+      onSelectB={pickFromImageB}
+      onRetryB={() => cmp.retryTickB.set((t) => t + 1)}
+      onChooseWeightsB={() => {
+        weightsTarget.set('b');
+        weightsInput.click();
+      }}
+      onServerB={() => cmp.runOnB.set('server')}
+      engine={engine}
     />
   );
 
@@ -588,7 +672,7 @@ export default function Playground() {
   const results = (rail: boolean) => (
     <ResultsPanel
       rail={rail}
-      classCount={counts.get().length}
+      classCount={showingB.get() ? cmp.countsB.get().length : counts.get().length}
       classList={classList}
       showAllButton={showAllButton}
       onShowAll={() => hidden.set(new Set())}
@@ -760,64 +844,11 @@ export default function Playground() {
                     ? {
                         countA: cmp.summary.get().countA,
                         countB: cmp.summary.get().countB,
-                        deltaText: formatSignedDelta(cmp.summary.get().countDelta),
+                        deltaText: cmp.summary.get().countDelta !== null ? formatSignedDelta(cmp.summary.get().countDelta) : null,
                       }
                     : null
                 }
-                compareStage={
-                  cmp.compare.get() && source.get() && dims.get()
-                    ? () => (
-                        <CompareStage
-                          source={source.get()!}
-                          src={src.get()}
-                          dims={dims.get()!}
-                          sourceName={sourceName.get()}
-                          onImageLoad={(ok) => imageError.set(!ok)}
-                          view={cmp.compareView.get()}
-                          bind:splitPct={cmp.splitPct}
-                          zoom={cmp.zoom}
-                          labels={labels.get()}
-                          scores={scores.get()}
-                          truthBoxes={truthBoxes.get()}
-                          modelA={model.get()}
-                          predA={pred.get()}
-                          keptA={kept.get()}
-                          visibleCountA={rows.get().length}
-                          classesA={classes.get()}
-                          onlyA={only.get()}
-                          activeIdxA={activeIdx.get()}
-                          selectedIdxA={selectedIdx.get()}
-                          predictingA={predicting.get()}
-                          errorA={error.get()}
-                          weightsMissingA={weightsMissing.get()}
-                          runOnA={runOn.get()}
-                          onHoverA={(b) => hover.set(b)}
-                          onSelectA={pickFromImage}
-                          modelB={cmp.modelB.get()}
-                          predB={cmp.predB.get()}
-                          keptB={cmp.keptB.get()}
-                          visibleCountB={cmp.rowsB.get().length}
-                          classesB={cmp.classesB.get()}
-                          onlyB={cmp.onlyB.get()}
-                          activeIdxB={cmp.activeIdxB.get()}
-                          selectedIdxB={cmp.selectedIdxB.get()}
-                          predictingB={cmp.predictingB.get()}
-                          errorB={cmp.errorB.get()}
-                          weightsMissingB={cmp.weightsMissingB.get()}
-                          runOnB={cmp.runOnB.get()}
-                          onHoverB={(b) => cmp.hoverB.set(b)}
-                          onSelectB={pickFromImageB}
-                          onRetryB={() => cmp.retryTickB.set((t) => t + 1)}
-                          onChooseWeightsB={() => {
-                            weightsTarget.set('b');
-                            weightsInput.click();
-                          }}
-                          onServerB={() => cmp.runOnB.set('server')}
-                          engine={engine}
-                        />
-                      )
-                    : null
-                }
+                compareStage={cmp.compare.get() && !!source.get() && !!dims.get() ? compareStage : null}
               />
 
               {narrow.current && cmp.compare.get() ? compareSummary(false) : null}

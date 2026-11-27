@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { compareBadgeText, drawAnnotations, exportDetectionsJson, exportFilename } from './export';
+import { visibleTruthBoxes } from './exportActions';
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -13,9 +14,24 @@ describe('playground/export', () => {
     expect(exportFilename('   ', 'png')).toBe('export.png');
   });
 
-  it('formats compare PNG badge captions with count and latency', () => {
+  it('formats compare PNG badge captions with count, unavailable state, and latency', () => {
     expect(compareBadgeText('A', 'shapes-s', 1, 14.2)).toBe('A · shapes-s · 1 det · 14.2 ms');
     expect(compareBadgeText('B', 'shapes-n', 4, null)).toBe('B · shapes-n · 4 dets');
+    expect(compareBadgeText('B', 'shapes-n', null, null)).toBe('B · shapes-n · unavailable');
+  });
+
+  it('filters exported ground-truth boxes by each pane visibility set (hidden classes)', () => {
+    const truth = [
+      { class: 0, x1: 0, y1: 0, x2: 10, y2: 10 },
+      { class: 1, x1: 20, y1: 20, x2: 30, y2: 30 },
+      { class: 2, x1: 40, y1: 40, x2: 50, y2: 50 },
+    ];
+    // No hidden classes -> keep all
+    expect(visibleTruthBoxes(truth, null).map((b) => b.class)).toEqual([0, 1, 2]);
+    // Model A hides class 0 -> only 1, 2 kept
+    expect(visibleTruthBoxes(truth, new Set([1, 2])).map((b) => b.class)).toEqual([1, 2]);
+    // Model B with a different class order hides class 2 -> only 0, 1 kept
+    expect(visibleTruthBoxes(truth, new Set([0, 1])).map((b) => b.class)).toEqual([0, 1]);
   });
 
   it('draws ground-truth boxes, predicted boxes, and label chips onto a 2D canvas context', () => {

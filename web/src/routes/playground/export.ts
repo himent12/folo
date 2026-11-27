@@ -175,15 +175,21 @@ export function drawAnnotations(
   ctx.restore();
 }
 
-/** Draws a high-contrast caption pill inside a pane for Compare exports. */
-function drawBadge(ctx: CanvasRenderingContext2D, text: string, x: number, y: number, align: 'left' | 'right', scale: number): void {
+/** Draws a high-contrast caption pill inside a pane for Compare exports, clamped to `maxWidth` to prevent collisions. */
+function drawBadge(ctx: CanvasRenderingContext2D, text: string, x: number, y: number, align: 'left' | 'right', scale: number, maxWidth: number): void {
   const fontPx = Math.max(12, Math.round(13 * scale));
   const padX = Math.max(8, Math.round(10 * scale));
   const h = Math.round(fontPx * 1.8);
   ctx.save();
   ctx.font = makeCanvasFont(600, fontPx);
   ctx.textBaseline = 'middle';
-  const w = Math.ceil(ctx.measureText(text).width + padX * 2);
+  const availText = Math.max(16, maxWidth - padX * 2);
+  let label = text;
+  if (ctx.measureText(label).width > availText) {
+    while (label.length > 1 && ctx.measureText(`${label}…`).width > availText) label = label.slice(0, -1);
+    label = `${label}…`;
+  }
+  const w = Math.min(maxWidth, Math.ceil(ctx.measureText(label).width + padX * 2));
   const left = align === 'right' ? x - w : x;
   ctx.fillStyle = 'rgba(10, 12, 16, 0.86)';
   ctx.fillRect(left, y, w, h);
@@ -191,7 +197,7 @@ function drawBadge(ctx: CanvasRenderingContext2D, text: string, x: number, y: nu
   ctx.lineWidth = Math.max(1, Math.round(scale));
   ctx.strokeRect(left, y, w, h);
   ctx.fillStyle = '#EDEFF2';
-  ctx.fillText(text, left + padX, y + h / 2 + 0.5);
+  ctx.fillText(label, left + padX, y + h / 2 + 0.5, availText);
   ctx.restore();
 }
 
@@ -224,8 +230,9 @@ function canvasToPng(canvas: HTMLCanvasElement): Promise<Blob> {
   });
 }
 
-/** Formats a concise caption badge for Compare PNG exports. */
-export function compareBadgeText(side: 'A' | 'B', modelName: string, count: number, totalMs: number | null): string {
+/** Formats a concise caption badge for Compare PNG exports (never reports 0 dets when a model has no result). */
+export function compareBadgeText(side: 'A' | 'B', modelName: string, count: number | null, totalMs: number | null): string {
+  if (count === null) return `${side} · ${modelName} · unavailable`;
   const det = `${count} ${count === 1 ? 'det' : 'dets'}`;
   return totalMs !== null ? `${side} · ${modelName} · ${det} · ${ms(totalMs)}` : `${side} · ${modelName} · ${det}`;
 }
@@ -314,8 +321,9 @@ export async function exportComparePng(opts: ExportComparePngOptions): Promise<b
       ctx.fillRect(Math.max(0, cutX - Math.floor(lineW / 2)), 0, lineW, h);
 
       const inset = Math.max(8, Math.round(10 * scale));
-      if (opts.layerA.caption) drawBadge(ctx, opts.layerA.caption, inset, inset, 'left', scale);
-      if (opts.layerB.caption) drawBadge(ctx, opts.layerB.caption, w - inset, inset, 'right', scale);
+      const maxBadgeW = Math.max(48, Math.floor(w / 2 - inset * 1.5));
+      if (opts.layerA.caption) drawBadge(ctx, opts.layerA.caption, inset, inset, 'left', scale, maxBadgeW);
+      if (opts.layerB.caption) drawBadge(ctx, opts.layerB.caption, w - inset, inset, 'right', scale, maxBadgeW);
     }
 
     const blob = await canvasToPng(canvas);

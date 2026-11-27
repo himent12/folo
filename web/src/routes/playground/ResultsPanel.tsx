@@ -96,14 +96,19 @@ export default function ResultsPanel(props: ResultsPanelProps) {
     const payload = props.json;
     if (!payload) return;
     const seq = ++copySeq;
-    const boxes = (payload as { boxes?: unknown }).boxes;
-    const exportedCount = Array.isArray(boxes) ? boxes.length : (props.result?.boxes.length ?? 0);
+    const comparePayload = payload as { mode?: unknown; comparison?: { count_a?: number | null; count_b?: number | null }; boxes?: unknown };
+    const isCompare = comparePayload.mode === 'compare';
+    const exportedCount = Array.isArray(comparePayload.boxes) ? comparePayload.boxes.length : (props.result?.boxes.length ?? 0);
     copyStatus.set('');
     try {
       await navigator.clipboard.writeText(jsonText(payload));
       if (!alive || seq !== copySeq) return;
       copied.set(true);
-      copyStatus.set(`Copied ${exportedCount} ${exportedCount === 1 ? 'detection' : 'detections'} as JSON`);
+      copyStatus.set(
+        isCompare
+          ? 'Copied Model A/B comparison as JSON'
+          : `Copied ${exportedCount} ${exportedCount === 1 ? 'detection' : 'detections'} as JSON`,
+      );
       clearTimeout(copyReset);
       copyReset = setTimeout(() => {
         if (alive && seq === copySeq) {
@@ -148,7 +153,7 @@ export default function ResultsPanel(props: ResultsPanelProps) {
               { value: 'json', label: 'JSON' },
             ]}
           />
-          {props.result && props.json ? (
+          {props.json ? (
             <span class="copy-json" use:tooltip={copied.get() ? 'Copied detections JSON' : 'Copy detections JSON'}>
               {props.rail ? (
                 <Button
@@ -170,7 +175,11 @@ export default function ResultsPanel(props: ResultsPanelProps) {
           {copyStatus.get()}
         </span>
         <div id="pg-panel" role="tabpanel" aria-labelledby={`pg-${view()}`}>
-          {!props.result ? (
+          {view() === 'json' && props.json ? (
+            <div class="json-wrap">
+              <JsonView value={props.json} label="Prediction as JSON" />
+            </div>
+          ) : !props.result ? (
             <p class="placeholder">
               {props.predicting
                 ? 'Running inference…'
@@ -182,10 +191,6 @@ export default function ResultsPanel(props: ResultsPanelProps) {
             <div class="classes-tab">
               {props.showAllButton ? <div class="show-all">{props.showAllButton}</div> : null}
               {props.classList?.()}
-            </div>
-          ) : view() === 'json' ? (
-            <div class="json-wrap">
-              <JsonView value={props.json} label="Prediction as JSON" />
             </div>
           ) : !props.pred?.boxes.length ? (
             /* Candidates are fetched down to the lowest threshold (FETCH): none means no threshold would show more. */

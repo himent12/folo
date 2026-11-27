@@ -23,7 +23,8 @@ export interface CompareSummaryPanelProps {
 }
 
 export default function CompareSummaryPanel(props: CompareSummaryPanelProps) {
-  const deltaTone = (d: number) => (d > 0 ? 'pos' : d < 0 ? 'neg' : 'zero');
+  const deltaTone = (d: number | null) => (d === null || d === 0 ? 'zero' : d > 0 ? 'pos' : 'neg');
+  const countText = (n: number | null) => (n === null ? '—' : String(n));
 
   const body = () => (
     <div class="ab-sum">
@@ -36,15 +37,17 @@ export default function CompareSummaryPanel(props: CompareSummaryPanelProps) {
               <span class="k-label">Detections</span>
               <div class="k-vals">
                 <span>
-                  <span class="tag-a">A</span> <b>{props.summary.countA}</b>
+                  <span class="tag-a">A</span> <b>{countText(props.summary.countA)}</b>
                 </span>
                 <span class="vs">vs</span>
                 <span>
-                  <span class="tag-b">B</span> <b>{props.summary.countB}</b>
+                  <span class="tag-b">B</span> <b>{countText(props.summary.countB)}</b>
                 </span>
-                <span class={`delta ${deltaTone(props.summary.countDelta)}`} data-fact>
-                  Δ {formatSignedDelta(props.summary.countDelta)}
-                </span>
+                {props.summary.countDelta !== null ? (
+                  <span class={`delta ${deltaTone(props.summary.countDelta)}`} data-fact>
+                    Δ {formatSignedDelta(props.summary.countDelta)}
+                  </span>
+                ) : null}
               </div>
             </div>
             <div class="kpi">
@@ -89,8 +92,8 @@ export default function CompareSummaryPanel(props: CompareSummaryPanelProps) {
                             <span class="truncate">{r().name}</span>
                           </span>
                         </td>
-                        <td class="r num">{r().countA}</td>
-                        <td class="r num">{r().countB}</td>
+                        <td class="r num">{countText(r().countA)}</td>
+                        <td class="r num">{countText(r().countB)}</td>
                         <td class={`r num d-cell ${deltaTone(r().delta)}`}>{formatSignedDelta(r().delta)}</td>
                       </tr>
                     )}
@@ -110,8 +113,8 @@ export default function CompareSummaryPanel(props: CompareSummaryPanelProps) {
               value={props.inspectSide}
               onchange={props.onInspectSide}
               options={[
-                { value: 'a', label: 'Model A', meta: String(props.summary.countA) },
-                { value: 'b', label: 'Model B', meta: String(props.summary.countB) },
+                { value: 'a', label: 'Model A', meta: props.summary.countA !== null ? String(props.summary.countA) : undefined },
+                { value: 'b', label: 'Model B', meta: props.summary.countB !== null ? String(props.summary.countB) : undefined },
               ]}
             />
           </div>

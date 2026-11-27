@@ -105,11 +105,17 @@ describe('Playground: Compare A/B and Export', () => {
     expect(beforeA).toBe('m_hard_s');
     expect(beforeB).toBe('m_shapes_n');
 
+    // Swap should reuse swapped predictions without firing redundant network calls and write both models atomically.
+    const callsBeforeSwap = predictSpy.mock.calls.length;
     const swapBtn = target.querySelector<HTMLButtonElement>('button[aria-label="Swap Model A and Model B"]')!;
     swapBtn.click();
     flushSync();
     expect(selects()[0]!.value).toBe(beforeB);
     expect(selects()[1]!.value).toBe(beforeA);
+    expect(router.route.query.get('model')).toBe(beforeB);
+    expect(router.route.query.get('modelB')).toBe(beforeA);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(predictSpy.mock.calls.length).toBe(callsBeforeSwap);
 
     // Toggle Compare off returns cleanly to single-model view.
     const cmpBtn = [...target.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('Compare A/B'))!;
@@ -117,6 +123,113 @@ describe('Playground: Compare A/B and Export', () => {
     flushSync();
     expect(target.querySelector('[data-compare-view]')).toBeNull();
     expect(target.querySelector('#pg-compare-summary')).toBeNull();
+  });
+
+  it('keeps CompareStage mounted across Model A updates and resets shared zoom when switching images', async () => {
+    await openPlayground('#/playground?model=m_hard_s&compare=1&modelB=m_shapes_n');
+    const stage = await until(() => target.querySelector('[data-compare-view="side-by-side"]'), 'compare stage');
+
+    // Zoom in while in Compare mode.
+    target.querySelector<HTMLButtonElement>('[data-zoom="in"]')!.click();
+    flushSync();
+    expect(target.querySelector('.zoom-pct')?.textContent).toBe('150%');
+
+    // Switching Model A should NOT remount the CompareStage node.
+    const selectA = target.querySelectorAll<HTMLSelectElement>('aside.rail select')[0]!;
+    selectA.value = 'm_shapes_s';
+    selectA.dispatchEvent(new Event('change', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 20));
+    flushSync();
+    expect(target.querySelector('[data-compare-view="side-by-side"]')).toBe(stage);
+
+    // Clearing the image and loading another resets shared zoom back to Fit.
+    target.querySelector<HTMLButtonElement>('button[aria-label="Clear image"]')!.click();
+    flushSync();
+    (await until(() => target.querySelector<HTMLButtonElement>('button.sample'), 'sample image after clear')).click();
+    await until(() => target.querySelector('[data-compare-view="side-by-side"]'), 'compare stage on new image');
+    expect(target.querySelector('.zoom-pct')?.textContent).toBe('Fit');
+  });
+
+  it('shows unavailable summary and Retry B without fabricating zero counts when Model B fails', async () => {
+    const api = new MockApi('normal', 0);
+    api.imageUrl = async () => 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+    const origPredict = api.predict.bind(api);
+    let failB = true;
+    api.predict = async (input, opts) => {
+      if (opts.model_id === 'm_shapes_n' && failB) throw new Error('Model B offline');
+      return origPredict(input, opts);
+    };
+    hub.api = api;
+    hub.mode = 'mock';
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    router.route = parse('#/playground?model=m_hard_s&compare=1&modelB=m_shapes_n');
+    handle = render(() => <Playground />, target);
+    (await until(() => target.querySelector<HTMLButtonElement>('button.sample'), 'sample image')).click();
+    const retryB = await until(
+      () => [...target.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('Retry B')),
+      'Retry B button',
+    );
+    // Summary omits Δ pill when Model B is unavailable.
+    expect(target.querySelector('.ab-sum .delta')).toBeNull();
+    // JSON tab stays accessible even when inspecting the failed side.
+    const sideBBtn = [...target.querySelectorAll<HTMLButtonElement>('[role="radio"]')].find((b) => b.textContent?.includes('Model B'))!;
+    sideBBtn.click();
+    flushSync();
+    target.querySelector<HTMLButtonElement>('#pg-json')!.click();
+    flushSync();
+    await until(() => target.querySelector('#pg-panel pre'), 'compare JSON while B failed');
+
+    // Retrying Model B recovers cleanly.
+    failB = false;
+    retryB.click();
+    await until(() => target.querySelector('.ab-sum .delta') !== null, 'delta restored after Retry B');
+  });
+
+  it('stops a pending camera MediaStream if the capture dialog closes before getUserMedia resolves', async () => {
+    const stop = vi.fn();
+    let resolveStream!: (s: MediaStream) => void;
+    const pending = new Promise<MediaStream>((r) => (resolveStream = r));
+    const origMediaDevices = navigator.mediaDevices;
+    Object.defineProperty(navigator, 'mediaDevices', {
+      configurable: true,
+      value: { getUserMedia: vi.fn(() => pending) },
+    });
+    try {
+      const api = new MockApi('normal', 0);
+      hub.api = api;
+      hub.mode = 'mock';
+      target = document.createElement('div');
+      document.body.appendChild(target);
+      router.route = parse('#/playground');
+      handle = render(() => <Playground />, target);
+
+      const captureBtn = await until(
+        () => [...target.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('Video / camera')),
+        'capture button',
+      );
+      captureBtn.click();
+      flushSync();
+      const dlg = await until(() => target.querySelector('dialog[open]'), 'capture dialog');
+      const camTab = [...dlg.querySelectorAll<HTMLButtonElement>('[role="radio"]')].find((b) => b.textContent?.trim() === 'Camera')!;
+      camTab.click();
+      flushSync();
+      const startBtn = [...dlg.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('Start camera'))!;
+      startBtn.click();
+      flushSync();
+
+      // Close dialog while getUserMedia is still pending.
+      const cancelBtn = [...dlg.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === 'Cancel')!;
+      cancelBtn.click();
+      flushSync();
+
+      // Resolving the stale getUserMedia call must immediately stop every track.
+      resolveStream({ getTracks: () => [{ stop }] } as unknown as MediaStream);
+      await new Promise((r) => setTimeout(r, 10));
+      expect(stop).toHaveBeenCalledTimes(1);
+    } finally {
+      Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: origMediaDevices });
+    }
   });
 
   it('opens the Video / camera frame capture dialog cleanly on the empty Playground', async () => {

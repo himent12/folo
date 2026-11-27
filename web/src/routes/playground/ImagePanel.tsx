@@ -110,7 +110,7 @@ export interface ImagePanelProps {
   /** Optional Compare A/B stage replacing the single-model canvas when Compare mode is active. */
   compareStage?: (() => JSX.Element) | null;
   /** Compact comparison summary shown in the desktop viewer header when Compare mode is active. */
-  compareFacts?: { countA: number; countB: number; deltaText: string } | null;
+  compareFacts?: { countA: number | null; countB: number | null; deltaText: string | null } | null;
   /** Opens the local video frame / camera capture dialog. */
   onCapture?: () => void;
 }
@@ -195,12 +195,12 @@ export default function ImagePanel(props: ImagePanelProps) {
                   {props.compareFacts ? (
                     <>
                       <span class="fi">
-                        A <b>{props.compareFacts.countA}</b>
+                        A <b>{props.compareFacts.countA === null ? '—' : props.compareFacts.countA}</b>
                       </span>
                       <span class="fi">
-                        B <b>{props.compareFacts.countB}</b>
+                        B <b>{props.compareFacts.countB === null ? '—' : props.compareFacts.countB}</b>
                       </span>
-                      <span class="fi">Δ {props.compareFacts.deltaText}</span>
+                      {props.compareFacts.deltaText !== null ? <span class="fi">Δ {props.compareFacts.deltaText}</span> : null}
                     </>
                   ) : props.result ? (
                     <>
@@ -265,7 +265,7 @@ export default function ImagePanel(props: ImagePanelProps) {
                   ) : null}
                 </div>
               ) : props.compareStage ? (
-                props.compareStage()
+                props.compareStage
               ) : (
                 <ZoomStage resetKey={sourceImageKey(props.source)}>
                   <DetectionView

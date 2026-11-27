@@ -1,5 +1,6 @@
 // Pure comparison helpers for Playground Model A/B visual compare: default Model B selection, count/latency deltas,
-// per-class breakdowns, and structured JSON payloads.
+// per-class breakdowns, and structured JSON payloads. Availability of Model A and Model B is tracked explicitly so
+// pending or failed predictions never report fabricated zero counts or misleading deltas.
 import type { Model, Prediction } from '$lib/api/types';
 import { ms } from '$lib/format';
 import { predictionJson, type Det } from './viewState';
@@ -10,15 +11,15 @@ export interface CompareClassRow {
   name: string;
   /** Class index used for palette swatch color (prefers Model A's class index, then Model B's). */
   colorClass: number;
-  countA: number;
-  countB: number;
-  delta: number;
+  countA: number | null;
+  countB: number | null;
+  delta: number | null;
 }
 
 export interface CompareSummary {
-  countA: number;
-  countB: number;
-  countDelta: number;
+  countA: number | null;
+  countB: number | null;
+  countDelta: number | null;
   latencyA: number | null;
   latencyB: number | null;
   latencyDeltaMs: number | null;
@@ -50,41 +51,57 @@ export function summarizeComparison(opts: {
   predB: Prediction | null;
 }): CompareSummary {
   const { boxesA, boxesB, predA, predB } = opts;
-  const byName = new Map<string, CompareClassRow>();
+  const hasA = predA !== null;
+  const hasB = predB !== null;
+  const byName = new Map<string, { name: string; colorClass: number; a: number; b: number }>();
 
-  for (const b of boxesA) {
-    const key = b.name || `class ${b.class}`;
-    const existing = byName.get(key);
-    if (existing) {
-      existing.countA++;
-    } else {
-      byName.set(key, { name: key, colorClass: b.class, countA: 1, countB: 0, delta: 0 });
+  if (hasA) {
+    for (const b of boxesA) {
+      const key = b.name || `class ${b.class}`;
+      const existing = byName.get(key);
+      if (existing) existing.a++;
+      else byName.set(key, { name: key, colorClass: b.class, a: 1, b: 0 });
     }
   }
 
-  for (const b of boxesB) {
-    const key = b.name || `class ${b.class}`;
-    const existing = byName.get(key);
-    if (existing) {
-      existing.countB++;
-    } else {
-      byName.set(key, { name: key, colorClass: b.class, countA: 0, countB: 1, delta: 0 });
+  if (hasB) {
+    for (const b of boxesB) {
+      const key = b.name || `class ${b.class}`;
+      const existing = byName.get(key);
+      if (existing) existing.b++;
+      else byName.set(key, { name: key, colorClass: b.class, a: 0, b: 1 });
     }
   }
 
-  const classes = [...byName.values()]
-    .map((row) => ({ ...row, delta: row.countB - row.countA }))
-    .sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta) || b.countA + b.countB - (a.countA + a.countB) || a.name.localeCompare(b.name));
+  const classes: CompareClassRow[] = [...byName.values()]
+    .map((row) => ({
+      name: row.name,
+      colorClass: row.colorClass,
+      countA: hasA ? row.a : null,
+      countB: hasB ? row.b : null,
+      delta: hasA && hasB ? row.b - row.a : null,
+    }))
+    .sort((a, b) => {
+      const da = a.delta === null ? -1 : Math.abs(a.delta);
+      const db = b.delta === null ? -1 : Math.abs(b.delta);
+      const sumA = (a.countA ?? 0) + (a.countB ?? 0);
+      const sumB = (b.countA ?? 0) + (b.countB ?? 0);
+      return db - da || sumB - sumA || a.name.localeCompare(b.name);
+    });
 
-  const latencyA = predA ? predA.timing.total_ms : null;
-  const latencyB = predB ? predB.timing.total_ms : null;
+  const countA = hasA ? boxesA.length : null;
+  const countB = hasB ? boxesB.length : null;
+  const countDelta = countA !== null && countB !== null ? countB - countA : null;
+
+  const latencyA = hasA ? predA.timing.total_ms : null;
+  const latencyB = hasB ? predB.timing.total_ms : null;
   const latencyDeltaMs = latencyA !== null && latencyB !== null ? latencyB - latencyA : null;
   const speedupRatio = latencyA !== null && latencyB !== null && latencyA > 0 && latencyB > 0 ? latencyA / latencyB : null;
 
   return {
-    countA: boxesA.length,
-    countB: boxesB.length,
-    countDelta: boxesB.length - boxesA.length,
+    countA,
+    countB,
+    countDelta,
     latencyA,
     latencyB,
     latencyDeltaMs,
@@ -93,14 +110,15 @@ export function summarizeComparison(opts: {
   };
 }
 
-/** Formats a signed integer delta (`+3`, `-2`, `0`). */
-export function formatSignedDelta(delta: number): string {
+/** Formats a signed integer delta (`+3`, `-2`, `0`, or `—` when unavailable). */
+export function formatSignedDelta(delta: number | null): string {
+  if (delta === null) return '—';
   if (delta > 0) return `+${delta}`;
   if (delta < 0) return String(delta);
   return '0';
 }
 
-/** Formats latency difference between Model A and Model B (`B faster by 12 ms (2.1×)` or `+8.4 ms`). */
+/** Formats latency difference between Model A and Model B (`-10.0 ms · B 2.0× faster` or `+8.4 ms`). */
 export function formatLatencyComparison(summary: Pick<CompareSummary, 'latencyA' | 'latencyB' | 'latencyDeltaMs' | 'speedupRatio'>): string {
   const { latencyDeltaMs, speedupRatio } = summary;
   if (latencyDeltaMs === null) return '—';

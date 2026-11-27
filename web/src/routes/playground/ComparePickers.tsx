@@ -7,7 +7,6 @@ import ArrowLeftRight from '$icons/arrow-left-right';
 import ArrowUpRight from '$icons/arrow-up-right';
 import { bindable, css, type Signal } from 'fw';
 import type { Model } from '$lib/api/types';
-import type { Backend } from '$lib/inference/browser';
 import { href } from '$lib/router';
 import type { ModelChoice } from '$lib/scoreSummary';
 import Button from '$lib/ui/Button';

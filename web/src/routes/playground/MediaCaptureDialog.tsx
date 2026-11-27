@@ -1,5 +1,5 @@
 /**
- * Capture a single frame into Playground from a local video file (.mp4/.webm/.mov with frame scrubbing) or live
+ * Capture a single frame into Playground from a local video file (.mp4/.webm/.mov with timeline scrubbing) or live
  * webcam snapshot (with graceful degradation when camera hardware or permissions are unavailable).
  */
 import Pause from '$icons/square';
@@ -21,7 +21,7 @@ export interface MediaCaptureDialogProps {
 }
 
 type Mode = 'video' | 'camera';
-const FRAME_STEP_S = 1 / 30;
+const STEP_SEC = 0.1;
 
 function formatSec(s: number): string {
   if (!Number.isFinite(s) || s < 0) return '0:00.0';
@@ -30,11 +30,11 @@ function formatSec(s: number): string {
   return `${m}:${rem < 10 ? '0' : ''}${rem.toFixed(1)}`;
 }
 
-/** Captures the current rendered frame of an HTMLVideoElement as a PNG blob. */
+/** Captures the current decoded frame of an HTMLVideoElement as a PNG blob. */
 async function videoFrameToPng(video: HTMLVideoElement): Promise<Blob> {
   const w = video.videoWidth;
   const h = video.videoHeight;
-  if (!w || !h) throw new Error('Video frame is not ready yet.');
+  if (!w || !h || video.readyState < 2) throw new Error('Video frame is not ready yet.');
   const canvas = document.createElement('canvas');
   canvas.width = w;
   canvas.height = h;
@@ -50,6 +50,11 @@ export default function MediaCaptureDialog(props: MediaCaptureDialogProps) {
   const open = bindable(props, 'open', false);
   const mode = signal<Mode>('video');
 
+  // Lifecycle and request-sequencing guards prevent stale async streams or captures from committing after close/unmount.
+  let alive = true;
+  let camSeq = 0;
+  let captureSeq = 0;
+
   // Video file state
   let videoInput!: HTMLInputElement;
   let videoEl: HTMLVideoElement | undefined;
@@ -59,6 +64,7 @@ export default function MediaCaptureDialog(props: MediaCaptureDialogProps) {
   const currentTime = signal(0);
   const playing = signal(false);
   const videoReady = signal(false);
+  const seeking = signal(false);
   const videoErr = signal<string | null>(null);
 
   // Camera state
@@ -71,17 +77,30 @@ export default function MediaCaptureDialog(props: MediaCaptureDialogProps) {
   const captureBusy = signal(false);
   const canCamera = computed(() => typeof navigator !== 'undefined' && !!navigator.mediaDevices?.getUserMedia);
 
+  function stopTracks(s: MediaStream | null) {
+    if (!s) return;
+    for (const t of s.getTracks()) t.stop();
+  }
+
   function stopCamera() {
-    if (stream) {
-      for (const t of stream.getTracks()) t.stop();
-      stream = null;
-    }
+    camSeq++;
+    stopTracks(stream);
+    stream = null;
     if (camEl) camEl.srcObject = null;
     camActive.set(false);
     camBusy.set(false);
   }
 
+  function resetVideoPlayback() {
+    if (videoEl && !videoEl.paused) videoEl.pause();
+    playing.set(false);
+    videoReady.set(false);
+    seeking.set(false);
+    currentTime.set(0);
+  }
+
   function clearVideo() {
+    captureSeq++;
     const old = videoUrl.peek();
     if (old) URL.revokeObjectURL(old);
     videoUrl.set(null);
@@ -90,6 +109,7 @@ export default function MediaCaptureDialog(props: MediaCaptureDialogProps) {
     currentTime.set(0);
     playing.set(false);
     videoReady.set(false);
+    seeking.set(false);
     videoErr.set(null);
   }
 
@@ -105,17 +125,26 @@ export default function MediaCaptureDialog(props: MediaCaptureDialogProps) {
       loadVideoFile(props.initialVideo);
     }
     if (!open.get()) {
+      captureSeq++;
       stopCamera();
       if (videoEl && !videoEl.paused) videoEl.pause();
       playing.set(false);
+      seeking.set(false);
+      captureBusy.set(false);
     }
   });
 
   effect(() => {
-    if (mode.get() !== 'camera') stopCamera();
+    const m = mode.get();
+    captureSeq++;
+    captureBusy.set(false);
+    if (m !== 'camera') stopCamera();
+    if (m !== 'video') resetVideoPlayback();
   });
 
   onCleanup(() => {
+    alive = false;
+    captureSeq++;
     stopCamera();
     clearVideo();
   });
@@ -126,12 +155,13 @@ export default function MediaCaptureDialog(props: MediaCaptureDialogProps) {
       return;
     }
     stopCamera();
+    const seq = ++camSeq;
     camErr.set(null);
     camBusy.set(true);
     try {
       const next = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false });
-      if (!open.peek() || mode.peek() !== 'camera') {
-        for (const t of next.getTracks()) t.stop();
+      if (!alive || seq !== camSeq || !open.peek() || mode.peek() !== 'camera') {
+        stopTracks(next);
         return;
       }
       stream = next;
@@ -139,12 +169,19 @@ export default function MediaCaptureDialog(props: MediaCaptureDialogProps) {
         camEl.srcObject = next;
         await camEl.play().catch(() => {});
       }
+      if (!alive || seq !== camSeq || !open.peek() || mode.peek() !== 'camera') {
+        stopTracks(next);
+        if (stream === next) stream = null;
+        if (camEl) camEl.srcObject = null;
+        return;
+      }
       camActive.set(true);
     } catch (e) {
+      if (!alive || seq !== camSeq) return;
       const msg = e instanceof Error && e.message ? e.message : 'Camera permission was denied or no camera was found.';
       camErr.set(msg);
     } finally {
-      camBusy.set(false);
+      if (alive && seq === camSeq) camBusy.set(false);
     }
   }
 
@@ -152,7 +189,10 @@ export default function MediaCaptureDialog(props: MediaCaptureDialogProps) {
     const max = duration.peek();
     const clamped = Math.max(0, Math.min(max || 0, sec));
     currentTime.set(clamped);
-    if (videoEl && Number.isFinite(clamped)) videoEl.currentTime = clamped;
+    if (videoEl && Number.isFinite(clamped)) {
+      if (Math.abs(videoEl.currentTime - clamped) > 0.001) seeking.set(true);
+      videoEl.currentTime = clamped;
+    }
   }
 
   function togglePlay() {
@@ -162,26 +202,35 @@ export default function MediaCaptureDialog(props: MediaCaptureDialogProps) {
   }
 
   async function captureCurrent() {
-    const el = mode.peek() === 'video' ? videoEl : camEl;
+    const activeMode = mode.peek();
+    const el = activeMode === 'video' ? videoEl : camEl;
     if (!el || captureBusy.peek()) return;
+    if (activeMode === 'video' && (!videoReady.peek() || seeking.peek())) return;
+    const seq = ++captureSeq;
+    const snapshotName =
+      activeMode === 'video'
+        ? `${videoName.peek().replace(/\.[^.]+$/, '') || 'video'}-${currentTime.peek().toFixed(1)}s.png`
+        : 'camera-snapshot.png';
     captureBusy.set(true);
     try {
       const blob = await videoFrameToPng(el);
-      const name =
-        mode.peek() === 'video'
-          ? `${videoName.peek().replace(/\.[^.]+$/, '') || 'video'}-${currentTime.peek().toFixed(1)}s.png`
-          : `camera-snapshot.png`;
+      if (!alive || seq !== captureSeq || !open.peek() || mode.peek() !== activeMode) return;
       stopCamera();
       open.set(false);
-      props.onCapture(blob, name);
+      props.onCapture(blob, snapshotName);
     } catch (e) {
+      if (!alive || seq !== captureSeq) return;
       const msg = e instanceof Error ? e.message : 'Could not capture frame.';
-      if (mode.peek() === 'video') videoErr.set(msg);
+      if (activeMode === 'video') videoErr.set(msg);
       else camErr.set(msg);
     } finally {
-      captureBusy.set(false);
+      if (alive && seq === captureSeq) captureBusy.set(false);
     }
   }
+
+  const canCapture = computed(() =>
+    !captureBusy.get() && (mode.get() === 'video' ? videoReady.get() && !seeking.get() : camActive.get()),
+  );
 
   return (
     <Dialog
@@ -195,12 +244,7 @@ export default function MediaCaptureDialog(props: MediaCaptureDialogProps) {
           <Button variant="ghost" onclick={() => open.set(false)}>
             Cancel
           </Button>
-          <Button
-            variant="primary"
-            icon={Scan}
-            disabled={captureBusy.get() || (mode.get() === 'video' ? !videoReady.get() : !camActive.get())}
-            onclick={() => void captureCurrent()}
-          >
+          <Button variant="primary" icon={Scan} disabled={!canCapture.get()} onclick={() => void captureCurrent()}>
             {captureBusy.get() ? 'Capturing…' : 'Use this frame'}
           </Button>
         </>
@@ -236,7 +280,12 @@ export default function MediaCaptureDialog(props: MediaCaptureDialogProps) {
               {videoUrl.get() ? 'Choose another video' : 'Choose video'}
             </Button>
           ) : (
-            <Button size="sm" variant={camActive.get() ? 'secondary' : 'primary'} disabled={camBusy.get() || !canCamera.get()} onclick={() => (camActive.get() ? stopCamera() : void startCamera())}>
+            <Button
+              size="sm"
+              variant={camActive.get() ? 'secondary' : 'primary'}
+              disabled={camBusy.get() || !canCamera.get()}
+              onclick={() => (camActive.get() ? stopCamera() : void startCamera())}
+            >
               {camBusy.get() ? 'Starting camera…' : camActive.get() ? 'Stop camera' : 'Start camera'}
             </Button>
           )}
@@ -251,15 +300,27 @@ export default function MediaCaptureDialog(props: MediaCaptureDialogProps) {
                   src={videoUrl.get()!}
                   muted
                   playsinline
-                  preload="metadata"
+                  preload="auto"
                   onloadedmetadata={(e) => {
                     const v = e.currentTarget;
                     duration.set(Number.isFinite(v.duration) ? v.duration : 0);
-                    videoReady.set(v.videoWidth > 0);
+                    videoReady.set(v.videoWidth > 0 && v.readyState >= 2);
                     videoErr.set(null);
                   }}
                   onloadeddata={(e) => {
-                    videoReady.set(e.currentTarget.videoWidth > 0);
+                    const v = e.currentTarget;
+                    videoReady.set(v.videoWidth > 0 && v.readyState >= 2);
+                  }}
+                  oncanplay={(e) => {
+                    const v = e.currentTarget;
+                    videoReady.set(v.videoWidth > 0 && v.readyState >= 2);
+                  }}
+                  onseeking={() => seeking.set(true)}
+                  onseeked={(e) => {
+                    const v = e.currentTarget;
+                    seeking.set(false);
+                    currentTime.set(v.currentTime);
+                    videoReady.set(v.videoWidth > 0 && v.readyState >= 2);
                   }}
                   ontimeupdate={(e) => {
                     currentTime.set(e.currentTarget.currentTime);
@@ -268,17 +329,37 @@ export default function MediaCaptureDialog(props: MediaCaptureDialogProps) {
                   onpause={() => playing.set(false)}
                   onerror={() => {
                     videoReady.set(false);
+                    seeking.set(false);
                     videoErr.set('This browser could not decode the selected video file.');
                   }}
                 ></video>
                 <div class="scrub">
                   <div class="scrub-controls">
-                    <Button size="sm" variant="ghost" icon={playing.get() ? Pause : Play} aria-label={playing.get() ? 'Pause video' : 'Play video'} onclick={togglePlay} />
-                    <Button size="sm" variant="ghost" onclick={() => seekTo(currentTime.peek() - FRAME_STEP_S)}>
-                      -1f
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      icon={playing.get() ? Pause : Play}
+                      aria-label={playing.get() ? 'Pause video' : 'Play video'}
+                      disabled={!videoReady.get()}
+                      onclick={togglePlay}
+                    />
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      aria-label="Step back 0.1 seconds"
+                      disabled={!videoReady.get() || seeking.get()}
+                      onclick={() => seekTo(currentTime.peek() - STEP_SEC)}
+                    >
+                      -0.1s
                     </Button>
-                    <Button size="sm" variant="ghost" onclick={() => seekTo(currentTime.peek() + FRAME_STEP_S)}>
-                      +1f
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      aria-label="Step forward 0.1 seconds"
+                      disabled={!videoReady.get() || seeking.get()}
+                      onclick={() => seekTo(currentTime.peek() + STEP_SEC)}
+                    >
+                      +0.1s
                     </Button>
                     <span class="time num">
                       {formatSec(currentTime.get())} / {formatSec(duration.get())}
@@ -306,14 +387,18 @@ export default function MediaCaptureDialog(props: MediaCaptureDialogProps) {
                 </Button>
               </div>
             )}
-            {videoErr.get() ? <p class="cap-err">{videoErr.get()}</p> : null}
+            {videoErr.get() ? (
+              <p class="cap-err" role="alert">
+                {videoErr.get()}
+              </p>
+            ) : null}
           </div>
         ) : (
           <div class="cap-stage">
             <video ref={(el) => (camEl = el)} muted playsinline class:hidden={!camActive.get()}></video>
             {!camActive.get() ? (
               <div class="cap-empty">
-                <p>
+                <p role={camErr.get() ? 'alert' : undefined}>
                   {!canCamera.get()
                     ? 'Camera capture is unavailable in this browser or context (requires HTTPS or localhost with camera hardware).'
                     : camErr.get() ?? 'Start the camera to preview and capture a single frame.'}

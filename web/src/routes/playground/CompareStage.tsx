@@ -1,17 +1,18 @@
 /**
  * Visual A/B comparison viewport for the Playground image canvas.
  * Renders Model A and Model B either side-by-side or in an interactive split-overlay curtain view, both sharing one
- * synchronized `ZoomState` so zooming and panning stay locked pixel-for-pixel across both models.
+ * synchronized `ZoomState` anchored in image space so zooming and panning stay locked across both models and layouts.
  */
 import ArrowLeftRight from '$icons/arrow-left-right';
 import FileUp from '$icons/file-up';
-import { bindable, css, onCleanup, signal } from 'fw';
+import { bindable, css, effect, onCleanup, onWindow, signal } from 'fw';
 import { hub } from '$lib/api/index';
 import type { DatasetImage as Img, Model, Prediction } from '$lib/api/types';
 import DetectionView from '$lib/detect/DetectionView';
 import { ms } from '$lib/format';
-import { PHASE_TEXT, type Backend, type BrowserEngine } from '$lib/inference/browser';
+import { PHASE_TEXT, type BrowserEngine } from '$lib/inference/browser';
 import Button from '$lib/ui/Button';
+import { errorDetail } from '$lib/ui/toast';
 import type { CompareViewMode } from './compare';
 import type { RunOn } from './predict';
 import { sourceImageKey, type Source } from './source';
@@ -42,8 +43,6 @@ export interface CompareStageProps {
   selectedIdxA: number | null;
   predictingA: boolean;
   errorA: unknown;
-  weightsMissingA: boolean;
-  runOnA: RunOn;
   onHoverA: (b: Det | null) => void;
   onSelectA: (i: number) => void;
   // Model B
@@ -58,6 +57,7 @@ export interface CompareStageProps {
   predictingB: boolean;
   errorB: unknown;
   weightsMissingB: boolean;
+  badFileB: { name: string; why: string | null } | null;
   runOnB: RunOn;
   onHoverB: (b: Det | null) => void;
   onSelectB: (i: number) => void;
@@ -75,15 +75,30 @@ export default function CompareStage(props: CompareStageProps) {
   const draggingSplit = signal(false);
 
   let dragPointer: number | null = null;
+  let dragTarget: HTMLElement | null = null;
   let windowMoveCleanup: (() => void) | null = null;
 
   function stopSplitDrag() {
+    if (dragPointer !== null && dragTarget) {
+      try {
+        dragTarget.releasePointerCapture?.(dragPointer);
+      } catch {
+        // Ignore if capture was already released.
+      }
+    }
     dragPointer = null;
+    dragTarget = null;
     draggingSplit.set(false);
     windowMoveCleanup?.();
     windowMoveCleanup = null;
   }
+
   onCleanup(stopSplitDrag);
+  onWindow('blur', stopSplitDrag);
+  effect(() => {
+    void props.view;
+    stopSplitDrag();
+  });
 
   function updateSplitFromClientX(clientX: number) {
     const el = splitRoot.peek();
@@ -94,15 +109,15 @@ export default function CompareStage(props: CompareStageProps) {
   }
 
   function onDividerDown(e: PointerEvent) {
-    if (e.button !== 0) return;
+    if (e.button !== 0 || dragPointer !== null) return;
     e.preventDefault();
     e.stopPropagation();
     dragPointer = e.pointerId;
+    dragTarget = e.currentTarget as HTMLElement | null;
     draggingSplit.set(true);
     updateSplitFromClientX(e.clientX);
-    const target = e.currentTarget as HTMLElement | null;
     try {
-      target?.setPointerCapture?.(e.pointerId);
+      dragTarget?.setPointerCapture?.(e.pointerId);
     } catch {
       // Synthetic events in tests may not have an active pointerId.
     }
@@ -112,11 +127,6 @@ export default function CompareStage(props: CompareStageProps) {
     };
     const onUp = (ev: PointerEvent) => {
       if (ev.pointerId !== dragPointer) return;
-      try {
-        target?.releasePointerCapture?.(ev.pointerId);
-      } catch {
-        // Ignore if capture was already released.
-      }
       stopSplitDrag();
     };
     window.addEventListener('pointermove', onMove);
@@ -131,12 +141,18 @@ export default function CompareStage(props: CompareStageProps) {
 
   function onDividerKey(e: KeyboardEvent) {
     const step = e.shiftKey ? 10 : 2;
-    if (e.key === 'ArrowLeft') {
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowDown') {
       e.preventDefault();
       splitPct.set(clampPct(splitPct.peek() - step));
-    } else if (e.key === 'ArrowRight') {
+    } else if (e.key === 'ArrowRight' || e.key === 'ArrowUp') {
       e.preventDefault();
       splitPct.set(clampPct(splitPct.peek() + step));
+    } else if (e.key === 'PageDown') {
+      e.preventDefault();
+      splitPct.set(clampPct(splitPct.peek() - 10));
+    } else if (e.key === 'PageUp') {
+      e.preventDefault();
+      splitPct.set(clampPct(splitPct.peek() + 10));
     } else if (e.key === 'Home') {
       e.preventDefault();
       splitPct.set(0);
@@ -201,15 +217,21 @@ export default function CompareStage(props: CompareStageProps) {
     />
   );
 
-  const bOverlay = () => (
+  const bStatusOverlay = (floating: boolean) => (
     <>
       {props.predictingB ? (
         <span class="busy b" role="status">
           {props.runOnB === 'server' || hub.api.mock ? `Detecting with ${props.modelB?.name}…` : PHASE_TEXT[props.engine.phase] || 'Starting…'}
         </span>
-      ) : props.weightsMissingB ? (
-        <div class="b-veil" role="alert">
-          <span>Model B needs its .folo weights file</span>
+      ) : props.weightsMissingB || props.badFileB ? (
+        <div class={floating ? 'b-banner' : 'b-veil'} role="alert">
+          <span>
+            {props.badFileB
+              ? props.badFileB.why
+                ? `${props.badFileB.name} could not be loaded: ${props.badFileB.why}`
+                : `${props.badFileB.name} is not a .folo weights file.`
+              : `Model B (${props.modelB?.name ?? 'B'}) needs its .folo weights file.`}
+          </span>
           <div class="b-veil-actions">
             <Button size="sm" variant="primary" icon={FileUp} onclick={props.onChooseWeightsB}>
               Choose .folo
@@ -220,8 +242,8 @@ export default function CompareStage(props: CompareStageProps) {
           </div>
         </div>
       ) : props.errorB && !props.predB ? (
-        <div class="b-veil" role="alert">
-          <span>Model B prediction failed</span>
+        <div class={floating ? 'b-banner' : 'b-veil'} role="alert">
+          <span>Model B failed: {errorDetail(props.errorB)}</span>
           <div class="b-veil-actions">
             <Button size="sm" variant="secondary" onclick={props.onRetryB}>
               Retry B
@@ -237,24 +259,24 @@ export default function CompareStage(props: CompareStageProps) {
       {props.view === 'side-by-side' ? (
         <div class="compare-grid" data-compare-view="side-by-side">
           <div class="compare-pane" data-compare-side="a">
-            <ZoomStage resetKey={resetKey()} zoom={props.zoom} hideHud>
+            <ZoomStage resetKey={resetKey()} imageWidth={props.dims.width} imageHeight={props.dims.height} zoom={props.zoom} hideHud>
               {viewA()}
             </ZoomStage>
             {paneCaption('A', props.modelA, props.visibleCountA, props.predA, props.predictingA, props.errorA)}
           </div>
           <div class="compare-pane" data-compare-side="b">
-            <ZoomStage resetKey={resetKey()} zoom={props.zoom} hideHud>
+            <ZoomStage resetKey={resetKey()} imageWidth={props.dims.width} imageHeight={props.dims.height} zoom={props.zoom} hideHud>
               {viewB()}
             </ZoomStage>
             {paneCaption('B', props.modelB, props.visibleCountB, props.predB, props.predictingB, props.errorB)}
-            {bOverlay()}
+            {bStatusOverlay(false)}
           </div>
           <ZoomHud zoom={props.zoom} />
         </div>
       ) : (
         <div class="split-root" class:dragging={draggingSplit.get()} ref={splitRoot} data-compare-view="split">
           <div class="split-layer back" data-compare-side="b">
-            <ZoomStage resetKey={resetKey()} zoom={props.zoom} hideHud>
+            <ZoomStage resetKey={resetKey()} imageWidth={props.dims.width} imageHeight={props.dims.height} zoom={props.zoom} hideHud>
               {viewB()}
             </ZoomStage>
           </div>
@@ -263,7 +285,7 @@ export default function CompareStage(props: CompareStageProps) {
             data-compare-side="a"
             style={{ clipPath: `inset(0 ${100 - splitPct.get()}% 0 0)` }}
           >
-            <ZoomStage resetKey={resetKey()} zoom={props.zoom} hideHud>
+            <ZoomStage resetKey={resetKey()} imageWidth={props.dims.width} imageHeight={props.dims.height} zoom={props.zoom} hideHud>
               {viewA()}
             </ZoomStage>
           </div>
@@ -285,6 +307,7 @@ export default function CompareStage(props: CompareStageProps) {
             aria-valuetext={`${Math.round(splitPct.get())}% Model A, ${100 - Math.round(splitPct.get())}% Model B`}
             style={{ left: `${splitPct.get()}%` }}
             onpointerdown={onDividerDown}
+            onlostpointercapture={stopSplitDrag}
             onkeydown={onDividerKey}
           >
             <span class="split-handle" aria-hidden="true">
@@ -292,7 +315,7 @@ export default function CompareStage(props: CompareStageProps) {
             </span>
           </div>
           <ZoomHud zoom={props.zoom} />
-          {bOverlay()}
+          {bStatusOverlay(true)}
         </div>
       )}
     </>
@@ -447,7 +470,7 @@ css`
     position: absolute;
     bottom: var(--space-2);
     left: var(--space-2);
-    z-index: 3;
+    z-index: 5;
     padding: 2px var(--space-2);
     border-radius: var(--radius-sm);
     background: var(--bg-overlay);
@@ -465,10 +488,27 @@ css`
     justify-content: center;
     gap: var(--space-2);
     padding: var(--space-4);
-    background: color-mix(in srgb, var(--bg-inset) 78%, transparent);
+    background: color-mix(in srgb, var(--bg-inset) 82%, transparent);
     font-size: var(--type-sm-size);
     color: var(--text-secondary);
     text-align: center;
+  }
+  .b-banner {
+    position: absolute;
+    right: var(--space-2);
+    top: 44px;
+    z-index: 5;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    max-width: min(320px, calc(100% - var(--space-4)));
+    padding: var(--space-2) var(--space-3);
+    border-radius: var(--radius-md);
+    background: var(--bg-overlay);
+    border: 1px solid var(--line-default);
+    box-shadow: var(--shadow-md);
+    font-size: var(--type-sm-size);
+    color: var(--text-secondary);
   }
   .b-veil-actions {
     display: flex;

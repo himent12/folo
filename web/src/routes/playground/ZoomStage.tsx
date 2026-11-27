@@ -10,13 +10,16 @@ import Plus from '$icons/plus';
 import { computed, css, effect, onCleanup, onWindow, signal, untrack } from 'fw';
 import Button from '$lib/ui/Button';
 import { tooltip } from '$lib/ui/tooltip';
-import { clampNormPan, clampPan, createZoomState, MAX_ZOOM, MIN_ZOOM, zoomToward, type ZoomState } from './zoomState';
+import { clampPan, createZoomState, fittedImageRect, MAX_ZOOM, MIN_ZOOM, panToPx, pxToNormPan, zoomToward, type ZoomState } from './zoomState';
 
 export { clampPan, createZoomState, MAX_ZOOM, MIN_ZOOM, zoomToward, type ZoomState };
 
 export interface ZoomStageProps {
   /** Changing this key resets zoom and pan back to Fit (e.g. when a new image is loaded). */
   resetKey: string | null;
+  /** Optional image pixel dimensions so shared pan stays anchored in image space across layout switches. */
+  imageWidth?: number;
+  imageHeight?: number;
   /** Optional external zoom state shared across synchronized Compare A/B panes. */
   zoom?: ZoomState;
   /** Hide this pane's HUD when another synchronized pane (or wrapper) renders the shared HUD. */
@@ -40,11 +43,15 @@ export default function ZoomStage(props: ZoomStageProps) {
 
   const zoomed = computed(() => z.get() > 1.001);
   const zoomLabel = computed(() => (zoomed.get() ? `${Math.round(z.get() * 100)}%` : 'Fit'));
+  const basis = (w: number, h: number) => fittedImageRect(w, h, props.imageWidth, props.imageHeight);
   const canvasStyle = computed(() => {
     const scale = z.get();
     if (scale <= 1.001) return undefined;
-    const x = clampPan(nx.get() * vw.get(), vw.get(), scale);
-    const y = clampPan(ny.get() * vh.get(), vh.get(), scale);
+    const w = vw.get();
+    const h = vh.get();
+    const { rw, rh } = basis(w, h);
+    const x = panToPx(nx.get(), rw, w, scale);
+    const y = panToPx(ny.get(), rh, h, scale);
     return { transform: `translate(${x}px, ${y}px) scale(${scale})` };
   });
 
@@ -194,14 +201,15 @@ export default function ZoomStage(props: ZoomStageProps) {
   function zoomAt(factor: number, px?: number, py?: number, eased = true) {
     cancelDrag(true);
     const { width, height } = stageSize();
+    const { rw, rh } = basis(width, height);
     const scale = z.peek();
     const ax = px ?? width / 2;
     const ay = py ?? height / 2;
     const next = zoomToward(
       {
         z: scale,
-        tx: clampPan(nx.peek() * width, width, scale),
-        ty: clampPan(ny.peek() * height, height, scale),
+        tx: panToPx(nx.peek(), rw, width, scale),
+        ty: panToPx(ny.peek(), rh, height, scale),
       },
       factor,
       ax,
@@ -221,8 +229,8 @@ export default function ZoomStage(props: ZoomStageProps) {
     }
     glide.set(eased);
     z.set(next.z);
-    nx.set(width > 0 ? clampNormPan(next.tx / width, next.z) : 0);
-    ny.set(height > 0 ? clampNormPan(next.ty / height, next.z) : 0);
+    nx.set(pxToNormPan(next.tx, rw, width, next.z));
+    ny.set(pxToNormPan(next.ty, rh, height, next.z));
     if (next.z <= 1.001) keepHudFocus('in');
     else if (next.z >= MAX_ZOOM - 0.001) keepHudFocus('out');
   }
@@ -233,12 +241,13 @@ export default function ZoomStage(props: ZoomStageProps) {
     if (!el) return;
     const sync = () => {
       const r = el.getBoundingClientRect();
-      if (r.width > 0) vw.set(r.width);
-      if (r.height > 0) vh.set(r.height);
-      const scale = z.peek();
-      if (scale > 1.001) {
-        nx.set(clampNormPan(nx.peek(), scale));
-        ny.set(clampNormPan(ny.peek(), scale));
+      if (r.width > 0) {
+        vw.set(r.width);
+        state.viewportW.set(r.width);
+      }
+      if (r.height > 0) {
+        vh.set(r.height);
+        state.viewportH.set(r.height);
       }
     };
     sync();
@@ -304,13 +313,14 @@ export default function ZoomStage(props: ZoomStageProps) {
     if (drag || e.button !== 0 || z.peek() <= 1.001) return;
     if (e.target instanceof Element && e.target.closest('.zoom-hud, .split-divider, button, a')) return;
     const { width, height } = stageSize();
+    const { rw, rh } = basis(width, height);
     const scale = z.peek();
     drag = {
       id: e.pointerId,
       x: e.clientX,
       y: e.clientY,
-      startTx: clampPan(nx.peek() * width, width, scale),
-      startTy: clampPan(ny.peek() * height, height, scale),
+      startTx: panToPx(nx.peek(), rw, width, scale),
+      startTy: panToPx(ny.peek(), rh, height, scale),
       moved: false,
       captured: false,
     };
@@ -344,9 +354,10 @@ export default function ZoomStage(props: ZoomStageProps) {
       }
     }
     const { width, height } = stageSize();
+    const { rw, rh } = basis(width, height);
     const scale = z.peek();
-    nx.set(width > 0 ? clampNormPan(clampPan(drag.startTx + dx, width, scale) / width, scale) : 0);
-    ny.set(height > 0 ? clampNormPan(clampPan(drag.startTy + dy, height, scale) / height, scale) : 0);
+    nx.set(pxToNormPan(drag.startTx + dx, rw, width, scale));
+    ny.set(pxToNormPan(drag.startTy + dy, rh, height, scale));
   }
 
   function ondblclick(e: MouseEvent) {

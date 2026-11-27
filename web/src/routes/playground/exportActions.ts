@@ -1,16 +1,21 @@
-// High-level export orchestrators for Playground: builds export filenames and runs annotated PNG or structured JSON
-// downloads for both Single and Compare A/B modes with toast feedback.
+// High-level export orchestrators for Playground: builds export filenames, applies per-pane visibility filters to
+// ground truth boxes, converts live split-overlay coordinates into image space, and runs PNG/JSON downloads.
 import type { DatasetImage as Img, Model, Prediction } from '$lib/api/types';
 import { toast } from '$lib/ui/toast';
 import type { CompareViewMode } from './compare';
 import { compareBadgeText, exportComparePng, exportDetectionsJson, exportSinglePng } from './export';
 import type { Source } from './source';
 import type { Det } from './viewState';
+import { viewportSplitToImagePct } from './zoomState';
 
 export interface RunPngExportInput {
   compare: boolean;
   compareView: CompareViewMode;
   splitPct: number;
+  viewportW: number;
+  viewportH: number;
+  zoomZ: number;
+  zoomNx: number;
   source: Source;
   src: string | null;
   dims: { width: number; height: number };
@@ -23,9 +28,19 @@ export interface RunPngExportInput {
   boxesB: readonly Det[];
   classesA: readonly string[];
   classesB: readonly string[];
+  onlyA: ReadonlySet<number> | null;
+  onlyB: ReadonlySet<number> | null;
   truthBoxes: readonly Img['boxes'][number][];
   labels: boolean;
   scores: boolean;
+}
+
+/** Filters ground-truth boxes using the same class visibility set `DetectionView` applies on screen. */
+export function visibleTruthBoxes(
+  truthBoxes: readonly Img['boxes'][number][],
+  only: ReadonlySet<number> | null,
+): Img['boxes'][number][] {
+  return only ? truthBoxes.filter((b) => only.has(b.class)) : [...truthBoxes];
 }
 
 export function buildExportBase(shortName: string, compare: boolean, modelAName?: string, modelBName?: string): string {
@@ -36,6 +51,20 @@ export function buildExportBase(shortName: string, compare: boolean, modelAName?
 
 export async function runPngExport(input: RunPngExportInput): Promise<boolean> {
   const filenameBase = buildExportBase(input.shortName, input.compare, input.modelA?.name, input.modelB?.name);
+  const truthA = visibleTruthBoxes(input.truthBoxes, input.onlyA);
+  const truthB = visibleTruthBoxes(input.truthBoxes, input.onlyB);
+  const imageSplitPct =
+    input.compare && input.compareView === 'split'
+      ? viewportSplitToImagePct({
+          splitPct: input.splitPct,
+          viewportW: input.viewportW,
+          viewportH: input.viewportH,
+          imgW: input.dims.width,
+          imgH: input.dims.height,
+          z: input.zoomZ,
+          nx: input.zoomNx,
+        })
+      : input.splitPct;
   try {
     const ok = input.compare
       ? await exportComparePng({
@@ -44,22 +73,22 @@ export async function runPngExport(input: RunPngExportInput): Promise<boolean> {
           width: input.dims.width,
           height: input.dims.height,
           view: input.compareView,
-          splitPct: input.splitPct,
+          splitPct: imageSplitPct,
           layerA: {
-            boxes: input.boxesA,
-            truth: input.truthBoxes,
+            boxes: input.predA ? input.boxesA : [],
+            truth: truthA,
             classes: input.classesA,
             labels: input.labels,
             scores: input.scores,
-            caption: compareBadgeText('A', input.modelA?.name ?? 'Model A', input.boxesA.length, input.predA?.timing.total_ms ?? null),
+            caption: compareBadgeText('A', input.modelA?.name ?? 'Model A', input.predA ? input.boxesA.length : null, input.predA?.timing.total_ms ?? null),
           },
           layerB: {
-            boxes: input.boxesB,
-            truth: input.truthBoxes,
+            boxes: input.predB ? input.boxesB : [],
+            truth: truthB,
             classes: input.classesB,
             labels: input.labels,
             scores: input.scores,
-            caption: compareBadgeText('B', input.modelB?.name ?? 'Model B', input.boxesB.length, input.predB?.timing.total_ms ?? null),
+            caption: compareBadgeText('B', input.modelB?.name ?? 'Model B', input.predB ? input.boxesB.length : null, input.predB?.timing.total_ms ?? null),
           },
           filenameBase,
         })
@@ -70,7 +99,7 @@ export async function runPngExport(input: RunPngExportInput): Promise<boolean> {
           height: input.dims.height,
           layer: {
             boxes: input.boxesA,
-            truth: input.truthBoxes,
+            truth: truthA,
             classes: input.classesA,
             labels: input.labels,
             scores: input.scores,

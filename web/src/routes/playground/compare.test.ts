@@ -7,6 +7,7 @@ import {
   pickDefaultModelB,
   summarizeComparison,
 } from './compare';
+import { fittedImageRect, panToPx, pxToNormPan, viewportSplitToImagePct } from './zoomState';
 
 const makeModel = (id: string, name: string, classes: string[], head: 'o2m' | 'o2o' = 'o2m'): Model =>
   ({ id, name, arch: 'folo-n', classes, head }) as unknown as Model;
@@ -111,5 +112,77 @@ describe('playground/compare', () => {
     expect(payload?.b?.model_name).toBe('shapes-n');
     expect(payload?.b?.run_on).toBe('cpu');
     expect(payload?.b?.filter).toEqual({ conf: 0.3, iou: 0.65, max_det: 100 });
+  });
+
+  it('tracks unavailable model results as null without fabricating zero counts or misleading deltas', () => {
+    const sum = summarizeComparison({
+      boxesA: predA.boxes,
+      boxesB: [],
+      predA,
+      predB: null,
+    });
+    expect(sum.countA).toBe(2);
+    expect(sum.countB).toBeNull();
+    expect(sum.countDelta).toBeNull();
+    expect(formatSignedDelta(sum.countDelta)).toBe('—');
+    expect(sum.classes).toEqual([
+      { name: 'circle', colorClass: 0, countA: 1, countB: null, delta: null },
+      { name: 'square', colorClass: 1, countA: 1, countB: null, delta: null },
+    ]);
+
+    const payload = comparePredictionJson({
+      view: 'side-by-side',
+      predA,
+      predB: null,
+      hasResultA: true,
+      hasResultB: false,
+      boxesA: predA.boxes,
+      boxesB: [],
+      modelAName: 'shapes-s',
+      modelBName: 'shapes-n',
+      runOnA: 'server',
+      runOnB: 'server',
+      o2oA: false,
+      o2oB: false,
+      filter: { conf: 0.25, iou: 0.7, maxDet: 300 },
+      summary: sum,
+    });
+    expect(payload?.a).not.toBeNull();
+    expect(payload?.b).toBeNull();
+    expect(payload?.comparison.count_a).toBe(2);
+    expect(payload?.comparison.count_b).toBeNull();
+    expect(payload?.comparison.count_delta).toBeNull();
+  });
+
+  it('converts live split-overlay divider through letterbox, zoom, and pan into exact image space', () => {
+    // Portrait image 200x400 inside a wide 1000x400 viewport -> ox = 400, rw = 200.
+    // A 40% viewport split sits at x=400 (the left edge of the portrait image = 0% image space).
+    expect(
+      viewportSplitToImagePct({ splitPct: 40, viewportW: 1000, viewportH: 400, imgW: 200, imgH: 400, z: 1, nx: 0 }),
+    ).toBeCloseTo(0);
+    // 50% viewport split sits at x=500 -> center of portrait image = 50% image space.
+    expect(
+      viewportSplitToImagePct({ splitPct: 50, viewportW: 1000, viewportH: 400, imgW: 200, imgH: 400, z: 1, nx: 0 }),
+    ).toBeCloseTo(50);
+    // 60% viewport split sits at x=600 -> right edge of portrait image = 100% image space.
+    expect(
+      viewportSplitToImagePct({ splitPct: 60, viewportW: 1000, viewportH: 400, imgW: 200, imgH: 400, z: 1, nx: 0 }),
+    ).toBeCloseTo(100);
+  });
+
+  it('keeps an off-center image landmark centered when switching between Side-by-side and Split viewports', () => {
+    // Wide 1200x400 image in a narrow 400x400 Side-by-side pane vs wide 800x400 Split viewport.
+    const sideRect = fittedImageRect(400, 400, 1200, 400);
+    const splitRect = fittedImageRect(800, 400, 1200, 400);
+    const z = 2;
+    // Center on a landmark offset (+0.15 * rw, -0.20 * rh) from image center -> tx = -0.15 * rw * z, ty = +0.20 * rh * z.
+    const nx = pxToNormPan(-0.15 * sideRect.rw * z, sideRect.rw, 400, z);
+    const ny = pxToNormPan(0.2 * sideRect.rh * z, sideRect.rh, 400, z);
+
+    const splitTx = panToPx(nx, splitRect.rw, 800, z);
+    const splitTy = panToPx(ny, splitRect.rh, 400, z);
+    // In Split mode, the exact same relative image landmark remains centered.
+    expect(splitTx / (splitRect.rw * z)).toBeCloseTo(-0.15);
+    expect(splitTy / (splitRect.rh * z)).toBeCloseTo(0.2);
   });
 });
