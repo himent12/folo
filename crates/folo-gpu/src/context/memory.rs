@@ -49,37 +49,83 @@ impl GpuContext {
         MemoryLimits::from_capabilities(&self.inner.caps, self.inner.summary.memory_bytes)
     }
 
-    /// Current GPU memory usage snapshot across the buffer pool, forward plans, anchor cache, upload staging,
-    /// uniform arena chunks, and wgpu's allocator report (when available).
+    /// Current GPU memory usage snapshot across the buffer pool, plan-exclusive allocations, anchor cache, upload
+    /// staging, uniform arena chunks, and wgpu's allocator report (when available).
+    ///
+    /// Samples the tracked caches before and after querying wgpu's allocator report so cache subtraction never mixes
+    /// observations from two different points in time; if concurrent threads mutate the caches across retries, the
+    /// driver allocator fields are omitted so [`MemoryUsage::effective_live_bytes`] falls back conservatively to the
+    /// tracked live counters.
     pub fn memory_usage(&self) -> MemoryUsage {
-        let pool = self.pool_stats();
-        let (_, plan_bytes) = self.plan_stats();
-        let anchor_bytes: u64 = self
-            .inner
-            .anchors
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .entries
-            .iter()
-            .map(|e| e.buf.size())
-            .sum();
-        let staging_bytes: u64 =
-            self.inner.staging.lock().expect("staging lock").bufs.iter().map(|b| b.size()).sum();
+        const MAX_ATTEMPTS: usize = 4;
+        let sample_caches = || {
+            let pool = self.pool_stats();
+            let plan_bytes = self.plans().exclusive_bytes();
+            let anchor_bytes: u64 = self
+                .inner
+                .anchors
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .entries
+                .iter()
+                .map(|e| e.buf.size())
+                .sum();
+            let staging_bytes: u64 =
+                self.inner.staging.lock().expect("staging lock").bufs.iter().map(|b| b.size()).sum();
+            (pool, plan_bytes, anchor_bytes, staging_bytes)
+        };
+
+        let mut last = sample_caches();
+        for _ in 0..MAX_ATTEMPTS {
+            let (pool, plan_bytes, anchor_bytes, staging_bytes) = last;
+            let device = self.device_memory();
+            let after = sample_caches();
+            let unchanged = pool.live_bytes == after.0.live_bytes
+                && pool.cached_bytes == after.0.cached_bytes
+                && plan_bytes == after.1
+                && anchor_bytes == after.2
+                && staging_bytes == after.3;
+            if unchanged || device.is_none() {
+                let uniform_bytes: u64 =
+                    self.inner.batch.lock().expect("batch lock").chunks.iter().map(|c| c.buf.size()).sum();
+                let (device_allocated_bytes, device_reserved_bytes) = match device {
+                    Some((a, r)) => (Some(a), Some(r)),
+                    None => (None, None),
+                };
+                return MemoryUsage {
+                    pool: after.0,
+                    plan_bytes: after.1,
+                    anchor_bytes: after.2,
+                    staging_bytes: after.3,
+                    uniform_bytes,
+                    device_allocated_bytes,
+                    device_reserved_bytes,
+                };
+            }
+            last = after;
+        }
+
+        let (pool, plan_bytes, anchor_bytes, staging_bytes) = last;
         let uniform_bytes: u64 =
             self.inner.batch.lock().expect("batch lock").chunks.iter().map(|c| c.buf.size()).sum();
-        let (device_allocated_bytes, device_reserved_bytes) = match self.device_memory() {
-            Some((a, r)) => (Some(a), Some(r)),
-            None => (None, None),
-        };
         MemoryUsage {
             pool,
             plan_bytes,
             anchor_bytes,
             staging_bytes,
             uniform_bytes,
-            device_allocated_bytes,
-            device_reserved_bytes,
+            device_allocated_bytes: None,
+            device_reserved_bytes: None,
         }
+    }
+
+    /// Lightweight per-buffer limit diagnostic using only immutable device limits and pool counters.
+    ///
+    /// Deliberately avoids acquiring the command-batch lock or querying the driver allocator so oversized
+    /// allocation errors cannot deadlock if invoked re-entrantly (for example from a wgpu completion callback).
+    fn limit_diagnostic(&self, requested_bytes: u64, kind: AllocationKind) -> String {
+        MemoryBudget::new(self.memory_limits(), MemoryUsage::from_pool(self.pool_stats()))
+            .format_limit_diagnostic(requested_bytes, kind)
     }
 
     /// Live [`MemoryBudget`] backed by this device's `wgpu::Limits`, dedicated VRAM, and current pool/allocator
@@ -181,7 +227,7 @@ impl GpuContext {
         if bytes > self.inner.caps.max_buffer_size {
             return Err(GpuError::Limit(format!(
                 "cached_anchors: {}",
-                self.memory_budget().format_limit_diagnostic(bytes, AllocationKind::Buffer)
+                self.limit_diagnostic(bytes, AllocationKind::Buffer)
             )));
         }
         let mut hasher = Fx::default();
@@ -264,7 +310,7 @@ impl GpuContext {
         let kind = if storage { AllocationKind::Storage } else { AllocationKind::Buffer };
         let limit = self.memory_limits().single_buffer_limit(kind);
         let Some(class) = aligned_within_limit(bytes, limit) else {
-            return Err(GpuError::Limit(self.memory_budget().format_limit_diagnostic(bytes, kind)));
+            return Err(GpuError::Limit(self.limit_diagnostic(bytes, kind)));
         };
         let buf = self.inner.pool.lock().expect("pool lock").take(&self.inner.device, class, usage);
         self.record_taken(&buf);
@@ -288,14 +334,10 @@ impl GpuContext {
             .checked_next_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT)
             .map(|s| s.max(wgpu::COPY_BUFFER_ALIGNMENT))
         else {
-            return Err(GpuError::Limit(
-                self.memory_budget().format_limit_diagnostic(len, AllocationKind::Buffer),
-            ));
+            return Err(GpuError::Limit(self.limit_diagnostic(len, AllocationKind::Buffer)));
         };
         if size > self.inner.caps.max_buffer_size {
-            return Err(GpuError::Limit(
-                self.memory_budget().format_limit_diagnostic(len, AllocationKind::Buffer),
-            ));
+            return Err(GpuError::Limit(self.limit_diagnostic(len, AllocationKind::Buffer)));
         }
         let buf = self.inner.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("folo-gpu staging"),
@@ -329,23 +371,20 @@ impl GpuContext {
         fill: impl FnOnce(wgpu::WriteOnly<'_, [u8]>) -> R,
     ) -> Result<(GpuBuffer, R)> {
         let Ok(len_usize) = usize::try_from(len) else {
-            return Err(GpuError::Limit(
-                self.memory_budget().format_limit_diagnostic(len, AllocationKind::Storage),
-            ));
+            return Err(GpuError::Limit(format!(
+                "upload_with: buffer of {len} bytes exceeds host address space (usize::MAX = {})",
+                usize::MAX
+            )));
         };
         let Some(len4) = len
             .checked_next_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT)
             .map(|s| s.max(wgpu::COPY_BUFFER_ALIGNMENT))
         else {
-            return Err(GpuError::Limit(
-                self.memory_budget().format_limit_diagnostic(len, AllocationKind::Storage),
-            ));
+            return Err(GpuError::Limit(self.limit_diagnostic(len, AllocationKind::Storage)));
         };
         let storage_limit = self.memory_limits().single_buffer_limit(AllocationKind::Storage);
         if aligned_within_limit(len4, storage_limit).is_none() {
-            return Err(GpuError::Limit(
-                self.memory_budget().format_limit_diagnostic(len, AllocationKind::Storage),
-            ));
+            return Err(GpuError::Limit(self.limit_diagnostic(len, AllocationKind::Storage)));
         }
         let class = aligned_within_limit(len4, self.inner.caps.max_buffer_size).unwrap_or(len4);
         self.record_taint("an upload");

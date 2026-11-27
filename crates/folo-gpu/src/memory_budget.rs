@@ -109,7 +109,8 @@ impl MemoryLimits {
 pub struct MemoryUsage {
     /// Buffer pool counters (live, cached, peak live, peak held, need, hits/misses).
     pub pool: PoolStats,
-    /// Bytes pinned by cached forward plans (`GpuContext::plan_stats().1`).
+    /// Bytes exclusively owned by cached forward plans (intermediate buffers adopted out of or created outside
+    /// the pool, plus plan uniform buffers — strictly disjoint from `pool`).
     pub plan_bytes: u64,
     /// Bytes held by cached device-resident anchor tables.
     pub anchor_bytes: u64,
@@ -117,9 +118,15 @@ pub struct MemoryUsage {
     pub staging_bytes: u64,
     /// Bytes held by open command-batch uniform arena chunks.
     pub uniform_bytes: u64,
-    /// Total allocated bytes reported by wgpu's allocator, if supported by the backend.
+    /// Aggregate allocated bytes reported by wgpu's allocator, if supported by the backend.
+    ///
+    /// Note: `wgpu::AllocatorReport` aggregates all wgpu memory blocks (both device-local and host-visible)
+    /// without per-heap flags, so this figure may include live host-visible staging or readback buffers.
     pub device_allocated_bytes: Option<u64>,
-    /// Total reserved memory-block bytes reported by wgpu's allocator, if supported by the backend.
+    /// Aggregate reserved memory-block bytes reported by wgpu's allocator, if supported by the backend.
+    ///
+    /// Note: includes unused suballocator slack inside driver memory blocks as well as both device-local and
+    /// host-visible blocks.
     pub device_reserved_bytes: Option<u64>,
 }
 
@@ -152,7 +159,10 @@ impl MemoryUsage {
         self.pool.live_bytes.saturating_add(self.uniform_bytes)
     }
 
-    /// Tracked device bytes held across the pool, forward plans, anchor cache, and uniform chunks.
+    /// Tracked device-resident bytes held across the pool, plan-exclusive allocations, anchor cache, and uniform
+    /// chunks.
+    ///
+    /// Excludes host-visible `staging_bytes` (which is counted in [`Self::reclaimable_bytes`]).
     pub const fn tracked_held_bytes(&self) -> u64 {
         self.pool_held_bytes()
             .saturating_add(self.plan_bytes)
@@ -160,7 +170,11 @@ impl MemoryUsage {
             .saturating_add(self.uniform_bytes)
     }
 
-    /// Bytes that [`crate::GpuContext::release_memory`] can reclaim without dropping live tensors.
+    /// Disjoint cached bytes that [`crate::GpuContext::release_memory`] can reclaim without dropping live tensors
+    /// (`pool.cached_bytes + plan_bytes + anchor_bytes + staging_bytes`).
+    ///
+    /// Because host-visible `staging_bytes` is included here and omitted from [`Self::tracked_held_bytes`], this
+    /// value can exceed `tracked_held_bytes()` when upload staging dominates.
     pub const fn reclaimable_bytes(&self) -> u64 {
         self.pool
             .cached_bytes
@@ -169,29 +183,37 @@ impl MemoryUsage {
             .saturating_add(self.staging_bytes)
     }
 
-    /// Best estimate of committed non-reclaimable live device bytes.
+    /// Best conservative estimate of committed non-reclaimable live bytes.
     ///
-    /// When wgpu reports `device_allocated_bytes`, strictly disjoint cached pool buffers, cached anchor tables,
-    /// and idle mapped upload staging buffers are subtracted so reusable/reclaimable caches are not miscounted as
-    /// unavailable VRAM, while any untracked live allocations on the same device still count against headroom.
+    /// When wgpu reports `device_allocated_bytes`, strictly disjoint cached pool buffers, plan-exclusive
+    /// allocations, cached anchor tables, and idle mapped upload staging buffers are subtracted so reclaimable
+    /// caches are not miscounted as unavailable VRAM, while any untracked live allocations on the same device
+    /// still count against headroom. Because `wgpu::AllocatorReport` aggregates device-local and host-visible
+    /// allocations, active host-visible buffers (such as live `Staged` or pooled `MAP_READ` buffers) may still
+    /// contribute conservatively to this figure.
     pub const fn effective_live_bytes(&self) -> u64 {
         let tracked = self.tracked_live_bytes();
         match self.device_allocated_bytes {
             Some(alloc) => {
-                let disjoint_cached = self
-                    .pool
-                    .cached_bytes
-                    .saturating_add(self.anchor_bytes)
-                    .saturating_add(self.staging_bytes);
-                let wgpu_live = alloc.saturating_sub(disjoint_cached);
+                let wgpu_live = alloc.saturating_sub(self.reclaimable_bytes());
                 if wgpu_live > tracked { wgpu_live } else { tracked }
             }
             None => tracked,
         }
     }
 
-    /// Best estimate of total device bytes currently held from the driver, including reusable pool caches and
-    /// driver allocator blocks.
+    /// Best estimate of currently allocated bytes including reusable caches (`pool.cached`, plans, anchors),
+    /// excluding unused suballocator slack inside `device_reserved_bytes`.
+    pub const fn effective_allocated_bytes(&self) -> u64 {
+        let tracked = self.tracked_held_bytes();
+        match self.device_allocated_bytes {
+            Some(alloc) if alloc > tracked => alloc,
+            _ => tracked,
+        }
+    }
+
+    /// Best estimate of total bytes currently held from the driver, including reusable pool caches and unused
+    /// driver allocator block slack.
     pub const fn effective_reserved_bytes(&self) -> u64 {
         let tracked = self.tracked_held_bytes();
         let driver = match (self.device_allocated_bytes, self.device_reserved_bytes) {
@@ -240,18 +262,22 @@ pub struct HeadroomEstimate {
     pub aligned_bytes: Option<u64>,
     /// Allocation class checked (`Storage` vs `Buffer`).
     pub kind: AllocationKind,
-    /// Applicable per-buffer device limit in bytes.
+    /// Applicable per-buffer device limit in bytes for `kind`.
     pub single_buffer_limit: u64,
+    /// Adapter's `wgpu::Limits::max_buffer_size` in bytes (reported when `ExceedsMaxBufferSize` triggers).
+    pub max_buffer_size: u64,
     /// Usable VRAM remaining above committed live usage before this allocation (`None` when VRAM total is unknown).
     pub available_vram_bytes: Option<u64>,
-    /// Usable VRAM remaining above driver-reserved bytes without reclaiming cached buffers (`None` when unknown).
+    /// Usable VRAM remaining above allocated live+cached bytes without reclaiming cached buffers (`None` when
+    /// unknown).
     pub available_without_reclaim_bytes: Option<u64>,
     /// Cached bytes that `release_memory()` / `trim_pool()` can reclaim without touching live tensors.
     pub reclaimable_bytes: u64,
     /// Whether the allocation fits within both per-buffer limits and known usable VRAM.
     pub fits: bool,
-    /// True when the allocation fits overall but exceeds unreserved VRAM, so pool eviction or
-    /// `GpuContext::release_memory()` will be needed.
+    /// True when the allocation fits overall, reclaimable caches are non-empty, and the allocation exceeds the
+    /// remaining VRAM above currently allocated live + cached buffers (so pool reuse/eviction or
+    /// `GpuContext::release_memory()` will be needed).
     pub needs_reclaim: bool,
     /// Why the allocation does not fit, if `!fits`.
     pub blocker: Option<HeadroomBlocker>,
@@ -281,8 +307,8 @@ impl fmt::Display for HeadroomEstimate {
                 "{kind_label} of {} bytes ({}){aligned} exceeds max_buffer_size ({} bytes / {})",
                 self.requested_bytes,
                 fmt_bytes(self.requested_bytes),
-                self.single_buffer_limit,
-                fmt_bytes(self.single_buffer_limit),
+                self.max_buffer_size,
+                fmt_bytes(self.max_buffer_size),
             ),
             Some(HeadroomBlocker::ExceedsDeviceMemory) => {
                 let avail = self.available_vram_bytes.unwrap_or(0);
@@ -368,10 +394,14 @@ impl MemoryBudget {
         }
     }
 
-    /// Estimated free VRAM without evicting cached buffers or calling `release_memory()`, or `None` when unknown.
+    /// Estimated free VRAM above currently allocated live + cached buffers without evicting cached buffers or
+    /// calling `release_memory()`, or `None` when total VRAM is unknown.
+    ///
+    /// Uses [`MemoryUsage::effective_allocated_bytes`] rather than `effective_reserved_bytes` so unused suballocator
+    /// slack inside existing driver blocks is not treated as requiring cache eviction.
     pub const fn free_without_reclaim_bytes(&self) -> Option<u64> {
         match self.usable_vram_bytes() {
-            Some(usable) => Some(usable.saturating_sub(self.usage.effective_reserved_bytes())),
+            Some(usable) => Some(usable.saturating_sub(self.usage.effective_allocated_bytes())),
             None => None,
         }
     }
@@ -432,14 +462,16 @@ impl MemoryBudget {
                 .then_some(HeadroomBlocker::ExceedsDeviceMemory)
         });
         let fits = blocker.is_none();
-        let needs_reclaim =
-            fits && available_without_reclaim_bytes.is_some_and(|avail| effective_need > avail);
+        let needs_reclaim = fits
+            && reclaimable_bytes > 0
+            && available_without_reclaim_bytes.is_some_and(|avail| effective_need > avail);
 
         HeadroomEstimate {
             requested_bytes,
             aligned_bytes: aligned,
             kind,
             single_buffer_limit,
+            max_buffer_size: self.limits.max_buffer_size,
             available_vram_bytes,
             available_without_reclaim_bytes,
             reclaimable_bytes,
@@ -457,11 +489,15 @@ impl MemoryBudget {
     /// Estimates the largest batch size that fits within BOTH:
     /// - remaining usable VRAM (`fixed_bytes + batch * per_sample_bytes <= free_vram_bytes`), when dedicated VRAM
     ///   is known, and
-    /// - the single storage-buffer limit (`batch * max_single_tensor_per_sample <= max_storage_limit`), when
-    ///   `max_single_tensor_per_sample > 0`.
+    /// - the single storage-buffer limit (verifying `aligned_bytes(batch * max_single_tensor_per_sample, Storage)`
+    ///   succeeds under the same alignment rule as `GpuContext::alloc`), when `max_single_tensor_per_sample > 0`.
     ///
-    /// Returns `None` when neither constraint bounds the batch size (for example `per_sample_bytes == 0` or unknown
-    /// VRAM with `max_single_tensor_per_sample == 0`). Returns `Some(0)` when even batch 1 does not fit.
+    /// `fixed_bytes` and `per_sample_bytes` are aggregate byte totals; callers should include any desired pool
+    /// size-class rounding overhead (at most 25% per buffer) or safety margin via
+    /// [`Self::with_reserve_bytes`] / [`Self::with_reserve_fraction`].
+    ///
+    /// Returns `None` when neither constraint bounds the batch size (that is, `(per_sample_bytes == 0 || VRAM is
+    /// unknown)` and `max_single_tensor_per_sample == 0`). Returns `Some(0)` when even batch 1 does not fit.
     pub fn estimate_max_batch(
         &self,
         fixed_bytes: u64,
@@ -477,9 +513,14 @@ impl MemoryBudget {
                 cap = Some(cap.map_or(by_vram, |c| c.min(by_vram)));
             }
         }
-        if let Some(by_limit) =
-            self.limits.single_buffer_limit(AllocationKind::Storage).checked_div(max_single_tensor_per_sample)
-        {
+        let storage_limit = self.limits.single_buffer_limit(AllocationKind::Storage);
+        if let Some(mut by_limit) = storage_limit.checked_div(max_single_tensor_per_sample) {
+            while by_limit > 0
+                && aligned_within_limit(by_limit.saturating_mul(max_single_tensor_per_sample), storage_limit)
+                    .is_none()
+            {
+                by_limit -= 1;
+            }
             cap = Some(cap.map_or(by_limit, |c| c.min(by_limit)));
         }
         cap.map(|b| usize::try_from(b).unwrap_or(usize::MAX))
@@ -514,7 +555,7 @@ pub(crate) fn aligned_within_limit(requested_bytes: u64, limit: u64) -> Option<u
         return None;
     }
     let class = size_class(requested_bytes);
-    if class <= limit {
+    if class <= limit && class.is_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT) {
         return Some(class);
     }
     let aligned = requested_bytes
@@ -611,11 +652,25 @@ mod tests {
         assert_eq!(storage_over.blocker, Some(HeadroomBlocker::ExceedsStorageBindingLimit));
         assert!(storage_over.to_string().contains("max_storage_buffer_binding_size"), "{storage_over}");
 
-        // 5 GiB plain buffer exceeds max_buffer_size (4 GiB).
+        // 5 GiB plain buffer AND 5 GiB storage buffer both exceed max_buffer_size (4 GiB) and must report 4 GiB
+        // (not the 2 GiB storage binding limit) as max_buffer_size.
         let buf_over = budget.estimate_headroom(5 * GIB, AllocationKind::Buffer);
         assert!(!buf_over.fits);
         assert_eq!(buf_over.blocker, Some(HeadroomBlocker::ExceedsMaxBufferSize));
-        assert!(buf_over.to_string().contains("max_buffer_size"), "{buf_over}");
+        assert!(
+            buf_over.to_string().contains("max_buffer_size") && buf_over.to_string().contains("4.00 GiB"),
+            "{buf_over}"
+        );
+        let storage_over_max = budget.estimate_headroom(5 * GIB, AllocationKind::Storage);
+        assert!(!storage_over_max.fits);
+        assert_eq!(storage_over_max.blocker, Some(HeadroomBlocker::ExceedsMaxBufferSize));
+        let storage_over_msg = storage_over_max.to_string();
+        assert!(
+            storage_over_msg.contains("max_buffer_size")
+                && storage_over_msg.contains("4.00 GiB")
+                && !storage_over_msg.contains("2.00 GiB"),
+            "{storage_over_msg}"
+        );
 
         // 3 GiB plain buffer is within max_buffer_size (4 GiB) but exceeds 2 GiB remaining VRAM.
         let vram_over = budget.estimate_headroom(3 * GIB, AllocationKind::Buffer);
@@ -628,17 +683,32 @@ mod tests {
     fn device_allocated_subtracts_disjoint_pool_cache_but_keeps_untracked_live_buffers() {
         let usage = MemoryUsage {
             pool: PoolStats { live_bytes: 2 * GIB, cached_bytes: 8 * GIB, ..PoolStats::default() },
+            plan_bytes: 128 * MIB,
             anchor_bytes: 64 * MIB,
-            // 1 GiB untracked external buffer on the same device: 2 + 8 + 0.0625 + 1 = 11.0625 GiB.
-            device_allocated_bytes: Some(11 * GIB + 64 * MIB),
+            // 1 GiB untracked external buffer on the same device: 2 + 8 + 0.125 + 0.0625 + 1 = 11.1875 GiB.
+            device_allocated_bytes: Some(11 * GIB + 192 * MIB),
             device_reserved_bytes: Some(12 * GIB),
             ..MemoryUsage::default()
         };
         assert_eq!(usage.effective_live_bytes(), 3 * GIB);
+        assert_eq!(usage.effective_allocated_bytes(), 11 * GIB + 192 * MIB);
         assert_eq!(usage.effective_reserved_bytes(), 12 * GIB);
         let budget = MemoryBudget::new(sample_limits(), usage);
         assert_eq!(budget.free_vram_bytes(), Some(13 * GIB));
-        assert_eq!(budget.free_without_reclaim_bytes(), Some(4 * GIB));
+        assert_eq!(budget.free_without_reclaim_bytes(), Some(4 * GIB + 832 * MIB));
+
+        // Unused suballocator slack inside device_reserved_bytes with zero cache must NOT report needs_reclaim.
+        let slack_only = MemoryUsage {
+            pool: PoolStats { live_bytes: 512 * MIB, cached_bytes: 0, ..PoolStats::default() },
+            device_allocated_bytes: Some(512 * MIB),
+            device_reserved_bytes: Some(GIB),
+            ..MemoryUsage::default()
+        };
+        let small = MemoryBudget::new(MemoryLimits::new(Some(GIB), GIB, GIB), slack_only);
+        let est = small.estimate_headroom(256 * MIB, AllocationKind::Storage);
+        assert!(est.fits);
+        assert!(!est.needs_reclaim, "unused driver block slack should not claim cache reclaim: {est}");
+        assert_eq!(est.available_without_reclaim_bytes, Some(512 * MIB));
     }
 
     #[test]
@@ -658,6 +728,12 @@ mod tests {
         let unknown = MemoryBudget::new(MemoryLimits::new(None, 4 * GIB, 2 * GIB), usage);
         assert_eq!(unknown.estimate_max_batch(GIB, 512 * MIB, 0), None);
         assert_eq!(unknown.estimate_max_batch(GIB, 512 * MIB, 512 * MIB), Some(4));
+
+        // Alignment-aware single-tensor bound: 1021 B rounds to 1024 B > 1022 B limit, so even batch 1 must fail.
+        let tight = MemoryBudget::new(MemoryLimits::new(None, 1022, 1022), MemoryUsage::default());
+        assert_eq!(tight.estimate_max_batch(0, 0, 1021), Some(0));
+        assert_eq!(tight.estimate_max_batch(0, 0, 510), Some(2));
+        assert_eq!(tight.estimate_max_batch(0, 0, 511), Some(1));
     }
 
     #[test]
@@ -668,6 +744,10 @@ mod tests {
         assert_eq!(budget.aligned_bytes(1025, AllocationKind::Storage), None);
         assert_eq!(budget.aligned_bytes(u64::MAX, AllocationKind::Storage), None);
         assert_eq!(budget.aligned_bytes(u64::MAX - 1, AllocationKind::Buffer), None);
+
+        // Even with an unbounded u64::MAX limit, unaligned > 2^62 requests must still respect 4-byte copy alignment.
+        assert_eq!(aligned_within_limit(u64::MAX, u64::MAX), None);
+        assert_eq!(aligned_within_limit((1 << 62) + 1, u64::MAX), Some((1 << 62) + 4));
 
         // Non-multiple-of-4 limit: 1021 bytes rounds to 1024 > 1022, rejected cleanly.
         let tight = MemoryLimits::new(None, 1022, 1022);

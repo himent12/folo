@@ -79,6 +79,8 @@ fn gen_fused_fwd_streaming(spec: &Spec) -> String {
          \x20 let channels = pu(0u);\n\
          \x20 let hw = pu(1u);\n\
          \x20 let m_u = pu(2u);\n\
+         \x20 let x0 = V4(X[c * hw]).x;\n\
+         \x20 let base = select(0.0, x0, abs(x0) < 1e37);\n\
          \x20 var k = 0.0;\n\
          \x20 var m4 = vec4<f32>(0.0);\n\
          \x20 var q4 = vec4<f32>(0.0);\n\
@@ -86,7 +88,7 @@ fn gen_fused_fwd_streaming(spec: &Spec) -> String {
          \x20 loop {\n\
          \x20   if (w.e >= m_u) { break; }\n\
          \x20   let idx = (w.n * channels + c) * hw + w.i;\n\
-         \x20   let x = V4(X[idx]);\n\
+         \x20   let x = V4(X[idx]) - base;\n\
          \x20   k += 1.0;\n\
          \x20   let inv_k = 1.0 / k;\n",
     );
@@ -165,10 +167,11 @@ fn gen_fused_fwd_streaming(spec: &Spec) -> String {
              \x20   let var_raw = fq_a / fn_a;\n\
              \x20   let var_b = select(var_raw, 0.0, var_raw < 0.0);\n\
              \x20   let inv_c = 1.0 / sqrt(var_b + pf(7u));\n\
-             \x20   MEAN[c] = fm_a;\n\
+             \x20   let mean_c = base + fm_a;\n\
+             \x20   MEAN[c] = mean_c;\n\
              \x20   INVSTD[c] = inv_c;\n\
              \x20   if (RUNNING) {\n\
-             \x20     RM[c] = RM[c] * pf(8u) + pf(9u) * fm_a;\n\
+             \x20     RM[c] = RM[c] * pf(8u) + pf(9u) * mean_c;\n\
              \x20     RV[c] = RV[c] * pf(8u) + pf(10u) * var_b;\n\
              \x20   }\n\
              \x20   wmean = fm_a;\n\
@@ -186,10 +189,11 @@ fn gen_fused_fwd_streaming(spec: &Spec) -> String {
              \x20   let var_raw = wq[0] / wn[0];\n\
              \x20   let var_b = select(var_raw, 0.0, var_raw < 0.0);\n\
              \x20   let inv_c = 1.0 / sqrt(var_b + pf(7u));\n\
-             \x20   MEAN[c] = fm_a;\n\
+             \x20   let mean_c = base + fm_a;\n\
+             \x20   MEAN[c] = mean_c;\n\
              \x20   INVSTD[c] = inv_c;\n\
              \x20   if (RUNNING) {\n\
-             \x20     RM[c] = RM[c] * pf(8u) + pf(9u) * fm_a;\n\
+             \x20     RM[c] = RM[c] * pf(8u) + pf(9u) * mean_c;\n\
              \x20     RV[c] = RV[c] * pf(8u) + pf(10u) * var_b;\n\
              \x20   }\n\
              \x20   wmean = fm_a;\n\
@@ -199,7 +203,7 @@ fn gen_fused_fwd_streaming(spec: &Spec) -> String {
         );
     }
     s.push_str(
-        "  let mean_c = wmean;\n\
+        "  let md_c = wmean;\n\
          \x20 let inv_c = winv;\n\
          \x20 let w_c = W[c];\n\
          \x20 let b_c = B[c];\n\
@@ -210,12 +214,12 @@ fn gen_fused_fwd_streaming(spec: &Spec) -> String {
     );
     if vec4 {
         s.push_str(
-            "    let xh = (V4(X[idx]) - mean_c) * inv_c;\n\
+            "    let xh = ((V4(X[idx]) - base) - md_c) * inv_c;\n\
              \x20   Y[idx] = OUT(bn_act(xh * w_c + b_c));\n",
         );
     } else {
         s.push_str(
-            "    let xh = (V4(X[idx]).x - mean_c) * inv_c;\n\
+            "    let xh = ((V4(X[idx]).x - base) - md_c) * inv_c;\n\
              \x20   Y[idx] = OUT(vec4<f32>(bn_act_f32(xh * w_c + b_c)));\n",
         );
     }

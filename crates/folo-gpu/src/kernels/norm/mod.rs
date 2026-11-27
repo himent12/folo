@@ -2,26 +2,23 @@
 //! (`x`, `y`, the gradients `g` and `dx`) is f32 or f16 ([`BnDesc::dtype`], mixed-precision training); the
 //! parameters, the statistics and every sum are f32.
 //!
-//! Forward, three dispatches:
-//! 1. `bn_stats`: each workgroup takes one channel and one chunk of its `N·H·W` values (`vec4` when `H·W` is a
-//!    multiple of 4), accumulates 4-lane vectorized Welford `(count, mean, M2)` per thread and merges across the
-//!    workgroup using a 1-barrier 32-wide pairwise Chan `subgroupShuffleDown` reduction when the native device
-//!    supports 32-wide subgroups, or a portable shared-memory `bn_tree_merge` fallback otherwise (browser WebGPU,
-//!    WARP, Lavapipe).
-//! 2. `bn_finalize`: one workgroup per channel merges its partials into the mean and biased variance (1-barrier
-//!    32-wide pairwise Chan `subgroupShuffleDown` when available, portable `bn_tree_merge` fallback otherwise),
-//!    writes `mean` and `invstd = 1 / sqrt(var + eps)`, and optionally updates the running statistics in
-//!    place.
-//! 3. `bn_apply`: `y = act(((x − mean) · invstd) · w + b)`, `vec4` when `H·W` is a multiple of 4.
+//! Dispatch tiers (both forward and backward, `vec4` when `H·W` is a multiple of 4):
+//! - **Single-dispatch register-cached** (`fused.rs`, `bn_fused_fwd`/`bn_fused_bwd` with `REGS = 4 | 8`, up to
+//!   2,048 units = 8,192 elements/channel under `VEC4`): one 256-thread workgroup per channel holds its channel
+//!   slice in registers and reads `X` (and `G`) once.
+//! - **Single-dispatch streaming two-pass** (`fused.rs`, `REGS = 0`, above 2,048 up to 6,400 units = 25,600
+//!   elements/channel when `C >= 64` and `max_storage_buffers >= 9` for backward): one workgroup per channel runs
+//!   anchor-centered Welford/Chan statistics (or `dw`/`db` reduction) in Pass 1 and normalizes / computes `dx`
+//!   from L2-warm tensors in Pass 2 with zero intermediate buffers.
+//! - **Three-dispatch split-K** (larger planes or narrower `C < 64`):
+//!   - Forward: `bn_stats` (per-chunk Welford/Chan partials) -> `bn_finalize` (merge, `mean`/`invstd`, optional
+//!     running stats) -> `bn_apply` (`y = act(((x − mean) · invstd) · w + b)`).
+//!   - Backward: `bn_bwd_reduce` (per-chunk `dz` and `dz · x̂` sums) -> `bn_bwd_finalize` (`db`, `dw`) ->
+//!     `bn_bwd_dx` (`dx = w · invstd · (dz − db / n − x̂ · dw / n)`).
 //!
-//! Backward (the analytic BatchNorm gradient through the activation), three dispatches:
-//! 1. `bn_bwd_reduce`: per (channel, chunk) partial sums of `dz` and `dz · x̂` (`vec4` when `H·W` is a multiple
-//!    of 4, evaluating `bn_act_grad` on 4 real lanes at once and `bn_act_grad_f32` on odd `H·W`; 1-barrier
-//!    `subgroupAdd` when available, portable shared-memory fallback otherwise);
-//! 2. `bn_bwd_finalize`: `db = Σdz` and `dw = Σdz·x̂` (1-barrier `subgroupAdd` when available, portable fallback
-//!    otherwise);
-//! 3. `bn_bwd_dx`: `dx = w · invstd · (dz − db / n − x̂ · dw / n)` per element, `vec4` when `H·W` is a multiple
-//!    of 4.
+//! Reductions use 32-wide subgroup operations (`subgroupShuffleDown` / `subgroupAdd`, 1-barrier in `bn_fused_bwd`
+//! and the 3-dispatch reduction kernels) when the native device supports fixed 32-wide subgroups, or a portable
+//! shared-memory tree fallback otherwise (browser WebGPU, WARP, Lavapipe).
 
 mod fused;
 

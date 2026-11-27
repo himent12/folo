@@ -763,7 +763,21 @@ fn batch_norm_streaming_fused_matches_cpu_f32_and_f16() {
         let g_g = g_cpu.to_device(dev).unwrap();
         let w_g = w_cpu.to_device(dev).unwrap();
         let b_g = b_cpu.to_device(dev).unwrap();
-        let out = x_g.batch_norm_act_train(&w_g, &b_g, eps, act, None).unwrap().unwrap();
+        let mom = 0.1f64;
+        let check_running = shape == [16, 64, 40, 40];
+        let (rm_g, rv_g) = if check_running {
+            (
+                Some(Tensor::full([c], 0.25f32).to_device(dev).unwrap()),
+                Some(Tensor::full([c], 1.5f32).to_device(dev).unwrap()),
+            )
+        } else {
+            (None, None)
+        };
+        let running = match (&rm_g, &rv_g) {
+            (Some(rm), Some(rv)) => Some((rm, rv, mom)),
+            _ => None,
+        };
+        let out = x_g.batch_norm_act_train(&w_g, &b_g, eps, act, running).unwrap().unwrap();
         let (dx, dw, db) = x_g
             .batch_norm_act_train_backward(&g_g, &w_g, &b_g, &out.mean, &out.invstd, act)
             .unwrap()
@@ -773,18 +787,32 @@ fn batch_norm_streaming_fused_matches_cpu_f32_and_f16() {
         let tag = format!("streaming {shape:?} {act:?} portable={portable}");
         assert_close_t(
             &out.mean,
-            &Tensor::from_vec(ref_mean, [c]).unwrap(),
+            &Tensor::from_vec(ref_mean.clone(), [c]).unwrap(),
             1e-4,
             1e-4,
             &format!("{tag} mean"),
         );
         assert_close_t(
             &out.invstd,
-            &Tensor::from_vec(ref_inv, [c]).unwrap(),
+            &Tensor::from_vec(ref_inv.clone(), [c]).unwrap(),
             1e-4,
             1e-4,
             &format!("{tag} inv"),
         );
+        if let (Some(rm), Some(rv)) = (&rm_g, &rv_g) {
+            let ref_rm: Vec<f32> =
+                ref_mean.iter().map(|&m| (0.25 * (1.0 - mom) + mom * m as f64) as f32).collect();
+            let ref_rv: Vec<f32> = ref_inv
+                .iter()
+                .map(|&inv| {
+                    let var_b = (1.0 / (inv as f64 * inv as f64) - eps).max(0.0);
+                    let var_u = var_b * m_f / (m_f - 1.0);
+                    (1.5 * (1.0 - mom) + mom * var_u) as f32
+                })
+                .collect();
+            assert_close_t(rm, &Tensor::from_vec(ref_rm, [c]).unwrap(), 1e-4, 1e-4, &format!("{tag} rm"));
+            assert_close_t(rv, &Tensor::from_vec(ref_rv, [c]).unwrap(), 1e-4, 1e-4, &format!("{tag} rv"));
+        }
         assert_close_t(&out.y, &Tensor::from_vec(ref_y, shape).unwrap(), 1e-4, 1e-4, &format!("{tag} y"));
         assert_close_t(&dw, &Tensor::from_vec(ref_dw, [c]).unwrap(), 2e-3, 2e-3, &format!("{tag} dw"));
         assert_close_t(&db, &Tensor::from_vec(ref_db, [c]).unwrap(), 2e-3, 2e-3, &format!("{tag} db"));
@@ -807,23 +835,54 @@ fn batch_norm_streaming_fused_matches_cpu_f32_and_f16() {
         }
     }
 
-    // 2. High-offset stability on streaming REGS=0 (`[1, 64, 1, 10000]`, m_u = 2500 > 2048).
+    // 2. High-offset stability on streaming REGS=0 (`[1, 64, 1, 16384]`, m_u = 4096): first 8,192 elements are
+    // 10_000_000.0 and last 8,192 are 10_000_002.0 so every vec4 lane sees 8 copies of each value. Without anchor
+    // centering, 2/9 rounds away at 1e7 and doubles variance to 2; with anchor centering, mean = 10_000_001.0 and
+    // var = 1.0 in both subgroup and portable modes.
     let c = 64usize;
-    let hw = 10_000usize;
+    let hw = 16_384usize;
     let mut data = vec![0.0f32; c * hw];
     for ch in 0..c {
-        let base = 1_000_000.0f32;
+        let base = 10_000_000.0f32;
         for i in 0..hw {
-            data[ch * hw + i] = base + if i % 2 == 0 { -1.0 } else { 1.0 };
+            data[ch * hw + i] = if i < hw / 2 { base } else { base + 2.0 };
         }
     }
     let x = Tensor::from_vec(data, [1, c, 1, hw]).unwrap().to_device(dev).unwrap();
     let w = Tensor::ones([c]).to_device(dev).unwrap();
     let b = Tensor::zeros([c]).to_device(dev).unwrap();
-    let out = x.batch_norm_act_train(&w, &b, eps, None, None).unwrap().unwrap();
-    let mean_v = out.mean.to_vec::<f32>().unwrap();
-    let inv_v = out.invstd.to_vec::<f32>().unwrap();
     let want_inv = 1.0f32 / (1.0f32 + eps as f32).sqrt();
-    assert!((mean_v[0] - 1_000_000.0).abs() < 1e-3, "streaming high-offset mean: {}", mean_v[0]);
-    assert!((inv_v[0] - want_inv).abs() < 1e-4, "streaming high-offset invstd: {} vs {want_inv}", inv_v[0]);
+    for portable in [false, true] {
+        let _reset = ResetSubgroups(crate::kernels::norm::FORCE_NO_SUBGROUPS.replace(portable));
+        let rm = Tensor::zeros([c]).to_device(dev).unwrap();
+        let rv = Tensor::zeros([c]).to_device(dev).unwrap();
+        let out = x.batch_norm_act_train(&w, &b, eps, None, Some((&rm, &rv, 1.0))).unwrap().unwrap();
+        let mean_v = out.mean.to_vec::<f32>().unwrap();
+        let inv_v = out.invstd.to_vec::<f32>().unwrap();
+        let y_v = out.y.to_vec::<f32>().unwrap();
+        let rm_v = rm.to_vec::<f32>().unwrap();
+        let rv_v = rv.to_vec::<f32>().unwrap();
+        assert!(
+            (mean_v[0] - 10_000_001.0).abs() < 1e-3,
+            "streaming high-offset mean (portable={portable}): {}",
+            mean_v[0]
+        );
+        assert!(
+            (inv_v[0] - want_inv).abs() < 1e-4,
+            "streaming high-offset invstd (portable={portable}): {} vs {want_inv}",
+            inv_v[0]
+        );
+        assert!(
+            (y_v[0] + want_inv).abs() < 1e-4 && (y_v[hw - 1] - want_inv).abs() < 1e-4,
+            "streaming high-offset y (portable={portable}): first={} last={} want=±{want_inv}",
+            y_v[0],
+            y_v[hw - 1]
+        );
+        assert!(
+            (rm_v[0] - 10_000_001.0).abs() < 1e-3 && (rv_v[0] - 1.0).abs() < 1e-3,
+            "streaming high-offset running stats (portable={portable}): rm={} rv={}",
+            rm_v[0],
+            rv_v[0]
+        );
+    }
 }
