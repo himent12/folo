@@ -1,7 +1,7 @@
 //! `folo dataset merge`: combine one or more datasets (YOLO, COCO, Pascal VOC) into one unified YOLO dataset
 //! on top of `folo_data::curate::write_merged`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use folo_data::{DataError, Format, LoadedDataset, MergeConfig, MergeSplitPolicy};
@@ -119,6 +119,37 @@ fn build_merge_config(args: &MergeArgs) -> Result<MergeConfig, CliError> {
     })
 }
 
+/// `--remap SRC=DST` sources and `--drop-class NAME` entries that matched none of the input datasets' classes
+/// under `normalize` (deduplicated, preserving input order).
+fn find_unmatched_rules(
+    datasets: &[LoadedDataset],
+    remap: &[String],
+    drop_class: &[String],
+    normalize: folo_data::ClassNormalize,
+) -> (Vec<String>, Vec<String>) {
+    let known: HashSet<String> =
+        datasets.iter().flat_map(|ds| ds.classes.iter()).map(|c| normalize_key(c, normalize)).collect();
+    let mut seen_remap = HashSet::new();
+    let mut unmatched_remaps = Vec::new();
+    for spec in remap {
+        if let Some((src, _)) = spec.split_once('=') {
+            let key = normalize_key(src, normalize);
+            if !known.contains(&key) && seen_remap.insert(key) {
+                unmatched_remaps.push(src.to_string());
+            }
+        }
+    }
+    let mut seen_drop = HashSet::new();
+    let mut unmatched_drops = Vec::new();
+    for name in drop_class {
+        let key = normalize_key(name, normalize);
+        if !known.contains(&key) && seen_drop.insert(key) {
+            unmatched_drops.push(name.clone());
+        }
+    }
+    (unmatched_remaps, unmatched_drops)
+}
+
 pub(super) fn merge(args: MergeArgs, out: Out) -> Result<(), CliError> {
     let cfg = build_merge_config(&args)?;
     let mut datasets: Vec<LoadedDataset> = Vec::with_capacity(args.inputs.len());
@@ -144,6 +175,8 @@ pub(super) fn merge(args: MergeArgs, out: Out) -> Result<(), CliError> {
         datasets.push(ds);
     }
     ensure_empty_output(&args.out)?;
+    let (unmatched_remaps, unmatched_drops) =
+        find_unmatched_rules(&datasets, &args.remap, &args.drop_class, cfg.normalize);
     let refs: Vec<&LoadedDataset> = datasets.iter().collect();
     let t0 = Instant::now();
     let report = folo_data::write_merged(&refs, &args.out, &cfg).map_err(|e| match e {
@@ -158,7 +191,7 @@ pub(super) fn merge(args: MergeArgs, out: Out) -> Result<(), CliError> {
     })?;
     let secs = t0.elapsed().as_secs_f64();
     let inputs_json: Vec<String> = args.inputs.iter().map(folo_api::json::path).collect();
-    out.record(&json!({
+    let mut rec = json!({
         "inputs": inputs_json,
         "output": folo_api::json::path(&report.root),
         "format": "yolo",
@@ -168,7 +201,14 @@ pub(super) fn merge(args: MergeArgs, out: Out) -> Result<(), CliError> {
         "renamed_collisions": report.renamed_collisions,
         "skipped_images": skipped,
         "seconds": secs,
-    }));
+    });
+    if !unmatched_remaps.is_empty() {
+        rec["unmatched_remaps"] = json!(unmatched_remaps);
+    }
+    if !unmatched_drops.is_empty() {
+        rec["unmatched_drops"] = json!(unmatched_drops);
+    }
+    out.record(&rec);
     let [train, val, test] = report.splits;
     out.human(format!(
         "merged {} dataset(s) → {} ({train} train / {val} val / {test} test images, {} classes, {} boxes, {} \
@@ -179,6 +219,18 @@ pub(super) fn merge(args: MergeArgs, out: Out) -> Result<(), CliError> {
         report.boxes,
         report.renamed_collisions,
     ));
+    if !unmatched_remaps.is_empty() {
+        out.human(format!(
+            "  warning: unmatched --remap source class(es) not found in inputs: {}",
+            unmatched_remaps.join(", "),
+        ));
+    }
+    if !unmatched_drops.is_empty() {
+        out.human(format!(
+            "  warning: unmatched --drop-class name(s) not found in inputs: {}",
+            unmatched_drops.join(", "),
+        ));
+    }
     if skipped > 0 {
         out.human(format!(
             "  {skipped} image(s) were skipped across inputs (unreadable or broken labels); run `folo dataset \

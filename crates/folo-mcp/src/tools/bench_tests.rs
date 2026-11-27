@@ -774,6 +774,21 @@ async fn create_benchmark_generated_embedded_proxy_and_old_server() {
     .await;
     assert_eq!(e.body.code, "invalid_arguments");
 
+    // `create_benchmark` schema enforces mutually exclusive sources, `split` dependency, and generated class bounds.
+    let create_schema = crate::tools::find("create_benchmark").unwrap().input_schema();
+    assert_eq!(create_schema["oneOf"].as_array().unwrap().len(), 3, "{create_schema:?}");
+    assert_eq!(create_schema["dependentRequired"]["split"], json!(["dataset_id"]));
+    let classes_schema = &create_schema["$defs"]["GeneratedBenchSourceArgs"]["properties"]["classes"];
+    assert_eq!(classes_schema["minItems"], json!(1));
+    assert_eq!(classes_schema["maxItems"], json!(8));
+    assert_eq!(classes_schema["uniqueItems"], json!(true));
+
+    // `generated.images: 0` blames `images`, not `max_images`.
+    let e = err(&embedded, "create_benchmark", json!({ "name": "zero", "generated": { "images": 0 } })).await;
+    assert_eq!(e.body.code, "invalid_arguments");
+    assert!(e.body.message.contains("images"), "{}", e.body.message);
+    assert!(!e.body.message.contains("max_images"), "{}", e.body.message);
+
     // Embedded generated benchmark creation.
     let g1 = ok(
         &embedded,

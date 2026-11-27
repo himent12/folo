@@ -134,12 +134,12 @@ impl GeneratedSource {
         self.cfg.images == 0
     }
 
-    /// Bounded parallel batch size chosen from image resolution so peak uncompressed + JPEG memory stays modest
-    /// (32 images at 640px, down to 4 images at 4096px).
+    /// Bounded parallel batch size chosen from image resolution (accounting for the `f32` raster canvas + RGB
+    /// output + encoded JPEG buffers, ~16 B/px) so peak memory stays modest even at `4096×4096`.
     pub fn chunk_size(&self) -> usize {
         let side = self.cfg.imgsz as usize;
-        let bytes_per_img = side.saturating_mul(side).saturating_mul(3).max(1);
-        ((64 * 1024 * 1024) / bytes_per_img).clamp(4, 32)
+        let bytes_per_img = side.saturating_mul(side).saturating_mul(16).max(1);
+        ((64 * 1024 * 1024) / bytes_per_img).clamp(1, 32)
     }
 
     /// Renders scenes in `range` deterministically in parallel, returning images in index order.
@@ -222,7 +222,10 @@ mod tests {
         // Chunked streaming via `GeneratedSource::render_range` matches full generation byte for byte.
         let src = GeneratedSource::new(&spec).unwrap();
         assert_eq!(src.len(), 6);
-        assert!(src.chunk_size() >= 4 && src.chunk_size() <= 32);
+        assert!(src.chunk_size() >= 1 && src.chunk_size() <= 32);
+        let huge = GeneratedSource::new(&GeneratedSourceSpec { images: 1, imgsz: MAX_IMGSZ, ..spec.clone() })
+            .unwrap();
+        assert_eq!(huge.chunk_size(), 1, "4096px renders one scene per chunk to cap canvas RAM");
         let mut streamed = Vec::new();
         for start in (0..src.len()).step_by(2) {
             let end = (start + 2).min(src.len());

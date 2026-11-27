@@ -160,6 +160,46 @@ pub(super) fn train_input() -> JsonObject {
     s
 }
 
+/// `create_benchmark`'s input: enforces mutually exclusive source selection (`dataset_id` | `label_job_id` |
+/// `generated`), forbids `split` outside `dataset_id`, and bounds `generated.classes` to 1..=8 unique strings.
+pub(super) fn create_benchmark_input() -> JsonObject {
+    let mut s = terse_input::<CreateBenchmarkArgs>();
+    if let Some(props) = s
+        .get_mut("$defs")
+        .and_then(|d| d.get_mut("GeneratedBenchSourceArgs"))
+        .and_then(|g| g.get_mut("properties"))
+        .and_then(Value::as_object_mut)
+    {
+        for p in props.values_mut().filter_map(Value::as_object_mut) {
+            if p.get("default") == Some(&Value::Bool(false)) || p.get("default") == Some(&Value::Null) {
+                p.remove("default");
+            }
+            if let Some(Value::Array(types)) = p.get("type")
+                && let [t, Value::String(null)] = &types[..]
+                && null == "null"
+            {
+                let t = t.clone();
+                p.insert("type".into(), t);
+            }
+        }
+        if let Some(classes) = props.get_mut("classes").and_then(Value::as_object_mut) {
+            classes.insert("minItems".into(), json!(1));
+            classes.insert("maxItems".into(), json!(8));
+            classes.insert("uniqueItems".into(), json!(true));
+        }
+    }
+    s.insert(
+        "oneOf".into(),
+        json!([
+            { "required": ["dataset_id"] },
+            { "required": ["label_job_id"] },
+            { "required": ["generated"] }
+        ]),
+    );
+    s.insert("dependentRequired".into(), json!({ "split": ["dataset_id"] }));
+    s
+}
+
 pub(super) fn output<T: JsonSchema + 'static>() -> JsonObject {
     let mut s = (*schema_for_output::<T>()).clone();
     compact(&mut s, true);

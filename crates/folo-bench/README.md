@@ -16,7 +16,7 @@ second implementation). folo-server depends on it: `src/bench/` stores and sched
 | `src/conditions/` | `mod.rs` (`Condition` and the parameter tables, per severity), `catalog.rs` (id, name, group, description, parameters, and the docs table), `transform.rs` (`apply`: a condition on pixels and boxes), `encoding.rs` (variant seeds, decoding, the canonical JPEG), `render.rs` (image file to canonical JPEG), `tests.rs` |
 | `src/pixels.rs`, `src/pixels/tests.rs` | Pixel kernels: sRGB tables, seeded noise, band-streamed separable & sparse convolution, band-streamed resampling, and bit-exact parity tests |
 | `src/plan.rs` | `catalog` (`GET /api/bench/catalog`), `default_plan`, `check_plan`, `variants`, and their unit tests |
-| `src/source.rs` | Deterministic generated-image benchmark source (`GeneratedSourceSpec`, `generate_images`) wrapping `folo-data::synthetic` |
+| `src/source.rs` | Deterministic generated-image benchmark source (`GeneratedSourceSpec`, `GeneratedSource`, `generate_images`) wrapping `folo-data::synthetic` |
 | `src/score.rs` | `evaluate`, `map`, `robustness`, `score`, `outcome`, `labels`: docs/BENCH.md's *Definitions* |
 | `src/score/bootstrap.rs` | Pre-matched, bit-exact bootstrap CI resampling for `mAP@0.5:0.95` |
 | `src/score/tests.rs` | Hand-worked cases and numerical parity tests for every number of the definitions |

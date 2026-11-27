@@ -113,6 +113,9 @@ pub fn quantize(args: QuantizeArgs, out: Out) -> Result<(), CliError> {
     let path = crate::weights::resolve(&args.model)?;
     let file = ModelFile::open(&path).map_err(|e| crate::infer::weights_error("quantize", &path, e))?;
     let model = open_cpu(&file)?;
+    if !selective.explicit_convs.is_empty() {
+        validate_explicit_convs(&model, &selective.explicit_convs)?;
+    }
     let split = match args.split {
         SplitArg::Train => Split::Train,
         SplitArg::Val => Split::Val,
@@ -295,6 +298,161 @@ fn write(
     m.set_int8(stored).map_err(nn_error)?;
     if m.int8().is_none() {
         return Err(CliError::new(ExitCode::Runtime, "internal", "the written file lost its calibration"));
+    }
+    Ok(())
+}
+
+/// Symbolic zero-compute walk over `model`'s quantised backbone/neck graph to list every int8-eligible conv
+/// name before opening calibration images or running two-pass calibration.
+fn eligible_conv_names(model: &FoloModel) -> Result<Vec<String>, CliError> {
+    struct Collector {
+        input_hw: (usize, usize),
+        pending_attn_dims: Option<[usize; 4]>,
+        names: Vec<String>,
+    }
+    impl Collector {
+        fn inspect(
+            &mut self,
+            name: &str,
+            conv: &folo_nn::ConvBnAct,
+            parts: &[&[usize; 4]],
+            res: Option<&[usize; 4]>,
+        ) -> Option<(usize, usize)> {
+            let [n, _, h, w] = *parts[0];
+            let c: usize = parts.iter().map(|a| a[1]).sum();
+            let cfg = conv.conv.config();
+            let (o, k) = (cfg.out_channels, cfg.kernel);
+            let able = cfg.in_channels == c
+                && conv.bn.is_none()
+                && cfg.groups == 1
+                && cfg.dilation == 1
+                && matches!(conv.act, folo_nn::Activation::Silu | folo_nn::Activation::Identity)
+                && conv.conv.weight.dims() == [o, c, k, k]
+                && conv.conv.bias.as_ref().is_none_or(|b| b.dims() == [o])
+                && folo_core::cpu::q8::QConv::supports((o, c, k), cfg.stride, cfg.padding);
+            let out_hw = if able {
+                folo_core::cpu::q8::conv_size(n, c, o, h, w, k, cfg.stride, cfg.padding)
+                    .filter(|&(oh, ow)| res.is_none_or(|r| *r == [n, o, oh, ow]))
+            } else {
+                None
+            };
+            if out_hw.is_some() {
+                self.names.push(name.to_string());
+            }
+            out_hw
+        }
+    }
+    impl quant::walk::Exec for Collector {
+        type A = [usize; 4];
+
+        fn stem(&mut self, _name: &str, conv: &folo_nn::ConvBnAct, x: &Tensor) -> folo_nn::Result<Self::A> {
+            let n = x.dims()[0];
+            let (h, w) = self.input_hw;
+            let cfg = conv.conv.config();
+            let (oh, ow) = folo_core::cpu::q8::out_size(h, w, cfg.kernel, cfg.stride, cfg.padding)
+                .unwrap_or((h / 2, w / 2));
+            Ok([n, cfg.out_channels, oh, ow])
+        }
+
+        fn conv(
+            &mut self,
+            name: &str,
+            conv: &folo_nn::ConvBnAct,
+            parts: &[&Self::A],
+            res: Option<&Self::A>,
+        ) -> folo_nn::Result<Self::A> {
+            let [n, _, h, w] = *parts[0];
+            let cfg = conv.conv.config();
+            let (oh, ow) = self.inspect(name, conv, parts, res).unwrap_or((h, w));
+            let (oh, ow) = match res {
+                Some(r) => (oh.max(r[2]), ow.max(r[3])),
+                None => (oh, ow),
+            };
+            Ok([n, cfg.out_channels, oh, ow])
+        }
+
+        fn conv_f32(
+            &mut self,
+            name: &str,
+            conv: &folo_nn::ConvBnAct,
+            x: &Self::A,
+        ) -> folo_nn::Result<Tensor> {
+            let _ = self.inspect(name, conv, &[x], None);
+            Ok(Tensor::zeros([0]))
+        }
+
+        fn attend_and_pe(
+            &mut self,
+            a: &folo_vision::model::blocks::Attention,
+            _qkv: &Tensor,
+            b: usize,
+            h: usize,
+            w: usize,
+        ) -> folo_nn::Result<Tensor> {
+            self.pending_attn_dims = Some([b, a.proj.conv.config().in_channels, h, w]);
+            Ok(Tensor::zeros([0]))
+        }
+
+        fn conv_out_f32(
+            &mut self,
+            name: &str,
+            conv: &folo_nn::ConvBnAct,
+            parts: &[&Self::A],
+        ) -> folo_nn::Result<Tensor> {
+            let _ = self.inspect(name, conv, parts, None);
+            Ok(Tensor::zeros([0]))
+        }
+
+        fn quantize(&mut self, _name: &str, x: &Tensor) -> folo_nn::Result<Self::A> {
+            match self.pending_attn_dims.take() {
+                Some(d) => Ok(d),
+                None => {
+                    let (n, c, h, w) = x.dims4()?;
+                    Ok([n, c, h, w])
+                }
+            }
+        }
+
+        fn dequantize(&mut self, _x: &Self::A) -> folo_nn::Result<Tensor> {
+            Ok(Tensor::zeros([0]))
+        }
+
+        fn narrow(&mut self, x: &Self::A, _start: usize, len: usize) -> folo_nn::Result<Self::A> {
+            Ok([x[0], len, x[2], x[3]])
+        }
+
+        fn max_pool(&mut self, x: &Self::A, _k: usize) -> folo_nn::Result<Self::A> {
+            Ok(*x)
+        }
+
+        fn upsample2(&mut self, x: &Self::A) -> folo_nn::Result<Self::A> {
+            Ok([x[0], x[1], x[2] * 2, x[3] * 2])
+        }
+
+        fn dims(&self, x: &Self::A) -> [usize; 4] {
+            *x
+        }
+    }
+
+    let mut collector = Collector { input_hw: (640, 640), pending_attn_dims: None, names: Vec::new() };
+    let dummy = Tensor::zeros([1, 3, 1, 1]);
+    quant::walk::features(model, &mut collector, &dummy).map_err(nn_error)?;
+    Ok(collector.names)
+}
+
+/// Validates every `--f32-conv` name against `model`'s int8-eligible convs upfront so typos fail before
+/// calibration runs.
+fn validate_explicit_convs(model: &FoloModel, explicit_convs: &[String]) -> Result<(), CliError> {
+    let eligible = eligible_conv_names(model)?;
+    for name in explicit_convs {
+        if !eligible.iter().any(|c| c == name) {
+            let sample: Vec<&str> = eligible.iter().take(6).map(String::as_str).collect();
+            return Err(usage(format!(
+                "--f32-conv `{name}` is not an int8-eligible backbone/neck conv of {}",
+                model.arch()
+            ))
+            .hint(format!("examples of eligible conv names: {}", sample.join(", "))));
+        }
     }
     Ok(())
 }

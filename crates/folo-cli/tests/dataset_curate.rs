@@ -116,6 +116,27 @@ fn dataset_merge_unifies_classes_remaps_resolves_collisions_and_splits() {
     assert_eq!(code, 0, "{stderr}: {chk}");
     assert_eq!(chk["clean"], true);
 
+    // Unmatched `--remap` and `--drop-class` rules are surfaced in JSON and human warnings.
+    let merged_unmatched = dir.join("merged_unmatched");
+    let (code, rec, stderr) = folo_one(&[
+        "dataset",
+        "merge",
+        s(&ds_a),
+        s(&ds_b),
+        "--out",
+        s(&merged_unmatched),
+        "--remap",
+        "missing=round",
+        "--drop-class",
+        "ghost",
+        "--json",
+    ]);
+    assert_eq!(code, 0, "{stderr}: {rec}");
+    assert_eq!(rec["unmatched_remaps"], serde_json::json!(["missing"]));
+    assert_eq!(rec["unmatched_drops"], serde_json::json!(["ghost"]));
+    assert!(stderr.contains("unmatched --remap"), "{stderr}");
+    assert!(stderr.contains("unmatched --drop-class"), "{stderr}");
+
     // Upfront validation: `--val` without `--splits stratified` and normalized remap conflicts fail with
     // exit 2 (`invalid_config`) before opening any input dataset.
     let (code, err, _) =

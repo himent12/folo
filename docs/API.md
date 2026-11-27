@@ -13,7 +13,9 @@ behaviour, and keep the Rust types in `crates/folo-api` (used by the server, the
 - Creating endpoints answer `201 Created` with the new object; deletes answer `204 No Content`; everything else `200`.
 - Request bodies are JSON (`Content-Type: application/json`) except multipart uploads (`/api/predict`, and
   `/api/label/jobs/{id}/images`, which also takes JSON) and raw upload parts (`PUT /api/uploads/{id}/parts/{n}`,
-  `application/octet-stream`). Unknown fields are ignored; missing optional fields take the defaults listed here.
+  `application/octet-stream`). Unknown fields are ignored on most endpoints; missing optional fields take the defaults
+  listed here. Exception: `POST /api/runs` and `POST /api/runs/estimate` reject unknown fields (including inside
+  `augment` and `compute`) with `422 invalid_body` so misspelled training settings never silently fall back to defaults.
 - Enum values grow: a client reads a value it does not know as unknown rather than failing the whole record (the Rust
   types decode `TrainConfig.optimizer` and `ResolvedTrain.optimizer` into an `Unknown` variant, which a server refuses
   with `invalid_config` where a run would train with it). Version skew: clients built before `musgd` (FOLO Desktop,
@@ -787,6 +789,8 @@ i7-14700KF, scaled by compute to other sizes; `note` says which and how).
   - `close_mosaic`: the close-mosaic epochs after the cap (the `close_mosaic` phase's epochs; `Run.resolved` has the
     same number once the run is built).
   - `cli`: the `folo train` command that trains this config on the server's machine (see `GET /api/runs/{id}/cli`).
+    `POST /api/runs/estimate` accepts the same auto-batch fields (`batch: "auto"`, `auto_batch`, `auto_batch_target`)
+    and strict unknown-field checks (`422 invalid_body`) as `POST /api/runs`, and reflects them in `cli`.
   - `cost` (a config with `compute`, feature `cloud`): `{ "price_per_hour": 0.69, "est_usd": 0.31, "est_usd_low":
     0.12, "est_usd_high": 0.93, "max_usd": 8.28 }`: the offer's price times `est_total_s` and its range (training
     only: booting the instance and uploading the dataset come on top), and `max_usd`, the price times

@@ -48,25 +48,20 @@ impl Runs {
             if k == "resume_run_id" || k == "auto_batch" || (k == "name" && v.as_str() == Some("")) {
                 continue;
             }
-            if k == "batch" {
-                if let Some(s) = v.as_str() {
-                    if s.eq_ignore_ascii_case("auto") {
-                        if !stored_auto.enabled {
-                            extra_differ.push("batch");
-                        }
-                        continue;
+            if k == "batch"
+                && let Some(s) = v.as_str()
+            {
+                if s.eq_ignore_ascii_case("auto") {
+                    if !stored_auto.enabled {
+                        extra_differ.push("batch");
                     }
-                    return Err(Error::new(
-                        StatusCode::UNPROCESSABLE_ENTITY,
-                        "invalid_body",
-                        format!("batch: expected a positive integer in 1..=1024 or \"auto\", got {s:?}"),
-                    ));
+                    continue;
                 }
-                // An explicit integer `batch` on an auto-batch run only matches when `auto_batch: true` is
-                // also supplied (and the integer equals `stored.batch`, checked below).
-                if stored_auto.enabled && auto_batch_flag != Some(true) {
-                    extra_differ.push("batch");
-                }
+                return Err(Error::new(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "invalid_body",
+                    format!("batch: expected a positive integer in 1..=1024 or \"auto\", got {s:?}"),
+                ));
             }
             if k == "auto_batch_target" {
                 if v.is_null() {
@@ -462,11 +457,20 @@ mod tests {
             .clone();
         runs.resume_config(id, &same).unwrap();
 
-        // Explicit integer `batch: 24` WITHOUT `auto_batch: true` is rejected as a `batch` mismatch.
-        let fixed = serde_json::json!({ "batch": 24 }).as_object().unwrap().clone();
-        let err = runs.resume_config(id, &fixed).err().unwrap();
+        // Repeating matching `batch: 24` alone (omitting `auto_batch`, e.g. echoing `Run.config`) succeeds.
+        let repeat_batch = serde_json::json!({ "batch": 24 }).as_object().unwrap().clone();
+        runs.resume_config(id, &repeat_batch).unwrap();
+
+        // A differing integer `batch` or `auto_batch: false` is rejected.
+        let wrong_batch = serde_json::json!({ "batch": 16 }).as_object().unwrap().clone();
+        let err = runs.resume_config(id, &wrong_batch).err().unwrap();
         assert_eq!(err.body.code, "invalid_config");
         assert!(err.body.message.contains("batch"), "{}", err.body.message);
+
+        let disable_auto = serde_json::json!({ "auto_batch": false }).as_object().unwrap().clone();
+        let err = runs.resume_config(id, &disable_auto).err().unwrap();
+        assert_eq!(err.body.code, "invalid_config");
+        assert!(err.body.message.contains("auto_batch"), "{}", err.body.message);
 
         // Non-auto string `batch` is 422 `invalid_body`.
         let bad = serde_json::json!({ "batch": "huge" }).as_object().unwrap().clone();
@@ -478,7 +482,7 @@ mod tests {
     }
 
     #[test]
-    fn queued_auto_batch_run_cli_and_cloud_resume_rejection() {
+    fn queued_auto_batch_run_cli_estimate_and_cloud_resume_rejection() {
         let dir = TestDir::new("real-store-auto-batch-cli-cloud");
         let store = crate::RealStore::open(dir.to_path_buf()).device("cpu");
         let ds = store
@@ -499,28 +503,34 @@ mod tests {
         }))
         .unwrap();
         let ab = AutoBatchOptions { enabled: true, target_utilization: Some(0.75) };
-        let run = store.create_run_with_auto_batch(cfg, ab).unwrap();
 
-        // Immediately (even while queued before `config.json` exists), `run_cli` preserves `--batch 24`,
-        // `--set auto_batch=true`, and `--auto-batch-target 0.75`.
-        let cli = store.run_cli(&run.id).unwrap();
+        // `estimate_run_with_auto_batch` accepts auto-batch and emits the matching CLI flags.
+        let est = store.estimate_run_with_auto_batch(cfg.clone(), ab).unwrap();
+        let est_cli = est.cli.unwrap();
+        assert!(est_cli.contains("--batch 24"), "{est_cli}");
+        assert!(est_cli.contains("--set auto_batch=true"), "{est_cli}");
+        assert!(est_cli.contains("--auto-batch-target 0.75"), "{est_cli}");
+
+        // Unqueued fixture with no `config.json`: deterministically exercises the persisted `run.json` fallback.
+        let dataset = DatasetRef {
+            id: ds.id.clone(),
+            name: ds.name.clone(),
+            path: ds.path.clone(),
+            format: ds.format,
+            classes: ds.classes.clone(),
+        };
+        let unqueued = store
+            .runs_for_test()
+            .register_with_auto_batch(cfg.clone(), dataset, None, None, 0, "cpu".into(), None, ab)
+            .unwrap();
+        assert!(!unqueued.dir().join("config.json").exists(), "fixture must lack config.json");
+        let cli = store.run_cli(unqueued.id()).unwrap();
         assert!(cli.cli.contains("--batch 24"), "{}", cli.cli);
         assert!(cli.cli.contains("--set auto_batch=true"), "{}", cli.cli);
         assert!(cli.cli.contains("--auto-batch-target 0.75"), "{}", cli.cli);
 
-        // Stop the run (or wait briefly if it finished) so we can test cloud resume rejection.
-        let _ = store.stop_run(&run.id);
-        for _ in 0..100 {
-            if !store.get_run(&run.id).unwrap().status.is_active() {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(25));
-        }
-        // Force stopped if the tiny 1-epoch CPU run completed before stop took effect.
-        if store.get_run(&run.id).unwrap().status == RunStatus::Completed {
-            let entry = store.runs_for_test().get(&run.id).unwrap();
-            entry.state.lock().unwrap().file.run.status = RunStatus::Stopped;
-        }
+        // Stopped auto-batch run rejects cloud resume with `invalid_config`.
+        unqueued.state.lock().unwrap().file.run.status = RunStatus::Stopped;
         let cloud_fields = serde_json::json!({
             "device": "auto",
             "compute": { "connection_id": "cc_missing", "offer_id": "off_1", "max_hours": 1.0 }
@@ -528,7 +538,7 @@ mod tests {
         .as_object()
         .unwrap()
         .clone();
-        let err = store.resume_run(&run.id, &cloud_fields).unwrap_err();
+        let err = store.resume_run(unqueued.id(), &cloud_fields).unwrap_err();
         assert_eq!(err.body.code, "invalid_config");
         assert!(err.body.message.contains("auto_batch"), "{}", err.body.message);
         store.shutdown();

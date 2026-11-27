@@ -37,7 +37,7 @@ use rmcp::model::{JsonObject, Tool, ToolAnnotations};
 use serde_json::{Value, json};
 
 use crate::types::*;
-use schemas::{api_output, input, output, terse_input, terse_output, train_input};
+use schemas::{api_output, create_benchmark_input, input, output, terse_input, terse_output, train_input};
 
 pub(crate) use arguments::closest_match;
 pub use dispatch::Progress;
@@ -403,7 +403,7 @@ static TOOL_TABLE: [ToolDef; 43] = [
         description: "Freezes a benchmark from a dataset split, a labeling job, or deterministic generated scenes, \
                       with a plan of conditions.",
         mutating: true,
-        input: terse_input::<CreateBenchmarkArgs>,
+        input: create_benchmark_input,
         output: terse_output::<BenchSummary>,
         schemas: SchemaCache::new(),
     },

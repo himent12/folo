@@ -647,9 +647,11 @@ async fn train_auto_batch_schema_validation_and_proxy_capability() {
         .unwrap();
     assert!(res.summary.contains("auto-batch"), "{}", res.summary);
 
-    // Conflicts and invalid values fail cleanly with `invalid_config`.
+    // Conflicts and invalid values (including non-canonical `"Auto"` that violates `const: "auto"`) fail cleanly
+    // with `invalid_config`.
     for bad in [
         json!({ "dataset_id": ds, "batch": "auto", "auto_batch": false }),
+        json!({ "dataset_id": ds, "batch": "Auto" }),
         json!({ "dataset_id": ds, "batch": "huge" }),
         json!({ "dataset_id": ds, "auto_batch_target": 0.75 }),
         json!({ "dataset_id": ds, "batch": "auto", "auto_batch_target": 0.99 }),
@@ -677,4 +679,52 @@ async fn train_auto_batch_schema_validation_and_proxy_capability() {
         let e = http.resume_run("run_1", resume_fields.as_object().unwrap()).unwrap_err();
         assert_eq!(e.body.code, "not_implemented", "{resume_fields}");
     }
+
+    // Resuming with explicit `null` auto-batch keys strips them before POSTing so an older server never sees
+    // unknown fields.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let seen_srv = seen.clone();
+    let srv = std::thread::spawn(move || {
+        use std::io::{BufRead, BufReader, Read, Write};
+        let (mut s, _) = listener.accept().unwrap();
+        let mut reader = BufReader::new(s.try_clone().unwrap());
+        let mut raw = String::new();
+        let mut content_len = 0usize;
+        loop {
+            let mut line = String::new();
+            let n = reader.read_line(&mut line).unwrap_or(0);
+            if n == 0 {
+                break;
+            }
+            if let Some(rest) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                content_len = rest.trim().parse().unwrap_or(0);
+            }
+            raw.push_str(&line);
+            if line == "\r\n" || line == "\n" {
+                break;
+            }
+        }
+        let mut body = vec![0u8; content_len];
+        let _ = reader.read_exact(&mut body);
+        raw.push_str(&String::from_utf8_lossy(&body));
+        *seen_srv.lock().unwrap() = raw;
+        let resp = r#"{"error":{"code":"run_not_found","message":"missing","hint":null}}"#;
+        let _ = write!(
+            s,
+            "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            resp.len(),
+            resp
+        );
+    });
+    let old_http = crate::proxy::HttpStore::new(&format!("http://{addr}"), None)
+        .assume_features(vec!["vision_bench".into()]);
+    let nulls = json!({ "auto_batch": null, "auto_batch_target": null }).as_object().unwrap().clone();
+    let e = old_http.resume_run("run_1", &nulls).unwrap_err();
+    srv.join().unwrap();
+    assert_eq!(e.body.code, "run_not_found");
+    let raw = seen.lock().unwrap().clone();
+    assert!(raw.contains("\"resume_run_id\":\"run_1\""), "{raw}");
+    assert!(!raw.contains("auto_batch"), "explicit null auto-batch keys must be stripped: {raw}");
 }
