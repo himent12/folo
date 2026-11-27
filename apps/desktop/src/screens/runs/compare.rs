@@ -6,7 +6,8 @@ use std::sync::Arc;
 
 use folo_ui::prelude::FluentBuilder;
 use folo_ui::{
-    AnyElement, Context, FontWeight, Hsla, IntoElement, ParentElement, SharedString, Styled, Window, div, px,
+    AnyElement, Context, FontWeight, Hsla, InteractiveElement, IntoElement, ParentElement, SharedString,
+    StatefulInteractiveElement, Styled, Window, div, px,
 };
 
 use super::compare_data::{
@@ -319,7 +320,16 @@ impl FoloApp {
                     cx.notify();
                 }),
             );
-            let best_str = r.best.as_ref().map_or("–".into(), |b| f3(b.map50_95));
+            let best_el = match &r.best {
+                Some(b) => div()
+                    .id(("cmp-chip-best", slot))
+                    .tooltip(crate::controls::tip(
+                        format!("Best mAP50-95: {} at epoch {}", f3(b.map50_95), b.epoch),
+                        None,
+                    ))
+                    .child(text(ty::SM, t.text_secondary).tnum().child(format!("best {}", f3(b.map50_95)))),
+                None => div().id(("cmp-chip-best", slot)).child(text(ty::SM, t.text_tertiary).child("–")),
+            };
             let chip = div()
                 .flex()
                 .items_center()
@@ -338,7 +348,7 @@ impl FoloApp {
                         .ellipsis()
                         .child(r.name.clone()),
                 )
-                .child(text(ty::SM, t.text_secondary).tnum().child(best_str))
+                .child(best_el)
                 .when(is_base, |d| d.child(badge(&t, "baseline", Tone::Accent)))
                 .child(div().flex().items_center().gap(px(2.)).child(pin_btn).child(open_btn).child(rm_btn));
             bar = bar.child(chip);
@@ -619,23 +629,42 @@ impl FoloApp {
                 None => crate::charts::value_at(pts, None, 0.0, x_max).map(f3),
             }
         };
-        let map_legend = div().flex().flex_wrap().items_center().gap(px(12.)).children(
-            chosen.iter().enumerate().map(|(slot, r)| {
-                let val = legend_val(&map_pts[slot], hover_of("cmp-map"));
+        let legend_scope = |hv: Option<f32>| -> String {
+            match hv {
+                Some(f) if f.is_finite() => match x_axis {
+                    CompareXAxis::Epochs => format!("@ ep {}", (x_max * f).round() as i64),
+                    CompareXAxis::Progress => format!("@ {:.0}%", (x_max * f).clamp(0.0, 100.0)),
+                },
+                _ => "latest".into(),
+            }
+        };
+        let map_hv = hover_of("cmp-map");
+        let loss_hv = hover_of("cmp-loss");
+        let map_legend = div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap(px(12.))
+            .child(text(ty::XS, t.text_tertiary).tnum().whitespace_nowrap().child(legend_scope(map_hv)))
+            .children(chosen.iter().enumerate().map(|(slot, r)| {
+                let val = legend_val(&map_pts[slot], map_hv);
                 legend_item(&r.name, slot, val)
-            }),
-        );
-        let loss_legend = div().flex().flex_wrap().items_center().gap(px(12.)).children(
-            chosen.iter().enumerate().map(|(slot, r)| {
+            }));
+        let loss_legend = div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap(px(12.))
+            .child(text(ty::XS, t.text_tertiary).tnum().whitespace_nowrap().child(legend_scope(loss_hv)))
+            .children(chosen.iter().enumerate().map(|(slot, r)| {
                 let val = if smooth_on {
                     let sm = crate::charts::smoothed(&loss_arcs[slot], COMPARE_LOSS_EMA);
-                    legend_val(&sm, hover_of("cmp-loss"))
+                    legend_val(&sm, loss_hv)
                 } else {
-                    legend_val(&loss_arcs[slot], hover_of("cmp-loss"))
+                    legend_val(&loss_arcs[slot], loss_hv)
                 };
                 legend_item(&r.name, slot, val)
-            }),
-        );
+            }));
 
         let map_metric_seg = self.segmented(
             "run-cmp-map-metric",

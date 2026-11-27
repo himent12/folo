@@ -1,7 +1,10 @@
 //! Hyperparameter & outcome diff table for Multi-Run Compare (`Route::RunCompare`).
 
 use folo_ui::prelude::FluentBuilder;
-use folo_ui::{AnyElement, Context, FontWeight, IntoElement, ParentElement, Styled, Window, div, px};
+use folo_ui::{
+    AnyElement, Context, FontWeight, InteractiveElement, IntoElement, ParentElement,
+    StatefulInteractiveElement, Styled, Window, div, px,
+};
 
 use super::compare::{run_slot_color, slot_swatch};
 use super::compare_data::{best_map_winners, hyperparam_rows};
@@ -142,6 +145,22 @@ impl FoloApp {
                                 })
                             })
                             .flatten();
+                        let best_badge = is_win.then(|| {
+                            let label = if same_ds { "best" } else { "best in dataset" };
+                            let tip_text = if same_ds {
+                                format!("Highest mAP50-95 among compared runs ({})", f3(b.map50_95))
+                            } else {
+                                format!(
+                                    "Highest mAP50-95 among compared runs on {}",
+                                    self.store.run_dataset_name(r)
+                                )
+                            };
+                            div()
+                                .id(("cmp-best-badge", i))
+                                .flex_none()
+                                .tooltip(crate::controls::tip(tip_text, None))
+                                .child(badge(&t, label, Tone::Success))
+                        });
                         div()
                             .flex()
                             .flex_col()
@@ -150,9 +169,11 @@ impl FoloApp {
                             .child(
                                 div()
                                     .flex()
+                                    .flex_wrap()
                                     .items_center()
+                                    .justify_end()
                                     .gap(px(6.))
-                                    .when(is_win, |d| d.child(badge(&t, "best", Tone::Success)))
+                                    .children(best_badge)
                                     .child(
                                         text(ty::MD, t.text_primary)
                                             .tnum()
@@ -237,7 +258,7 @@ impl FoloApp {
             .child(row_frame("Epochs", false, epoch_cells))
             .child(row_frame("Duration", false, dur_cells));
 
-        for hp in &diff_rows {
+        for (row_idx, hp) in diff_rows.iter().enumerate() {
             let is_sci = hp.label == "Learning rate";
             let cells: Vec<AnyElement> = hp
                 .values
@@ -261,11 +282,13 @@ impl FoloApp {
                             .into_any_element()
                     };
                     div()
+                        .id(("cmp-hp-diff", row_idx * 8 + i))
                         .flex()
                         .items_center()
                         .justify_end()
                         .gap(px(6.))
                         .min_w_0()
+                        .tooltip(crate::controls::tip(val.clone(), None))
                         .when(off, |d| {
                             d.child(div().size(px(6.)).flex_none().rounded_full().bg(t.accent_solid))
                         })
@@ -298,13 +321,14 @@ impl FoloApp {
             rows = rows
                 .child(div().px(px(16.)).py(px(6.)).border_b_1().border_color(t.line_subtle).child(toggle));
             if show_same {
-                for hp in &same_rows {
+                for (row_idx, hp) in same_rows.iter().enumerate() {
                     let is_sci = hp.label == "Learning rate";
                     let cells: Vec<AnyElement> = hp
                         .values
                         .iter()
-                        .map(|val| {
-                            if is_sci {
+                        .enumerate()
+                        .map(|(i, val)| {
+                            let value_el: AnyElement = if is_sci {
                                 crate::ui::sci(ty::SM, t.text_tertiary, val.clone())
                                     .min_w_0()
                                     .into_any_element()
@@ -315,7 +339,16 @@ impl FoloApp {
                                     .ellipsis()
                                     .child(val.clone())
                                     .into_any_element()
-                            }
+                            };
+                            div()
+                                .id(("cmp-hp-same", row_idx * 8 + i))
+                                .flex()
+                                .items_center()
+                                .justify_end()
+                                .min_w_0()
+                                .tooltip(crate::controls::tip(val.clone(), None))
+                                .child(value_el)
+                                .into_any_element()
                         })
                         .collect();
                     rows = rows.child(row_frame(hp.label, false, cells));

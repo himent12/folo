@@ -298,3 +298,50 @@ fn chart_controls_hyperparam_diff_partial_failure_and_viewports() {
         });
     }
 }
+
+#[test]
+fn playtest_r11_mixed_dataset_tooltips_and_chip_vs_legend_labels() {
+    for (w, h, mode) in [(960.0_f32, 620.0_f32, Mode::Dark), (1280.0, 800.0, Mode::Light)] {
+        let (mut app, win) = open_with(Arc::new(MockBackend::new(4200, true)), w, h, mode);
+        drive(&mut app, win, |this, win, cx| this.open_run_compare(None, win, cx));
+        settle(&mut app, win);
+
+        // Select 4 runs across mixed datasets with long device names and identical settings expanded,
+        // and verify both resting ("latest") and hovered ("@ ep ...") legend states render cleanly.
+        drive(&mut app, win, |this, _, cx| {
+            let runs = this.store.runs.ready_mut().expect("runs loaded");
+            assert!(runs.len() >= RUN_COMPARE_MAX);
+            for (i, r) in runs.iter_mut().take(RUN_COMPARE_MAX).enumerate() {
+                r.device = if i % 2 == 0 {
+                    "NVIDIA GeForce RTX 4080 SUPER (16 GB)".into()
+                } else {
+                    "AMD Ryzen 9 7950X (32 threads)".into()
+                };
+            }
+            let ids: Vec<String> = runs.iter().take(RUN_COMPARE_MAX).map(|r| r.id.clone()).collect();
+            let chosen: Vec<_> = runs.iter().take(RUN_COMPARE_MAX).cloned().collect();
+            assert!(!same_dataset(&chosen), "test exercises mixed-dataset comparison");
+            this.run_compare.ids = ids;
+            this.run_compare.show_identical = true;
+            this.run_compare.hover = None;
+            this.run_compare.hover_on = None;
+            cx.notify();
+        });
+        settle(&mut app, win);
+
+        drive(&mut app, win, |this, _, cx| {
+            this.run_compare.hover = Some(0.5);
+            this.run_compare.hover_on = Some("cmp-map");
+            cx.notify();
+        });
+        settle(&mut app, win);
+
+        drive(&mut app, win, |this, _, cx| {
+            this.run_compare.x_axis = CompareXAxis::Progress;
+            this.run_compare.hover = Some(0.75);
+            this.run_compare.hover_on = Some("cmp-loss");
+            cx.notify();
+        });
+        settle(&mut app, win);
+    }
+}

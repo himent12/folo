@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use folo_ui::{
     AppContext, Bounds, HeadlessApp, HeadlessOptions, KeyDownEvent, KeyUpEvent, Keystroke, PlatformInput,
-    WindowBounds, WindowHandle, WindowOptions, point, px, size,
+    ScrollDelta, ScrollWheelEvent, WindowBounds, WindowHandle, WindowOptions, point, px, size,
 };
 
 use crate::api::mock::MockBackend;
@@ -460,4 +460,111 @@ fn route_exit_guard_sse_filter_eviction_dirty_delete_and_many_classes() {
         this.navigate(Route::LabelJobs, w, cx);
         assert_eq!(this.route, Route::LabelJobs, "missing job never traps user on Not found screen");
     });
+}
+
+#[test]
+fn playtest_r11_wheel_scroll_stage_stability_and_conflict_banner() {
+    // 1. Drawing the first box (clean -> dirty) must NOT shift the stage canvas vertically at 1280x800 or 1120x780.
+    for (w, h) in [(1280.0_f32, 800.0_f32), (1120.0, 780.0)] {
+        let (mut app, win) = open_with(Arc::new(MockBackend::new(4200, true)), w, h, Mode::Dark);
+        drive(&mut app, win, |this, win, cx| this.navigate(Route::LabelJob("lb_4f10".into()), win, cx));
+        settle(&mut app, win);
+
+        let y_clean = drive(&mut app, win, |this, _, _| {
+            assert!(!this.label.editor.is_dirty());
+            f32::from(this.label.stage_view.get().expect("clean stage bounds").origin.y)
+        });
+        drive(&mut app, win, |this, _, cx| {
+            this.label.editor.add_box(BBox { class: 0, x1: 12., y1: 12., x2: 52., y2: 52. });
+            cx.notify();
+        });
+        settle(&mut app, win);
+        let y_dirty = drive(&mut app, win, |this, _, _| {
+            assert!(this.label.editor.is_dirty());
+            f32::from(this.label.stage_view.get().expect("dirty stage bounds").origin.y)
+        });
+        assert!(
+            (y_clean - y_dirty).abs() < 0.5,
+            "stage jumped vertically at {w}x{h} on clean->dirty transition: {y_clean} -> {y_dirty}"
+        );
+    }
+
+    // 2. At 960x620 and 1x zoom, wheeling down over the stage bubbles to scroll the page down;
+    //    wheeling up zooms in, and wheeling down while zoomed zooms back out to 1x first.
+    let (mut app, win) = open_with(Arc::new(MockBackend::new(4200, true)), 960., 620., Mode::Dark);
+    drive(&mut app, win, |this, win, cx| this.navigate(Route::LabelJob("lb_4f10".into()), win, cx));
+    settle(&mut app, win);
+
+    let (stage_center, y_before) = drive(&mut app, win, |this, _, _| {
+        let b = this.label.stage_view.get().expect("stage bounds at 960x620");
+        assert!((this.label.zoom - 1.0).abs() < 1e-4);
+        (point(b.origin.x + b.size.width * 0.5, b.origin.y + b.size.height * 0.5), f32::from(b.origin.y))
+    });
+    app.simulate_input(
+        win.into(),
+        PlatformInput::ScrollWheel(ScrollWheelEvent {
+            position: stage_center,
+            delta: ScrollDelta::Pixels(point(px(0.), px(-120.))),
+            ..Default::default()
+        }),
+    );
+    settle(&mut app, win);
+    let y_after_down = drive(&mut app, win, |this, _, _| {
+        assert!((this.label.zoom - 1.0).abs() < 1e-4, "wheel down at 1x keeps zoom at 1x");
+        f32::from(this.label.stage_view.get().expect("stage bounds after wheel down").origin.y)
+    });
+    assert!(
+        y_after_down < y_before - 1.0,
+        "wheel down at 1x must bubble to scroll page (stage y {y_before} -> {y_after_down})"
+    );
+
+    // Wheel up zooms into the stage (consuming the event), then wheel down zooms back out.
+    let stage_center_now = drive(&mut app, win, |this, _, _| {
+        let b = this.label.stage_view.get().unwrap();
+        point(b.origin.x + b.size.width * 0.5, b.origin.y + b.size.height * 0.5)
+    });
+    app.simulate_input(
+        win.into(),
+        PlatformInput::ScrollWheel(ScrollWheelEvent {
+            position: stage_center_now,
+            delta: ScrollDelta::Pixels(point(px(0.), px(120.))),
+            ..Default::default()
+        }),
+    );
+    settle(&mut app, win);
+    let zoomed = drive(&mut app, win, |this, _, _| this.label.zoom);
+    assert!(zoomed > 1.05, "wheel up over stage zooms in: {zoomed}");
+
+    app.simulate_input(
+        win.into(),
+        PlatformInput::ScrollWheel(ScrollWheelEvent {
+            position: stage_center_now,
+            delta: ScrollDelta::Pixels(point(px(0.), px(-120.))),
+            ..Default::default()
+        }),
+    );
+    settle(&mut app, win);
+    let zoomed_back = drive(&mut app, win, |this, _, _| this.label.zoom);
+    assert!(zoomed_back < zoomed, "wheel down while zoomed zooms back out: {zoomed} -> {zoomed_back}");
+
+    // 3. Conflict recovery banner wraps cleanly with both action buttons mounted at 1280x800 and 960x620.
+    for (w, h) in [(1280.0_f32, 800.0_f32), (960.0, 620.0)] {
+        let (mut a, win) = open_with(Arc::new(MockBackend::new(4200, true)), w, h, Mode::Dark);
+        drive(&mut a, win, |this, win, cx| this.navigate(Route::LabelJob("lb_4f10".into()), win, cx));
+        settle(&mut a, win);
+        drive(&mut a, win, |this, _, cx| {
+            this.label.editor.add_box(BBox { class: 0, x1: 8., y1: 8., x2: 40., y2: 40. });
+            this.label.editor.changed_elsewhere = true;
+            cx.notify();
+        });
+        settle(&mut a, win);
+        drive(&mut a, win, |this, _, _| {
+            let keys: Vec<String> = this.focus.borrow().keys().map(|k| k.to_string()).collect();
+            assert!(keys.iter().any(|k| k == "label-load-server"), "Load server button mounted at {w}x{h}");
+            assert!(
+                keys.iter().any(|k| k == "label-overwrite-edits"),
+                "Overwrite server button mounted at {w}x{h}"
+            );
+        });
+    }
 }

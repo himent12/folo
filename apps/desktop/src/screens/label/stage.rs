@@ -127,6 +127,10 @@ impl FoloApp {
                 let Some(b) = view_for_wheel.get() else { return };
                 let dy = f32::from(ev.delta.pixel_delta(w.line_height()).y);
                 let new_zoom = (this.label.zoom * (1.0 + dy * 0.0025).clamp(0.5, 2.0)).clamp(1.0, 12.0);
+                // At 1x fit zoom, scrolling down cannot zoom out further; let the wheel scroll the page.
+                if dy == 0.0 || (this.label.zoom <= 1.0 + 1e-4 && new_zoom <= 1.0 + 1e-4) {
+                    return;
+                }
                 this.label.pan = zoom_about(b, dims, this.label.zoom, this.label.pan, ev.position, new_zoom);
                 this.label.zoom = new_zoom;
                 w.prevent_default();
