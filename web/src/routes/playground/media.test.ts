@@ -29,10 +29,23 @@ describe('Playground media helpers', () => {
     expect(clampMediaTime(NaN, 10)).toBe(0);
     expect(clampMediaTime(3, NaN)).toBe(0);
 
+    // 30 fps stepping snaps to frame boundary + small sub-frame PTS nudge.
     const next = stepFrameTime(1.0, 1, 10, DEFAULT_FRAME_STEP_SEC);
-    expect(next).toBeCloseTo(1.033, 3);
+    expect(next).toBeGreaterThan(1.033);
+    expect(next).toBeLessThan(1.04);
     expect(stepFrameTime(0.01, -1, 10, DEFAULT_FRAME_STEP_SEC)).toBe(0);
-    expect(stepFrameTime(9.99, 1, 10, DEFAULT_FRAME_STEP_SEC)).toBe(10);
+    // Already inside the last frame: +1f never moves backward.
+    expect(stepFrameTime(9.99, 1, 10, DEFAULT_FRAME_STEP_SEC)).toBe(9.99);
+
+    // 10 fps clip (1.1 s, 11 frames at 0.0..1.0): every +1f / -1f moves directly to the adjacent frame.
+    const f1 = stepFrameTime(0, 1, 1.1, 0.1);
+    expect(f1).toBeCloseTo(0.102, 3);
+    const f2 = stepFrameTime(f1, 1, 1.1, 0.1);
+    expect(f2).toBeCloseTo(0.202, 3);
+    // Stepping back from mid-frame (0.165 s, inside frame 1) lands cleanly on frame 0.
+    expect(stepFrameTime(0.165, -1, 1.1, 0.1)).toBe(0);
+    // Stepping back from the clip end (1.1 s) lands on frame 9 (not frame 10 again).
+    expect(stepFrameTime(1.1, -1, 1.1, 0.1)).toBeCloseTo(0.902, 3);
 
     expect(formatMediaTime(0)).toBe('0:00.0');
     expect(formatMediaTime(65.34)).toBe('1:05.3');
@@ -41,7 +54,9 @@ describe('Playground media helpers', () => {
 
     expect(frameIndexAt(0, 0.1)).toBe(1);
     expect(frameIndexAt(0.25, 0.1)).toBe(3);
+    expect(frameIndexAt(1.1, 0.1, 11)).toBe(11);
     expect(totalFramesFor(3, 0.1)).toBe(30);
+    expect(totalFramesFor(1.1, 0.1)).toBe(11);
     expect(totalFramesFor(0)).toBe(0);
 
     expect(videoFrameName('traffic.mp4', 4.25)).toBe('traffic@4.25s.jpg');

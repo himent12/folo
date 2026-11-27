@@ -470,4 +470,89 @@ describe('Playground: Local Video Frame Scrubber & Live Webcam', () => {
       URL.revokeObjectURL = origRevokeUrl;
     }
   });
+
+  it('probes 10 fps WebM frame timing so +1f/-1f step across adjacent frames and display accurate frame counts', async () => {
+    const origCreateUrl = URL.createObjectURL;
+    const origRevokeUrl = URL.revokeObjectURL;
+    URL.createObjectURL = vi.fn(() => 'blob:mock-10fps');
+    URL.revokeObjectURL = vi.fn();
+    const ctxStub = {
+      drawImage: vi.fn(),
+      save: vi.fn(),
+      beginPath: vi.fn(),
+      rect: vi.fn(),
+      clip: vi.fn(),
+      restore: vi.fn(),
+    } as unknown as CanvasRenderingContext2D;
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(ctxStub);
+    vi.spyOn(HTMLCanvasElement.prototype, 'toBlob').mockImplementation((cb) => {
+      cb(new Blob(['jpg'], { type: 'image/jpeg' }));
+    });
+    vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => {});
+    vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => {});
+
+    // Minimal valid EBML/WebM container with 10 fps video SimpleBlocks (0, 100, 200 ms) and no DefaultDuration.
+    const webmBytes = new Uint8Array([
+      0x1a, 0x45, 0xdf, 0xa3, 0x84, 0x42, 0x86, 0x81, 0x01, // EBML header
+      0x18, 0x53, 0x80, 0x67, 0xff, // Segment (unknown size)
+      0x15, 0x49, 0xa9, 0x66, 0x87, 0x2a, 0xd7, 0xb1, 0x83, 0x0f, 0x42, 0x40, // Info: TimestampScale = 1_000_000 ns
+      0x16, 0x54, 0xae, 0x6b, 0x88, 0xae, 0x86, 0xd7, 0x81, 0x01, 0x83, 0x81, 0x01, // Tracks: track 1 video
+      0x1f, 0x43, 0xb6, 0x75, 0x99, // Cluster (25 bytes)
+      0xe7, 0x81, 0x00, // Cluster Timestamp = 0
+      0xa3, 0x85, 0x81, 0x00, 0x00, 0x80, 0x00, // SimpleBlock track 1, t = 0 ms
+      0xa3, 0x85, 0x81, 0x00, 0x64, 0x80, 0x00, // SimpleBlock track 1, t = 100 ms
+      0xa3, 0x85, 0x81, 0x00, 0xc8, 0x80, 0x00, // SimpleBlock track 1, t = 200 ms
+    ]);
+
+    try {
+      const { api } = mountPlayground('#/playground?model=m_hard_s');
+      vi.spyOn(api, 'predict').mockResolvedValue({
+        model_id: 'm_hard_s',
+        image: { width: 320, height: 180 },
+        boxes: [],
+        timing: { preprocess_ms: 1, inference_ms: 4, postprocess_ms: 1, total_ms: 6 },
+        device: 'cpu',
+      });
+      await until(() => target.querySelector('input[accept*="video/mp4"]'), 'video file input');
+
+      const videoInput = [...target.querySelectorAll<HTMLInputElement>('input[type="file"]')].find((i) => i.accept.startsWith('video/mp4'))!;
+      const clip = new File([webmBytes], 'ten-fps.webm', { type: 'video/webm' });
+      Object.defineProperty(videoInput, 'files', { configurable: true, value: [clip] });
+      videoInput.dispatchEvent(new Event('change', { bubbles: true }));
+      flushSync();
+
+      const bar = await until(() => target.querySelector('[data-media-bar="video"]'), 'video bar');
+      const decoder = target.querySelector<HTMLVideoElement>('video.media-decoder')!;
+      Object.defineProperty(decoder, 'videoWidth', { configurable: true, value: 320 });
+      Object.defineProperty(decoder, 'videoHeight', { configurable: true, value: 180 });
+      Object.defineProperty(decoder, 'duration', { configurable: true, value: 1.1 });
+      Object.defineProperty(decoder, 'readyState', { configurable: true, value: 4 });
+      decoder.dispatchEvent(new Event('loadedmetadata'));
+      decoder.dispatchEvent(new Event('loadeddata'));
+
+      // Async container probe sets 10 fps -> 1.1 s clip reports f 1 / 11 (never f 1 / 33).
+      await until(() => bar.textContent?.includes('f 1 / 11'), '10 fps frame count f 1 / 11');
+
+      // Turn Auto off, then step +1f -> jumps directly past 100 ms (frame 2) on the very first press.
+      bar.querySelector<HTMLInputElement>('input[role="switch"]')!.click();
+      flushSync();
+      bar.querySelector<HTMLButtonElement>('button[aria-label="Step forward 1 frame"]')!.click();
+      flushSync();
+      expect(decoder.currentTime).toBeCloseTo(0.102, 3);
+      decoder.dispatchEvent(new Event('seeked'));
+      flushSync();
+      expect(bar.textContent).toContain('f 2 / 11');
+
+      // Step -1f returns cleanly to frame 1 (0 s).
+      bar.querySelector<HTMLButtonElement>('button[aria-label="Step back 1 frame"]')!.click();
+      flushSync();
+      expect(decoder.currentTime).toBe(0);
+      decoder.dispatchEvent(new Event('seeked'));
+      flushSync();
+      expect(bar.textContent).toContain('f 1 / 11');
+    } finally {
+      URL.createObjectURL = origCreateUrl;
+      URL.revokeObjectURL = origRevokeUrl;
+    }
+  });
 });

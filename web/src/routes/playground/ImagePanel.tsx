@@ -157,9 +157,9 @@ export default function ImagePanel(props: ImagePanelProps) {
   /** The picked detection, for the phone's one line under the image. */
   const sel = () => (props.selectedIdx !== null ? props.kept[props.selectedIdx] : undefined);
 
-  /** Closes the tablet popover when Tab / Shift+Tab leaves both the popover and its trigger (never into a modal dialog). */
-  function onPopoverFocusOut(e: FocusEvent) {
-    if (!props.sheetShown || !props.tablet) return;
+  /** Closes the phone sheet or tablet popover when Tab / Shift+Tab leaves both it and its trigger (never into a modal dialog). */
+  function onSheetFocusOut(e: FocusEvent) {
+    if (!props.sheetShown) return;
     const next = e.relatedTarget as Node | null;
     if (!next) return;
     if (sheetEl.peek()?.contains(next) || moreBtn.peek()?.contains(next)) return;
@@ -409,7 +409,7 @@ export default function ImagePanel(props: ImagePanelProps) {
                     </span>
                   ) : null}
                   <span class="grow"></span>
-                  {props.selectedIdx === null ? <span class="tap">Tap a box to inspect</span> : null}
+                  {props.selectedIdx === null && props.rows.length > 0 && !props.compareStage ? <span class="tap">Tap a box to inspect</span> : null}
                   <span class="faint">filtered in {props.result.ms < 0.01 ? '<0.01' : props.result.ms.toFixed(2)} ms</span>
                 </>
               ) : props.notice === 'error' ? (
@@ -426,7 +426,7 @@ export default function ImagePanel(props: ImagePanelProps) {
                   <span class="grow"></span>
                 </>
               )}
-              <span class="more-btn" ref={moreBtn} onfocusout={onPopoverFocusOut}>
+              <span class="more-btn" ref={moreBtn} onfocusout={onSheetFocusOut}>
                 <Button
                   size="sm"
                   variant="ghost"
@@ -450,7 +450,7 @@ export default function ImagePanel(props: ImagePanelProps) {
                 aria-labelledby="pg-more-title"
                 tabindex={-1}
                 ref={sheetEl}
-                onfocusout={onPopoverFocusOut}
+                onfocusout={onSheetFocusOut}
               >
                 <div class="pop-head">
                   <h2 id="pg-more-title">{props.sheetTitle}</h2>
@@ -459,8 +459,18 @@ export default function ImagePanel(props: ImagePanelProps) {
                 {props.moreBody}
               </div>
             ) : props.sheetShown ? (
-              /* Phones. Non-modal: no backdrop, the image above stays visible and keeps re-filtering as the sliders move. */
-              <div class="sheet" id="pg-more" role="dialog" aria-modal="false" aria-labelledby="pg-more-title" tabindex={-1} ref={sheetEl}>
+              /* Phones. Non-modal: no backdrop, the image above stays visible and keeps re-filtering as the sliders move;
+                 Tab away closes the sheet so focus never lands on a covered control beneath it. */
+              <div
+                class="sheet"
+                id="pg-more"
+                role="dialog"
+                aria-modal="false"
+                aria-labelledby="pg-more-title"
+                tabindex={-1}
+                ref={sheetEl}
+                onfocusout={onSheetFocusOut}
+              >
                 <div class="sheet-head" use:sheetDrag={{ sheet: () => sheetEl.get(), close: props.closeSheet }}>
                   <SheetHandle />
                   <h2 id="pg-more-title">{props.sheetTitle}</h2>
@@ -864,7 +874,17 @@ css`
     .viewer.loaded .vfoot {
       height: auto;
       min-height: 40px;
+      flex-wrap: wrap;
+      row-gap: var(--space-1);
+      padding-top: var(--space-1);
+      padding-bottom: var(--space-1);
       padding-right: var(--space-2);
+    }
+    .vfoot .grow {
+      display: none;
+    }
+    .vfoot .more-btn {
+      margin-left: auto;
     }
     .more-btn {
       display: inline-flex;

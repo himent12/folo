@@ -80,12 +80,16 @@ export default function MediaBar(props: MediaBarProps) {
             </div>
             <span class="readout num">
               {formatMediaTime(m.currentTime.get())} / {formatMediaTime(m.duration.get())}
-              {totalFramesFor(m.duration.get()) > 0 ? (
-                <span class="faint">
-                  {' '}
-                  · f {frameIndexAt(m.currentTime.get())} / {totalFramesFor(m.duration.get())}
-                </span>
-              ) : null}
+              {(() => {
+                const step = m.frameStep.get();
+                const total = totalFramesFor(m.duration.get(), step);
+                return total > 0 ? (
+                  <span class="faint">
+                    {' '}
+                    · f {frameIndexAt(m.currentTime.get(), step, total)} / {total}
+                  </span>
+                ) : null;
+              })()}
             </span>
             <div class="media-right">
               {m.playing.get() && m.fps.get() > 0 ? (
@@ -115,7 +119,7 @@ export default function MediaBar(props: MediaBarProps) {
                 value={m.currentTime.get()}
                 min={0}
                 max={m.duration.get()}
-                step={0.033}
+                step={Math.max(0.01, Math.round(m.frameStep.get() * 1000) / 1000)}
                 format={formatMediaTime}
                 oninput={(v) => m.seekTo(v, false)}
               />
