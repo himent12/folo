@@ -191,10 +191,11 @@ try {
         Pass "hover a sidebar item: the hover style appears" (-not (Same $before (Snap))) ""
         Away
         Pass "the mouse leaves: it clears" (Same $before (Snap)) ""
-        Point 1209 73; Settle
-        Pass "hover a button (New run): the hover style appears" (-not (Same $before (Snap))) ""
+        $newRun = @(604, 54, 110, 40)
+        Point 660 73; Settle
+        Pass "hover a button (New run): the hover style appears" (-not (Same $before (Snap) $newRun)) ""
         Point 120 560; Settle
-        Pass "moving off the button clears it" (Same $before (Snap)) ""
+        Pass "moving off the button clears it" (Same $before (Snap) $newRun) ""
         Away
 
         # Tooltip: the Runs count badge has one; it shows after the 500 ms delay, goes when the mouse leaves.
