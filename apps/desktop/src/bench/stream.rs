@@ -101,6 +101,9 @@ impl FoloApp {
                     if let Some(list) = self.bench.entries.get_mut(&id).and_then(|l| l.ready_mut()) {
                         list.retain(|x| x.id != r.id);
                     }
+                    if let Some(cmp) = self.bench.compare.get_mut(&id) {
+                        cmp.retain(|x| x != &r.id);
+                    }
                     if let Some(list) = self.bench.loops.get_mut(&id).and_then(|l| l.ready_mut()) {
                         list.retain(|x| x.id != r.id);
                     }

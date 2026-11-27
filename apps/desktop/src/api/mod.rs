@@ -274,7 +274,21 @@ pub trait Backend: Send + Sync + 'static {
     fn bench_entries(&self, _id: &str) -> ApiResult<Vec<BenchEntry>> {
         Err(no_bench())
     }
+    fn bench_entry(&self, _id: &str, _entry_id: &str) -> ApiResult<BenchEntry> {
+        Err(no_bench())
+    }
     fn start_bench_entry(&self, _id: &str, _req: &StartBenchEntry) -> ApiResult<BenchEntry> {
+        Err(no_bench())
+    }
+    fn send_bench_predictions(
+        &self,
+        _id: &str,
+        _entry_id: &str,
+        _req: &BenchPredictions,
+    ) -> ApiResult<BenchEntry> {
+        Err(no_bench())
+    }
+    fn finish_bench_entry(&self, _id: &str, _entry_id: &str) -> ApiResult<BenchEntry> {
         Err(no_bench())
     }
     fn bench_result(&self, _id: &str, _entry_id: &str) -> ApiResult<BenchResult> {

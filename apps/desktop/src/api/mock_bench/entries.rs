@@ -28,6 +28,80 @@ impl MockBench {
         })
     }
 
+    pub fn entry(
+        &self,
+        id: &str,
+        entry_id: &str,
+        datasets: &[DatasetFixture],
+        models: &[Model],
+    ) -> ApiResult<BenchEntry> {
+        self.with(datasets, models, |d, _, _| {
+            let b = find_bench(&d.benches, id)?;
+            Ok(find_entry(&b.entries, entry_id)?.entry.clone())
+        })
+    }
+
+    pub fn send_predictions(
+        &self,
+        id: &str,
+        entry_id: &str,
+        req: &BenchPredictions,
+        datasets: &[DatasetFixture],
+        models: &[Model],
+    ) -> ApiResult<BenchEntry> {
+        check_external_boxes(&req.predictions)?;
+        self.with(datasets, models, |d, _, _| {
+            let b = find_bench_mut(&mut d.benches, id)?;
+            let ef = find_entry_mut(&mut b.entries, entry_id)?;
+            let Some(records) = ef.open_records.as_mut() else {
+                return Err(ApiError::new(
+                    "bench_entry_not_open",
+                    format!("Entry '{entry_id}' is not an open external entry."),
+                ));
+            };
+            records.extend(req.predictions.iter().cloned());
+            ef.entry.progress.done = records.len() as u64;
+            Ok(ef.entry.clone())
+        })
+    }
+
+    pub fn finish_entry(
+        &self,
+        id: &str,
+        entry_id: &str,
+        datasets: &[DatasetFixture],
+        models: &[Model],
+    ) -> ApiResult<BenchEntry> {
+        self.with(datasets, models, |d, _, now| {
+            let b = find_bench_mut(&mut d.benches, id)?;
+            let idx = b
+                .entries
+                .iter()
+                .position(|e| e.entry.id == entry_id)
+                .ok_or_else(|| ApiError::new("bench_entry_not_found", format!("No entry {entry_id}")))?;
+            let Some(records) = b.entries[idx].open_records.clone() else {
+                return Err(ApiError::new(
+                    "bench_entry_not_open",
+                    format!("Entry '{entry_id}' is not an open external entry."),
+                ));
+            };
+            let existing = b.entries[idx].entry.clone();
+            let (entry, res) = score_external_entry(
+                b,
+                existing.id,
+                existing.name,
+                existing.created,
+                time::format(now),
+                existing.scored,
+                &records,
+            )?;
+            b.entries[idx].entry = entry.clone();
+            b.entries[idx].open_records = None;
+            b.entries[idx].cached_result = Some(res);
+            Ok(entry)
+        })
+    }
+
     pub fn start_entry(
         &self,
         id: &str,

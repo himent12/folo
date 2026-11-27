@@ -3,6 +3,8 @@
 
 mod actions;
 #[cfg(test)]
+mod bench_compare_tests;
+#[cfg(test)]
 mod class_filter_tests;
 mod connection;
 #[cfg(test)]
@@ -77,6 +79,7 @@ use crate::store::*;
 use crate::theme::{Mode, theme};
 use crate::ui::*;
 
+pub(crate) use actions::picked as picked_path;
 pub(crate) use connection::persistable_server_url;
 pub use connection::{Connector, Reason};
 pub use focus::focus_ring;

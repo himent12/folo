@@ -806,9 +806,29 @@ impl Backend for MockBackend {
         self.benches.entries(id, &self.datasets, &self.models)
     }
 
+    fn bench_entry(&self, id: &str, entry_id: &str) -> ApiResult<BenchEntry> {
+        self.check()?;
+        self.benches.entry(id, entry_id, &self.datasets, &self.models)
+    }
+
     fn start_bench_entry(&self, id: &str, req: &StartBenchEntry) -> ApiResult<BenchEntry> {
         self.check()?;
         self.benches.start_entry(id, req, &self.datasets, &self.models)
+    }
+
+    fn send_bench_predictions(
+        &self,
+        id: &str,
+        entry_id: &str,
+        req: &BenchPredictions,
+    ) -> ApiResult<BenchEntry> {
+        self.check()?;
+        self.benches.send_predictions(id, entry_id, req, &self.datasets, &self.models)
+    }
+
+    fn finish_bench_entry(&self, id: &str, entry_id: &str) -> ApiResult<BenchEntry> {
+        self.check()?;
+        self.benches.finish_entry(id, entry_id, &self.datasets, &self.models)
     }
 
     fn bench_result(&self, id: &str, entry_id: &str) -> ApiResult<BenchResult> {

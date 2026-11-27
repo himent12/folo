@@ -14,6 +14,7 @@ pub enum BenchForm {
     NewBench,
     NewLoop,
     Design,
+    External,
 }
 
 impl BenchForm {
@@ -23,6 +24,7 @@ impl BenchForm {
             BenchForm::NewBench => "bench-new",
             BenchForm::NewLoop => "bench-loop-new",
             BenchForm::Design => "bench-design",
+            BenchForm::External => "bench-external-open",
         }
     }
 }
@@ -35,6 +37,7 @@ impl FoloApp {
             BenchForm::Design => self.bench.design = None,
             BenchForm::NewLoop => self.bench.new_loop = None,
             BenchForm::NewBench => self.bench.new_bench = None,
+            BenchForm::External => self.bench.external = None,
         }
         let opener = self.fh(form.opener(), cx);
         window.focus(&opener);
@@ -47,7 +50,9 @@ impl FoloApp {
         let on_tab = |tab: BenchTab, bench: &str| {
             matches!(&self.route, Route::Bench(_)) && self.bench.tab == tab && here == Some(bench)
         };
-        if self.bench.design.as_ref().is_some_and(|f| on_tab(BenchTab::Plan, &f.bench)) {
+        if self.bench.external.as_ref().is_some_and(|f| on_tab(BenchTab::Leaderboard, &f.bench)) {
+            Some(BenchForm::External)
+        } else if self.bench.design.as_ref().is_some_and(|f| on_tab(BenchTab::Plan, &f.bench)) {
             Some(BenchForm::Design)
         } else if self.bench.new_loop.as_ref().is_some_and(|f| on_tab(BenchTab::Loops, &f.bench)) {
             Some(BenchForm::NewLoop)
@@ -155,6 +160,7 @@ impl FoloApp {
                     self.ask_design(cx);
                 }
             }
+            Some(BenchForm::External) => self.submit_external_entry(cx),
             None => return false,
         }
         true

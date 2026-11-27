@@ -572,3 +572,62 @@ fn label_calls_hit_their_paths_page_and_decode_sse_and_conflicts() {
     );
     assert!(matches!(sub.recv_timeout(Duration::from_secs(2)).unwrap(), LabelEvent::Reload));
 }
+
+#[test]
+fn external_bench_entry_parts_and_finish_hit_their_paths() {
+    let open_json = r#"{"id":"be_ext1","bench_id":"bn_1","name":"yolo26n","contestant":{"kind":"external"},"status":"running","created":"2026-01-01T00:00:00Z","finished":null,"progress":{"done":0,"total":2,"condition":null,"severity":null},"images":2,"conditions":false,"scored":true,"fingerprint":"fp1","missing_classes":[],"score":null,"map50_95":null,"ci95":null,"conditions_run":0,"speed":null,"usage":null,"error":null}"#;
+    let done_json = r#"{"id":"be_ext1","bench_id":"bn_1","name":"yolo26n","contestant":{"kind":"external"},"status":"done","created":"2026-01-01T00:00:00Z","finished":"2026-01-01T00:00:01Z","progress":{"done":2,"total":2,"condition":null,"severity":null},"images":2,"conditions":false,"scored":true,"fingerprint":"fp1","missing_classes":[],"score":{"total":64.2,"partial":true,"axes":[]},"map50_95":0.61,"ci95":[0.55,0.67],"conditions_run":0,"speed":null,"usage":null,"error":null}"#;
+    let (url, requests) = canned_server(vec![
+        json("200 OK", open_json),
+        json("200 OK", open_json),
+        json("200 OK", done_json),
+        json("200 OK", done_json),
+    ]);
+    let api = HttpBackend::new(&url);
+
+    let opened = api
+        .start_bench_entry(
+            "bn_1",
+            &StartBenchEntry {
+                contestant: BenchContestantSpec::External {
+                    scored: true,
+                    open: true,
+                    predictions: Vec::new(),
+                },
+                name: Some("yolo26n".into()),
+                max_images: None,
+                conditions: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(opened.id, "be_ext1");
+    assert_eq!(opened.status, BenchEntryStatus::Running);
+    assert!(requests.recv().unwrap().starts_with("POST /api/bench/benchmarks/bn_1/entries "));
+
+    let part = api
+        .send_bench_predictions(
+            "bn_1",
+            "be_ext1",
+            &BenchPredictions {
+                predictions: vec![BenchPrediction {
+                    image: "1".into(),
+                    condition: None,
+                    severity: None,
+                    boxes: Vec::new(),
+                }],
+            },
+        )
+        .unwrap();
+    assert_eq!(part.id, "be_ext1");
+    assert!(
+        requests.recv().unwrap().starts_with("POST /api/bench/benchmarks/bn_1/entries/be_ext1/predictions ")
+    );
+
+    let done = api.finish_bench_entry("bn_1", "be_ext1").unwrap();
+    assert_eq!(done.status, BenchEntryStatus::Done);
+    assert!(requests.recv().unwrap().starts_with("POST /api/bench/benchmarks/bn_1/entries/be_ext1/finish "));
+
+    let fetched = api.bench_entry("bn_1", "be_ext1").unwrap();
+    assert_eq!(fetched.score.as_ref().unwrap().total, 64.2);
+    assert!(requests.recv().unwrap().starts_with("GET /api/bench/benchmarks/bn_1/entries/be_ext1 "));
+}

@@ -301,8 +301,26 @@ impl Backend for HttpBackend {
         self.get::<BenchEntryList>(&format!("/bench/benchmarks/{}/entries", seg(id))).map(|l| l.entries)
     }
 
+    fn bench_entry(&self, id: &str, entry_id: &str) -> ApiResult<BenchEntry> {
+        self.get(&format!("/bench/benchmarks/{}/entries/{}", seg(id), seg(entry_id)))
+    }
+
     fn start_bench_entry(&self, id: &str, req: &StartBenchEntry) -> ApiResult<BenchEntry> {
         self.post_slow(&format!("/bench/benchmarks/{}/entries", seg(id)), req)
+    }
+
+    fn send_bench_predictions(
+        &self,
+        id: &str,
+        entry_id: &str,
+        req: &BenchPredictions,
+    ) -> ApiResult<BenchEntry> {
+        self.post_slow(&format!("/bench/benchmarks/{}/entries/{}/predictions", seg(id), seg(entry_id)), req)
+    }
+
+    fn finish_bench_entry(&self, id: &str, entry_id: &str) -> ApiResult<BenchEntry> {
+        let empty = serde_json::json!({});
+        self.post_slow(&format!("/bench/benchmarks/{}/entries/{}/finish", seg(id), seg(entry_id)), &empty)
     }
 
     fn bench_result(&self, id: &str, entry_id: &str) -> ApiResult<BenchResult> {

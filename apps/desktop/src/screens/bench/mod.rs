@@ -2,9 +2,11 @@
 //! form, a benchmark's leaderboard, plan and loops, and an entry's result on the five axes.
 
 mod cells;
+mod compare;
 mod design;
 mod entry;
 mod entry_images;
+mod external;
 mod format;
 mod leaderboard;
 mod list;

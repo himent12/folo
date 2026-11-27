@@ -273,6 +273,11 @@ impl FoloApp {
                 (self.bench_name(b).into(), Some(Route::Bench(b.clone()))),
                 (self.bench_entry_name(b, e).into(), None),
             ],
+            Route::BenchCompare(b) => vec![
+                ("Benchmarks".into(), Some(Route::Benches)),
+                (self.bench_name(b).into(), Some(Route::Bench(b.clone()))),
+                ("Compare".into(), None),
+            ],
             Route::LabelJob(id) => {
                 vec![("Labeling".into(), Some(Route::LabelJobs)), (self.label_job_name(id).into(), None)]
             }
