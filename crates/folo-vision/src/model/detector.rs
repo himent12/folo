@@ -339,10 +339,27 @@ impl Detector {
         }
     }
 
-    /// Enable or disable GPU forward plans (no-op on `V2`).
+    /// Enable or disable recorded GPU forward plans (`folo-*` and `folo2-*`).
     pub fn set_forward_plans(&self, on: bool) {
-        if let Detector::V1(m) = self {
-            m.set_forward_plans(on);
+        match self {
+            Detector::V1(m) => m.set_forward_plans(on),
+            Detector::V2(m) => m.set_forward_plans(on),
+        }
+    }
+
+    /// Number of GPU forwards or candidate-first passes answered from a recorded plan so far.
+    pub fn plan_replays(&self) -> u64 {
+        match self {
+            Detector::V1(m) => m.plan_replays(),
+            Detector::V2(m) => m.plan_replays(),
+        }
+    }
+
+    /// Why the last recording of this detector's forward did not become a GPU plan, if any.
+    pub fn plan_refusal(&self) -> Option<String> {
+        match self {
+            Detector::V1(m) => m.plan_refusal(),
+            Detector::V2(m) => m.plan_refusal(),
         }
     }
 

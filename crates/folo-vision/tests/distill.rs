@@ -50,7 +50,7 @@ fn micro(epochs: u32) -> TrainConfig {
 /// FNV-1a over every tensor of the live model, in canonical order.
 fn weights_hash(t: &Trainer) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for nt in t.model().named_tensors() {
+    for nt in t.detector().named_tensors() {
         let bytes: Vec<u8> = match nt.tensor.dtype() {
             folo_core::DType::I64 => {
                 nt.tensor.to_vec::<i64>().unwrap().iter().flat_map(|v| v.to_le_bytes()).collect()
@@ -365,4 +365,169 @@ fn stored_configs_with_and_without_distill_load() {
         serde_json::json!({ "teacher": "folo-s-coco", "cls_gain": 0.5, "dfl_gain": 1.5, "temperature": 4.0 })
     );
     assert_eq!(serde_json::from_value::<TrainConfig>(v).unwrap(), with);
+}
+
+/// A FOLO v2 teacher file: `folo2-n` of `nc` classes with optional `o2o` and `iou_head`.
+fn v2_teacher_file(
+    dir: &TestDir,
+    nc: usize,
+    seed: u64,
+    head: folo_vision::model::HeadMode,
+    iou_head: bool,
+) -> String {
+    let cfg =
+        folo_vision::model::v2::FoloV2Config::new("n", nc).unwrap().with_head(head).with_iou_head(iou_head);
+    let mut m =
+        folo_vision::model::v2::FoloV2Model::with_rng(cfg, &mut folo_core::rng::Rng::seed(seed)).unwrap();
+    m.set_classes((0..nc).map(|c| ["circle", "square", "star"][c].to_string()).collect()).unwrap();
+    let path = dir.join(format!("teacher-v2-{nc}-{seed}-{}-{iou_head}.folo", head.as_str()));
+    m.save(&path).unwrap();
+    path.to_string_lossy().into_owned()
+}
+
+fn micro_v2(epochs: u32) -> TrainConfig {
+    TrainConfig { arch: "folo2-n".into(), ..micro(epochs) }
+}
+
+/// Write an epoch-0 `folo2-n` checkpoint with `iou_head = true` so `Trainer::resume` trains an `iou_head`
+/// student with any `ResumeOverrides::distill` config.
+fn save_v2_iou_seed_checkpoint(path: &Path, cfg: &TrainConfig, train_data: &TrainData) {
+    use folo_nn::io::{BestState, CheckpointParts, FileKind, Metadata, RngState, save_checkpoint};
+    use folo_vision::model::v2::{FoloV2Config, FoloV2Model};
+
+    let v2_cfg = FoloV2Config::new("n", train_data.classes.len()).unwrap().with_iou_head(true);
+    let mut v2 = FoloV2Model::new(v2_cfg.clone()).unwrap();
+    v2.set_classes(train_data.classes.clone()).unwrap();
+    v2.set_imgsz(cfg.imgsz);
+    let mc = v2.config().to_model_config().unwrap();
+    let meta = Metadata::new(FileKind::Checkpoint, mc, train_data.classes.clone(), cfg.imgsz).unwrap();
+    let mut train_json = serde_json::to_value(cfg).unwrap();
+    train_json
+        .as_object_mut()
+        .unwrap()
+        .insert("train_images".into(), serde_json::json!(train_data.train.len()));
+    let groups =
+        folo_nn::optim::StandardGroups::from_module(&v2).into_groups(cfg.lr0, cfg.momentum, cfg.weight_decay);
+    let opt = folo_nn::optim::AdamW::new(groups).unwrap();
+    let sched =
+        folo_nn::LrSchedule::new(folo_nn::DecayKind::Linear, cfg.epochs as u64, 2, 0.01, 0.0, 0.1, 0.8)
+            .unwrap();
+    let mut shadow = FoloV2Model::new(v2_cfg).unwrap();
+    shadow.set_classes(train_data.classes.clone()).unwrap();
+    shadow.set_imgsz(cfg.imgsz);
+    let ema = folo_nn::ModelEma::with_params(shadow, &v2, 0.9999, 2000.0).unwrap();
+    let rng_state = RngState { seed: cfg.seed, streams: Default::default() };
+    let parts = CheckpointParts {
+        model: &v2,
+        ema: Some(&ema),
+        optimizer: &opt,
+        schedule: &sched,
+        rng: &rng_state,
+        epoch: 0,
+        best: BestState::default(),
+        train_config: &train_json,
+    };
+    save_checkpoint(path, &meta, &parts).unwrap();
+}
+
+/// Dense distillation works deterministically for `folo2 -> folo2` (both `o2m` and `o2o`), and cross-family
+/// (`folo-n -> folo2-n` and `folo2-n -> folo-n`), while rejecting incompatible `nc`.
+#[test]
+fn folo2_distillation_same_and_cross_family_deterministic() {
+    let dir = TestDir::new("distill-v2-det");
+    let v2_teacher = v2_teacher_file(&dir, 2, 17, folo_vision::model::HeadMode::O2m, false);
+    let v1_teacher = teacher_file(&dir, 2, 19);
+
+    let (v2_plain, _) = train(micro_v2(1));
+    let v2_from_v2 = with_teacher(micro_v2(1), &v2_teacher);
+    let (h_v2_v2, log) = train(v2_from_v2.clone());
+    assert_eq!(h_v2_v2, train(v2_from_v2).0, "folo2 -> folo2 deterministic");
+    assert_ne!(h_v2_v2, v2_plain, "folo2 teacher changes folo2 student weights");
+    assert!(log.iter().any(|l| l.contains("distilling from") && l.contains("folo2-n")), "{log:?}");
+    let line = log.iter().find(|l| l.starts_with("epoch 1: distillation cls")).expect("distill log");
+    assert!(line.contains("over 2 batches"), "{line}");
+
+    // `o2o` `folo2-n` student with a `folo2-n` teacher.
+    let v2_o2o =
+        with_teacher(TrainConfig { head: folo_vision::model::HeadMode::O2o, ..micro_v2(1) }, &v2_teacher);
+    let (h_o2o, _) = train(v2_o2o.clone());
+    assert_eq!(h_o2o, train(v2_o2o).0, "folo2 o2o student deterministic");
+    assert!(h_o2o != h_v2_v2 && h_o2o != v2_plain);
+
+    // Cross-family: `folo-n` teacher -> `folo2-n` student, and `folo2-n` teacher -> `folo-n` student.
+    let v1_to_v2 = with_teacher(micro_v2(1), &v1_teacher);
+    let (h_12, _) = train(v1_to_v2.clone());
+    assert_eq!(h_12, train(v1_to_v2).0, "folo1 -> folo2 deterministic");
+    assert!(h_12 != v2_plain && h_12 != h_v2_v2);
+
+    let (v1_plain, _) = train(micro(1));
+    let v2_to_v1 = with_teacher(micro(1), &v2_teacher);
+    let (h_21, log_21) = train(v2_to_v1.clone());
+    assert_eq!(h_21, train(v2_to_v1).0, "folo2 -> folo1 deterministic");
+    assert_ne!(h_21, v1_plain, "folo2 teacher changes folo1 student weights");
+    assert!(log_21.iter().any(|l| l.contains("folo2-n")), "{log_21:?}");
+
+    // Incompatible `nc` on a `folo2` teacher is rejected cleanly before training starts.
+    let bad_v2 = v2_teacher_file(&dir, 3, 21, folo_vision::model::HeadMode::O2m, false);
+    let err = Trainer::new(with_teacher(micro_v2(1), &bad_v2), data(), TrainOptions::default())
+        .err()
+        .expect("incompatible nc refused")
+        .to_string();
+    assert!(err.contains("nc 3") && err.contains("student 2"), "{err}");
+}
+
+/// `folo2` with `iou_head` trains deterministically under plain distillation (`bckd_gamma == 0, !gt_verify`),
+/// under context-aware distillation (`bckd_gamma > 0` + `gt_verify`), and resumes bit-for-bit across epochs.
+#[test]
+fn folo2_distillation_with_iou_head_context_and_resume() {
+    let dir = TestDir::new("distill-v2-iou-resume");
+    let teacher = v2_teacher_file(&dir, 2, 29, folo_vision::model::HeadMode::O2o, true);
+    let ckpt_seed = dir.join("iou-seed.folo");
+    let base_cfg = micro_v2(1);
+    save_v2_iou_seed_checkpoint(&ckpt_seed, &base_cfg, &data());
+
+    let run_iou = |over: ResumeOverrides| -> u64 {
+        let mut t = Trainer::resume(&ckpt_seed, data(), TrainOptions::default(), over).unwrap();
+        assert!(t.model_v2().unwrap().config().iou_head);
+        t.run().unwrap();
+        weights_hash(&t)
+    };
+
+    // 1) Plain distillation (`!need_kd_asg`) paired with `iou_head: true` (`need_asg = true`).
+    let h_no_kd = run_iou(ResumeOverrides::default());
+    let over_kd =
+        ResumeOverrides { distill: Some(DistillConfig::new(&teacher)), ..ResumeOverrides::default() };
+    let h_kd = run_iou(over_kd.clone());
+    assert_eq!(h_kd, run_iou(over_kd), "folo2 iou_head + plain distill deterministic");
+    assert_ne!(h_kd, h_no_kd);
+
+    // 2) Context-aware distillation (`bckd_gamma > 0` + `gt_verify`) paired with `iou_head: true`.
+    let mut ctx_d = DistillConfig::new(&teacher);
+    ctx_d.bckd_gamma = 0.5;
+    ctx_d.gt_verify = true;
+    let over_ctx = ResumeOverrides { distill: Some(ctx_d), ..ResumeOverrides::default() };
+    let h_ctx = run_iou(over_ctx.clone());
+    assert_eq!(h_ctx, run_iou(over_ctx), "folo2 iou_head + bckd + gt_verify deterministic");
+    assert_ne!(h_ctx, h_kd);
+
+    // 3) 2-epoch `folo2` + teacher checkpoint resume is bit-identical to an uninterrupted run.
+    let cfg = with_teacher(micro_v2(2), &teacher);
+    let (dir_a, dir_b) = (dir.join("a"), dir.join("b"));
+    let (opts, _) = options(Some(&dir_a));
+    Trainer::new(cfg.clone(), data(), opts).unwrap().run().unwrap();
+    let (opts, _) = options(Some(&dir_b));
+    let opts = TrainOptions { after_epoch: Some(Box::new(StopAfter(1))), ..opts };
+    let s = Trainer::new(cfg, data(), opts).unwrap().run().unwrap();
+    assert_eq!(s.epochs_completed, 1);
+    let ckpt = dir_b.join("weights/last.folo");
+    let (opts, log) = options(Some(&dir_b));
+    let mut resumed = Trainer::resume(&ckpt, data(), opts, ResumeOverrides::default()).unwrap();
+    resumed.run().unwrap();
+    assert!(logs(&log).iter().any(|l| l.contains("distilling from")));
+    let (ta, tb) = (file_tensors(&dir_a.join("weights/last.folo")), file_tensors(&ckpt));
+    assert_eq!(ta.len(), tb.len());
+    for ((na, va), (nb, vb)) in ta.iter().zip(&tb) {
+        assert_eq!(na, nb);
+        assert!(va == vb, "folo2 tensor {na} differs after distill resume");
+    }
 }

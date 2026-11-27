@@ -10,15 +10,19 @@ use std::process::Command;
 
 use folo_core::rng::Rng;
 use folo_core::{Tensor, no_grad};
+use folo_nn::io::ModelFile;
 use folo_nn::{Module, init};
 use folo_test_support::TestDir;
 use folo_vision::Error;
 use folo_vision::export::onnx::proto::Dim;
-use folo_vision::export::onnx::{DynamicAxes, OnnxOptions, export_v2, export_v2_with_axes};
+use folo_vision::export::onnx::{
+    DynamicAxes, OnnxOptions, export_detector, export_detector_with_axes, export_file, export_file_with_axes,
+    export_v2, export_v2_with_axes,
+};
 use folo_vision::model::v2::{
     DEFAULT_IOU_FUSION_ALPHA, FoloV2Config, FoloV2Model, HeadOutputV2, WsQARepConv3x3,
 };
-use folo_vision::model::{FoloModel, HeadMode, HeadOutput, ModelConfig};
+use folo_vision::model::{Detector, FoloModel, HeadMode, HeadOutput, ModelConfig};
 use folo_vision::nms::{NmsConfig, topk_detections};
 use serde_json::{Value, json};
 
@@ -225,6 +229,84 @@ fn v2_export_covers_all_scales_and_variants() {
     // Only `boxes_f32` is cast after Sqrt (1 Cast between Sqrt and TopK, not a narrow+widen pair).
     let casts_between = custom_e2e.ops[sqrt_pos..topk_pos].iter().filter(|op| *op == "Cast").count();
     assert_eq!(casts_between, 1, "only boxes should be widened between Sqrt and TopK, no F16 narrowing");
+}
+
+#[test]
+fn v2_export_file_and_detector_preserve_classes_and_options() {
+    let dir = TestDir::new("vision-onnx-v2-file");
+    let classes = vec!["cat".to_string(), "dog".to_string(), "bird".to_string()];
+    let cfg = FoloV2Config::new("n", classes.len())
+        .unwrap()
+        .with_head(HeadMode::O2o)
+        .with_iou_head(true)
+        .with_fullpad(true);
+    let mut m = FoloV2Model::with_rng(cfg, &mut Rng::seed(19)).unwrap();
+    m.set_classes(classes.clone()).unwrap();
+    m.set_imgsz(320);
+
+    // Save unfused `.folo` weights and export via `export_file` / `export_file_with_axes`.
+    let raw_path = dir.join("folo2-n-unfused.folo");
+    m.save(&raw_path).unwrap();
+    let mf = ModelFile::open(&raw_path).unwrap();
+
+    let opts_e2e = OnnxOptions { decode: true, max_det: 50, ..OnnxOptions::new(96) };
+    let from_file = export_file_with_axes(&mf, &opts_e2e, DynamicAxes::ALL).unwrap();
+    assert_eq!(from_file.metadata["names"], r#"{"0":"cat","1":"dog","2":"bird"}"#);
+    assert_eq!(from_file.metadata["folo.classes"], r#"["cat","dog","bird"]"#);
+    assert_eq!(from_file.metadata["folo.arch"], "folo2-n");
+    assert_eq!(from_file.metadata["folo.imgsz"], "320");
+    assert_eq!(from_file.metadata["folo.fused"], "true");
+    assert_eq!(from_file.metadata["folo.onnx.head"], "o2o");
+    assert_eq!(from_file.metadata["folo.onnx.outputs"], "end2end");
+    assert_eq!(from_file.metadata["folo.onnx.iou_head"], "true");
+    let cfg_json: Value = serde_json::from_str(&from_file.metadata["folo.config"]).unwrap();
+    assert_eq!(cfg_json["family"], "folo2");
+
+    // Must match `Detector::from_file` -> `fuse()` -> `to_onnx_with_axes` bit for bit.
+    let (mut det, _) = Detector::from_file(&mf, folo_nn::io::Purpose::Inference).unwrap();
+    det.fuse().unwrap();
+    let from_det = det.to_onnx_with_axes(&opts_e2e, DynamicAxes::ALL).unwrap();
+    assert_eq!(from_file.bytes, from_det.bytes);
+    assert_eq!(from_file.metadata, from_det.metadata);
+
+    // `opts.head = Some(HeadMode::O2m)` switches exported branch cleanly on `folo2` files.
+    let opts_o2m = OnnxOptions { head: Some(HeadMode::O2m), ..OnnxOptions::new(96) };
+    let o2m_exp = export_file(&mf, &opts_o2m).unwrap();
+    assert_eq!(o2m_exp.metadata["folo.onnx.head"], "o2m");
+    assert_eq!(o2m_exp.outputs.len(), 3);
+    assert!(!o2m_exp.ops.iter().any(|op| op == "Softplus"));
+
+    // Fused `.folo` export also works through `export_file`.
+    let fused_path = dir.join("folo2-n-fused.folo");
+    m.export(&fused_path, folo_nn::io::FloatDType::F32).unwrap();
+    let fused_mf = ModelFile::open(&fused_path).unwrap();
+    let from_fused = export_file_with_axes(&fused_mf, &opts_e2e, DynamicAxes::ALL).unwrap();
+    assert_eq!(from_fused.bytes, from_file.bytes);
+
+    // `export_detector` / `Detector::to_onnx` match `FoloModel::to_onnx` on v1 too.
+    let mut v1 = FoloModel::new(ModelConfig::new("n", 3).unwrap()).unwrap();
+    v1.set_classes(classes).unwrap();
+    v1.fuse().unwrap();
+    let v1_direct = v1.to_onnx(&OnnxOptions::new(64)).unwrap();
+    let det_v1 = Detector::from(v1);
+    let v1_via_det = export_detector(&det_v1, &OnnxOptions::new(64)).unwrap();
+    assert_eq!(v1_direct.bytes, v1_via_det.bytes);
+    assert_eq!(
+        v1_direct.bytes,
+        export_detector_with_axes(&det_v1, &OnnxOptions::new(64), DynamicAxes::STATIC).unwrap().bytes
+    );
+
+    // Requesting `head: Some(HeadMode::O2o)` on an `o2m`-only `folo2` file fails cleanly with `Error::Config`.
+    let o2m_only = FoloV2Model::with_rng(FoloV2Config::new("n", 2).unwrap(), &mut Rng::seed(23)).unwrap();
+    let o2m_path = dir.join("folo2-n-o2m.folo");
+    o2m_only.save(&o2m_path).unwrap();
+    let err = export_file(
+        &ModelFile::open(&o2m_path).unwrap(),
+        &OnnxOptions { head: Some(HeadMode::O2o), ..OnnxOptions::new(64) },
+    )
+    .err()
+    .expect("o2m-only folo2 refuses o2o export");
+    assert!(matches!(err, Error::Config(_)), "{err}");
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -669,6 +751,42 @@ fn dynamic_axes_and_v2_match_folo_in_onnxruntime() {
             "expected": expected,
         }));
     }
+
+    // End-to-end `export_file_with_axes` on a saved `folo2-n` `.folo` checkpoint (`o2o` + `iou_head`,
+    // `DynamicAxes::ALL`, decoded) verified directly in `onnx.checker` + `onnxruntime`.
+    let v2_ckpt_model =
+        calibrated_v2(FoloV2Config::new("n", 5).unwrap().with_head(HeadMode::O2o).with_iou_head(true), 61);
+    let v2_ckpt_path = dir.join("v2-o2o-iou.folo");
+    v2_ckpt_model.save(&v2_ckpt_path).unwrap();
+    let mut v2_ckpt_ref = v2_ckpt_model;
+    v2_ckpt_ref.fuse().unwrap();
+    let opts = OnnxOptions { decode: true, max_det: 20, ..OnnxOptions::new(128) };
+    let exp =
+        export_file_with_axes(&ModelFile::open(&v2_ckpt_path).unwrap(), &opts, DynamicAxes::ALL).unwrap();
+    exp.write_to(dir.join("v2-export-file-e2e.onnx")).unwrap();
+    let inputs: Vec<Value> = v2_xs[..2]
+        .iter()
+        .enumerate()
+        .map(|(i, x)| dump(&dir, &format!("v2-export-file-in{i}.f32"), x))
+        .collect();
+    let expected: Vec<Value> = v2_xs[..2]
+        .iter()
+        .enumerate()
+        .map(|(i, x)| {
+            let _g = no_grad();
+            let out = v2_ckpt_ref.forward(x).unwrap();
+            ref_v2(&out, true, opts.max_det, &dir, &format!("v2-export-file-{i}"))
+        })
+        .collect();
+    cases.push(json!({
+        "name": "v2-export-file-e2e",
+        "model": "v2-export-file-e2e.onnx",
+        "dtype": "float32",
+        "tolerance": TOL_F32_DEC.0,
+        "mean_tolerance": TOL_F32_DEC.1,
+        "inputs": inputs,
+        "expected": expected,
+    }));
 
     let manifest = dir.join("manifest.json");
     std::fs::write(&manifest, serde_json::to_vec_pretty(&json!({ "cases": cases })).unwrap()).unwrap();

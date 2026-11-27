@@ -43,6 +43,17 @@ type SitePart = (Tensor, Tensor, Tensor, usize, f32, usize);
 /// Tags the planned device side's key apart from the forward's ([`FoloModel::forward`]).
 const SITES_PLAN: u64 = 1;
 
+/// True when `device` is backed by a DX12 software adapter (Windows WARP / `Microsoft Basic Render Driver`),
+/// whose runtime (`d3d10warp.dll`) hits `STATUS_ACCESS_VIOLATION` in the GPU site kernels; callers keep DX12
+/// software adapters on the dense path while leaving hardware GPUs and non-DX12 software adapters unchanged.
+pub(crate) fn is_dx12_software_adapter(device: Device) -> bool {
+    !device.is_cpu()
+        && folo_gpu::context_for(device).is_some_and(|c| {
+            let s = c.summary();
+            s.device_type == "Cpu" && s.backend == "Dx12"
+        })
+}
+
 /// Candidate slots per image of the P3, P4 and P5 levels (at most the level's pixels). At `conf = 0.25` over COCO
 /// val2017 with the published weights the most any image has is far below (docs/notes/hill/r3-lazy-head.md); the
 /// slots past an image's candidates cost a workgroup that returns at once.
@@ -60,7 +71,7 @@ fn conv_sites(c: &ConvBnAct, x: &Tensor, sites: &Tensor, to_map: bool) -> Result
 /// it (listed with the model's tensors) instead of uploading it. Keyed by the context serving `dev`, not by the
 /// ordinal: a context registered again at the same device ([`folo_gpu::register`]) gets bins of its own, and the
 /// replaced context's are dropped. Without a registered context the bins are uploaded for the call.
-pub(super) fn device_bins(dev: Device, rm: usize) -> Result<Tensor> {
+pub(crate) fn device_bins(dev: Device, rm: usize) -> Result<Tensor> {
     static BINS: Mutex<Vec<(Device, GpuContext, usize, Tensor)>> = Mutex::new(Vec::new());
     let Some(ctx) = folo_gpu::context_for(dev) else { return Ok(moment_bins(rm)?.to_device(dev)?) };
     let mut bins = BINS.lock().unwrap_or_else(|p| p.into_inner());
@@ -231,114 +242,127 @@ impl FoloModel {
         wants: DflWants,
         want_strides: bool,
     ) -> Result<(Vec<ImageCandidates>, Vec<bool>)> {
-        let mut start = 0usize;
-        let layout: Vec<(usize, f32, usize)> = levels
-            .iter()
-            .enumerate()
-            .map(|(l, lv)| {
-                let at = start;
-                let stride = lv.stride as usize;
-                let hw = (h / stride) * (w / stride);
-                start += hw;
-                (GPU_SITE_SLOTS[l].min(hw), lv.stride as f32, at)
-            })
-            .collect();
-        let total_words = out[0].dims()[1];
-        let has_stats = out.len() == 2;
-        let site_words: usize = if has_stats { layout.iter().map(|l| 1 + l.0).sum() } else { 0 };
-        let rec_words = total_words - site_words;
-        let v = out[0].to_vec::<u32>()?;
-        let mut cands = Vec::with_capacity(out[0].dims()[0]);
-        let mut fits = Vec::with_capacity(cands.capacity());
-        for row in v.chunks_exact(total_words) {
-            let rec = &row[..rec_words];
-            let n = (rec[0] as usize).min((rec_words - 2) / 7);
-            let fit = rec[1] == 0;
-            let list = candidates_of_records(&rec[2..2 + 7 * n]);
-            let strides = (want_strides && fit)
-                .then(|| list.iter().map(|c| stride_of(&layout, c.anchor as usize)).collect());
-            cands.push(ImageCandidates {
-                cands: list,
-                precisions: None,
-                bin_precisions: None,
-                entropies: None,
-                strides,
-            });
-            fits.push(fit);
-        }
-        if has_stats && wants.any_stats() {
-            self.unpack_site_stats(&out[1], &v, total_words, rec_words, &layout, &mut cands, &fits, wants)?;
-        }
-        Ok((cands, fits))
+        let strides = [levels[0].stride, levels[1].stride, levels[2].stride];
+        read_sites_for_strides(out, strides, h, w, wants, want_strides)
     }
+}
 
-    /// DFL precisions and/or entropies of the fitting images' candidates from the packed `u32` buffer's site lists
-    /// and the single `stats` (`[B, ch, Σ cap]`) tensor. Skips the `stats` readback when no fitting image has any
-    /// candidate.
-    #[allow(clippy::too_many_arguments)]
-    fn unpack_site_stats(
-        &self,
-        stats: &Tensor,
-        packed_u32: &[u32],
-        total_words: usize,
-        rec_words: usize,
-        layout: &[(usize, f32, usize)],
-        cands: &mut [ImageCandidates],
-        fits: &[bool],
-        wants: DflWants,
-    ) -> Result<()> {
-        let any_needed = fits.iter().zip(cands.iter()).any(|(&fit, c)| fit && !c.cands.is_empty());
-        if !any_needed {
-            for (c, &fit) in cands.iter_mut().zip(fits) {
-                if fit {
-                    c.precisions = wants.side.then(Vec::new);
-                    c.bin_precisions = wants.bin.then(Vec::new);
-                    c.entropies = wants.ent.then(Vec::new);
-                }
-            }
-            return Ok(());
-        }
-        let cols: usize = layout.iter().map(|l| l.0).sum();
-        let ch = dfl_stats_channels(wants.moments(), wants.ent);
-        let m = stats.to_vec::<f32>()?;
-        for (i, (c, &fit)) in cands.iter_mut().zip(fits).enumerate() {
-            if !fit {
-                continue;
-            }
-            // Global anchor -> (column, stride) of every slotted candidate, read straight from packed_u32.
-            let mut at = HashMap::with_capacity(c.cands.len());
-            let mut col0 = 0;
-            let mut off = i * total_words + rec_words;
-            for &(cap, stride, start) in layout {
-                let row = &packed_u32[off..off + 1 + cap];
-                for (k, &px) in row[1..].iter().take((row[0] as usize).min(cap)).enumerate() {
-                    at.insert(start as u32 + px, (col0 + k, stride));
-                }
-                col0 += cap;
-                off += 1 + cap;
-            }
-            let img = &m[i * ch * cols..(i + 1) * ch * cols];
-            let mut prec = wants.side.then(|| Vec::with_capacity(c.cands.len()));
-            let mut bprec = wants.bin.then(|| Vec::with_capacity(c.cands.len()));
-            let mut ent = wants.ent.then(|| Vec::with_capacity(c.cands.len()));
-            for cand in &c.cands {
-                let &(j, stride) = at.get(&cand.anchor).ok_or_else(|| {
-                    folo_nn::Error::Invalid(format!("candidate anchor {} is in no site list", cand.anchor))
-                })?;
-                if let Some(p) = prec.as_mut() {
-                    p.push(precision_from_moments(img, cols, j, stride));
-                }
-                if let Some(bp) = bprec.as_mut() {
-                    bp.push(bin_precision_from_moments(img, cols, j));
-                }
-                if let Some(ev) = ent.as_mut() {
-                    ev.push(entropy_from_stats(img, cols, j, wants.moments()));
-                }
-            }
-            c.precisions = prec;
-            c.bin_precisions = bprec;
-            c.entropies = ent;
-        }
-        Ok(())
+/// Shared site-record and DFL-stats unpacker for GPU candidate-first prediction on both `FoloModel` and
+/// [`super::v2::FoloV2Model`].
+pub(crate) fn read_sites_for_strides(
+    out: &[Tensor],
+    strides: [u32; 3],
+    h: usize,
+    w: usize,
+    wants: DflWants,
+    want_strides: bool,
+) -> Result<(Vec<ImageCandidates>, Vec<bool>)> {
+    let mut start = 0usize;
+    let layout: Vec<(usize, f32, usize)> = strides
+        .iter()
+        .enumerate()
+        .map(|(l, &stride)| {
+            let at = start;
+            let st = stride as usize;
+            let hw = (h / st) * (w / st);
+            start += hw;
+            (GPU_SITE_SLOTS[l].min(hw), stride as f32, at)
+        })
+        .collect();
+    let total_words = out[0].dims()[1];
+    let has_stats = out.len() == 2;
+    let site_words: usize = if has_stats { layout.iter().map(|l| 1 + l.0).sum() } else { 0 };
+    let rec_words = total_words - site_words;
+    let v = out[0].to_vec::<u32>()?;
+    let mut cands = Vec::with_capacity(out[0].dims()[0]);
+    let mut fits = Vec::with_capacity(cands.capacity());
+    for row in v.chunks_exact(total_words) {
+        let rec = &row[..rec_words];
+        let n = (rec[0] as usize).min((rec_words - 2) / 7);
+        let fit = rec[1] == 0;
+        let list = candidates_of_records(&rec[2..2 + 7 * n]);
+        let strides = (want_strides && fit)
+            .then(|| list.iter().map(|c| stride_of(&layout, c.anchor as usize)).collect());
+        cands.push(ImageCandidates {
+            cands: list,
+            precisions: None,
+            bin_precisions: None,
+            entropies: None,
+            strides,
+        });
+        fits.push(fit);
     }
+    if has_stats && wants.any_stats() {
+        unpack_site_stats(&out[1], &v, total_words, rec_words, &layout, &mut cands, &fits, wants)?;
+    }
+    Ok((cands, fits))
+}
+
+/// DFL precisions and/or entropies of the fitting images' candidates from the packed `u32` buffer's site lists
+/// and the single `stats` (`[B, ch, Σ cap]`) tensor. Skips the `stats` readback when no fitting image has any
+/// candidate.
+#[allow(clippy::too_many_arguments)]
+fn unpack_site_stats(
+    stats: &Tensor,
+    packed_u32: &[u32],
+    total_words: usize,
+    rec_words: usize,
+    layout: &[(usize, f32, usize)],
+    cands: &mut [ImageCandidates],
+    fits: &[bool],
+    wants: DflWants,
+) -> Result<()> {
+    let any_needed = fits.iter().zip(cands.iter()).any(|(&fit, c)| fit && !c.cands.is_empty());
+    if !any_needed {
+        for (c, &fit) in cands.iter_mut().zip(fits) {
+            if fit {
+                c.precisions = wants.side.then(Vec::new);
+                c.bin_precisions = wants.bin.then(Vec::new);
+                c.entropies = wants.ent.then(Vec::new);
+            }
+        }
+        return Ok(());
+    }
+    let cols: usize = layout.iter().map(|l| l.0).sum();
+    let ch = dfl_stats_channels(wants.moments(), wants.ent);
+    let m = stats.to_vec::<f32>()?;
+    for (i, (c, &fit)) in cands.iter_mut().zip(fits).enumerate() {
+        if !fit {
+            continue;
+        }
+        // Global anchor -> (column, stride) of every slotted candidate, read straight from packed_u32.
+        let mut at = HashMap::with_capacity(c.cands.len());
+        let mut col0 = 0;
+        let mut off = i * total_words + rec_words;
+        for &(cap, stride, start) in layout {
+            let row = &packed_u32[off..off + 1 + cap];
+            for (k, &px) in row[1..].iter().take((row[0] as usize).min(cap)).enumerate() {
+                at.insert(start as u32 + px, (col0 + k, stride));
+            }
+            col0 += cap;
+            off += 1 + cap;
+        }
+        let img = &m[i * ch * cols..(i + 1) * ch * cols];
+        let mut prec = wants.side.then(|| Vec::with_capacity(c.cands.len()));
+        let mut bprec = wants.bin.then(|| Vec::with_capacity(c.cands.len()));
+        let mut ent = wants.ent.then(|| Vec::with_capacity(c.cands.len()));
+        for cand in &c.cands {
+            let &(j, stride) = at.get(&cand.anchor).ok_or_else(|| {
+                folo_nn::Error::Invalid(format!("candidate anchor {} is in no site list", cand.anchor))
+            })?;
+            if let Some(p) = prec.as_mut() {
+                p.push(precision_from_moments(img, cols, j, stride));
+            }
+            if let Some(bp) = bprec.as_mut() {
+                bp.push(bin_precision_from_moments(img, cols, j));
+            }
+            if let Some(ev) = ent.as_mut() {
+                ev.push(entropy_from_stats(img, cols, j, wants.moments()));
+            }
+        }
+        c.precisions = prec;
+        c.bin_precisions = bprec;
+        c.entropies = ent;
+    }
+    Ok(())
 }

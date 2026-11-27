@@ -122,12 +122,14 @@ pub(super) fn needing_boxes(
 
 impl FoloModel {
     /// Whether [`FoloModel::predict_candidates`] serves an input on `device` with the settings `nms`: a fused
-    /// model in eval mode, on the CPU in `F32` or on a GPU, single-label (multi-label validation at
-    /// `conf = 0.001` passes thousands of anchors per image and stays on the dense path).
+    /// model in eval mode, on the CPU in `F32` or on a GPU (excluding DX12 software adapters where WARP crashes
+    /// in site kernels), single-label (multi-label validation at `conf = 0.001` passes thousands of anchors per
+    /// image and stays on the dense path).
     pub fn candidates_first_applies(&self, device: Device, nms: &NmsConfig) -> bool {
         self.fused
             && !self.is_training()
             && !nms.multi_label
+            && !super::lazy_gpu::is_dx12_software_adapter(device)
             && (!device.is_cpu() || self.dtype() == DType::F32)
     }
 

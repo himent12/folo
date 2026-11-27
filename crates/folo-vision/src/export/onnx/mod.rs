@@ -62,7 +62,7 @@ use std::path::Path;
 use folo_nn::Module;
 use folo_nn::io::{ModelFile, Purpose};
 
-use crate::model::{FoloModel, HeadMode};
+use crate::model::{Detector, FoloModel, HeadMode};
 use crate::{Error, Result};
 use graph::Graph;
 use proto::{DataType, Dim};
@@ -143,12 +143,11 @@ pub struct OnnxOptions {
     pub decode: bool,
     /// `o2o` head with `decode`: the detections per image, `K = min(max_det, A)` (300 by default).
     pub max_det: usize,
-    /// [`export_file`]: the head branch to export, `None` for the file's ([`FoloModel::head_mode`]).
-    /// [`export`] and [`export_v2`] export the model's own mode.
+    /// [`export_file`]: the head branch to export, `None` for the file's ([`Detector::head_mode`]).
+    /// [`export`], [`export_v2`], and [`export_detector`] export the model's own mode.
     pub head: Option<HeadMode>,
     /// Extra `metadata_props` (for example the source file's `folo.metrics`); exporter-owned keys always win
-    /// (conditional keys that do not apply to the exported graph are cleared; [`export_v2`] preserves caller-supplied
-    /// `names` / `folo.classes` when present because [`crate::model::v2::FoloV2Model`] does not store class names).
+    /// (conditional keys that do not apply to the exported graph are cleared).
     pub metadata: BTreeMap<String, String>,
 }
 
@@ -267,20 +266,53 @@ impl FoloModel {
     }
 }
 
-/// `folo export --format onnx`: build the inference model a `.folo` file describes (its EMA weights when present,
-/// docs/FORMAT.md loading rules) on the CPU, fuse it in `F32` and export it.
+impl Detector {
+    /// Export this fused detector (`folo-*` or `folo2-*`) as an ONNX graph, deriving dynamic axes from
+    /// `opts.dynamic`. Weights are read from any device.
+    pub fn to_onnx(&self, opts: &OnnxOptions) -> Result<OnnxExport> {
+        export_detector(self, opts)
+    }
+
+    /// Export this fused detector (`folo-*` or `folo2-*`) as an ONNX graph with independent [`DynamicAxes`]
+    /// (`batch` and `hw`), overriding `opts.dynamic`.
+    pub fn to_onnx_with_axes(&self, opts: &OnnxOptions, axes: DynamicAxes) -> Result<OnnxExport> {
+        export_detector_with_axes(self, opts, axes)
+    }
+}
+
+/// Build the ONNX model of a fused [`Detector`] (`folo-*` or `folo2-*`), deriving dynamic axes from
+/// `opts.dynamic`.
+pub fn export_detector(model: &Detector, opts: &OnnxOptions) -> Result<OnnxExport> {
+    export_detector_with_axes(model, opts, opts.dynamic_axes())
+}
+
+/// Build the ONNX model of a fused [`Detector`] (`folo-*` or `folo2-*`) with independent [`DynamicAxes`]
+/// (`batch` and `hw`), overriding `opts.dynamic`.
+pub fn export_detector_with_axes(
+    model: &Detector,
+    opts: &OnnxOptions,
+    axes: DynamicAxes,
+) -> Result<OnnxExport> {
+    match model {
+        Detector::V1(m) => export_with_axes(m, opts, axes),
+        Detector::V2(m) => export_v2_with_axes(m, opts, axes),
+    }
+}
+
+/// `folo export --format onnx`: build the inference model a `.folo` file describes (`folo-*` or `folo2-*`, its
+/// EMA weights when present, docs/FORMAT.md loading rules) on the CPU, fuse it in `F32` and export it.
 pub fn export_file(file: &ModelFile, opts: &OnnxOptions) -> Result<OnnxExport> {
     export_file_with_axes(file, opts, opts.dynamic_axes())
 }
 
 /// [`export_file`] with independent [`DynamicAxes`] (`batch` and `hw`), overriding `opts.dynamic`.
 pub fn export_file_with_axes(file: &ModelFile, opts: &OnnxOptions, axes: DynamicAxes) -> Result<OnnxExport> {
-    let (mut model, _) = FoloModel::from_file(file, Purpose::Inference)?;
+    let (mut model, _) = Detector::from_file(file, Purpose::Inference)?;
     if let Some(h) = opts.head {
         model.set_head_mode(h).map_err(|e| Error::Config(format!("ONNX export: {e}")))?;
     }
     model.fuse()?;
-    export_with_axes(&model, opts, axes)
+    export_detector_with_axes(&model, opts, axes)
 }
 
 /// Build the ONNX model of a fused `model`, deriving dynamic axes from `opts.dynamic`.

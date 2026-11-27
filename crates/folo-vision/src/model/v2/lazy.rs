@@ -26,27 +26,31 @@ fn rep_conv_at(rep: &WsQARepConv3x3, x: &Tensor, at: &Tensor) -> Result<Tensor> 
 }
 
 impl FoloV2Model {
-    /// Whether [`FoloV2Model::predict_candidates`] serves an input on `device` with `nms`: a fused CPU `F32`
-    /// eval-mode model, single-label, and without `iou_head` (which fuses per-anchor localization quality logits
-    /// with class probabilities before thresholding).
+    /// Whether [`FoloV2Model::predict_candidates`] serves an input on `device` with `nms`: a fused eval-mode
+    /// model, single-label, without `iou_head` (which fuses per-anchor localization quality logits with class
+    /// probabilities before thresholding), on CPU (`F32`) or a GPU (`F32` / `F16`, excluding DX12 software
+    /// adapters where WARP crashes in site kernels).
     pub fn candidates_first_applies(&self, device: Device, nms: &NmsConfig) -> bool {
         self.fused
             && !self.is_training()
             && !nms.multi_label
-            && device.is_cpu()
-            && self.dtype() == DType::F32
             && !self.head.has_iou_head
+            && !crate::model::lazy_gpu::is_dx12_software_adapter(device)
+            && ((device.is_cpu() && self.dtype() == DType::F32) || !device.is_cpu())
     }
 
-    /// CPU candidate-first prediction of `[B, in_channels, H, W]` with [`FoloV2Model::head_mode`]: bit-for-bit
-    /// identical to the dense [`super::HeadOutputV2::detections`] path while skipping `BoxBranchV2` on
-    /// non-candidate anchors.
+    /// Candidate-first prediction of `[B, in_channels, H, W]` with [`FoloV2Model::head_mode`]: bit-for-bit
+    /// identical to the dense [`super::HeadOutputV2::detections`] path on both CPU and GPU while skipping
+    /// `BoxBranchV2` on non-candidate anchors.
     pub fn predict_candidates(&self, x: &Tensor, nms: &NmsConfig) -> Result<Vec<ImageCandidates>> {
         if !self.candidates_first_applies(x.device(), nms) {
             return Err(Error::Invalid(
-                "FoloV2Model::predict_candidates needs a fused CPU F32 eval-mode model, single-label, without iou_head"
+                "FoloV2Model::predict_candidates needs a fused eval-mode model (CPU F32 or GPU), single-label, without iou_head"
                     .into(),
             ));
+        }
+        if !x.device().is_cpu() {
+            return self.predict_candidates_gpu(x, nms);
         }
         folo_core::cpu::in_pool(|| {
             let _g = no_grad();
@@ -169,7 +173,7 @@ impl FoloV2Model {
         finish_candidates(self.head_mode, &c.cands, dfl, nms)
     }
 
-    fn dfl_wants(&self, nms: &NmsConfig) -> DflWants {
+    pub(super) fn dfl_wants(&self, nms: &NmsConfig) -> DflWants {
         if self.head_mode != HeadMode::O2m {
             return DflWants::default();
         }
@@ -178,6 +182,10 @@ impl FoloV2Model {
             bin: nms.score.wants_bin_precisions(),
             ent: nms.score.wants_dfl_entropy(),
         }
+    }
+
+    pub(super) fn wants_strides(&self, nms: &NmsConfig) -> bool {
+        nms.score.wants_strides() && self.head_mode == HeadMode::O2m
     }
 
     fn extract_cls_candidates(&self, cls: &Tensor, b: usize, a: usize, conf: f32) -> Result<Vec<Vec<Found>>> {

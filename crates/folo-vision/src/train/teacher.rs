@@ -159,6 +159,11 @@ pub(super) enum TeacherBatch {
 }
 
 impl TeacherBatch {
+    /// True when this batch holds host [`DistillTargets`] (cannot consume [`DistillAssignment::Device`]).
+    pub(super) fn is_host_targets(&self) -> bool {
+        matches!(self, TeacherBatch::Targets { .. })
+    }
+
     /// The distillation term of the student's f32 one-to-many outputs against this batch (docs/MODEL.md §8.9).
     pub(super) fn loss(
         &self,

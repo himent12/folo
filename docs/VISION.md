@@ -12,7 +12,7 @@ code](../crates/folo-vision/README.md#from-modelmd-to-the-code).
 model/             FoloModel & Detector: detector.rs (unified v1/v2 dispatch), blocks.rs (MODEL.md §2),
                    head.rs (§6), io.rs (.folo through folo-nn), predict.rs (decode and the raw prediction path),
                    lazy.rs / lazy_gpu.rs (candidate-first head), quant/ (int8 inference, §9.6),
-                   v2/ (FOLO v2-Iso model family + io.rs `.folo` weights/export/transfer)
+                   v2/ (FOLO v2-Iso model family + io.rs `.folo` weights/export/transfer, lazy.rs / lazy_gpu.rs)
 loss/              the detection loss: assignment.rs (host assigner), terms/ (BCE/MAL/VFL/QFL,
                    CIoU/R-PIoU/S-AEIoU/Inner-CIoU/WIoU v3/NWD, DFL/OT-DFL/CRPS-DFL), device.rs (GPU),
                    distill/ (dense/BCKD/GT-verified distillation, §8.9)
@@ -51,8 +51,8 @@ differentiable, so it works on folo-core tensors.
 
 ### FOLO v2-Iso (`model/v2/`)
 Clean-sheet, hardware-co-designed detector family (`folo2-n/s/m/l/x`) built on standard CPU/GPU autograd primitives and
-ONNX opset-17-expressible ops (exported via `FoloV2Model::to_onnx` / `export::onnx::export_v2`; `model::quant` currently
-targets v1 `FoloModel`):
+ONNX opset-17-expressible ops (exported via `FoloV2Model::to_onnx`, `Detector::to_onnx`, and `export::onnx::export_file`;
+CPU int8 inference is also supported in `model::quant`):
 - **Config & scaling (`config.rs`):** `FoloV2Config` and `ScalingV2` enforce `ceil16`-aligned widths at every stage
   and lock shared head widths (`c_box = 48`, `c_cls = 64`) across `n` and `s` for zero-adapter CrossKD; `plus = true`
   selects the deeper `v2-Plus` tier.
@@ -78,11 +78,13 @@ targets v1 `FoloModel`):
   the full `.folo` IO lifecycle (`save`, `export` folding `WS-QARepConv3x3` + BatchNorms in `F32` before writing,
   `from_file`, `open`, `open_on`, `from_file_for_inference`, `transfer_from` with cross-class `o2o` class-output
   skipping and `o2m → o2o` head copy). Unified `Detector` (`V1(Box<FoloModel>)` | `V2(Box<FoloV2Model>)`) wires
-  `folo2-n/s/m/l/x` through `Trainer` (including EMA, MuSGD `.cls` LR boost, MAL bias prior, bit-exact checkpoint
-  save/resume preserving v2 flags, and `iou_quality_loss` supervision when `iou_head = true`), `auto_batch` VRAM
-  probing (`analyze_folo_v2_model` matching exact parameter counts across all 5 scales), `validate_v2` /
-  `validate_detector` (including `ValConfig::eval` per-image error diagnosis and `iou_raw` score fusion), and
-  `Predictor` (`open` auto-dispatch, `new_v2`, `predict`, `predict_batch`, SAHI `predict_tiled`, and TTA).
+  `folo2-n/s/m/l/x` through `Trainer` (including EMA, MuSGD `.cls` LR boost, MAL bias prior, dense/BCKD/GT-verified
+  distillation with same-family and cross-family teachers, bit-exact checkpoint save/resume preserving v2 flags, and
+  `iou_quality_loss` supervision when `iou_head = true`), `auto_batch` VRAM probing (`analyze_folo_v2_model` matching
+  exact parameter counts across all 5 scales), `validate_v2` / `validate_detector` (including `ValConfig::eval`
+  per-image error diagnosis and `iou_raw` score fusion), and `Predictor` (`open` auto-dispatch, `new_v2`, GPU
+  `ForwardPlans` and candidate-first prediction in `v2/lazy_gpu.rs`, `predict`, `predict_batch`, SAHI
+  `predict_tiled`, and TTA).
 
 ### int8 inference (`model/quant/`)
 Post-training CPU int8 quantisation of the v1 backbone and neck (layers 0–22; the head stays `f32`, MODEL.md §9.6).
@@ -263,7 +265,7 @@ preprocess / inference / postprocess timing split.
 - The raw `u8` images are uploaded and letterboxed there (bit-exact with the CPU letterbox) and only the decoded
   candidates come back: the images of a batch share one upload (a batch larger than the device's largest storage
   buffer takes several), one queue of work, one small readback.
-- The head is candidate-first too (`model/lazy_gpu.rs`): per level the class branch, the class pass into
+- The head is candidate-first too (`model/lazy_gpu.rs` for v1 and `model/v2/lazy_gpu.rs` for v2): per level the class branch, the class pass into
   fixed-capacity site lists, `conv0` on the listed windows (scattered back into a map), `conv1` and `out` at the
   candidates, then one decode of every level and one readback of the records. The dispatches do not depend on the
   candidates, and an image whose candidates overflow a list takes the dense head on the same features.
@@ -350,7 +352,8 @@ and `HeadOutput::detections`, which reads the head outputs in place and extracts
 - Apart from the head branch the export does not use (`head.o2o.*`, or `head.box.*` / `head.cls.*` for v1 `o2o`, or
   `head.cls.*` for v2 `o2o` which shares `head.box.*`), any model tensor no node consumed, or an unfused BatchNorm or
   `WsQARepConv3x3`, is an error naming it.
-- `folo export --format onnx` and `POST /api/models/{id}/export` call `export_file`; parity with onnxruntime is
+- `folo export --format onnx` and `POST /api/models/{id}/export` call `export_file` (which dispatches both `folo-*` and
+  `folo2-*` via `Detector::from_file`); parity with onnxruntime is
   `crates/folo-vision/tests/onnx_export.rs` (independent dynamic axes + `FoloV2Model`) and
   `crates/folo-cli/tests/onnx.rs` + `bench/parity/onnx_check.py` ([CLI.md](CLI.md#onnx-export)).
 - `.folo` export itself lives in folo-nn ([FORMAT.md](FORMAT.md), [NN.md](NN.md)).
