@@ -1,12 +1,14 @@
 // Shell-safe `folo dataset` curation & export CLI command builders paired with DatasetInsights and StatsTab:
 // `check` (perceptual dHash duplicate/leakage audit + dry-run fixes), `split` (stratified train/val),
-// `filter` (class/split/empty-image curation), `merge` (multi-dataset unification), and `convert` (YOLO/COCO/VOC export).
+// `filter` (class/split/empty-image curation), `merge` (multi-dataset unification), `convert` (YOLO/COCO/VOC),
+// and `export` (spec-compliant COCO instances JSON with split selection, copy/link/reference images, pretty JSON).
 // Every subcommand and flag matches crates/folo-cli/src/cli/dataset.rs and docs/CLI.md verbatim.
 import type { Dataset, DatasetStats, Split } from '$lib/api/types';
 import { quote } from '$lib/trainCli';
 
-export type CurateCliMode = 'check' | 'split' | 'filter' | 'merge' | 'convert';
+export type CurateCliMode = 'check' | 'split' | 'filter' | 'merge' | 'convert' | 'export';
 export type ConvertTargetFormat = 'yolo' | 'coco' | 'voc';
+export type CocoImageMode = 'copy' | 'link' | 'reference';
 
 export interface CurateCliCommand {
   mode: CurateCliMode;
@@ -25,12 +27,19 @@ export const CURATE_CLI_MODES: readonly { value: CurateCliMode; label: string }[
   { value: 'filter', label: 'Filter' },
   { value: 'merge', label: 'Merge' },
   { value: 'convert', label: 'Convert' },
+  { value: 'export', label: 'Export COCO' },
 ];
 
 export const CONVERT_TARGET_FORMATS: readonly { value: ConvertTargetFormat; label: string }[] = [
   { value: 'yolo', label: 'YOLO' },
   { value: 'coco', label: 'COCO' },
   { value: 'voc', label: 'VOC' },
+];
+
+export const COCO_IMAGE_MODES: readonly { value: CocoImageMode; label: string }[] = [
+  { value: 'copy', label: 'Copy' },
+  { value: 'link', label: 'Hard-link' },
+  { value: 'reference', label: 'Reference' },
 ];
 
 /** Picks the most useful default conversion target format for a dataset (YOLO for COCO datasets, else COCO). */
@@ -75,6 +84,8 @@ export function buildDatasetCurateCli(
     activeClass?: number;
     activeSplit?: 'all' | Split;
     targetFormat?: ConvertTargetFormat;
+    cocoImageMode?: CocoImageMode;
+    cocoPretty?: boolean;
   } = {},
 ): CurateCliCommand {
   const pathUnsafe = !!dataset.path && UNSAFE_PS_NATIVE_ARG.test(dataset.path);
@@ -173,6 +184,31 @@ export function buildDatasetCurateCli(
       label: 'Convert',
       command: `folo dataset convert ${args.join(' ')}`,
       description: `Converts this ${dataset.format.toUpperCase()} dataset into ${formatNames[to]} in a new folder (images are copied unchanged).`,
+      warning: pathWarning,
+      placeholders: [...pathPlaceholder, '<out_dir>'],
+    };
+  }
+
+  if (mode === 'export') {
+    const out = suggestedOut(dataset, 'coco-export');
+    const imageMode: CocoImageMode = opts.cocoImageMode ?? 'copy';
+    const splitFilter = opts.activeSplit && opts.activeSplit !== 'all' ? opts.activeSplit : null;
+    const flags = [`--out ${out}`, '--format coco'];
+    if (splitFilter) flags.push(`--split ${splitFilter}`);
+    flags.push(`--images ${imageMode}`);
+    if (opts.cocoPretty) flags.push('--pretty');
+    const args = hasRealPath ? positionalPath(path, flags) : [path, ...flags];
+    const imageDesc: Record<CocoImageMode, string> = {
+      copy: 'copies source images into <out>/images/<split>/',
+      link: 'hard-links source images into <out>/images/<split>/ (falls back to copy across filesystems)',
+      reference: 'references source images in place via relative paths without duplicating files',
+    };
+    const splitDesc = splitFilter ? `the ${splitFilter} split` : 'all non-empty splits';
+    return {
+      mode,
+      label: 'Export COCO',
+      command: `folo dataset export ${args.join(' ')}`,
+      description: `Exports ${splitDesc} to spec-compliant COCO Detection JSON (annotations/instances_<split>.json) and ${imageDesc[imageMode]}${opts.cocoPretty ? ', pretty-printed' : ''}.`,
       warning: pathWarning,
       placeholders: [...pathPlaceholder, '<out_dir>'],
     };

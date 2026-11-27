@@ -24,9 +24,15 @@ export interface PlaygroundTimingProps {
   engineInfo?: DetectorInfo | null;
 }
 
+function matchedEngineInfo(pred: Prediction | null, info: DetectorInfo | null | undefined): DetectorInfo | null {
+  if (!pred?.backend || !info) return null;
+  return info.backend === pred.backend && (!info.modelId || info.modelId === pred.model_id) ? info : null;
+}
+
 function browserBadgeFor(pred: Prediction | null, info: DetectorInfo | null | undefined, model: Model | null): string | null {
   if (!pred?.backend) return null;
-  if (info && info.backend === pred.backend && (!info.modelId || info.modelId === pred.model_id)) return detectorInfoBadge(info);
+  const matched = matchedEngineInfo(pred, info);
+  if (matched) return detectorInfoBadge(matched);
   if (model) {
     const parts: string[] = [model.arch];
     if (model.arch.startsWith('folo2-')) parts.push('FOLO v2');
@@ -37,6 +43,8 @@ function browserBadgeFor(pred: Prediction | null, info: DetectorInfo | null | un
 }
 
 export default function PlaygroundTiming(props: PlaygroundTimingProps) {
+  const infoA = () => matchedEngineInfo(props.predA, props.engineInfo);
+  const infoB = () => matchedEngineInfo(props.predB, props.engineInfo);
   return (
     <>
       {props.compare ? (
@@ -49,6 +57,8 @@ export default function PlaygroundTiming(props: PlaygroundTimingProps) {
                 device={deviceLabel(props.predA, props.adapter)}
                 cold={props.predA.cold}
                 engineBadge={browserBadgeFor(props.predA, props.engineInfo, props.modelA)}
+                precision={infoA()?.precision ?? null}
+                precisionFallback={infoA()?.precisionFallback ?? null}
                 mode={inferenceMetaLabel(props.predA.inference)}
               />
             ) : props.predictingA ? (
@@ -68,6 +78,8 @@ export default function PlaygroundTiming(props: PlaygroundTimingProps) {
                 device={deviceLabel(props.predB, props.adapter)}
                 cold={props.predB.cold}
                 engineBadge={browserBadgeFor(props.predB, props.engineInfo, props.modelB)}
+                precision={infoB()?.precision ?? null}
+                precisionFallback={infoB()?.precisionFallback ?? null}
                 mode={inferenceMetaLabel(props.predB.inference)}
               />
             ) : props.predictingB ? (
@@ -87,6 +99,8 @@ export default function PlaygroundTiming(props: PlaygroundTimingProps) {
             device={deviceLabel(props.predA, props.adapter)}
             cold={props.predA.cold}
             engineBadge={browserBadgeFor(props.predA, props.engineInfo, props.modelA)}
+            precision={infoA()?.precision ?? null}
+            precisionFallback={infoA()?.precisionFallback ?? null}
             mode={inferenceMetaLabel(props.predA.inference)}
           />
           {!props.narrow && props.resultMsA !== null ? (

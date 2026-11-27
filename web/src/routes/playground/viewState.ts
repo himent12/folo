@@ -3,6 +3,7 @@
 import type { Model, Prediction } from '$lib/api/types';
 import { archFamily, archScaleRank } from '$lib/arch';
 import { inferenceShortTag } from '$lib/inference/browser';
+import { hasPerClassConf, perClassConfForExport } from './perClassConf';
 import { BACKEND_NAME, DEFAULTS } from './predict';
 import type { Source } from './source';
 
@@ -103,9 +104,15 @@ export function scrollRowIntoView(row: HTMLTableRowElement | null, narrow: boole
   else if (row.offsetTop + row.offsetHeight > box.scrollTop + box.clientHeight) box.scrollTop = row.offsetTop + row.offsetHeight - box.clientHeight;
 }
 
-/** Whether active threshold sliders are at their default values (ignoring IoU for end-to-end o2o models). */
-export function areDefaultThresholds(conf: number, iou: number, maxDet: number, o2o: boolean): boolean {
-  return conf === DEFAULTS.conf && (o2o || iou === DEFAULTS.iou) && maxDet === DEFAULTS.maxDet;
+/** Whether active threshold controls are at their default values (ignoring IoU for end-to-end o2o models). */
+export function areDefaultThresholds(
+  conf: number,
+  iou: number,
+  maxDet: number,
+  o2o: boolean,
+  perClassConf?: Readonly<Record<number, number>> | null,
+): boolean {
+  return conf === DEFAULTS.conf && (o2o || iou === DEFAULTS.iou) && maxDet === DEFAULTS.maxDet && !hasPerClassConf(perClassConf);
 }
 
 /** Summary of visible detection confidence scores for the live distribution badge. */
@@ -157,9 +164,17 @@ export function predictionJson(
   pred: Prediction | null,
   hasResult: boolean,
   kept: readonly Det[],
-  filter: { conf: number; iou: number; maxDet: number; o2o: boolean; hiddenClasses?: readonly string[] },
+  filter: {
+    conf: number;
+    iou: number;
+    maxDet: number;
+    o2o: boolean;
+    hiddenClasses?: readonly string[];
+    perClassConf?: Readonly<Record<number, number>> | null;
+  },
 ) {
   if (!pred || !hasResult) return null;
+  const perClass = perClassConfForExport(filter.perClassConf);
   const baseFilter = filter.o2o ? { conf: filter.conf, max_det: filter.maxDet } : { conf: filter.conf, iou: filter.iou, max_det: filter.maxDet };
   return {
     model_id: pred.model_id,
@@ -177,6 +192,10 @@ export function predictionJson(
     timing: pred.timing,
     device: pred.device,
     ...(pred.inference ? { inference: pred.inference } : {}),
-    filter: filter.hiddenClasses?.length ? { ...baseFilter, hidden_classes: [...filter.hiddenClasses] } : baseFilter,
+    filter: {
+      ...baseFilter,
+      ...(perClass ? { per_class_conf: perClass } : {}),
+      ...(filter.hiddenClasses?.length ? { hidden_classes: [...filter.hiddenClasses] } : {}),
+    },
   };
 }

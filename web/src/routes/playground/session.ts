@@ -10,6 +10,7 @@ import { hub } from '$lib/api/index';
 import type { Dataset, DatasetImage as Img, Prediction, Split } from '$lib/api/types';
 import type { InferenceConfig } from '$lib/inference/browser';
 import type { CompareViewMode } from './compare';
+import type { PerClassConfMap } from './perClassConf';
 import { DEFAULTS } from './predict';
 import type { Source } from './source';
 
@@ -26,6 +27,7 @@ export interface Session {
   conf: number;
   iou: number;
   maxDet: number;
+  perClassConf?: PerClassConfMap;
   labels: boolean;
   scores: boolean;
   truth: boolean;

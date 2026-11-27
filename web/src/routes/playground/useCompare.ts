@@ -10,11 +10,13 @@ import {
   inferenceMetaKey,
   isDetectorLoadError,
   type BrowserEngine,
+  type BrowserPrecision,
   type InferenceConfig,
 } from '$lib/inference/browser';
 import type { ModelChoice } from '$lib/scoreSummary';
-import { askAllWhenCut } from './allCandidates';
+import { askAllWhenCut, recordFetchedFloors } from './allCandidates';
 import { comparePredictionJson, pickDefaultModelB, summarizeComparison, type CompareViewMode } from './compare';
+import { hasPerClassConf, mapPerClassConfToClasses, type PerClassConfMap } from './perClassConf';
 import { ask, FETCH, noServerWeights, type RunOn } from './predict';
 import { sourceImageKey, type Source } from './source';
 import { classCounts, detectionIndex, visibleClasses, visibleRows, type Det } from './viewState';
@@ -38,6 +40,7 @@ export interface CompareControllerInput {
   conf: Signal<number>;
   iou: Signal<number>;
   maxDet: Signal<number>;
+  perClassConf?: Signal<PerClassConfMap>;
   hidden: Signal<Set<number>>;
   classesA: () => string[];
   browserOff: () => string | null;
@@ -47,6 +50,8 @@ export interface CompareControllerInput {
   engine: BrowserEngine;
   /** Resolves effective inference options (standard / SAHI / TTA) for a given backend. */
   inferenceFor?: (on: RunOn) => InferenceConfig;
+  /** Resolves active browser precision for a given backend (`auto` for server). */
+  precisionFor?: (on: RunOn) => BrowserPrecision;
   /** True while streaming live video/webcam frames (skips secondary full-candidate re-fetches). */
   isLiveStream?: () => boolean;
   /** True when a local video has been manually scrubbed ahead of the last detected frame. */
@@ -194,8 +199,13 @@ export function createCompareController(input: CompareControllerInput) {
   }
 
   const effectiveInfB = computed(() => infOf(runOnB.get()));
+  const classesB = computed(() => modelB.get()?.classes ?? []);
+  const perClassConfB = computed<PerClassConfMap>(() =>
+    mapPerClassConfToClasses(input.perClassConf?.get(), input.classesA(), classesB.get()),
+  );
 
   // Model B prediction effect: strictly skipped when Compare mode is OFF (zero extra network calls).
+  let lastPrecB: BrowserPrecision | null = null;
   effect(() => {
     const onCompare = compare.get();
     const id = modelBId.get();
@@ -204,6 +214,7 @@ export function createCompareController(input: CompareControllerInput) {
     const file = activeFileB.get();
     const inf = effectiveInfB.get();
     const infKey = inferenceConfigKey(inf);
+    const prec: BrowserPrecision = on !== 'server' && input.precisionFor ? input.precisionFor(on) : 'auto';
     void retryTickB.get();
     if (!onCompare || !id || !s) {
       untrack(() => {
@@ -234,22 +245,39 @@ export function createCompareController(input: CompareControllerInput) {
     }
     const frameKey = sourceImageKey(s);
     const ctrl = new AbortController();
+    const pccSnap = on !== 'server' ? untrack(() => perClassConfB.get()) : undefined;
+    const wasmPcc = hasPerClassConf(pccSnap) ? pccSnap : undefined;
+    const precChanged = on !== 'server' && lastPrecB !== null && lastPrecB !== prec;
+    lastPrecB = on !== 'server' ? prec : null;
     untrack(() => {
       predictingB.set(true);
       errorB.set(null);
       weightsMissingB.set(false);
       const p = predB.get();
-      if (p && (p.model_id !== id || (p.backend ?? 'server') !== on || inferenceMetaKey(p.inference) !== infKey)) {
+      if (p && (p.model_id !== id || (p.backend ?? 'server') !== on || inferenceMetaKey(p.inference) !== infKey || precChanged)) {
         predB.set(null);
         predBSourceKey.set(null);
         hoverB.set(null);
         pickedB.set(null);
       }
     });
-    ask({ api: hub.api, engine: input.engine, model: id, source: s, on, file, options: FETCH, inference: inf, signal: ctrl.signal }).then(
+    ask({
+      api: hub.api,
+      engine: input.engine,
+      model: id,
+      source: s,
+      on,
+      file,
+      options: FETCH,
+      ...(wasmPcc ? { perClassConf: wasmPcc, confInclusive: true } : {}),
+      precision: prec,
+      inference: inf,
+      signal: ctrl.signal,
+    }).then(
       (p) => {
         if (ctrl.signal.aborted) return;
         input.badFileB.set(null);
+        if (on !== 'server') recordFetchedFloors(p, FETCH.conf, wasmPcc);
         predB.set(p);
         predBSourceKey.set(frameKey);
         hoverB.set(null);
@@ -284,9 +312,11 @@ export function createCompareController(input: CompareControllerInput) {
   askAllWhenCut({
     pred: predB,
     conf: () => input.conf.get(),
+    perClassConf: () => perClassConfB.get(),
     model: () => (compare.get() ? modelBId.get() : null),
     source: () => (compare.get() ? input.source.get() : null),
     runOn: () => runOnB.get(),
+    precision: input.precisionFor ? () => untrack(() => input.precisionFor!(runOnB.peek())) : undefined,
     file: () => activeFileB.peek(),
     busy: () => predictingB.get() || !!input.isLiveStream?.(),
     engine: input.engine,
@@ -298,11 +328,15 @@ export function createCompareController(input: CompareControllerInput) {
     const p = predB.get();
     if (!p) return null;
     const t0 = performance.now();
-    const boxes = filterDetections(p.boxes, { conf: input.conf.get(), iou: o2oB.get() ? 1 : input.iou.get(), maxDet: input.maxDet.get() });
+    const boxes = filterDetections(p.boxes, {
+      conf: input.conf.get(),
+      iou: o2oB.get() ? 1 : input.iou.get(),
+      maxDet: input.maxDet.get(),
+      perClassConf: perClassConfB.get(),
+    });
     return { boxes, ms: performance.now() - t0 };
   });
   const keptB = computed(() => resultB.get()?.boxes ?? []);
-  const classesB = computed(() => modelB.get()?.classes ?? []);
 
   // Map hidden class names from Model A and Model B–only hidden names onto Model B's class indices.
   const allHiddenNames = computed(() => {
@@ -391,6 +425,8 @@ export function createCompareController(input: CompareControllerInput) {
         iou: input.iou.get(),
         maxDet: input.maxDet.get(),
         hiddenClasses,
+        perClassConf: input.perClassConf?.get(),
+        perClassConfB: perClassConfB.get(),
       },
       summary: summary.get(),
     });
@@ -421,6 +457,7 @@ export function createCompareController(input: CompareControllerInput) {
     resultB,
     keptB,
     classesB,
+    perClassConfB,
     hiddenB,
     onlyB,
     rowsB,

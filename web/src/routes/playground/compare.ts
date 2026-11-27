@@ -3,6 +3,7 @@
 // pending or failed predictions never report fabricated zero counts or misleading deltas.
 import type { Model, Prediction } from '$lib/api/types';
 import { ms } from '$lib/format';
+import { perClassConfForExport } from './perClassConf';
 import { predictionJson, type Det } from './viewState';
 
 export type CompareViewMode = 'side-by-side' | 'split';
@@ -179,7 +180,14 @@ export function comparePredictionJson(opts: {
   runOnB: string;
   o2oA: boolean;
   o2oB: boolean;
-  filter: { conf: number; iou: number; maxDet: number; hiddenClasses?: readonly string[] };
+  filter: {
+    conf: number;
+    iou: number;
+    maxDet: number;
+    hiddenClasses?: readonly string[];
+    perClassConf?: Readonly<Record<number, number>> | null;
+    perClassConfB?: Readonly<Record<number, number>> | null;
+  };
   summary: CompareSummary;
 }) {
   const a = predictionJson(opts.predA, opts.hasResultA, opts.boxesA, {
@@ -188,6 +196,7 @@ export function comparePredictionJson(opts: {
     maxDet: opts.filter.maxDet,
     o2o: opts.o2oA,
     hiddenClasses: opts.filter.hiddenClasses,
+    perClassConf: opts.filter.perClassConf,
   });
   const b = predictionJson(opts.predB, opts.hasResultB, opts.boxesB, {
     conf: opts.filter.conf,
@@ -195,9 +204,11 @@ export function comparePredictionJson(opts: {
     maxDet: opts.filter.maxDet,
     o2o: opts.o2oB,
     hiddenClasses: opts.filter.hiddenClasses,
+    perClassConf: opts.filter.perClassConfB ?? opts.filter.perClassConf,
   });
   if (!a && !b) return null;
   const image = opts.predA?.image ?? opts.predB?.image ?? null;
+  const perClass = perClassConfForExport(opts.filter.perClassConf);
   const filter = opts.o2oA && opts.o2oB
     ? { conf: opts.filter.conf, max_det: opts.filter.maxDet }
     : { conf: opts.filter.conf, iou: opts.filter.iou, max_det: opts.filter.maxDet };
@@ -205,7 +216,11 @@ export function comparePredictionJson(opts: {
     mode: 'compare' as const,
     view: opts.view,
     image,
-    filter: opts.filter.hiddenClasses?.length ? { ...filter, hidden_classes: [...opts.filter.hiddenClasses] } : filter,
+    filter: {
+      ...filter,
+      ...(perClass ? { per_class_conf: perClass } : {}),
+      ...(opts.filter.hiddenClasses?.length ? { hidden_classes: [...opts.filter.hiddenClasses] } : {}),
+    },
     comparison: {
       count_a: opts.summary.countA,
       count_b: opts.summary.countB,

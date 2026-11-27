@@ -8,8 +8,10 @@ import {
   toServerTtaPayload,
   type Backend,
   type BrowserEngine,
+  type BrowserPrecision,
   type InferenceConfig,
 } from '$lib/inference/browser';
+import { buildWasmDetectOptions } from './folo';
 import { imageBlob, sourceImageKey, type Source } from './source';
 
 // The server is asked once with loose settings and no suppression (IoU 1 keeps every candidate); the controls below
@@ -57,6 +59,12 @@ export function ask(r: {
   /** A .folo the user picked for this model (the browser runs it instead of the server's weights). */
   file: File | null;
   options: typeof FETCH;
+  /** Optional per-class confidence overrides forwarded directly to `folo-wasm` on browser runs. */
+  perClassConf?: Readonly<Record<number, number>> | null;
+  /** Optional inclusive thresholding flag (`score >= conf`) forwarded to `folo-wasm`. */
+  confInclusive?: boolean;
+  /** Optional browser WASM compute precision override (`auto` | `f32` | `f16` | `int8`). */
+  precision?: BrowserPrecision;
   /** Optional SAHI tiled or TTA multi-view inference settings (standard single-pass when omitted). */
   inference?: InferenceConfig;
   signal: AbortSignal;
@@ -79,6 +87,13 @@ export function ask(r: {
     return api.predict(input, opts, signal).then((p) => (meta ? { ...p, inference: meta } : p));
   }
   if (api.mock) return (api as unknown as MockApi).predictInPage(input, { model_id: model, ...options }).then((p) => simulate(p, on));
+  const wasmOpts = buildWasmDetectOptions({
+    conf: options.conf,
+    iou: options.iou,
+    maxDet: effectiveMaxDet,
+    perClassConf: r.perClassConf,
+    confInclusive: r.confInclusive,
+  });
   return (r.file ? Promise.resolve(null) : api.modelWeightsTag(model, signal)).then((tag) => {
     // Superseded while asking for the ETag: do not start loading or running a model nobody waits for.
     if (signal.aborted) throw new DOMException('Superseded', 'AbortError');
@@ -88,9 +103,16 @@ export function ask(r: {
       download: () => api.modelWeights(model),
       tag,
       backend: on,
+      precision: r.precision ?? inference?.precision,
       image: () => imageBlob(s, signal),
       imageKey: sourceImageKey(s),
-      options: { conf: options.conf, iou: options.iou, maxDet: effectiveMaxDet },
+      options: {
+        conf: wasmOpts.conf ?? options.conf,
+        iou: wasmOpts.iou ?? options.iou,
+        maxDet: wasmOpts.maxDet ?? effectiveMaxDet,
+        ...(wasmOpts.perClassConf ? { perClassConf: wasmOpts.perClassConf } : {}),
+        ...(wasmOpts.confInclusive !== undefined ? { confInclusive: wasmOpts.confInclusive } : {}),
+      },
       inference,
       signal,
     });

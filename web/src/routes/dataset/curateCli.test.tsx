@@ -67,6 +67,26 @@ describe('buildDatasetCurateCli', () => {
     expect(buildDatasetCurateCli({ ...BASE_DATASET, path: '-leading-dash' }, 'convert', { targetFormat: 'coco' }).command).toBe(
       'folo dataset convert --to coco -- -leading-dash <out_dir>/fasteners-coco',
     );
+    expect(buildDatasetCurateCli(BASE_DATASET, 'export').command).toBe(
+      'folo dataset export D:/datasets/fasteners --out <out_dir>/fasteners-coco-export --format coco --images copy',
+    );
+    expect(
+      buildDatasetCurateCli(BASE_DATASET, 'export', {
+        activeSplit: 'val',
+        cocoImageMode: 'reference',
+        cocoPretty: true,
+      }).command,
+    ).toBe(
+      'folo dataset export D:/datasets/fasteners --out <out_dir>/fasteners-coco-export --format coco --split val --images reference --pretty',
+    );
+    expect(
+      buildDatasetCurateCli({ ...BASE_DATASET, path: '-leading-dash' }, 'export', { cocoImageMode: 'link' }).command,
+    ).toBe(
+      'folo dataset export --out <out_dir>/fasteners-coco-export --format coco --images link -- -leading-dash',
+    );
+    expect(curateCliCopiedMessage(buildDatasetCurateCli(BASE_DATASET, 'export'))).toBe(
+      'Replace <out_dir> before running this export coco command.',
+    );
   });
 
   it('quotes spaces, apostrophes, and leading-dash paths and class names safely', () => {
@@ -192,6 +212,25 @@ describe('DatasetInsights CLI curation integration', () => {
     await Promise.resolve();
     expect(write).toHaveBeenCalledWith(expectedFilter);
     expect(toast.items.at(-1)?.detail).toBe('Replace <out_dir> before running this filter command.');
+
+    // Switch to Export COCO and toggle image mode & Pretty JSON
+    const exportBtn = [...target.querySelectorAll<HTMLButtonElement>('[data-dataset-curate-cli] [role="radio"]')].find(
+      (b) => b.textContent?.trim() === 'Export COCO',
+    )!;
+    exportBtn.click();
+    flushSync();
+    expect(target.querySelector('[data-dataset-curate-cli] pre.line')?.textContent).toBe(
+      'folo dataset export D:/datasets/fasteners --out <out_dir>/fasteners-coco-export --format coco --images copy',
+    );
+    const refBtn = [...target.querySelectorAll<HTMLButtonElement>('[data-coco-export-options] [role="radio"]')].find(
+      (b) => b.textContent?.trim() === 'Reference',
+    )!;
+    refBtn.click();
+    target.querySelector<HTMLButtonElement>('[data-coco-export-options] [role="switch"]')!.click();
+    flushSync();
+    expect(target.querySelector('[data-dataset-curate-cli] pre.line')?.textContent).toBe(
+      'folo dataset export D:/datasets/fasteners --out <out_dir>/fasteners-coco-export --format coco --images reference --pretty',
+    );
 
     // Switching dataset collapses the helper cleanly
     ds.set({ ...BASE_DATASET, id: 'ds_other', name: 'other', splits: { train: 50, val: 0, test: 0 } });

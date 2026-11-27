@@ -5,7 +5,13 @@
  */
 import ChevronRight from '$icons/chevron-right';
 import { computed, createUniqueId, css, signal } from 'fw';
-import { TILE_OVERLAP_OPTIONS, TILE_SIZE_OPTIONS, type InferenceMode, type TtaScalePreset } from '$lib/inference/browser';
+import {
+  BROWSER_PRECISION_OPTIONS,
+  TILE_OVERLAP_OPTIONS,
+  TILE_SIZE_OPTIONS,
+  type InferenceMode,
+  type TtaScalePreset,
+} from '$lib/inference/browser';
 import Segmented from '$lib/ui/Segmented';
 import Switch from '$lib/ui/Switch';
 import type { InferenceOptionsController } from './useInferenceOptions';
@@ -58,6 +64,22 @@ export default function InferenceOptions(props: InferenceOptionsProps) {
 
   const activeBadge = computed(() => props.ctrl.badge.get());
   const availNote = computed(() => props.ctrl.availability.get().note);
+  const precisionNote = computed(() => {
+    if (!props.ctrl.hasBrowserBackend.get()) return null;
+    const info = props.ctrl.engineInfo.get();
+    if (info?.precisionFallback) return info.precisionFallback;
+    const p = props.ctrl.precision.get();
+    if (p === 'int8' && props.ctrl.hasWebGpuBackend.get()) {
+      return 'INT8 runs on the CPU backend; WebGPU executes in f32.';
+    }
+    if (p === 'int8') {
+      return 'Runs quantized INT8 weights on CPU (requires folo.quant calibration in the .folo file).';
+    }
+    if (p === 'auto') {
+      return 'Auto uses INT8 on CPU for quantized checkpoints (folo.quant), else f32.';
+    }
+    return null;
+  });
 
   return (
     <div class="inf-opt" class:inline={!!props.inline} data-inference-options>
@@ -85,6 +107,26 @@ export default function InferenceOptions(props: InferenceOptionsProps) {
               options={modeOptions.get()}
             />
           </div>
+          {props.ctrl.hasBrowserBackend.get() ? (
+            <div class="inf-row" data-browser-precision-control>
+              <span class="inf-label">Browser precision</span>
+              <Segmented
+                label="Browser precision"
+                size="sm"
+                bind:value={props.ctrl.precision}
+                options={[...BROWSER_PRECISION_OPTIONS]}
+              />
+              {precisionNote.get() ? (
+                <p
+                  class="inf-note"
+                  class:warn={!!props.ctrl.engineInfo.get()?.precisionFallback}
+                  data-precision-fallback-hint={props.ctrl.engineInfo.get()?.precisionFallback ? '' : undefined}
+                >
+                  {precisionNote.get()}
+                </p>
+              ) : null}
+            </div>
+          ) : null}
           {props.ctrl.displayMode.get() === 'sahi' ? (
             <div class="inf-group" role="group" aria-label="SAHI tiled inference options">
               <div class="inf-row">
@@ -198,5 +240,8 @@ css`
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
     color: var(--text-tertiary);
+  }
+  .inf-note.warn {
+    color: var(--warning-text);
   }
 `;

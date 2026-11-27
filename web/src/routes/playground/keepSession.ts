@@ -9,6 +9,7 @@ import { inferenceMetaKey, type InferenceConfig } from '$lib/inference/browser';
 import { router } from '$lib/router';
 import { toast } from '$lib/ui/toast';
 import { DEFAULTS } from './predict';
+import { normalizePerClassConf, type PerClassConfMap } from './perClassConf';
 import type { CompareViewMode } from './compare';
 import { compareFromUrl, findImage, fromUrl, keep, playgroundPath, restore, session, type FromUrl, type ImageRef } from './session';
 import type { Source } from './source';
@@ -27,6 +28,7 @@ export interface Kept {
   conf: Signal<number>;
   iou: Signal<number>;
   maxDet: Signal<number>;
+  perClassConf?: Signal<PerClassConfMap>;
   labels: Signal<boolean>;
   scores: Signal<boolean>;
   truth: Signal<boolean>;
@@ -73,6 +75,7 @@ export function keepSession(k: Kept): (model: string, s: Source, runOn: string, 
     k.truth.set(saved.truth);
     k.runOn.set(saved.runOn);
     if (saved.inference && k.inference) k.inference.restore(saved.inference);
+    if (saved.perClassConf && k.perClassConf) k.perClassConf.set(normalizePerClassConf(saved.perClassConf));
   }
   k.conf.set(url.conf ?? saved?.conf ?? DEFAULTS.conf);
   k.iou.set(url.iou ?? saved?.iou ?? DEFAULTS.iou);
@@ -219,6 +222,7 @@ export function keepSession(k: Kept): (model: string, s: Source, runOn: string, 
       conf: k.conf.get(),
       iou: k.iou.get(),
       maxDet: k.maxDet.get(),
+      ...(k.perClassConf ? { perClassConf: normalizePerClassConf(k.perClassConf.get()) } : {}),
       labels: k.labels.get(),
       scores: k.scores.get(),
       truth: k.truth.get(),

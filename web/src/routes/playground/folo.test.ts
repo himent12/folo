@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { looksLikeFolo } from './folo';
+import { buildWasmDetectOptions, hasFoloQuantMetadata, looksLikeFolo } from './folo';
 
 /** A safetensors file: an 8-byte little-endian header length, the JSON header, then `data` bytes. */
 function safetensors(header: string, data = 8, claim?: number): Blob {
@@ -22,5 +22,35 @@ describe('looksLikeFolo', () => {
     expect(await looksLikeFolo(safetensors('{"a":1}', 0, 4096))).toBe(false);
     expect(await looksLikeFolo(safetensors('["a"]'))).toBe(false);
     expect(await looksLikeFolo(new Blob(['tiny']))).toBe(false);
+  });
+});
+
+describe('hasFoloQuantMetadata and buildWasmDetectOptions', () => {
+  it('detects folo.quant calibration metadata in safetensors headers', async () => {
+    expect(await hasFoloQuantMetadata(safetensors('{"__metadata__":{"folo.arch":"folo2-n","folo.quant":"{\\"version\\":1}"}}'))).toBe(true);
+    expect(await hasFoloQuantMetadata(safetensors('{"__metadata__":{"folo.arch":"folo2-n"}}'))).toBe(false);
+    expect(await hasFoloQuantMetadata(new Blob(['tiny']))).toBe(false);
+  });
+
+  it('builds strict folo-wasm detect options with perClassConf and confInclusive', () => {
+    expect(buildWasmDetectOptions({ conf: 0.01, iou: 1, maxDet: 1000 })).toEqual({
+      conf: 0.01,
+      iou: 1,
+      maxDet: 1000,
+    });
+    expect(
+      buildWasmDetectOptions({
+        conf: 0.01,
+        iou: 1,
+        maxDet: 1000,
+        perClassConf: { 0: 0.4, 2: 0.75 },
+      }),
+    ).toEqual({
+      conf: 0.01,
+      iou: 1,
+      maxDet: 1000,
+      perClassConf: { 0: 0.4, 2: 0.75 },
+      confInclusive: true,
+    });
   });
 });

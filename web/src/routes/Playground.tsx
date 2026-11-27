@@ -32,11 +32,13 @@ import { holdNoticeFocus } from './playground/noticeFocus';
 import ImagePanel from './playground/ImagePanel';
 import ResultsPanel from './playground/ResultsPanel';
 import ClassList from './playground/ClassList';
+import PerClassThresholds from './playground/PerClassThresholds';
 import PhoneDetails from './playground/PhoneDetails';
 import SidePanels from './playground/SidePanels';
 import Rail from './playground/Rail';
 import DisplayToggles from './playground/DisplayToggles';
 import { MoreBody, RailThresholds, SecondarySliders } from './playground/Thresholds';
+import { mapPerClassConfToClasses, normalizePerClassConf, type PerClassConfMap } from './playground/perClassConf';
 import { DEFAULTS, type RunOn } from './playground/predict';
 import { keepSession } from './playground/keepSession';
 import { sampleImages } from './playground/samples';
@@ -104,6 +106,7 @@ export default function Playground() {
   const conf = signal(DEFAULTS.conf);
   const iou = signal(DEFAULTS.iou);
   const maxDet = signal(DEFAULTS.maxDet);
+  const perClassConf = signal<PerClassConfMap>({});
   const labels = signal(true);
   const scores = signal(true);
   const truth = signal(false);
@@ -211,8 +214,8 @@ export default function Playground() {
     if (!p) return null;
     const t0 = performance.now();
     const tracked = trackingRef?.boxesFor(p) ?? null;
-    const f = { conf: conf.get(), iou: o2o.get() ? 1 : iou.get(), maxDet: maxDet.get() };
-    const boxes = tracked ? filterDetections(tracked, { ...f, conf: 0 }) : filterDetections(p.boxes, f);
+    const f = { conf: conf.get(), iou: o2o.get() ? 1 : iou.get(), maxDet: maxDet.get(), perClassConf: perClassConf.get() };
+    const boxes = tracked ? filterDetections(tracked, { ...f, conf: 0, perClassConf: undefined }) : filterDetections(p.boxes, f);
     return { boxes, ms: performance.now() - t0 };
   });
   const kept = computed(() => result.get()?.boxes ?? []);
@@ -224,33 +227,13 @@ export default function Playground() {
 
   // Compare A/B controller: strictly inert (zero network calls) while Compare mode is off.
   const cmp = createCompareController({
-    ranked: () => ranked.get(),
-    choices: () => choices.get(),
-    modelA: () => model.get(),
-    modelAId: () => modelId.get(),
-    chooseModelA: chooseModel,
-    runOnA: runOn,
-    predA: pred,
-    predSourceKeyA: predSourceKey,
-    hoverA: hover,
-    pickedA: picked,
-    resultA: () => result.get(),
-    rowsA: () => rows.get(),
-    o2oA: () => o2o.get(),
-    source,
-    conf,
-    iou,
-    maxDet,
-    hidden,
-    classesA: () => classes.get(),
-    browserOff: () => browserOff.get(),
-    localWeights,
-    dropLocalB: (id, f, e) => dropLocal(id, f, e, badFileB),
-    badFileB,
-    engine,
-    inferenceFor: inf.effectiveFor,
-    isLiveStream: () => isLiveStreamFn(),
-    isUnsyncedVideoPreview: () => isUnsyncedVideoFn(),
+    ranked: () => ranked.get(), choices: () => choices.get(), modelA: () => model.get(), modelAId: () => modelId.get(),
+    chooseModelA: chooseModel, runOnA: runOn, predA: pred, predSourceKeyA: predSourceKey, hoverA: hover, pickedA: picked,
+    resultA: () => result.get(), rowsA: () => rows.get(), o2oA: () => o2o.get(), source, conf, iou, maxDet, perClassConf,
+    hidden, classesA: () => classes.get(), browserOff: () => browserOff.get(), localWeights,
+    dropLocalB: (id, f, e) => dropLocal(id, f, e, badFileB), badFileB, engine,
+    inferenceFor: inf.effectiveFor, precisionFor: inf.precisionFor,
+    isLiveStream: () => isLiveStreamFn(), isUnsyncedVideoPreview: () => isUnsyncedVideoFn(),
   });
   clearCompare = cmp.clearResults;
   getModelBId = () => cmp.modelBId.peek();
@@ -270,7 +253,7 @@ export default function Playground() {
     mediaKey: () => `${mediaSession.mode.get()}:${mediaSession.sessionSeq.get()}`,
     frameKey: () => (mediaSession.mode.get() === 'none' ? null : `${mediaSession.mode.get()}:${mediaSession.sessionSeq.get()}:${mediaSession.frameSeq.get()}`),
     modelId: () => modelId.get(), classes: () => classes.get(), pred: () => pred.get(),
-    conf: () => conf.get(), iou: () => iou.get(), maxDet: () => maxDet.get(), o2o: () => o2o.get(),
+    conf: () => conf.get(), perClassConf: () => perClassConf.get(), iou: () => iou.get(), maxDet: () => maxDet.get(), o2o: () => o2o.get(),
   }));
   const visibleTrails = computed(() => {
     if (!tracking.enabled.get()) return undefined;
@@ -294,108 +277,62 @@ export default function Playground() {
   // The image, its result and the thresholds outlive the page for the tab; a dataset image and the thresholds are in
   // the URL (./playground/session).
   const restored = keepSession({
-    source,
-    pred,
-    predMatchesSource: () => predMatchesSourceFn(),
-    runOn: runOn as Signal<string>,
+    source, pred, predMatchesSource: () => predMatchesSourceFn(), runOn: runOn as Signal<string>,
     inference: { config: () => inf.config.get(), restore: inf.restore },
-    conf,
-    iou,
-    maxDet,
-    labels,
-    scores,
-    truth,
-    hidden,
-    compare: cmp.compare,
-    modelB: () => cmp.modelBId.get() ?? cmp.pickedModelB.get(),
-    pickModelB: (id) => cmp.pickedModelB.set(id),
-    compareView: cmp.compareView,
-    setSource,
-    choose,
-    model: () => modelId.get() ?? queryModel.get() ?? null,
-    pickModel: (id) => pickedModel.set(id),
-    onModelUrl: (write) => (syncModelUrl = write),
+    conf, iou, maxDet, perClassConf, labels, scores, truth, hidden,
+    compare: cmp.compare, modelB: () => cmp.modelBId.get() ?? cmp.pickedModelB.get(),
+    pickModelB: (id) => cmp.pickedModelB.set(id), compareView: cmp.compareView,
+    setSource, choose, model: () => modelId.get() ?? queryModel.get() ?? null,
+    pickModel: (id) => pickedModel.set(id), onModelUrl: (write) => (syncModelUrl = write),
   });
 
   let lastModelId: string | null = null;
+  let lastModelClasses: string[] = [];
   effect(() => {
     const id = modelId.get();
+    const curClasses = classes.get();
     if (id !== null && lastModelId !== null && id !== lastModelId) {
       untrack(() => {
         hidden.set(new Set());
+        const curPcc = perClassConf.peek();
+        if (Object.keys(curPcc).length) perClassConf.set(mapPerClassConfToClasses(curPcc, lastModelClasses, curClasses));
         const curB = cmp.hiddenBNames.peek();
         if (curB.size) {
-          const nextA = new Set(classes.peek());
+          const nextA = new Set(curClasses);
           const keptB = new Set([...curB].filter((name) => !nextA.has(name)));
           if (keptB.size !== curB.size) cmp.hiddenBNames.set(keptB);
         }
       });
     }
-    if (id !== null) lastModelId = id;
+    if (id !== null) {
+      lastModelId = id;
+      lastModelClasses = curClasses;
+    }
   });
 
   const batch = useBatchSession({
-    engine,
-    model: () => model.peek(),
-    modelId: () => modelId.get(),
-    runOn,
-    inference: () => inf.effective.get(),
-    localWeights,
-    compare: cmp.compare,
-    o2o: () => o2o.get(),
-    conf,
-    iou,
-    maxDet,
-    hidden,
-    classes: () => classes.get(),
-    source,
-    pred,
-    predSourceKey,
-    predicting,
-    error,
-    weightsMissing,
-    hover,
-    picked,
-    choose,
-    cancelSinglePredict: () => cancelSinglePredict(),
-    onSingleFile: (s) => setSource(s),
-    onActivateFrame: (s, cached, bump) => setBatchFrame(s, cached, bump),
-    onEnterBatch: () => {
-      stopMedia();
-      hidden.set(new Set());
-    },
+    engine, model: () => model.peek(), modelId: () => modelId.get(), runOn,
+    inference: () => inf.effective.get(), precision: () => inf.precision.get(),
+    localWeights, compare: cmp.compare, o2o: () => o2o.get(), conf, iou, maxDet, perClassConf,
+    hidden, classes: () => classes.get(), source, pred, predSourceKey, predicting, error, weightsMissing,
+    hover, picked, choose, cancelSinglePredict: () => cancelSinglePredict(),
+    onSingleFile: (s) => setSource(s), onActivateFrame: (s, cached, bump) => setBatchFrame(s, cached, bump),
+    onEnterBatch: () => { stopMedia(); hidden.set(new Set()); },
     dropLocal: (id, f, e) => dropLocal(id, f, e, badFile),
   });
   clearBatch = batch.clear;
   loadBatchFiles = (files) => void batch.loadFiles(files);
 
   const cut = useSinglePredict({
-    modelId: () => modelId.get(),
-    source,
-    runOn,
-    localWeights,
-    retryTick,
-    restored,
-    consumeReuse: cmp.consumeReuseA,
-    pred,
-    predSourceKey,
-    predicting,
-    error,
-    weightsMissing,
-    hidden,
-    hover,
-    picked,
-    conf,
-    engine,
-    inference: () => inf.effective.get(),
+    modelId: () => modelId.get(), source, runOn, localWeights, retryTick, restored,
+    consumeReuse: cmp.consumeReuseA, pred, predSourceKey, predicting, error, weightsMissing,
+    hidden, hover, picked, conf, perClassConf, engine,
+    inference: () => inf.effective.get(), precision: () => inf.precision.get(),
     dropLocal: (id, f, e) => dropLocal(id, f, e, badFile),
     isLiveStream: () => mediaSession.liveStreaming.get(),
-    isBatchRunningAll: () => batch.runningAll.get(),
-    getCachedBatchPred: batch.getCachedPred,
-    wasBatchStopped: batch.wasStoppedFor,
-    onBatchResult: batch.recordSingleResult,
-    onBatchBusy: batch.recordSingleBusy,
-    onRegisterAbort: (fn) => (cancelSinglePredict = fn),
+    isBatchRunningAll: () => batch.runningAll.get(), getCachedBatchPred: batch.getCachedPred,
+    wasBatchStopped: batch.wasStoppedFor, onBatchResult: batch.recordSingleResult,
+    onBatchBusy: batch.recordSingleBusy, onRegisterAbort: (fn) => (cancelSinglePredict = fn),
   });
 
   // Out of GPU memory on the server (507): this browser has its own device, and a smaller model of the same classes
@@ -478,6 +415,7 @@ export default function Playground() {
         maxDet: maxDet.get(),
         o2o: o2o.get(),
         hiddenClasses,
+        perClassConf: perClassConf.get(),
       },
     );
   });
@@ -532,15 +470,44 @@ export default function Playground() {
     conf.set(DEFAULTS.conf);
     iou.set(DEFAULTS.iou);
     maxDet.set(DEFAULTS.maxDet);
+    perClassConf.set({});
   }
-  const isDefault = computed(() => areDefaultThresholds(conf.get(), iou.get(), maxDet.get(), effectiveO2o.get()));
+  const isDefault = computed(() => areDefaultThresholds(conf.get(), iou.get(), maxDet.get(), effectiveO2o.get(), perClassConf.get()));
+
+  function setClassConf(classId: number, value: number) {
+    perClassConf.set((cur) => normalizePerClassConf({ ...cur, [classId]: value }));
+  }
+  function clearClassConf(classId: number) {
+    perClassConf.set((cur) => {
+      if (!Object.prototype.hasOwnProperty.call(cur, classId)) return cur;
+      const next = { ...cur };
+      delete next[classId];
+      return next;
+    });
+  }
 
   // ---------- snippets ----------
   const displayToggles = () => <DisplayToggles bind:labels={labels} bind:scores={scores} bind:truth={truth} dataset={source.get()?.kind === 'dataset'} />;
   const inferenceOpts = (inline: boolean) => <InferenceOptions ctrl={inf} inline={inline} />;
+  const perClassThresholds = (inline: boolean) => (
+    <PerClassThresholds
+      classes={classes.get()}
+      globalConf={conf.get()}
+      perClassConf={perClassConf.get()}
+      modelName={model.get()?.name ?? null}
+      inline={inline}
+      onSetClassConf={setClassConf}
+      onClearClassConf={clearClassConf}
+      onResetAll={() => perClassConf.set({})}
+      onImport={({ globalConf, perClassConf: next }) => {
+        if (globalConf !== null) conf.set(globalConf);
+        perClassConf.set(normalizePerClassConf(next));
+      }}
+    />
+  );
   const secondarySliders = (inline: boolean) => <SecondarySliders inline={inline} o2o={effectiveO2o.get()} bind:iou={iou} bind:maxDet={maxDet} />;
-  const railThresholds = () => <RailThresholds bind:conf={conf} bind:iou={iou} bind:maxDet={maxDet} o2o={effectiveO2o.get()} />;
-  const moreBody = () => <MoreBody tablet={tablet.get()} o2o={effectiveO2o.get()} bind:conf={conf} bind:iou={iou} bind:maxDet={maxDet} toggles={displayToggles} inferenceOptions={() => inferenceOpts(true)} />;
+  const railThresholds = () => <RailThresholds bind:conf={conf} bind:iou={iou} bind:maxDet={maxDet} o2o={effectiveO2o.get()} perClassThresholds={() => perClassThresholds(false)} />;
+  const moreBody = () => <MoreBody tablet={tablet.get()} o2o={effectiveO2o.get()} bind:conf={conf} bind:iou={iou} bind:maxDet={maxDet} toggles={displayToggles} perClassThresholds={() => perClassThresholds(true)} inferenceOptions={() => inferenceOpts(true)} />;
 
   const resetButton = () => (
     <Button size="sm" variant="ghost" icon={RotateCcw} disabled={isDefault.get()} onclick={resetThresholds}>
@@ -586,6 +553,7 @@ export default function Playground() {
         hidden={showingB.get() ? cmp.hiddenB.get() : hidden.get()}
         classes={showingB.get() ? cmp.classesB.get() : classes.get()}
         maxCount={showingB.get() ? cmp.maxCountB.get() : maxCount.get()}
+        perClassConf={showingB.get() ? cmp.perClassConfB.get() : perClassConf.get()}
         toggleClass={showingB.get() ? toggleClassB : toggleClass}
       />
     );
@@ -916,6 +884,7 @@ export default function Playground() {
                 bind:conf={conf}
                 resetButton={resetButton}
                 secondarySliders={secondarySliders}
+                perClassThresholds={() => perClassThresholds(true)}
                 inferenceOptions={() => inferenceOpts(true)}
                 displayToggles={displayToggles}
                 showAllButton={showAllButton}

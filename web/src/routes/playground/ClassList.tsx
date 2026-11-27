@@ -13,6 +13,8 @@ export interface ClassListProps {
   hidden: Set<number>;
   classes: string[];
   maxCount: number;
+  /** Optional per-class confidence overrides so rows display custom threshold badges. */
+  perClassConf?: Readonly<Record<number, number>>;
   toggleClass: (c: number) => void;
 }
 
@@ -34,6 +36,7 @@ export default function ClassList(props: ClassListProps) {
               const n = () => e()[1];
               const off = () => props.hidden.has(c());
               const name = () => props.classes[c()] ?? `class ${c()}`;
+              const customConf = () => props.perClassConf?.[c()];
               return (
                 <li>
                   <button type="button" class:off={off()} aria-pressed={!off()} onclick={() => props.toggleClass(c())} aria-label={`Show ${name()}, ${n()} found`}>
@@ -42,6 +45,11 @@ export default function ClassList(props: ClassListProps) {
                     </span>
                     <Swatch color={classColor(c())} />
                     <span class="c-name truncate">{name()}</span>
+                    {customConf() !== undefined ? (
+                      <span class="c-conf num" title={`Custom confidence threshold ${customConf()!.toFixed(2)}`} data-class-conf-override={c()}>
+                        ≥{customConf()!.toFixed(2)}
+                      </span>
+                    ) : null}
                     <span class="c-bar" aria-hidden="true">
                       <span style:transform={`scaleX(${n() / props.maxCount})`} style:background={classColor(c())}></span>
                     </span>
@@ -121,6 +129,15 @@ css`
     flex: 1;
     min-width: 0;
     text-align: left;
+  }
+  .c-conf {
+    flex: none;
+    padding: 0 var(--space-1);
+    border-radius: var(--radius-sm);
+    background: var(--accent-muted);
+    color: var(--accent-text);
+    font-size: var(--type-sm-size);
+    font-variant-numeric: tabular-nums;
   }
   .c-bar {
     width: 64px;

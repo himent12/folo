@@ -8,9 +8,11 @@ import {
   inferenceMetaKey,
   isDetectorLoadError,
   type BrowserEngine,
+  type BrowserPrecision,
   type InferenceConfig,
 } from '$lib/inference/browser';
-import { askAllWhenCut } from './allCandidates';
+import { askAllWhenCut, recordFetchedFloors } from './allCandidates';
+import { hasPerClassConf, type PerClassConfMap } from './perClassConf';
 import { ask, FETCH, noServerWeights, type RunOn } from './predict';
 import { sourceImageKey, type Source } from './source';
 import type { Det } from './viewState';
@@ -34,9 +36,12 @@ export interface SinglePredictInput {
   hover: Signal<Det | null>;
   picked: Signal<Det | null>;
   conf: Signal<number>;
+  perClassConf?: Signal<PerClassConfMap>;
   engine: BrowserEngine;
   /** Active effective inference config (standard / SAHI / TTA) for Model A's backend. */
   inference?: () => InferenceConfig;
+  /** Active browser WASM precision override (`auto` | `f32` | `f16` | `int8`; ignored for server runs). */
+  precision?: () => BrowserPrecision;
   dropLocal: (id: string, f: File, e: unknown) => void;
   /** True while streaming live video/webcam frames (skips secondary full-candidate re-fetches). */
   isLiveStream?: () => boolean;
@@ -64,6 +69,7 @@ export function useSinglePredict(o: SinglePredictInput): () => boolean {
   });
 
   let lastRetry = 0;
+  let lastPredPrecision: BrowserPrecision | null = null;
   let activeCtrl: AbortController | null = null;
   o.onRegisterAbort?.(() => {
     if (!activeCtrl) return;
@@ -78,6 +84,7 @@ export function useSinglePredict(o: SinglePredictInput): () => boolean {
     const file = activeFile.get();
     const inf = o.inference ? o.inference() : DEFAULT_INFERENCE_CONFIG;
     const infKey = inferenceConfigKey(inf);
+    const prec: BrowserPrecision = on !== 'server' && o.precision ? o.precision() : 'auto';
     const retry = o.retryTick.get();
     const batchRunning = !!o.isBatchRunningAll?.();
     const explicitRetry = retry !== lastRetry;
@@ -117,14 +124,18 @@ export function useSinglePredict(o: SinglePredictInput): () => boolean {
     }
     const frameKey = sourceImageKey(s);
     const ctrl = (activeCtrl = new AbortController());
+    const pccSnap = on !== 'server' ? untrack(() => o.perClassConf?.peek()) : undefined;
+    const wasmPcc = hasPerClassConf(pccSnap) ? pccSnap : undefined;
+    const precChanged = on !== 'server' && lastPredPrecision !== null && lastPredPrecision !== prec;
+    lastPredPrecision = on !== 'server' ? prec : null;
     untrack(() => {
       o.predicting.set(true);
       o.error.set(null);
       o.weightsMissing.set(false);
       o.onBatchBusy?.(s, true);
-      // Results belong to a model, backend, and inference mode: never show stale boxes while (or if) this run fails.
+      // Results belong to a model, backend, precision, and inference mode: never show stale boxes while (or if) this run fails.
       const p = o.pred.get();
-      if (p && (p.model_id !== id || (p.backend ?? 'server') !== on || inferenceMetaKey(p.inference) !== infKey)) {
+      if (p && (p.model_id !== id || (p.backend ?? 'server') !== on || inferenceMetaKey(p.inference) !== infKey || precChanged)) {
         o.pred.set(null);
         o.predSourceKey.set(null);
         if (p.model_id !== id) o.hidden.set(new Set());
@@ -132,11 +143,24 @@ export function useSinglePredict(o: SinglePredictInput): () => boolean {
         o.picked.set(null);
       }
     });
-    const run = ask({ api: hub.api, engine: o.engine, model: id, source: s, on, file, options: FETCH, inference: inf, signal: ctrl.signal });
+    const run = ask({
+      api: hub.api,
+      engine: o.engine,
+      model: id,
+      source: s,
+      on,
+      file,
+      options: FETCH,
+      ...(wasmPcc ? { perClassConf: wasmPcc, confInclusive: true } : {}),
+      precision: prec,
+      inference: inf,
+      signal: ctrl.signal,
+    });
     run.then(
       (p) => {
         if (ctrl.signal.aborted) return;
         if (activeCtrl === ctrl) activeCtrl = null;
+        if (on !== 'server') recordFetchedFloors(p, FETCH.conf, wasmPcc);
         o.pred.set(p);
         o.predSourceKey.set(frameKey);
         o.hover.set(null);
@@ -184,9 +208,11 @@ export function useSinglePredict(o: SinglePredictInput): () => boolean {
   return askAllWhenCut({
     pred: o.pred,
     conf: () => o.conf.get(),
+    perClassConf: o.perClassConf ? () => o.perClassConf!.get() : undefined,
     model: o.modelId,
     source: () => o.source.get(),
     runOn: () => o.runOn.get(),
+    precision: o.precision ? () => untrack(() => o.precision!()) : undefined,
     file: () => activeFile.peek(),
     busy: () => o.predicting.get() || !!o.isLiveStream?.() || !!o.isBatchRunningAll?.(),
     engine: o.engine,

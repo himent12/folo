@@ -10,9 +10,12 @@ import {
   inferenceConfigKey,
   inferenceMetaOf,
   inferenceShortTag,
+  normalizeBrowserPrecision,
   scalesForPreset,
   ttaScalePreset,
   type BrowserEngine,
+  type BrowserPrecision,
+  type DetectorInfo,
   type InferenceConfig,
   type InferenceMode,
   type TtaScalePreset,
@@ -81,19 +84,43 @@ export function useInferenceOptions(input: UseInferenceOptionsInput) {
   const fullImage = signal<boolean>(DEFAULT_TILE_OPTIONS.fullImage);
   const hflip = signal<boolean>(DEFAULT_TTA_OPTIONS.hflip);
   const scalePreset = signal<TtaScalePreset>(ttaScalePreset(DEFAULT_TTA_OPTIONS.scales));
+  const precision = signal<BrowserPrecision>('auto');
 
-  const config = computed<InferenceConfig>(() => ({
-    mode: mode.get(),
-    tile: {
-      tileSize: tileSize.get(),
-      overlap: overlap.get(),
-      fullImage: fullImage.get(),
-    },
-    tta: {
-      hflip: hflip.get(),
-      scales: scalesForPreset(scalePreset.get()),
-    },
-  }));
+  const config = computed<InferenceConfig>(() => {
+    const p = precision.get();
+    return {
+      mode: mode.get(),
+      tile: {
+        tileSize: tileSize.get(),
+        overlap: overlap.get(),
+        fullImage: fullImage.get(),
+      },
+      tta: {
+        hflip: hflip.get(),
+        scales: scalesForPreset(scalePreset.get()),
+      },
+      ...(p !== 'auto' ? { precision: p } : {}),
+    };
+  });
+
+  const hasBrowserBackend = computed(() => {
+    if (input.browserOff()) return false;
+    if (input.runOn.get() !== 'server') return true;
+    const onB = input.compareRunOn?.() ?? null;
+    return onB !== null && onB !== 'server';
+  });
+
+  const hasWebGpuBackend = computed(() => {
+    if (input.browserOff()) return false;
+    if (input.runOn.get() === 'webgpu') return true;
+    return (input.compareRunOn?.() ?? null) === 'webgpu';
+  });
+
+  const engineInfo = computed<DetectorInfo | null>(() => input.engine.info);
+
+  function precisionFor(on: RunOn): BrowserPrecision {
+    return on === 'server' ? 'auto' : precision.get();
+  }
 
   function availabilityFor(on: RunOn): InferenceAvailability {
     const caps = input.engine.capabilities;
@@ -142,7 +169,11 @@ export function useInferenceOptions(input: UseInferenceOptionsInput) {
   const badge = computed(() => {
     const onB = input.compareRunOn?.() ?? null;
     const meta = effectiveMeta.get() ?? (onB ? inferenceMetaOf(effectiveFor(onB)) : undefined);
-    return inferenceShortTag(meta);
+    const modeTag = inferenceShortTag(meta);
+    const prec = hasBrowserBackend.get() ? precision.get() : 'auto';
+    const precTag = prec === 'int8' ? 'INT8' : prec !== 'auto' ? prec : null;
+    if (modeTag && precTag) return `${modeTag} · ${precTag}`;
+    return modeTag ?? precTag;
   });
 
   /** Active mode shown in the segmented selector (reads `standard` if unsupported on every active backend). */
@@ -169,6 +200,7 @@ export function useInferenceOptions(input: UseInferenceOptionsInput) {
     fullImage.set(saved.tile.fullImage);
     hflip.set(saved.tta.hflip);
     scalePreset.set(ttaScalePreset(saved.tta.scales));
+    precision.set(normalizeBrowserPrecision(saved.precision));
   }
 
   function reset() {
@@ -178,6 +210,7 @@ export function useInferenceOptions(input: UseInferenceOptionsInput) {
     fullImage.set(DEFAULT_TILE_OPTIONS.fullImage);
     hflip.set(DEFAULT_TTA_OPTIONS.hflip);
     scalePreset.set(ttaScalePreset(DEFAULT_TTA_OPTIONS.scales));
+    precision.set('auto');
   }
 
   return {
@@ -188,6 +221,11 @@ export function useInferenceOptions(input: UseInferenceOptionsInput) {
     fullImage,
     hflip,
     scalePreset,
+    precision,
+    hasBrowserBackend,
+    hasWebGpuBackend,
+    engineInfo,
+    precisionFor,
     config,
     availability,
     effective,

@@ -7,9 +7,14 @@ import type { Prediction, SystemInfo } from '$lib/api/types';
 import { signal } from 'fw';
 import {
   inferenceMetaOf,
+  normalizeBrowserPrecision,
+  toWasmDetectOptions,
   toWasmTileOptions,
   toWasmTtaOptions,
+  type BrowserPrecision,
   type InferenceConfig,
+  type WasmDetectOptions,
+  type WasmPrecision,
   type WasmTileDetectOptions,
   type WasmTtaDetectOptions,
 } from './options';
@@ -44,9 +49,9 @@ export interface DetectorInfo {
   hasO2o?: boolean;
   /** Whether the loaded model includes an IoU-aware prediction head (`folo2`). */
   hasIouHead?: boolean;
-  /** Active compute precision (`f32` or `f16` on WebGPU). */
-  precision?: 'f32' | 'f16';
-  /** Why requested f16 fell back to f32, if applicable. */
+  /** Active compute precision (`f32`, `f16` on WebGPU, or `int8` on CPU). */
+  precision?: WasmPrecision;
+  /** Why a requested or embedded precision fell back to f32, if applicable. */
   precisionFallback?: string | null;
   /** True when compiled with WASM SIMD128. */
   simd128?: boolean;
@@ -140,14 +145,15 @@ export function detectorInfoBadge(info: DetectorInfo | null | undefined): string
   if (info.headMode === 'o2o') parts.push('o2o');
   else if (info.headMode === 'o2m') parts.push('o2m');
   if (info.hasIouHead) parts.push('IoU head');
-  if (info.precision === 'f16') parts.push('f16');
+  if (info.precision === 'int8') parts.push('INT8');
+  else if (info.precision === 'f16') parts.push('f16');
   return parts.length ? parts.join(' · ') : null;
 }
 
 export interface Detector {
   readonly backend: Backend;
   info(): DetectorInfo;
-  detect(image: ImageData, width?: number, height?: number, options?: { conf?: number; iou?: number; maxDet?: number }): Promise<Prediction>;
+  detect(image: ImageData, width?: number, height?: number, options?: WasmDetectOptions): Promise<Prediction>;
   detectTiled?(image: ImageData, width?: number, height?: number, options?: WasmTileDetectOptions): Promise<Prediction>;
   detectTta?(image: ImageData, width?: number, height?: number, options?: WasmTtaDetectOptions): Promise<Prediction>;
   free(): void;
@@ -156,7 +162,7 @@ export interface Detector {
 export interface WasmModule {
   default(): Promise<unknown>;
   FoloDetector: {
-    load(bytes: Uint8Array, options: { backend: Backend; modelId: string }): Promise<Detector>;
+    load(bytes: Uint8Array, options: { backend: Backend; modelId: string; precision?: WasmPrecision }): Promise<Detector>;
     prototype?: Partial<Pick<Detector, 'detectTiled' | 'detectTta'>>;
   };
   FoloTracker?: FoloTrackerConstructor;
@@ -358,10 +364,18 @@ export class BrowserEngine {
     /** The server's version of the weights (an ETag): a new one loads them again. */
     tag?: string | null;
     backend: Backend;
+    /** Optional compute precision override (`auto` lets folo-wasm pick INT8 for quantized CPU checkpoints, else f32). */
+    precision?: BrowserPrecision;
     image: () => Promise<Blob>;
     /** Stable identity for the image (e.g. dataset+image id or file id) so repeated runs skip re-fetching and re-decoding. */
     imageKey?: string;
-    options: { conf: number; iou: number; maxDet: number };
+    options: {
+      conf: number;
+      iou: number;
+      maxDet: number;
+      perClassConf?: Readonly<Record<number, number>> | null;
+      confInclusive?: boolean;
+    };
     /** Optional SAHI tiled or TTA multi-view inference config (calls `detectTiled` / `detectTta`). */
     inference?: InferenceConfig;
     /** Aborted when a newer request replaces this one: it stops before decoding and before detecting. */
@@ -410,7 +424,7 @@ export class BrowserEngine {
         }
         p = await det.detectTta(pixels, undefined, undefined, toWasmTtaOptions(req.options, req.inference.tta));
       } else {
-        p = await det.detect(pixels, undefined, undefined, req.options);
+        p = await det.detect(pixels, undefined, undefined, toWasmDetectOptions(req.options));
       }
       superseded();
       if (reqSeq === this.#requestSeq) this.info = det.info();
@@ -482,13 +496,25 @@ export class BrowserEngine {
     return data;
   }
 
-  #detector(req: { modelId: string; file: File | null; download: () => Promise<ArrayBuffer>; tag?: string | null; backend: Backend; signal?: AbortSignal }, reqSeq: number): Entry {
-    // One detector per model, weights source (and version) and backend: the same file picked for two models loads
-    // twice, since a detector stamps its model id on every result; retrained weights (a run's last.folo changes
-    // every epoch) load again.
+  #detector(
+    req: {
+      modelId: string;
+      file: File | null;
+      download: () => Promise<ArrayBuffer>;
+      tag?: string | null;
+      backend: Backend;
+      precision?: BrowserPrecision;
+      signal?: AbortSignal;
+    },
+    reqSeq: number,
+  ): Entry {
+    // One detector per model, weights source (and version), backend, and requested precision: the same file picked
+    // for two models loads twice, since a detector stamps its model id on every result; retrained weights (a run's
+    // last.folo changes every epoch) load again.
     // Server weights without an ETag cannot be known to be unchanged: they load for this request only (not cached).
     const cacheable = !!req.file || !!req.tag;
-    const key = `${req.modelId}|${req.file ? `file#${fileId(req.file)}` : `server:${req.tag ?? ''}`}|${req.backend}`;
+    const prec = normalizeBrowserPrecision(req.precision);
+    const key = `${req.modelId}|${req.file ? `file#${fileId(req.file)}` : `server:${req.tag ?? ''}`}|${req.backend}|${prec}`;
     const hit = cacheable ? this.#detectors.get(key) : undefined;
     if (hit) {
       // Most recently used last; track the latest waiting request and publish the entry's current load phase.
@@ -516,7 +542,12 @@ export class BrowserEngine {
       try {
         bytes = new Uint8Array(await (req.file ? req.file.arrayBuffer() : dl!.bytes));
         setEntryPhase('compile');
-        const loading = m.FoloDetector.load(bytes, { backend: req.backend, modelId: req.modelId });
+        const loadOpts: { backend: Backend; modelId: string; precision?: WasmPrecision } = {
+          backend: req.backend,
+          modelId: req.modelId,
+          ...(prec !== 'auto' ? { precision: prec } : {}),
+        };
+        const loading = m.FoloDetector.load(bytes, loadOpts);
         // Drop this closure's reference so the temporary weights buffer can be collected as soon as wasm finishes loading.
         bytes = null;
         const det = await loading;

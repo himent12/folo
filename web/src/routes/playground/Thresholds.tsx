@@ -45,34 +45,45 @@ export function SecondarySliders(props: SliderValues & { inline: boolean; o2o?: 
  * The rail's thresholds: each explanation a tooltip on its slider. An end-to-end model has no NMS: its Overlap row
  * says so instead of offering a control that changes nothing.
  */
-export function RailThresholds(props: SliderValues & { o2o: boolean }) {
+export function RailThresholds(props: SliderValues & { o2o: boolean; perClassThresholds?: (() => JSX.Element) | null }) {
   const conf = bindable(props, 'conf', DEFAULTS.conf);
   const iou = bindable(props, 'iou', DEFAULTS.iou);
   const maxDet = bindable(props, 'maxDet', DEFAULTS.maxDet);
   return (
-    <div class="r-sliders">
-      <span use:tooltip={CONF_HINT}>
-        <Slider label="Confidence" bind:value={conf} min={0.01} max={0.95} step={0.01} />
-      </span>
-      {props.o2o ? (
-        <p class="no-nms">
-          <span>Overlap (IoU)</span>
-          <span class="faint">Not used · end-to-end model</span>
-        </p>
-      ) : (
-        <span use:tooltip={`${IOU_HINT} ${NMS_TIP}`}>
-          <Slider label="Overlap (IoU)" bind:value={iou} min={0.05} max={0.95} step={0.05} />
+    <>
+      <div class="r-sliders">
+        <span use:tooltip={CONF_HINT}>
+          <Slider label="Confidence" bind:value={conf} min={0.01} max={0.95} step={0.01} />
         </span>
-      )}
-      <span use:tooltip={MAX_HINT}>
-        <Slider label="Max detections" bind:value={maxDet} min={1} max={300} step={1} format={round} />
-      </span>
-    </div>
+        {props.o2o ? (
+          <p class="no-nms">
+            <span>Overlap (IoU)</span>
+            <span class="faint">Not used · end-to-end model</span>
+          </p>
+        ) : (
+          <span use:tooltip={`${IOU_HINT} ${NMS_TIP}`}>
+            <Slider label="Overlap (IoU)" bind:value={iou} min={0.05} max={0.95} step={0.05} />
+          </span>
+        )}
+        <span use:tooltip={MAX_HINT}>
+          <Slider label="Max detections" bind:value={maxDet} min={1} max={300} step={1} format={round} />
+        </span>
+      </div>
+      {props.perClassThresholds ? props.perClassThresholds() : null}
+    </>
   );
 }
 
-/** The phone sheet's every threshold, or the tablet popover's Max detections; then inference options and what is drawn on the image. */
-export function MoreBody(props: SliderValues & { tablet: boolean; o2o?: boolean; toggles: () => JSX.Element; inferenceOptions?: (() => JSX.Element) | null }) {
+/** The phone sheet's every threshold, or the tablet popover's Max detections; then per-class overrides, inference options and what is drawn on the image. */
+export function MoreBody(
+  props: SliderValues & {
+    tablet: boolean;
+    o2o?: boolean;
+    toggles: () => JSX.Element;
+    perClassThresholds?: (() => JSX.Element) | null;
+    inferenceOptions?: (() => JSX.Element) | null;
+  },
+) {
   const conf = bindable(props, 'conf', DEFAULTS.conf);
   const iou = bindable(props, 'iou', DEFAULTS.iou);
   const maxDet = bindable(props, 'maxDet', DEFAULTS.maxDet);
@@ -96,6 +107,7 @@ export function MoreBody(props: SliderValues & { tablet: boolean; o2o?: boolean;
           </>
         )}
       </div>
+      {props.perClassThresholds ? props.perClassThresholds() : null}
       {props.inferenceOptions ? props.inferenceOptions() : null}
       <div class="more-toggles">{props.toggles()}</div>
     </div>

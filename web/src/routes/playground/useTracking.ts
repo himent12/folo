@@ -5,9 +5,10 @@
 import { computed, effect, onCleanup, signal, untrack } from 'fw';
 import { ApiError } from '$lib/api/client';
 import type { PredictBox, Prediction } from '$lib/api/types';
-import { filterDetections } from '$lib/detect/nms';
+import { effectiveMinConf, filterDetections } from '$lib/detect/nms';
 import type { BrowserEngine, Tracker } from '$lib/inference/browser';
 import { toast } from '$lib/ui/toast';
+import type { PerClassConfMap } from './perClassConf';
 import { trackerOptionsForConf, TrackTrailHistory, type TrackTrail } from './tracking';
 import type { MediaMode } from './useMediaSession';
 
@@ -23,6 +24,7 @@ export interface UseTrackingInput {
   classes: () => readonly string[];
   pred: () => Prediction | null;
   conf: () => number;
+  perClassConf?: () => PerClassConfMap;
   iou: () => number;
   maxDet: () => number;
   o2o: () => boolean;
@@ -235,8 +237,8 @@ export function useTracking(input: UseTrackingInput) {
       const maxDet = input.maxDet();
       const o2o = input.o2o();
       const cls = input.classes();
-      // Preserve ByteTrack's two-stage low-confidence occlusion recovery by keeping candidates down to `min(0.1, conf)`.
-      const low = Math.min(0.1, Math.max(0.01, c));
+      // Preserve ByteTrack's two-stage low-confidence occlusion recovery by keeping candidates down to `min(0.1, minConf)`.
+      const low = Math.min(0.1, Math.max(0.01, effectiveMinConf(c, input.perClassConf?.())));
       const candidates = filterDetections(p.boxes, { conf: low, iou: o2o ? 1 : iou, maxDet });
       const tracked = tracker.update(candidates);
       const boxes: PredictBox[] = tracked.map((t) => ({
