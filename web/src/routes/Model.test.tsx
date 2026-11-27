@@ -533,4 +533,46 @@ describe('Model: parallel provenance, transient errors, and full class list', ()
     expect(btn.textContent?.trim()).toBe('+70 more');
     expect(btn.getAttribute('aria-expanded')).toBe('false');
   });
+
+  it('offers a Fine-tune action linking to /runs/new?weights=<id> for startable models and hides it for fused inference-only exports', async () => {
+    await open('m_fast_n');
+    const fineTune = [...target.querySelectorAll<HTMLAnchorElement>('a')].find((a) => a.textContent?.trim() === 'Fine-tune');
+    expect(fineTune?.getAttribute('href')).toBe('#/runs/new?weights=m_fast_n');
+
+    unmount(c!);
+    c = undefined;
+
+    // Phone layout puts Fine-tune inside the More model actions menu for startable models.
+    const matchSpy = vi.spyOn(window, 'matchMedia').mockImplementation((q) => ({
+      matches: q.includes('max-width'),
+      media: q,
+      onchange: null,
+      addListener: () => {},
+      removeListener: () => {},
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      dispatchEvent: () => false,
+    }));
+    try {
+      router.route = parse('#/models/m_fast_n');
+      c = mount(Model, { target });
+      const moreBtn = await until(() => target.querySelector<HTMLButtonElement>('button[aria-label="More model actions"]'), 'phone model actions menu');
+      moreBtn.click();
+      flushSync();
+      const menuLabels = [...document.querySelectorAll('[role="menuitem"]')].map((el) => el.textContent?.trim());
+      expect(menuLabels).toContain('Fine-tune');
+      expect(menuLabels).toContain('Export');
+    } finally {
+      matchSpy.mockRestore();
+      if (c) unmount(c);
+      c = undefined;
+    }
+
+    const api = hub.api as MockApi;
+    const origModel = api.model.bind(api);
+    api.model = async (id: string) => ({ ...(await origModel(id)), fused: true });
+    await open('m_fast_n');
+    const fusedLink = [...target.querySelectorAll<HTMLAnchorElement>('a')].find((a) => a.textContent?.trim() === 'Fine-tune');
+    expect(fusedLink).toBeUndefined();
+  });
 });

@@ -4,6 +4,7 @@ import ArrowLeft from '$icons/arrow-left';
 import ChevronDown from '$icons/chevron-down';
 import Download from '$icons/download';
 import Copy from '$icons/copy';
+import Play from '$icons/play';
 import ScanSearch from '$icons/scan-search';
 import TriangleAlert from '$icons/triangle-alert';
 import { computed, css, effect, MediaQuery, signal, tick } from 'fw';
@@ -63,6 +64,17 @@ export default function Model() {
     const m = model.data;
     if (!m) return [];
     return [
+      ...(m.fused !== true
+        ? [
+            {
+              id: 'model-finetune',
+              label: `Fine-tune from ${m.name}`,
+              match: ['Fine-tune', 'New run', 'Train'],
+              icon: Play,
+              run: () => router.go(`/runs/new?weights=${encodeURIComponent(m.id)}`),
+            },
+          ]
+        : []),
       { id: 'model-export', label: `Export ${m.name}`, match: ['Export model', 'ONNX'], icon: Download, run: () => exportOpen.set(true) },
       { id: 'model-try', label: `Try ${m.name} in Playground`, match: ['Try model'], icon: ScanSearch, run: () => router.go(`/playground?model=${encodeURIComponent(m.id)}`) },
       { id: 'model-copy-id', label: 'Copy model id', match: [m.id], icon: Copy, run: () => void copyText(m.id, 'model id') },
@@ -340,10 +352,23 @@ export default function Model() {
                     <Button variant="primary" icon={ScanSearch} aria-label="Try in Playground" href={href(`/playground?model=${encodeURIComponent(m().id)}`)}>
                       Try
                     </Button>
-                    <Menu label="More model actions" items={[{ label: 'Export', icon: Download, onclick: () => exportOpen.set(true) }]} />
+                    <Menu
+                      label="More model actions"
+                      items={[
+                        ...(m().fused !== true
+                          ? [{ label: 'Fine-tune', icon: Play, onclick: () => router.go(`/runs/new?weights=${encodeURIComponent(m().id)}`) }]
+                          : []),
+                        { label: 'Export', icon: Download, onclick: () => exportOpen.set(true) },
+                      ]}
+                    />
                   </>
                 ) : (
                   <>
+                    {m().fused !== true ? (
+                      <Button icon={Play} href={href(`/runs/new?weights=${encodeURIComponent(m().id)}`)}>
+                        Fine-tune
+                      </Button>
+                    ) : null}
                     <Button icon={Download} onclick={() => exportOpen.set(true)}>
                       Export
                     </Button>

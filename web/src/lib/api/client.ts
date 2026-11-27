@@ -69,7 +69,8 @@ import type {
   TrainConfig,
   UpdateLabelJob,
 } from './types';
-import { archFromCli, isArch, isFolo2Arch } from '$lib/arch';
+import { isArch } from '$lib/arch';
+import { ArchHydrator } from './archHydrate';
 import type { AccessWatch } from './access';
 import type { Reachability } from './reach';
 import { BENCH_EVENTS, LABEL_EVENTS, openEventStream, RUN_EVENTS, type EventHandlers } from './sse';
@@ -332,25 +333,8 @@ export function qs(params: Record<string, string | number | undefined | null>): 
 
 export class HttpApi implements Api {
   readonly mock = false;
-  /** Session-known canonical `folo2-*` architectures keyed by run id and model id (bridging wire `folo_api::Arch`). */
-  #runArchs = new Map<string, Arch>();
-  #modelArchs = new Map<string, Arch>();
-
-  #promoteRun(r: Run): Run {
-    if (!r?.config) return r;
-    const known = this.#runArchs.get(r.id);
-    if (known && known !== r.config.arch) return { ...r, config: { ...r.config, arch: known } };
-    if (isFolo2Arch(r.config.arch)) this.#runArchs.set(r.id, r.config.arch);
-    return r;
-  }
-
-  #promoteModel(m: Model): Model {
-    if (!m) return m;
-    const known = this.#modelArchs.get(m.id) ?? (m.run_id ? this.#runArchs.get(m.run_id) : undefined);
-    if (known && known !== m.arch) return { ...m, arch: known };
-    if (isFolo2Arch(m.arch)) this.#modelArchs.set(m.id, m.arch);
-    return m;
-  }
+  /** Session-scoped canonical `folo2-*` arch cache & bounded probe hydrator (./archHydrate). */
+  #archs: ArchHydrator = new ArchHydrator(this);
 
   /**
    * `base` is the server origin ('' for same origin, e.g. behind the Vite proxy or `folo serve`). `reach` hears whether
@@ -411,11 +395,15 @@ export class HttpApi implements Api {
     return json as T;
   }
 
-  health(signal?: AbortSignal) {
-    return this.#req<Health>('GET', '/health', undefined, signal);
+  async health(signal?: AbortSignal) {
+    const h = await this.#req<Health>('GET', '/health', undefined, signal);
+    this.#archs.noteCapabilities(h);
+    return h;
   }
-  system(signal?: AbortSignal) {
-    return this.#req<SystemInfo>('GET', '/system', undefined, signal);
+  async system(signal?: AbortSignal) {
+    const sys = await this.#req<SystemInfo>('GET', '/system', undefined, signal);
+    this.#archs.noteCapabilities(sys);
+    return sys;
   }
   throughput(signal?: AbortSignal) {
     return this.#req<ThroughputTable>('GET', '/system/throughput', undefined, signal);
@@ -461,20 +449,14 @@ export class HttpApi implements Api {
 
   async models(signal?: AbortSignal) {
     const list = await this.#list<Model>('/models', 'models', signal);
-    return list.map((m) => this.#promoteModel(m));
+    return this.#archs.hydrateModels(list, signal);
   }
-  async model(id: string, signal?: AbortSignal) {
+  async model(id: string, signal?: AbortSignal): Promise<Model> {
     let headerArch: string | null = null;
     const m = await this.#req<Model>('GET', `/models/${encodeURIComponent(id)}`, undefined, signal, (res) => {
       headerArch = res.headers.get('x-folo-arch')?.trim() ?? null;
     });
-    // folo-server emits the exact `folo2-*` architecture in `x-folo-arch` alongside the wire `folo_api::Arch` field.
-    if (isArch(headerArch) && isFolo2Arch(headerArch)) {
-      this.#modelArchs.set(m.id, headerArch);
-      if (m.run_id) this.#runArchs.set(m.run_id, headerArch);
-      return headerArch !== m.arch ? { ...m, arch: headerArch } : m;
-    }
-    return this.#promoteModel(m);
+    return this.#archs.recordModelProbe(m, isArch(headerArch) ? headerArch : null);
   }
   modelEval(id: string, signal?: AbortSignal) {
     return this.#req<ModelEval>('GET', `/models/${encodeURIComponent(id)}/eval`, undefined, signal);
@@ -487,35 +469,35 @@ export class HttpApi implements Api {
 
   async runs(signal?: AbortSignal) {
     const list = await this.#list<Run>('/runs', 'runs', signal);
-    return list.map((r) => this.#promoteRun(r));
+    return this.#archs.hydrateRuns(list, signal);
   }
   async run(id: string, signal?: AbortSignal) {
-    return this.#promoteRun(await this.#req<Run>('GET', `/runs/${encodeURIComponent(id)}`, undefined, signal));
+    const r = await this.#req<Run>('GET', `/runs/${encodeURIComponent(id)}`, undefined, signal);
+    return this.#archs.hydrateRun(r, signal);
   }
   async createRun(config: TrainConfig) {
     const run = await this.#req<Run>('POST', '/runs', config);
-    if (isFolo2Arch(config.arch)) this.#runArchs.set(run.id, config.arch);
-    return this.#promoteRun(run);
+    this.#archs.recordRun(run.id, config.arch);
+    return this.#archs.promoteRun(run);
   }
   estimateRun(config: TrainConfig, signal?: AbortSignal) {
     return this.#req<RunEstimate>('POST', '/runs/estimate', config, signal);
   }
   async stopRun(id: string) {
-    return this.#promoteRun(await this.#req<Run>('POST', `/runs/${encodeURIComponent(id)}/stop`));
+    return this.#archs.promoteRun(await this.#req<Run>('POST', `/runs/${encodeURIComponent(id)}/stop`));
   }
   async resumeRun(id: string, device?: string) {
-    return this.#promoteRun(await this.#req<Run>('POST', '/runs', device ? { resume_run_id: id, device } : { resume_run_id: id }));
+    return this.#archs.promoteRun(await this.#req<Run>('POST', '/runs', device ? { resume_run_id: id, device } : { resume_run_id: id }));
   }
   deleteRun(id: string) {
     return this.#req<void>('DELETE', `/runs/${encodeURIComponent(id)}`);
   }
   async moveRun(id: string, req: QueueRequest) {
-    return this.#promoteRun(await this.#req<Run>('POST', `/runs/${encodeURIComponent(id)}/queue`, req));
+    return this.#archs.promoteRun(await this.#req<Run>('POST', `/runs/${encodeURIComponent(id)}/queue`, req));
   }
   async runCli(id: string, signal?: AbortSignal) {
     const cmd = await this.#req<CliCommand>('GET', `/runs/${encodeURIComponent(id)}/cli`, undefined, signal);
-    const cliArch = archFromCli(cmd);
-    if (cliArch && isFolo2Arch(cliArch)) this.#runArchs.set(id, cliArch);
+    this.#archs.recordRunCli(id, cmd);
     return cmd;
   }
   runMetrics(id: string, signal?: AbortSignal, every?: number) {

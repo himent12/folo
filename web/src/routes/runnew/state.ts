@@ -6,7 +6,7 @@ import { ApiError, hub } from '$lib/api/index';
 import { Resource } from '$lib/api/resource';
 import { runsChanged } from '$lib/api/runs';
 import type { Arch, Augment, DatasetImage, Model, Optimizer, TrainConfig } from '$lib/api/types';
-import { archFromCli, archNameSuffix, archWithFamily, isFolo2Arch, supportsFolo2 } from '$lib/arch';
+import { archFromCli, archNameSuffix, archScale, archWithFamily, isFolo2Arch, supportsFolo2 } from '$lib/arch';
 import { hasCloud } from '$lib/cloud';
 import { sentence } from '$lib/format';
 import { fitFix, isOom, oomCalibration, vramForecaster, type OomFix } from '$lib/oom';
@@ -242,32 +242,44 @@ export function runNewState() {
   });
   const checkedModels = new Set<string>();
   const inFlightModels = new Set<string>();
+  /** Tracks a pending `pickWeights(id)` awaiting canonical arch resolution, plus the arch active when picked. */
+  const pendingPick = signal<{ id: string; startArch: Arch } | null>(null);
   let resolveSeq = 0;
-  async function resolveModelArch(m: Model) {
-    if (hub.api.mock || isFolo2Arch(m.arch) || checkedModels.has(m.id) || inFlightModels.has(m.id)) return;
+  async function resolveModelArch(m: Model, applyResolvedArch = false) {
+    if (hub.api.mock || isFolo2Arch(m.arch) || checkedModels.has(m.id)) return;
+    if (applyResolvedArch) {
+      pendingPick.set({ id: m.id, startArch: arch.peek() });
+      resolvingModelId.set(m.id);
+    }
+    if (inFlightModels.has(m.id)) return;
     inFlightModels.add(m.id);
     const seq = ++resolveSeq;
     resolvingModelId.set(m.id);
     try {
       const detail = await hub.api.model(m.id).catch(() => null);
       let resolved: Arch = detail && isFolo2Arch(detail.arch) ? detail.arch : m.arch;
-      let cliOk = false;
       if (!isFolo2Arch(resolved) && m.run_id) {
         const cli = await hub.api.runCli(m.run_id).catch(() => null);
-        cliOk = cli !== null;
         const cliArch = archFromCli(cli);
         if (cliArch && isFolo2Arch(cliArch)) resolved = cliArch;
       }
-      void cliOk;
       checkedModels.add(m.id);
-      if (mounted && resolved !== m.arch) {
-        resolvedModelArchs.set({ ...resolvedModelArchs.peek(), [m.id]: resolved });
-        if (weights.peek() === m.id && arch.peek() !== resolved) arch.set(resolved);
+      if (mounted) {
+        if (resolved !== m.arch) {
+          resolvedModelArchs.set({ ...resolvedModelArchs.peek(), [m.id]: resolved });
+        }
+        const pp = pendingPick.peek();
+        const stillSamePick = pp?.id === m.id && arch.peek() === pp.startArch;
+        if (pp?.id === m.id) pendingPick.set(null);
+        const draftMatch = resolved !== m.arch && archScale(arch.peek()) === archScale(resolved);
+        if ((stillSamePick || draftMatch) && weights.peek() === m.id && arch.peek() !== resolved) {
+          arch.set(resolved);
+        }
+        checkedModelsTick.set((t) => t + 1);
       }
-      if (mounted) checkedModelsTick.set((t) => t + 1);
     } finally {
       inFlightModels.delete(m.id);
-      if (mounted && seq === resolveSeq) resolvingModelId.set(null);
+      if (mounted && (seq === resolveSeq || resolvingModelId.peek() === m.id)) resolvingModelId.set(null);
     }
   }
   effect(() => {
@@ -283,9 +295,21 @@ export function runNewState() {
       return;
     }
     if (m.arch !== a) {
-      // On a real server, a restored `folo2-*` draft may pair with a checkpoint listed as wire `folo-*`:
-      // resolve its canonical arch once before clearing `weights` as a mismatch.
-      if (!hub.api.mock && isFolo2Arch(a) && !isFolo2Arch(m.arch) && !checkedModels.has(m.id)) {
+      const pp = untrack(() => pendingPick.get());
+      // If the user explicitly changed `arch` while a checkpoint lookup was pending, honor the newer arch choice.
+      if (pp?.id === m.id && a !== pp.startArch) {
+        pendingPick.set(null);
+        weights.set('none');
+        return;
+      }
+      // On a real server, a picked or draft-restored checkpoint listed as wire `folo-*` may actually be `folo2-*`:
+      // defer clearing `weights` until its canonical arch lookup finishes once.
+      if (
+        !hub.api.mock &&
+        !isFolo2Arch(m.arch) &&
+        !checkedModels.has(m.id) &&
+        ((pp?.id === m.id && inFlightModels.has(m.id)) || (isFolo2Arch(a) && archScale(a) === archScale(m.arch)))
+      ) {
         untrack(() => void resolveModelArch(m));
         return;
       }
@@ -301,8 +325,17 @@ export function runNewState() {
   /** Start from picked: weights of another size (trained or published) bring their size (the size picker follows). */
   function pickWeights(id: string) {
     const m = startable.get().find((x) => x.id === id);
-    if (m && m.arch !== arch.get()) arch.set(m.arch);
-    if (m) void resolveModelArch(m);
+    if (!m) {
+      pendingPick.set(null);
+      return;
+    }
+    // Wait for canonical arch resolution on unchecked real-server wire `folo-*` checkpoints before switching family/name.
+    if (!hub.api.mock && !isFolo2Arch(m.arch) && !checkedModels.has(m.id)) {
+      void resolveModelArch(m, true);
+      return;
+    }
+    pendingPick.set(null);
+    if (m.arch !== arch.get()) arch.set(m.arch);
   }
   const gpu = computed(() => system.data?.gpus[0]);
 
@@ -422,7 +455,7 @@ export function runNewState() {
   });
   const deviceMsg = computed(() => deviceMessage(deviceErr.get(), system));
 
-  const errors = computed(() =>
+  const rawErrors = computed(() =>
     seedCopy.errors(
       formErrors(
         name.get(),
@@ -445,6 +478,11 @@ export function runNewState() {
       ),
     ),
   );
+  // Suppress transient size-mismatch error while an unchecked real-server checkpoint's canonical arch is resolving.
+  const errors = computed(() => {
+    const e = rawErrors.get();
+    return resolvingWeights.get() && e.weights ? { ...e, weights: null } : e;
+  });
   const valid = computed(() => prefilled.get() && !pendingWeights.get() && !resolvingWeights.get() && errorCount(errors.get()) === 0);
   /**
    * Settings no estimate can stand for: no dataset, or one with nothing to train on, or an epoch count (or Close mosaic)
@@ -454,7 +492,7 @@ export function runNewState() {
   const noFigures = computed(() => !!errors.get().dataset || !isInt(epochs.get(), 1, 10000) || !!errors.get().close);
   /** The first problem, named by its field (shown beside a disabled Start, as a way to that field). */
   const why = computed(() => firstError(errors.get()));
-  const showWhy = computed(() => !valid.get() && !!why.get() && prefilled.get() && !pendingWeights.get());
+  const showWhy = computed(() => !valid.get() && !!why.get() && prefilled.get() && !pendingWeights.get() && !resolvingWeights.get());
   // The trainer's own short-run warnings (too few steps from scratch, mostly warmup): not errors, a warning with the fix.
   const short = computed(() => (errors.get().epochs ? null : shortRun(dataset.get()?.splits.train ?? 0, epochs.get(), batchN.get(), weights.get() === 'none')));
   const selArch = computed(() => arches.find((a) => a.arch === arch.get()));
