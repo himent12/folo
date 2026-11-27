@@ -378,7 +378,7 @@ impl GradAccumulator {
             return Ok(f64::NAN);
         }
         let n = self.global_norm()?;
-        if max_norm > 0.0 && n > max_norm {
+        if max_norm > 0.0 && n.is_finite() && n > max_norm {
             self.scale_cpu_valid_f64(max_norm / (n + 1e-6))?;
         }
         Ok(n)
@@ -765,4 +765,37 @@ fn scaled_sum_sq(g: &Tensor) -> Result<ScaledSumSq> {
         sum_sq_f64_slice(&g.to_dtype(DType::F32)?.to_vec::<f32>()?)
     };
     Ok(ScaledSumSq::from_sq_f64(sq))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clip_grad_norm_does_not_zero_finite_grads_when_norm_is_infinite() {
+        let p_fin = Tensor::from_vec(vec![1.0f32, 2.0], [2]).unwrap().requires_grad_();
+        let p_inf = Tensor::from_vec(vec![3.0f32, 4.0], [2]).unwrap().requires_grad_();
+        let mut acc = GradAccumulator::new(&[p_fin.clone(), p_inf.clone()]);
+
+        // Build gradients via trivial backward passes so `Grads` contains a finite tensor and an +Inf tensor.
+        let g_fin = Tensor::from_vec(vec![3.0f32, -4.0], [2]).unwrap();
+        let g_inf = Tensor::from_vec(vec![f32::INFINITY, 1.0], [2]).unwrap();
+        let loss = p_fin
+            .mul(&g_fin)
+            .unwrap()
+            .sum_all()
+            .unwrap()
+            .add(&p_inf.mul(&g_inf).unwrap().sum_all().unwrap())
+            .unwrap();
+        let grads = loss.backward().unwrap();
+        acc.add(&grads).unwrap();
+
+        let n = acc.clip_grad_norm(1.0).unwrap();
+        assert!(n.is_infinite() && n.is_sign_positive(), "expected +Inf norm, got {n}");
+        // Finite gradients must remain untouched (not multiplied by 1.0 / Inf = 0.0), and +Inf must not become NaN.
+        assert_eq!(acc.grad(&p_fin).unwrap().to_vec::<f32>().unwrap(), vec![3.0, -4.0]);
+        let inf_vals = acc.grad(&p_inf).unwrap().to_vec::<f32>().unwrap();
+        assert!(inf_vals[0].is_infinite() && inf_vals[0].is_sign_positive(), "{inf_vals:?}");
+        assert_eq!(inf_vals[1], 1.0);
+    }
 }

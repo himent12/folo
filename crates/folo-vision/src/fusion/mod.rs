@@ -850,15 +850,22 @@ pub fn fuse_boxes(
                 let x = c.to_array();
                 for e in 0..4 {
                     let wt = s * p[e] as f64;
-                    // A non-finite edge (a NaN box can join a cluster: its IoU comes out as 1) is left out.
-                    if wt > 0.0 && x[e].is_finite() {
+                    // A non-finite edge (a NaN box can join a cluster: its IoU comes out as 1) or a
+                    // non-finite weight (+Inf score or precision) is left out so acc / sum never turns NaN.
+                    if wt.is_finite() && wt > 0.0 && x[e].is_finite() {
                         acc[e] += wt * x[e] as f64;
                         sum[e] += wt;
                     }
                 }
             }
             let old = b.to_array();
-            let e = |i: usize| if sum[i] > 0.0 { (acc[i] / sum[i]) as f32 } else { old[i] };
+            let e = |i: usize| {
+                if sum[i] > 0.0 && sum[i].is_finite() && acc[i].is_finite() {
+                    (acc[i] / sum[i]) as f32
+                } else {
+                    old[i]
+                }
+            };
             Xyxy::new(e(0), e(1), e(2), e(3))
         })
         .collect()
