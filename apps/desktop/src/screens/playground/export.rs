@@ -1,14 +1,17 @@
 //! Playground annotated PNG rendering and export file helpers (Single and Compare A/B modes).
 //!
-//! Renders boxes, halos, and crisp label chips onto an RGBA pixel buffer using the active
-//! theme's class palette (`design/tokens.json`), then encodes to PNG without extra dependencies.
+//! Renders boxes, halos, and crisp Unicode label chips onto an RGBA pixel buffer using the active
+//! theme's class palette (`design/tokens.json`) and `folo-ui`'s `TextSystem`, then encodes to PNG.
 
 use std::io::Cursor;
 use std::path::Path;
+use std::sync::Arc;
 
-use folo_ui::{Hsla, RenderImage, Rgba};
+use folo_ui::{Hsla, RenderImage, Rgba, TextSystem};
 use image::{ImageFormat, RgbaImage};
 
+use super::compare::ComparePaneCaption;
+use super::export_text::{ExportText, RectI, fill_rect_clipped};
 use crate::api::ScoredBox;
 use crate::theme::{Theme, tokens};
 
@@ -20,6 +23,8 @@ pub struct ExportPalette {
     pub chip_text: [u8; 4],
     pub header_bg: [u8; 4],
     pub header_text: [u8; 4],
+    pub header_meta: [u8; 4],
+    pub inset_bg: [u8; 4],
     pub divider: [u8; 4],
 }
 
@@ -33,6 +38,8 @@ impl ExportPalette {
             chip_text: u32_rgba(tokens::CLASS_CHIP_TEXT),
             header_bg: hsla_to_rgba(t.bg_panel),
             header_text: hsla_to_rgba(t.text_primary),
+            header_meta: hsla_to_rgba(t.text_secondary),
+            inset_bg: hsla_to_rgba(t.bg_inset),
             divider: hsla_to_rgba(t.line_strong),
         }
     }
@@ -120,65 +127,140 @@ pub fn render_annotated_single_png(
     show_boxes: bool,
     show_labels: bool,
     palette: &ExportPalette,
+    text_system: Option<&Arc<TextSystem>>,
 ) -> anyhow::Result<Vec<u8>> {
     let mut canvas = base.clone();
     let (w, h) = canvas.dimensions();
     if show_boxes {
-        draw_annotations(&mut canvas, 0, 0, w, h, boxes, show_labels, palette);
+        let text_out = ExportText::new(text_system);
+        draw_annotations(&mut canvas, 0, 0, w, h, boxes, show_labels, palette, &text_out);
     }
     encode_png(&canvas)
 }
 
-/// Renders a Compare A/B side-by-side annotated PNG (with dark header captions and divider) to bytes.
+/// Renders a Compare A/B side-by-side annotated PNG (with header captions and divider) to bytes.
+/// Narrow images are centered inside a minimum-width pane with a two-line header when needed so
+/// model identity, detection counts, and timings stay legible.
 #[allow(clippy::too_many_arguments)]
 pub fn render_annotated_compare_png(
     base: &RgbaImage,
-    caption_a: &str,
+    caption_a: &ComparePaneCaption,
     boxes_a: &[ScoredBox],
-    caption_b: &str,
+    caption_b: &ComparePaneCaption,
     boxes_b: &[ScoredBox],
     show_boxes: bool,
     show_labels: bool,
     palette: &ExportPalette,
+    text_system: Option<&Arc<TextSystem>>,
 ) -> anyhow::Result<Vec<u8>> {
     let (w, h) = base.dimensions();
     let scale = ((w.min(h) as f32) / 640.0).max(1.0).round() as u32;
     let gap = (4 * scale).max(2);
     let text_scale = scale.clamp(1, 4);
-    let head_h = (28 * scale).max(text_scale * 7 + 12);
-    let total_w = w.saturating_mul(2).saturating_add(gap);
-    let total_h = h.saturating_add(head_h);
-    let mut canvas = RgbaImage::from_pixel(total_w, total_h, image::Rgba(palette.header_bg));
+    let text_out = ExportText::new(text_system);
+    let title_px = 12.0 * text_scale as f32;
+    let meta_px = 11.0 * text_scale as f32;
 
-    blit(&mut canvas, base, 0, head_h);
-    blit(&mut canvas, base, w + gap, head_h);
-    fill_rect(&mut canvas, w as i64, 0, gap as i64, total_h as i64, palette.divider);
+    // Give narrow images a readable minimum pane width so headers keep model identity and metrics.
+    let min_pane_w = 240 * scale;
+    let pane_w = w.max(min_pane_w);
+    let pad = (10 * scale).min(pane_w / 8);
+    let avail_w = pane_w.saturating_sub(pad * 2);
+
+    let single_a = caption_a.single_line();
+    let single_b = caption_b.single_line();
+    let fits_one_line = text_out.measure(&single_a, title_px, text_scale, true).0 <= avail_w as f32
+        && text_out.measure(&single_b, title_px, text_scale, true).0 <= avail_w as f32;
+
+    let head_h = if fits_one_line {
+        (28 * scale).max(text_out.line_height(title_px, text_scale) + 12 * scale)
+    } else {
+        let l1 = text_out.line_height(title_px, text_scale);
+        let l2 = text_out.line_height(meta_px, text_scale);
+        (46 * scale).max(l1 + l2 + 16 * scale)
+    };
+
+    let total_w = pane_w.saturating_mul(2).saturating_add(gap);
+    let total_h = h.saturating_add(head_h);
+    let mut canvas = RgbaImage::from_pixel(total_w, total_h, image::Rgba(palette.inset_bg));
+    fill_rect(&mut canvas, 0, 0, total_w as i64, head_h as i64, palette.header_bg);
+
+    let pane_b_x = pane_w.saturating_add(gap);
+    let img_ox_a = (pane_w - w) / 2;
+    let img_ox_b = pane_b_x.saturating_add((pane_w - w) / 2);
+    blit(&mut canvas, base, img_ox_a, head_h);
+    blit(&mut canvas, base, img_ox_b, head_h);
+    fill_rect(&mut canvas, pane_w as i64, 0, gap as i64, total_h as i64, palette.divider);
 
     if show_boxes {
-        draw_annotations(&mut canvas, 0, head_h, w, h, boxes_a, show_labels, palette);
-        draw_annotations(&mut canvas, w + gap, head_h, w, h, boxes_b, show_labels, palette);
+        draw_annotations(&mut canvas, img_ox_a, head_h, w, h, boxes_a, show_labels, palette, &text_out);
+        draw_annotations(&mut canvas, img_ox_b, head_h, w, h, boxes_b, show_labels, palette, &text_out);
     }
 
-    let pad = (10 * scale) as i64;
-    let ty = ((head_h.saturating_sub(7 * text_scale)) / 2) as i64;
-    draw_text_clipped(
-        &mut canvas,
-        caption_a,
-        pad,
-        ty,
-        w.saturating_sub(20 * scale),
-        text_scale,
-        palette.header_text,
-    );
-    draw_text_clipped(
-        &mut canvas,
-        caption_b,
-        (w + gap) as i64 + pad,
-        ty,
-        w.saturating_sub(20 * scale),
-        text_scale,
-        palette.header_text,
-    );
+    let head_clip_a = RectI { x: 0, y: 0, w: pane_w as i64, h: head_h as i64 };
+    let head_clip_b = RectI { x: pane_b_x as i64, y: 0, w: pane_w as i64, h: head_h as i64 };
+    if fits_one_line {
+        text_out.draw_clipped(
+            &mut canvas,
+            &single_a,
+            pad as i64,
+            0,
+            head_h as i64,
+            avail_w,
+            title_px,
+            text_scale,
+            true,
+            palette.header_text,
+            head_clip_a,
+        );
+        text_out.draw_clipped(
+            &mut canvas,
+            &single_b,
+            (pane_b_x + pad) as i64,
+            0,
+            head_h as i64,
+            avail_w,
+            title_px,
+            text_scale,
+            true,
+            palette.header_text,
+            head_clip_b,
+        );
+    } else {
+        let top_h = (head_h as i64 * 52) / 100;
+        let bot_y = top_h;
+        let bot_h = head_h as i64 - top_h;
+        for (px_x, cap, clip) in
+            [(pad as i64, caption_a, head_clip_a), ((pane_b_x + pad) as i64, caption_b, head_clip_b)]
+        {
+            text_out.draw_clipped(
+                &mut canvas,
+                &cap.title,
+                px_x,
+                2 * scale as i64,
+                top_h - 2 * scale as i64,
+                avail_w,
+                title_px,
+                text_scale,
+                true,
+                palette.header_text,
+                clip,
+            );
+            text_out.draw_clipped(
+                &mut canvas,
+                &cap.meta,
+                px_x,
+                bot_y,
+                bot_h - 2 * scale as i64,
+                avail_w,
+                meta_px,
+                text_scale,
+                false,
+                palette.header_meta,
+                clip,
+            );
+        }
+    }
 
     encode_png(&canvas)
 }
@@ -248,6 +330,7 @@ fn draw_annotations(
     boxes: &[ScoredBox],
     show_labels: bool,
     palette: &ExportPalette,
+    text_out: &ExportText,
 ) {
     let scale = ((pane_w.min(pane_h) as f32) / 640.0).max(1.0).round() as i64;
     let stroke = (2 * scale).max(2);
@@ -279,16 +362,17 @@ fn draw_annotations(
 
     // Pass 2: label chips above/inside visible boxes with simple vertical collision avoidance.
     let text_scale = (scale as u32).clamp(1, 3);
+    let font_px = 11.0 * text_scale as f32;
     let pad_x = (4 * text_scale) as i64;
     let pad_y = (3 * text_scale) as i64;
-    let chip_h = (7 * text_scale) as i64 + pad_y * 2;
+    let chip_h = text_out.line_height(font_px, text_scale) as i64 + pad_y * 2;
     let mut placed: Vec<RectI> = Vec::with_capacity(visible_boxes.len());
 
     for &(b, r) in &visible_boxes {
         let name = if b.name.trim().is_empty() { format!("class {}", b.class) } else { b.name.clone() };
         let safe_score = if b.score.is_finite() { b.score.clamp(0.0, 1.0) } else { 0.0 };
         let label = format!("{name} {safe_score:.2}");
-        let tw = text_width_px(&label, text_scale) as i64;
+        let tw = text_out.measure(&label, font_px, text_scale, true).0.ceil() as i64;
         let cw = (tw + pad_x * 2).min((pane_w as i64 - 4).max(8));
 
         let cx = r.x.clamp(clip.x + 2, (clip.x + clip.w - cw - 2).max(clip.x + 2));
@@ -317,64 +401,25 @@ fn draw_annotations(
         fill_rect_clipped(canvas, cx - 1, cy - 1, cw + 2, chip_h + 2, palette.halo, clip);
         fill_rect_clipped(canvas, cx, cy, cw, chip_h, palette.class_color(b.class), clip);
         let avail = (cw - pad_x * 2).max(0) as u32;
-        draw_text_clipped(canvas, &label, cx + pad_x, cy + pad_y, avail, text_scale, palette.chip_text);
+        text_out.draw_clipped(
+            canvas,
+            &label,
+            cx + pad_x,
+            cy,
+            chip_h,
+            avail,
+            font_px,
+            text_scale,
+            true,
+            palette.chip_text,
+            clip,
+        );
     }
-}
-
-#[derive(Clone, Copy)]
-struct RectI {
-    x: i64,
-    y: i64,
-    w: i64,
-    h: i64,
-}
-
-impl RectI {
-    fn intersects(self, other: RectI, pad: i64) -> bool {
-        self.x < other.x + other.w + pad
-            && self.x + self.w + pad > other.x
-            && self.y < other.y + other.h + pad
-            && self.y + self.h + pad > other.y
-    }
-}
-
-fn blend_pixel(dst: &mut image::Rgba<u8>, src: [u8; 4]) {
-    let sa = src[3] as u32;
-    if sa == 0 {
-        return;
-    }
-    if sa == 255 {
-        *dst = image::Rgba(src);
-        return;
-    }
-    let inv = 255 - sa;
-    dst[0] = ((src[0] as u32 * sa + dst[0] as u32 * inv) / 255) as u8;
-    dst[1] = ((src[1] as u32 * sa + dst[1] as u32 * inv) / 255) as u8;
-    dst[2] = ((src[2] as u32 * sa + dst[2] as u32 * inv) / 255) as u8;
-    dst[3] = (sa + (dst[3] as u32 * inv) / 255).min(255) as u8;
 }
 
 fn fill_rect(img: &mut RgbaImage, x: i64, y: i64, w: i64, h: i64, color: [u8; 4]) {
     let clip = RectI { x: 0, y: 0, w: img.width() as i64, h: img.height() as i64 };
     fill_rect_clipped(img, x, y, w, h, color, clip);
-}
-
-fn fill_rect_clipped(img: &mut RgbaImage, x: i64, y: i64, w: i64, h: i64, color: [u8; 4], clip: RectI) {
-    if w <= 0 || h <= 0 {
-        return;
-    }
-    let x0 = x.max(clip.x).max(0);
-    let y0 = y.max(clip.y).max(0);
-    let x1 = x.saturating_add(w).min(clip.x + clip.w).min(img.width() as i64);
-    let y1 = y.saturating_add(h).min(clip.y + clip.h).min(img.height() as i64);
-    if x0 >= x1 || y0 >= y1 {
-        return;
-    }
-    for py in y0..y1 {
-        for px in x0..x1 {
-            blend_pixel(img.get_pixel_mut(px as u32, py as u32), color);
-        }
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -401,103 +446,6 @@ fn stroke_rect_clipped(
         color,
         clip,
     );
-}
-
-fn text_width_px(text: &str, scale: u32) -> u32 {
-    let n = text.chars().count() as u32;
-    if n == 0 { 0 } else { n * 6 * scale - scale }
-}
-
-fn draw_text_clipped(
-    img: &mut RgbaImage,
-    text: &str,
-    x: i64,
-    y: i64,
-    max_width: u32,
-    scale: u32,
-    color: [u8; 4],
-) {
-    let step = (6 * scale) as i64;
-    let max_x = x.saturating_add(max_width as i64);
-    let mut cx = x;
-    let clip = RectI { x: 0, y: 0, w: img.width() as i64, h: img.height() as i64 };
-    for ch in text.chars() {
-        if cx.saturating_add((5 * scale) as i64) > max_x {
-            break;
-        }
-        let glyph = glyph_5x7(ch);
-        for (row, bits) in glyph.iter().enumerate() {
-            for col in 0..5 {
-                if (bits & (1 << (4 - col))) != 0 {
-                    fill_rect_clipped(
-                        img,
-                        cx + (col as u32 * scale) as i64,
-                        y + (row as u32 * scale) as i64,
-                        scale as i64,
-                        scale as i64,
-                        color,
-                        clip,
-                    );
-                }
-            }
-        }
-        cx = cx.saturating_add(step);
-    }
-}
-
-/// Crisp 5×7 bitmap glyphs for ASCII characters (plus `·` and `×`) used in exported PNG labels/captions.
-fn glyph_5x7(ch: char) -> [u8; 7] {
-    match ch.to_ascii_uppercase() {
-        '0' => [0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E],
-        '1' => [0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E],
-        '2' => [0x0E, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1F],
-        '3' => [0x1E, 0x01, 0x01, 0x0E, 0x01, 0x01, 0x1E],
-        '4' => [0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02],
-        '5' => [0x1F, 0x10, 0x1E, 0x01, 0x01, 0x11, 0x0E],
-        '6' => [0x06, 0x08, 0x10, 0x1E, 0x11, 0x11, 0x0E],
-        '7' => [0x1F, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08],
-        '8' => [0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E],
-        '9' => [0x0E, 0x11, 0x11, 0x0F, 0x01, 0x02, 0x0C],
-        'A' => [0x0E, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11],
-        'B' => [0x1E, 0x11, 0x11, 0x1E, 0x11, 0x11, 0x1E],
-        'C' => [0x0E, 0x11, 0x10, 0x10, 0x10, 0x11, 0x0E],
-        'D' => [0x1C, 0x12, 0x11, 0x11, 0x11, 0x12, 0x1C],
-        'E' => [0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x1F],
-        'F' => [0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x10],
-        'G' => [0x0E, 0x11, 0x10, 0x17, 0x11, 0x11, 0x0F],
-        'H' => [0x11, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11],
-        'I' => [0x0E, 0x04, 0x04, 0x04, 0x04, 0x04, 0x0E],
-        'J' => [0x07, 0x02, 0x02, 0x02, 0x12, 0x12, 0x0C],
-        'K' => [0x11, 0x12, 0x14, 0x18, 0x14, 0x12, 0x11],
-        'L' => [0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1F],
-        'M' => [0x11, 0x1B, 0x15, 0x15, 0x11, 0x11, 0x11],
-        'N' => [0x11, 0x19, 0x15, 0x13, 0x11, 0x11, 0x11],
-        'O' => [0x0E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E],
-        'P' => [0x1E, 0x11, 0x11, 0x1E, 0x10, 0x10, 0x10],
-        'Q' => [0x0E, 0x11, 0x11, 0x11, 0x15, 0x12, 0x0D],
-        'R' => [0x1E, 0x11, 0x11, 0x1E, 0x14, 0x12, 0x11],
-        'S' => [0x0F, 0x10, 0x10, 0x0E, 0x01, 0x01, 0x1E],
-        'T' => [0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04],
-        'U' => [0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E],
-        'V' => [0x11, 0x11, 0x11, 0x11, 0x11, 0x0A, 0x04],
-        'W' => [0x11, 0x11, 0x11, 0x15, 0x15, 0x1B, 0x11],
-        'X' | '×' => [0x11, 0x11, 0x0A, 0x04, 0x0A, 0x11, 0x11],
-        'Y' => [0x11, 0x11, 0x0A, 0x04, 0x04, 0x04, 0x04],
-        'Z' => [0x1F, 0x01, 0x02, 0x04, 0x08, 0x10, 0x1F],
-        '.' => [0x00, 0x00, 0x00, 0x00, 0x00, 0x0C, 0x0C],
-        ',' => [0x00, 0x00, 0x00, 0x00, 0x04, 0x04, 0x08],
-        '-' | '—' => [0x00, 0x00, 0x00, 0x1F, 0x00, 0x00, 0x00],
-        '+' => [0x00, 0x04, 0x04, 0x1F, 0x04, 0x04, 0x00],
-        ':' => [0x00, 0x0C, 0x0C, 0x00, 0x0C, 0x0C, 0x00],
-        '/' => [0x01, 0x02, 0x02, 0x04, 0x08, 0x08, 0x10],
-        '_' => [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1F],
-        '(' => [0x02, 0x04, 0x08, 0x08, 0x08, 0x04, 0x02],
-        ')' => [0x08, 0x04, 0x02, 0x02, 0x02, 0x04, 0x08],
-        '%' => [0x19, 0x1A, 0x02, 0x04, 0x08, 0x0B, 0x13],
-        '·' => [0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00],
-        ' ' => [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
-        _ => [0x0E, 0x11, 0x02, 0x04, 0x04, 0x00, 0x04],
-    }
 }
 
 #[cfg(test)]
@@ -539,7 +487,7 @@ mod tests {
             y2: 86.,
         }];
 
-        let single_bytes = render_annotated_single_png(&base, &boxes_a, true, true, &palette).unwrap();
+        let single_bytes = render_annotated_single_png(&base, &boxes_a, true, true, &palette, None).unwrap();
         let single_path = dir.path().join("single.png");
         write_export_bytes(&single_path, &single_bytes).unwrap();
         let decoded_single = image::open(&single_path).unwrap().to_rgba8();
@@ -547,19 +495,14 @@ mod tests {
         let changed_single = decoded_single.pixels().zip(base.pixels()).filter(|(a, b)| a != b).count();
         assert!(changed_single > 200, "expected boxes and label chips to paint pixels, got {changed_single}");
 
-        let clean_bytes = render_annotated_single_png(&base, &boxes_a, false, true, &palette).unwrap();
+        let clean_bytes = render_annotated_single_png(&base, &boxes_a, false, true, &palette, None).unwrap();
         let clean_img = image::load_from_memory(&clean_bytes).unwrap().to_rgba8();
         assert_eq!(clean_img, base);
 
+        let cap_a = ComparePaneCaption { title: "A · shapes-n".into(), meta: "2 dets · 12.0 ms".into() };
+        let cap_b = ComparePaneCaption { title: "B · shapes-s".into(), meta: "1 det · 8.5 ms".into() };
         let cmp_bytes = render_annotated_compare_png(
-            &base,
-            "A · shapes-n · 2 dets · 12.0 ms",
-            &boxes_a,
-            "B · shapes-s · 1 det · 8.5 ms",
-            &boxes_b,
-            true,
-            true,
-            &palette,
+            &base, &cap_a, &boxes_a, &cap_b, &boxes_b, true, true, &palette, None,
         )
         .unwrap();
         let cmp_path = dir.path().join("compare.png");
@@ -567,6 +510,64 @@ mod tests {
         let decoded_cmp = image::open(&cmp_path).unwrap().to_rgba8();
         assert!(decoded_cmp.width() > 320);
         assert!(decoded_cmp.height() > 120);
+    }
+
+    #[test]
+    fn narrow_compare_png_pads_panes_and_uses_two_line_headers() {
+        let palette = ExportPalette::from_theme(&Theme::new(Mode::Dark));
+        let narrow = RgbaImage::from_pixel(64, 480, image::Rgba([24, 32, 48, 255]));
+        let cap_a =
+            ComparePaneCaption { title: "A · shapes-hard-s-best".into(), meta: "2 dets · 12.0 ms".into() };
+        let cap_b =
+            ComparePaneCaption { title: "B · shapes-hard-n-best".into(), meta: "1 det · 8.5 ms".into() };
+        let cmp_bytes =
+            render_annotated_compare_png(&narrow, &cap_a, &[], &cap_b, &[], true, true, &palette, None)
+                .unwrap();
+        let decoded = image::load_from_memory(&cmp_bytes).unwrap().to_rgba8();
+        assert!(
+            decoded.width() >= 480,
+            "narrow 64x480 compare PNG should widen panes to fit model identity + metrics, got {}",
+            decoded.width()
+        );
+        assert!(
+            decoded.height() >= 480 + 46,
+            "narrow compare PNG should expand to a two-line header, got height {}",
+            decoded.height()
+        );
+        let head_h = decoded.height() - 480;
+        let row2_top = (head_h * 52) / 100;
+        let left_meta_px = (0..240)
+            .flat_map(|x| (row2_top..head_h).map(move |y| (x, y)))
+            .filter(|&(x, y)| decoded.get_pixel(x, y).0 != palette.header_bg)
+            .count();
+        assert!(left_meta_px > 20, "expected second header line to render metrics, got {left_meta_px} px");
+    }
+
+    #[test]
+    fn unicode_labels_and_captions_render_distinct_glyphs_via_text_system() {
+        let app = folo_ui::HeadlessApp::new(folo_ui::HeadlessOptions {
+            text: folo_ui::TextBackend::Native,
+            ..Default::default()
+        });
+        let ts = app.read(|cx| cx.text_system().clone());
+        let palette = ExportPalette::from_theme(&Theme::new(Mode::Dark));
+        let base = RgbaImage::from_pixel(220, 120, image::Rgba([24, 32, 48, 255]));
+        let mk = |name: &str| {
+            vec![ScoredBox { class: 0, name: name.into(), score: 0.91, x1: 20., y1: 35., x2: 180., y2: 100. }]
+        };
+        let cafe_png =
+            render_annotated_single_png(&base, &mk("café"), true, true, &palette, Some(&ts)).unwrap();
+        let qmark_png =
+            render_annotated_single_png(&base, &mk("caf?"), true, true, &palette, Some(&ts)).unwrap();
+        let cjk_png = render_annotated_single_png(&base, &mk("丸"), true, true, &palette, Some(&ts)).unwrap();
+        let single_q_png =
+            render_annotated_single_png(&base, &mk("?"), true, true, &palette, Some(&ts)).unwrap();
+        let cafe = image::load_from_memory(&cafe_png).unwrap().to_rgba8();
+        let qmark = image::load_from_memory(&qmark_png).unwrap().to_rgba8();
+        let cjk = image::load_from_memory(&cjk_png).unwrap().to_rgba8();
+        let single_q = image::load_from_memory(&single_q_png).unwrap().to_rgba8();
+        assert_ne!(cafe, qmark, "accented Unicode label 'café' must not degrade to 'caf?'");
+        assert_ne!(cjk, single_q, "CJK Unicode label '丸' must not degrade to '?'");
     }
 
     #[test]
@@ -588,7 +589,7 @@ mod tests {
             ScoredBox { class: 0, name: "off".into(), score: 0.9, x1: 200., y1: 10., x2: 260., y2: 40. },
             ScoredBox { class: 0, name: "huge-off".into(), score: 0.9, x1: 1e20, y1: 0., x2: 2e20, y2: 50. },
         ];
-        let out_bytes = render_annotated_single_png(&base, &invisible, true, true, &palette).unwrap();
+        let out_bytes = render_annotated_single_png(&base, &invisible, true, true, &palette, None).unwrap();
         assert_eq!(image::load_from_memory(&out_bytes).unwrap().to_rgba8(), base);
 
         // Huge finite coordinates spanning the image with NaN score must clip safely without overflow panic.
@@ -601,9 +602,20 @@ mod tests {
             x2: 1e20,
             y2: 1e20,
         }];
-        let cmp_bytes =
-            render_annotated_compare_png(&base, "A", &huge_visible, "B", &huge_visible, true, true, &palette)
-                .unwrap();
+        let cap_a = ComparePaneCaption { title: "A".into(), meta: "1 det".into() };
+        let cap_b = ComparePaneCaption { title: "B".into(), meta: "1 det".into() };
+        let cmp_bytes = render_annotated_compare_png(
+            &base,
+            &cap_a,
+            &huge_visible,
+            &cap_b,
+            &huge_visible,
+            true,
+            true,
+            &palette,
+            None,
+        )
+        .unwrap();
         let decoded = image::load_from_memory(&cmp_bytes).unwrap().to_rgba8();
         assert!(decoded.width() > 240);
     }

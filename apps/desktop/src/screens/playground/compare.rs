@@ -148,7 +148,12 @@ pub struct CompareSummary {
     pub latency_a_ms: Option<f64>,
     pub latency_b_ms: Option<f64>,
     pub latency_delta_ms: Option<f64>,
-    /// `latency_a_ms / latency_b_ms` (> 1 means Model B is faster than Model A).
+    /// Whether Model A's prediction included a cold start / model warm-up.
+    pub cold_a: Option<bool>,
+    /// Whether Model B's prediction included a cold start / model warm-up.
+    pub cold_b: Option<bool>,
+    /// `latency_a_ms / latency_b_ms` (> 1 means Model B is faster than Model A). Suppressed (`None`)
+    /// whenever either side was a cold start so warm-up overhead is not mistaken for a speed gap.
     pub speedup_ratio: Option<f64>,
     pub shared_classes: Vec<String>,
     pub only_a_classes: Vec<String>,
@@ -237,9 +242,15 @@ pub fn summarize_comparison(
 
     let latency_a_ms = pred_a.map(|p| p.timing.total_ms).filter(|v| v.is_finite());
     let latency_b_ms = pred_b.map(|p| p.timing.total_ms).filter(|v| v.is_finite());
+    let cold_a = pred_a.map(|p| p.cold);
+    let cold_b = pred_b.map(|p| p.cold);
+    let any_cold = cold_a.unwrap_or(false) || cold_b.unwrap_or(false);
     let latency_delta_ms = latency_a_ms.zip(latency_b_ms).map(|(a, b)| b - a);
-    let speedup_ratio =
-        latency_a_ms.zip(latency_b_ms).filter(|&(a, b)| a > 0.0 && b > 0.0).map(|(a, b)| a / b);
+    let speedup_ratio = if any_cold {
+        None
+    } else {
+        latency_a_ms.zip(latency_b_ms).filter(|&(a, b)| a > 0.0 && b > 0.0).map(|(a, b)| a / b)
+    };
 
     CompareSummary {
         count_a,
@@ -248,6 +259,8 @@ pub fn summarize_comparison(
         latency_a_ms,
         latency_b_ms,
         latency_delta_ms,
+        cold_a,
+        cold_b,
         speedup_ratio,
         shared_classes,
         only_a_classes,
@@ -265,11 +278,18 @@ pub fn format_signed_delta(delta: Option<isize>) -> String {
     }
 }
 
-/// Formats latency comparison between Model A and Model B (`-4.2 ms · B 1.6× faster` or `+8.4 ms`).
+/// Formats latency comparison between Model A and Model B (`-4.2 ms · B 1.6× faster`, `+8.4 ms`,
+/// or a warm-up notice when either side included a cold start).
 pub fn format_latency_comparison(summary: &CompareSummary) -> String {
     let Some(delta) = summary.latency_delta_ms else {
         return "—".to_string();
     };
+    match (summary.cold_a.unwrap_or(false), summary.cold_b.unwrap_or(false)) {
+        (true, true) => return "Warm-up (A & B)".to_string(),
+        (true, false) => return "Warm-up (A)".to_string(),
+        (false, true) => return "Warm-up (B)".to_string(),
+        (false, false) => {}
+    }
     if delta.abs() < 0.05 {
         return "Same latency".to_string();
     }
@@ -286,23 +306,41 @@ pub fn format_latency_comparison(summary: &CompareSummary) -> String {
     diff
 }
 
-/// Concise caption text for Compare PNG export headers and pane badges.
-pub fn compare_pane_caption(
+/// Two-line Compare PNG pane caption: model identity (`title`) and count/timing (`meta`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ComparePaneCaption {
+    pub title: String,
+    pub meta: String,
+}
+
+impl ComparePaneCaption {
+    /// Formats as a single-line caption when header width permits.
+    pub fn single_line(&self) -> String {
+        format!("{} · {}", self.title, self.meta)
+    }
+}
+
+/// Structured title and metric caption lines for Compare PNG export headers.
+pub fn compare_pane_caption_parts(
     side: &str,
     model_name: &str,
     count: Option<usize>,
     total_ms: Option<f64>,
-) -> String {
-    match count {
-        None => format!("{side} · {model_name} · unavailable"),
+    cold: bool,
+) -> ComparePaneCaption {
+    let title = format!("{side} · {model_name}");
+    let meta = match count {
+        None => "unavailable".to_string(),
         Some(n) => {
             let det = if n == 1 { "1 det".to_string() } else { format!("{n} dets") };
             match total_ms {
-                Some(ms) if ms.is_finite() => format!("{side} · {model_name} · {det} · {ms:.1} ms"),
-                _ => format!("{side} · {model_name} · {det}"),
+                Some(ms) if ms.is_finite() && cold => format!("{det} · {ms:.1} ms (cold)"),
+                Some(ms) if ms.is_finite() => format!("{det} · {ms:.1} ms"),
+                _ => det,
             }
         }
-    }
+    };
+    ComparePaneCaption { title, meta }
 }
 
 /// Side payload for structured Compare JSON export.
@@ -346,6 +384,8 @@ pub fn compare_detections_json(
         latency_a_ms: Option<f64>,
         latency_b_ms: Option<f64>,
         latency_delta_ms: Option<f64>,
+        cold_a: Option<bool>,
+        cold_b: Option<bool>,
         speedup_ratio: Option<f64>,
         shared_classes: &'a [String],
         only_a_classes: &'a [String],
@@ -359,6 +399,7 @@ pub fn compare_detections_json(
         #[serde(skip_serializing_if = "Option::is_none")]
         iou: Option<f32>,
         device: &'a str,
+        cold: bool,
         timing: &'a Timing,
         detections: &'a [&'a ScoredBox],
     }
@@ -383,6 +424,7 @@ pub fn compare_detections_json(
             model_id: s.model_id,
             iou: s.iou,
             device: &s.pred.device,
+            cold: s.pred.cold,
             timing: &s.pred.timing,
             detections: s.boxes,
         }
@@ -402,6 +444,8 @@ pub fn compare_detections_json(
             latency_a_ms: summary.latency_a_ms,
             latency_b_ms: summary.latency_b_ms,
             latency_delta_ms: summary.latency_delta_ms,
+            cold_a: summary.cold_a,
+            cold_b: summary.cold_b,
             speedup_ratio: summary.speedup_ratio,
             shared_classes: &summary.shared_classes,
             only_a_classes: &summary.only_a_classes,
@@ -527,8 +571,61 @@ mod tests {
         assert_eq!(v["comparison"]["shared_classes"][0], "circle");
         assert_eq!(v["comparison"]["only_b_classes"][0], "square");
         assert_eq!(v["a"]["model"], "shapes-n");
+        assert_eq!(v["a"]["cold"], false);
         assert!(v["a"].get("iou").is_some());
         assert_eq!(v["b"]["model"], "shapes-s");
+        assert_eq!(v["b"]["cold"], false);
         assert!(v["b"].get("iou").is_none());
+    }
+
+    #[test]
+    fn cold_start_prediction_suppresses_speedup_claim_and_serializes_cold_flags() {
+        let a_boxes = vec![fake_box(0, "circle", 0.91)];
+        let b_boxes = vec![fake_box(0, "circle", 0.88)];
+        let mut pa = fake_pred("m_a", 2.0, a_boxes.clone());
+        pa.cold = true;
+        let pb = fake_pred("m_b", 0.1, b_boxes.clone());
+        let ra: Vec<&ScoredBox> = a_boxes.iter().collect();
+        let rb: Vec<&ScoredBox> = b_boxes.iter().collect();
+
+        let s_a = summarize_comparison(Some(&ra), Some(&rb), Some(&pa), Some(&pb));
+        assert_eq!(s_a.cold_a, Some(true));
+        assert_eq!(s_a.cold_b, Some(false));
+        assert_eq!(s_a.speedup_ratio, None, "cold Model A must not produce a speedup ratio");
+        assert_eq!(format_latency_comparison(&s_a), "Warm-up (A)");
+
+        let mut pb_cold = pb.clone();
+        pb_cold.cold = true;
+        let s_both = summarize_comparison(Some(&ra), Some(&rb), Some(&pa), Some(&pb_cold));
+        assert_eq!(s_both.speedup_ratio, None);
+        assert_eq!(format_latency_comparison(&s_both), "Warm-up (A & B)");
+
+        let mut pa_warm = pa.clone();
+        pa_warm.cold = false;
+        let s_b = summarize_comparison(Some(&ra), Some(&rb), Some(&pa_warm), Some(&pb_cold));
+        assert_eq!(s_b.speedup_ratio, None);
+        assert_eq!(format_latency_comparison(&s_b), "Warm-up (B)");
+
+        let cap = compare_pane_caption_parts("A", "shapes-n", Some(1), Some(2.0), true);
+        assert_eq!(cap.title, "A · shapes-n");
+        assert_eq!(cap.meta, "1 det · 2.0 ms (cold)");
+
+        let json = compare_detections_json(
+            "val_001.png",
+            (640, 480),
+            0.25,
+            None,
+            None,
+            &s_a,
+            Some(&CompareSideExport { model: "shapes-n", model_id: "m_a", iou: None, pred: &pa, boxes: &ra }),
+            Some(&CompareSideExport { model: "shapes-s", model_id: "m_b", iou: None, pred: &pb, boxes: &rb }),
+        )
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["comparison"]["cold_a"], true);
+        assert_eq!(v["comparison"]["cold_b"], false);
+        assert!(v["comparison"]["speedup_ratio"].is_null());
+        assert_eq!(v["a"]["cold"], true);
+        assert_eq!(v["b"]["cold"], false);
     }
 }

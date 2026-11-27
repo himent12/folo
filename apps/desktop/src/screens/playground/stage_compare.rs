@@ -51,7 +51,11 @@ impl FoloApp {
             Load::Ready(p) => {
                 let b = self.visible_boxes(p, active_a);
                 let n = b.len();
-                (b, Some(n), Some(latency_text(p.timing.total_ms, sim)), self.play_pred_pending, None)
+                let mut lat = latency_text(p.timing.total_ms, sim);
+                if p.cold {
+                    lat.push_str(" (cold)");
+                }
+                (b, Some(n), Some(lat), self.play_pred_pending, None)
             }
             Load::Loading => (Vec::new(), None, None, true, None),
             Load::Failed(e) => (Vec::new(), None, None, false, Some(e.message.clone())),
@@ -61,13 +65,11 @@ impl FoloApp {
             Load::Ready(p) => {
                 let b = self.visible_boxes_b(p, active_b);
                 let n = b.len();
-                (
-                    b,
-                    Some(n),
-                    Some(latency_text(p.timing.total_ms, sim)),
-                    self.play_compare.pred_b_pending,
-                    None,
-                )
+                let mut lat = latency_text(p.timing.total_ms, sim);
+                if p.cold {
+                    lat.push_str(" (cold)");
+                }
+                (b, Some(n), Some(lat), self.play_compare.pred_b_pending, None)
             }
             Load::Loading => (Vec::new(), None, None, true, None),
             Load::Failed(e) => (Vec::new(), None, None, false, Some(e.message.clone())),
@@ -411,10 +413,36 @@ impl FoloApp {
                         if let Some((from, pan0)) = this.play_drag {
                             if ev.pressed_button == Some(folo_ui::MouseButton::Left) {
                                 if this.play_zoom > 1.0 {
-                                    this.play_pan = (
+                                    let raw = (
                                         pan0.0 + f32::from(ev.position.x - from.x),
                                         pan0.1 + f32::from(ev.position.y - from.y),
                                     );
+                                    let next = match bounds_cell.get() {
+                                        Some(b) => crate::viz::clamp_pan(
+                                            b,
+                                            dims.0,
+                                            dims.1,
+                                            Fit::Contain,
+                                            this.play_zoom,
+                                            raw,
+                                        ),
+                                        None => raw,
+                                    };
+                                    this.play_pan = next;
+                                    // Rebase any clamped axis so reversing a held drag past the edge moves immediately.
+                                    let clamped_x = (next.0 - raw.0).abs() > 1e-4;
+                                    let clamped_y = (next.1 - raw.1).abs() > 1e-4;
+                                    if clamped_x || clamped_y {
+                                        let next_from = folo_ui::point(
+                                            if clamped_x { ev.position.x } else { from.x },
+                                            if clamped_y { ev.position.y } else { from.y },
+                                        );
+                                        let next_pan0 = (
+                                            if clamped_x { next.0 } else { pan0.0 },
+                                            if clamped_y { next.1 } else { pan0.1 },
+                                        );
+                                        this.play_drag = Some((next_from, next_pan0));
+                                    }
                                     cx.notify();
                                     return;
                                 }

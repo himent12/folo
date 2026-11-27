@@ -259,6 +259,12 @@ pub struct BenchState {
     pub entry_image_filter: crate::screens::bench::EntryImageFilter,
     /// Error-analysis sort order active on the Entry Images panel.
     pub entry_image_order: crate::screens::bench::EntryImageOrder,
+    /// Last painted height of the Entry Images tile grid / empty-state area (used to keep the filter
+    /// bar anchored under the pointer when a filter shrinks the grid while scrolled near the bottom).
+    pub entry_grid_height: std::rc::Rc<std::cell::Cell<f32>>,
+    /// Temporary minimum height held on `(bench_id, entry_id)`'s tile grid area after switching
+    /// filters while scrolled so `page_scroll` does not clamp upward and jump the filter bar.
+    pub entry_grid_min_h: Option<((String, String), f32)>,
 }
 
 /// One-shot scroll reveal target for the Entry Images panel (works in pointer and keyboard mode).

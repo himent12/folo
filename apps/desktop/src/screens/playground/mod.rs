@@ -4,6 +4,7 @@
 mod compare;
 mod device;
 mod export;
+mod export_text;
 mod page;
 mod samples;
 mod side;
@@ -12,8 +13,8 @@ mod stage;
 mod stage_compare;
 
 pub use compare::{
-    CompareSideExport, PlayCompareState, PlayPredMeta, compare_detections_json, compare_pane_caption,
-    pick_default_model_b, summarize_comparison,
+    ComparePaneCaption, CompareSideExport, PlayCompareState, PlayPredMeta, compare_detections_json,
+    compare_pane_caption_parts, pick_default_model_b, summarize_comparison,
 };
 pub use export::{
     ExportPalette, export_filename, render_annotated_compare_png, render_annotated_single_png,

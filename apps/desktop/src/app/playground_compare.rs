@@ -7,9 +7,10 @@ use folo_ui::Context;
 
 use crate::api::*;
 use crate::screens::playground::{
-    CompareSideExport, ExportPalette, PlayPredMeta, compare_detections_json, compare_pane_caption,
-    export_filename, filter_detections, pick_default_model_b, render_annotated_compare_png,
-    render_annotated_single_png, render_image_to_rgba, summarize_comparison, write_export_bytes,
+    ComparePaneCaption, CompareSideExport, ExportPalette, PlayPredMeta, compare_detections_json,
+    compare_pane_caption_parts, export_filename, filter_detections, pick_default_model_b,
+    render_annotated_compare_png, render_annotated_single_png, render_image_to_rgba, summarize_comparison,
+    write_export_bytes,
 };
 use crate::store::Load;
 use crate::theme::theme;
@@ -516,6 +517,7 @@ impl FoloApp {
         let show_boxes = self.play_boxes;
         let show_labels = self.play_labels;
         let compare = self.play_compare.enabled;
+        let text_system = cx.text_system().clone();
         let fresh_a = self.pred_a_is_fresh().then(|| self.play_pred.ready()).flatten();
 
         let (suggested, job): (String, PngExportJob) = if !compare {
@@ -530,7 +532,14 @@ impl FoloApp {
             let fname = export_filename(&image_name, &model_a_name, None, "png");
             (
                 fname,
-                PngExportJob::Single { image: render_img, boxes: boxes_a, show_boxes, show_labels, palette },
+                PngExportJob::Single {
+                    image: render_img,
+                    boxes: boxes_a,
+                    show_boxes,
+                    show_labels,
+                    palette,
+                    text_system,
+                },
             )
         } else {
             let fresh_b = self.pred_b_is_fresh().then(|| self.play_compare.pred_b.ready()).flatten();
@@ -550,17 +559,19 @@ impl FoloApp {
             let boxes_b: Vec<ScoredBox> = fresh_b
                 .map(|p| self.filter_detections_b(&p.boxes).into_iter().cloned().collect())
                 .unwrap_or_default();
-            let cap_a = compare_pane_caption(
+            let cap_a = compare_pane_caption_parts(
                 "A",
                 &model_a_name,
                 fresh_a.map(|_| boxes_a.len()),
                 fresh_a.map(|p| p.timing.total_ms),
+                fresh_a.is_some_and(|p| p.cold),
             );
-            let cap_b = compare_pane_caption(
+            let cap_b = compare_pane_caption_parts(
                 "B",
                 &model_b_name,
                 fresh_b.map(|_| boxes_b.len()),
                 fresh_b.map(|p| p.timing.total_ms),
+                fresh_b.is_some_and(|p| p.cold),
             );
             let fname = export_filename(&image_name, &model_a_name, Some(&model_b_name), "png");
             (
@@ -574,6 +585,7 @@ impl FoloApp {
                     show_boxes,
                     show_labels,
                     palette,
+                    text_system,
                 },
             )
         };
@@ -587,11 +599,25 @@ impl FoloApp {
                 .background_executor()
                 .spawn(async move {
                     let png = match job {
-                        PngExportJob::Single { image, boxes, show_boxes, show_labels, palette } => {
+                        PngExportJob::Single {
+                            image,
+                            boxes,
+                            show_boxes,
+                            show_labels,
+                            palette,
+                            text_system,
+                        } => {
                             let base = render_image_to_rgba(&image).ok_or_else(|| {
                                 anyhow::anyhow!("Could not read pixels from the current image.")
                             })?;
-                            render_annotated_single_png(&base, &boxes, show_boxes, show_labels, &palette)?
+                            render_annotated_single_png(
+                                &base,
+                                &boxes,
+                                show_boxes,
+                                show_labels,
+                                &palette,
+                                Some(&text_system),
+                            )?
                         }
                         PngExportJob::Compare {
                             image,
@@ -602,6 +628,7 @@ impl FoloApp {
                             show_boxes,
                             show_labels,
                             palette,
+                            text_system,
                         } => {
                             let base = render_image_to_rgba(&image).ok_or_else(|| {
                                 anyhow::anyhow!("Could not read pixels from the current image.")
@@ -615,6 +642,7 @@ impl FoloApp {
                                 show_boxes,
                                 show_labels,
                                 &palette,
+                                Some(&text_system),
                             )?
                         }
                     };
@@ -653,16 +681,18 @@ enum PngExportJob {
         show_boxes: bool,
         show_labels: bool,
         palette: ExportPalette,
+        text_system: std::sync::Arc<folo_ui::TextSystem>,
     },
     Compare {
         image: std::sync::Arc<folo_ui::RenderImage>,
-        caption_a: String,
+        caption_a: ComparePaneCaption,
         boxes_a: Vec<ScoredBox>,
-        caption_b: String,
+        caption_b: ComparePaneCaption,
         boxes_b: Vec<ScoredBox>,
         show_boxes: bool,
         show_labels: bool,
         palette: ExportPalette,
+        text_system: std::sync::Arc<folo_ui::TextSystem>,
     },
 }
 

@@ -392,3 +392,159 @@ fn playground_compare_freshness_guards_reenable_exports_and_class_filter() {
         );
     });
 }
+
+#[test]
+fn playground_drag_pan_reverses_immediately_past_clamp_limit() {
+    use crate::viz::{Fit, clamp_pan};
+    use folo_ui::{Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, PlatformInput, point, px};
+
+    let (mut app, window) = open();
+    drive(&mut app, window, |this, w, cx| {
+        this.navigate(Route::Playground, w, cx);
+        this.play_dataset_image("ds_3b91", "img_03417", cx);
+    });
+    drive(&mut app, window, |this, _, cx| {
+        this.set_play_compare(true, cx);
+        this.play_zoom = 2.0;
+        this.play_pan = (0.0, 0.0);
+        cx.notify();
+    });
+    app.frame(window.into());
+
+    // Position 20 px inside the right clamp edge so a +100 px drag inside Pane A overshoots by 80 px.
+    let (start_pt, overshoot_pt, reverse_pt, max_x) = drive(&mut app, window, |this, _, cx| {
+        let b = this.play_view.get().expect("compare Pane A bounds recorded");
+        let img = this.play_image.as_ref().expect("staged image");
+        let dims = (img.width as f32, img.height as f32);
+        let max_x = clamp_pan(b, dims.0, dims.1, Fit::Contain, 2.0, (1e6, 0.0)).0;
+        assert!(max_x > 30.0, "expected positive horizontal pan headroom, got {max_x}");
+        this.play_pan = (max_x - 20.0, 0.0);
+        cx.notify();
+        let cy = b.origin.y + b.size.height / 2.0;
+        let x0 = b.origin.x + px(20.0);
+        (point(x0, cy), point(x0 + px(100.0), cy), point(x0 + px(85.0), cy), max_x)
+    });
+    app.frame(window.into());
+
+    app.simulate_input(
+        window.into(),
+        PlatformInput::MouseDown(MouseDownEvent {
+            button: MouseButton::Left,
+            position: start_pt,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+            first_mouse: false,
+        }),
+    );
+    app.frame(window.into());
+
+    app.simulate_input(
+        window.into(),
+        PlatformInput::MouseMove(MouseMoveEvent {
+            position: overshoot_pt,
+            pressed_button: Some(MouseButton::Left),
+            modifiers: Modifiers::none(),
+        }),
+    );
+    app.frame(window.into());
+    let clamped_x = drive(&mut app, window, |this, _, _| this.play_pan.0);
+    assert!((clamped_x - max_x).abs() < 1.0, "expected pan clamped at right edge {max_x}, got {clamped_x}");
+
+    // Reverse by 15 px while still holding Left: must move immediately without an 80 px dead zone.
+    app.simulate_input(
+        window.into(),
+        PlatformInput::MouseMove(MouseMoveEvent {
+            position: reverse_pt,
+            pressed_button: Some(MouseButton::Left),
+            modifiers: Modifiers::none(),
+        }),
+    );
+    app.frame(window.into());
+    let after_reverse_x = drive(&mut app, window, |this, _, _| this.play_pan.0);
+    assert!(
+        (after_reverse_x - (clamped_x - 15.0)).abs() < 1.0,
+        "reversing drag past clamp limit must move immediately (clamped={clamped_x}, after={after_reverse_x})"
+    );
+}
+
+#[test]
+fn bench_filter_switch_at_bottom_keeps_scroll_offset_anchored() {
+    use crate::theme::{Mode, Theme};
+    use folo_ui::{
+        AppContext, Bounds, HeadlessApp, HeadlessOptions, WindowBounds, WindowOptions, point, px, size,
+    };
+
+    let api = Arc::new(MockBackend::new(4200, true));
+    let win_size = size(px(1680.), px(1050.));
+    let mut app = HeadlessApp::new(HeadlessOptions { size: win_size, ..Default::default() });
+    let window = app.update(|cx| {
+        crate::app::bind_keys(cx);
+        crate::input::bind_keys(cx);
+        cx.set_global(Theme::new(Mode::Dark));
+        let bounds = Bounds::new(point(px(0.), px(0.)), win_size);
+        let opts =
+            WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), ..Default::default() };
+        cx.open_window(opts, |w, cx| cx.new(|cx| super::FoloApp::new(api, true, w, cx))).expect("open window")
+    });
+    drive(&mut app, window, |this, _, cx| this.ensure_core(cx));
+
+    // Open a scored benchmark entry with enough images to span multiple tile rows.
+    let bid = "bn_5e12";
+    drive(&mut app, window, |this, w, cx| {
+        this.navigate(Route::Bench(bid.into()), w, cx);
+    });
+    for _ in 0..3 {
+        app.frame(window.into());
+        app.run_until_idle();
+    }
+    drive(&mut app, window, |this, w, cx| {
+        let eid = this
+            .bench
+            .entries
+            .get(bid)
+            .and_then(|l| l.ready())
+            .and_then(|v| v.iter().find(|e| e.status == BenchEntryStatus::Done))
+            .expect("done entry")
+            .id
+            .clone();
+        this.navigate(Route::BenchEntry(bid.into(), eid), w, cx);
+    });
+    for _ in 0..4 {
+        app.frame(window.into());
+        app.run_until_idle();
+    }
+
+    // Scroll to the bottom under `All`, then switch to `FalsePositives` (fewer tiles).
+    let (scroll_before, grid_h_before) = drive(&mut app, window, |this, _, cx| {
+        let max_y = this.page_scroll.max_offset().height;
+        assert!(f32::from(max_y) > 100.0, "expected scrollable entry page, max_offset={max_y:?}");
+        this.page_scroll.set_offset(point(px(0.), -max_y));
+        cx.notify();
+        (f32::from(-max_y), this.bench.entry_grid_height.get())
+    });
+    app.frame(window.into());
+    assert!(grid_h_before > 100.0, "expected measured grid height, got {grid_h_before}");
+
+    // Activate the real `eimg-filter-fp` chip via focus + Enter so the chip's own handler runs.
+    drive(&mut app, window, |this, w, cx| {
+        this.focus_key("eimg-filter-fp", w, cx);
+    });
+    app.simulate_input(
+        window.into(),
+        folo_ui::PlatformInput::KeyDown(folo_ui::KeyDownEvent {
+            keystroke: folo_ui::Keystroke::parse("enter").unwrap(),
+            is_held: false,
+        }),
+    );
+    app.frame(window.into());
+    app.frame(window.into());
+
+    let (active_filter, scroll_after) = drive(&mut app, window, |this, _, _| {
+        (this.bench.entry_image_filter, f32::from(this.page_scroll.offset().y))
+    });
+    assert_eq!(active_filter, EntryImageFilter::FalsePositives, "FP chip handler should activate filter");
+    assert!(
+        (scroll_after - scroll_before).abs() < 2.0,
+        "page_scroll must stay anchored on filter shrink (before={scroll_before}, after={scroll_after})"
+    );
+}

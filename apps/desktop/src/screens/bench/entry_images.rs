@@ -57,6 +57,7 @@ impl FoloApp {
                 let next = orders[i.min(orders.len() - 1)];
                 if this.bench.entry_image_order != next {
                     this.bench.entry_image_order = next;
+                    this.bench.entry_grid_min_h = None;
                     let server = next.server_sort();
                     if this.bench.image_sort != server {
                         this.bench.image_sort = server;
@@ -123,8 +124,17 @@ impl FoloApp {
         let active_filter = self.bench.entry_image_filter;
         let show_truth = !self.bench.entry_inspect_hide_truth;
         let show_preds = !self.bench.entry_inspect_hide_preds;
-        let filter_bar =
-            self.entry_image_filter_bar(&t, active_filter, counts, show_truth, show_preds, window, cx);
+        let filter_bar = self.entry_image_filter_bar(
+            &t,
+            &b.id,
+            &e.id,
+            active_filter,
+            counts,
+            show_truth,
+            show_preds,
+            window,
+            cx,
+        );
 
         // Reuse the single-pass error stats for filtering and client-side error sorting.
         let filtered = if active_filter == EntryImageFilter::All && order == EntryImageOrder::MostErrors {
@@ -221,6 +231,7 @@ impl FoloApp {
                             } else {
                                 this.bench.selected_entry_image = Some(target);
                                 this.bench.entry_image_reveal = Some(EntryImageReveal::Preview);
+                                this.bench.entry_grid_min_h = None;
                                 this.bench.entry_inspect_scroll.set_offset(folo_ui::point(px(0.), px(0.)));
                                 let fh = this.fh("eimg-prev", cx);
                                 w.focus(&fh);
@@ -285,6 +296,7 @@ impl FoloApp {
                 cx,
                 act(|this, _, cx| {
                     this.bench.entry_image_filter = EntryImageFilter::All;
+                    this.bench.entry_grid_min_h = None;
                     cx.notify();
                 }),
             );
@@ -361,19 +373,43 @@ impl FoloApp {
                         Some("icons/chevron-down.svg"),
                         window,
                         cx,
-                        act(move |this, _, cx| this.more_entry_images(&bid, &eid, cx)),
+                        act(move |this, _, cx| {
+                            this.bench.entry_grid_min_h = None;
+                            this.more_entry_images(&bid, &eid, cx);
+                        }),
                     )
                 }))
+            });
+        let grid_min_h = self
+            .bench
+            .entry_grid_min_h
+            .as_ref()
+            .filter(|((sb, se), _)| sb == &b.id && se == &e.id)
+            .map(|(_, h)| *h);
+        let grid_height_cell = self.bench.entry_grid_height.clone();
+        let grid_body = div()
+            .relative()
+            .when_some(grid_min_h, |d, h| d.min_h(px(h)))
+            .child(
+                folo_ui::canvas(
+                    move |b, _, _| grid_height_cell.set(f32::from(b.size.height)),
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full(),
+            )
+            .children(empty_filter)
+            .when(!tiles.is_empty(), |d| {
+                d.child(div().p(px(16.)).flex().flex_wrap().gap(px(12.)).children(tiles))
             });
         panel(&t)
             .child(header)
             .children(retry_anchor)
             .child(filter_bar)
             .children(inspector)
-            .children(empty_filter)
-            .when(!tiles.is_empty(), |d| {
-                d.child(div().p(px(16.)).flex().flex_wrap().gap(px(12.)).children(tiles))
-            })
+            .child(grid_body)
             .child(footer)
             .into_any_element()
     }
@@ -382,6 +418,8 @@ impl FoloApp {
     fn entry_image_filter_bar(
         &mut self,
         t: &Theme,
+        bench_id: &str,
+        entry_id: &str,
         active: EntryImageFilter,
         counts: super::error_analysis::FilterCounts,
         show_truth: bool,
@@ -402,6 +440,7 @@ impl FoloApp {
         ]
         .into_iter()
         .map(|(key, label, filter, cnt)| {
+            let (bid, eid) = (bench_id.to_string(), entry_id.to_string());
             self.chip(
                 key,
                 label,
@@ -411,6 +450,27 @@ impl FoloApp {
                 window,
                 cx,
                 act(move |this, _, cx| {
+                    if filter == EntryImageFilter::All {
+                        this.bench.entry_grid_min_h = None;
+                    } else if this.bench.entry_image_filter != filter {
+                        let scroll_depth = -f32::from(this.page_scroll.offset().y);
+                        if scroll_depth > 0.5 {
+                            let max_scroll = f32::from(this.page_scroll.max_offset().height);
+                            let slack_below = (max_scroll - scroll_depth).max(0.0);
+                            let prev_h = this.bench.entry_grid_height.get();
+                            let floor = (prev_h - slack_below).max(0.0);
+                            if floor > 1.0 {
+                                let key = (bid.clone(), eid.clone());
+                                let prev_floor = this
+                                    .bench
+                                    .entry_grid_min_h
+                                    .as_ref()
+                                    .filter(|(k, _)| k == &key)
+                                    .map_or(0.0, |(_, h)| *h);
+                                this.bench.entry_grid_min_h = Some((key, prev_floor.max(floor)));
+                            }
+                        }
+                    }
                     this.bench.entry_image_filter = filter;
                     if let Some((sb, se, sid)) = this.bench.selected_entry_image.clone() {
                         let still_visible =
