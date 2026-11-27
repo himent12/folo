@@ -225,3 +225,76 @@ fn resumable(st: &RunState, id: &str) -> Result<()> {
     }
     Ok(())
 }
+
+impl RunEntry {
+    /// Checks whether `weights/last.folo` in this run's folder holds a valid, incomplete training checkpoint
+    /// (strictly fewer epochs done than the run's target schedule). Returns `Some((resume_epoch, best))` when a
+    /// replacement cloud worker can continue training from it.
+    pub(crate) fn resumable_checkpoint(&self) -> Option<(u32, Option<BestEpoch>)> {
+        let last = self.dir.join("weights").join("last.folo");
+        if !last.is_file() {
+            return None;
+        }
+        let ckpt = crate::engine::read_model_file(&last)
+            .ok()
+            .and_then(|f| f.checkpoint().map(|c| (c.epoch, c.best)))?;
+        let resume_epoch = ckpt.0.min(u32::MAX as u64) as u32;
+        let total_epochs = self.state.lock().unwrap().file.run.epochs;
+        if resume_epoch >= total_epochs {
+            return None;
+        }
+        let best = ckpt.1.fitness.map(|v| v as f32).filter(|f| f.is_finite()).and_then(|f| {
+            let ep = ckpt.1.epoch.saturating_add(1).clamp(1, i64::from(u32::MAX)) as u32;
+            (ep <= resume_epoch).then_some(BestEpoch { epoch: ep, map50_95: f })
+        });
+        Some((resume_epoch, best))
+    }
+
+    /// Rolls `metrics.jsonl` and live `Run` progress (`epoch`, `step`, `best`, `epochs_done`, `last_metrics`,
+    /// `eta_s`) back to match a synced checkpoint at `resume_epoch` before a replacement cloud worker continues
+    /// training from `weights/last.folo`, keeping `Run.status` active.
+    pub(crate) fn rollback_to_checkpoint(&self, resume_epoch: u32, ckpt_best: Option<BestEpoch>) {
+        let mut st = self.state.lock().unwrap();
+        mark_resume(&self.metrics_path(), resume_epoch);
+        let retained = super::history::read_metrics(&self.metrics_path());
+        if resume_epoch != st.file.epochs_done {
+            st.file.epochs_done = resume_epoch;
+            st.file.last_metrics = retained
+                .epochs
+                .last()
+                .filter(|ep| ep.epoch == resume_epoch)
+                .map(|ep| super::entry::model_metrics(&ep.val));
+        }
+        let r = &mut st.file.run;
+        r.epoch = resume_epoch;
+        r.step = if resume_epoch == 0 {
+            0
+        } else {
+            retained
+                .steps
+                .last()
+                .filter(|s| s.epoch == resume_epoch)
+                .map(|s| s.step)
+                .unwrap_or_else(|| u64::from(resume_epoch).saturating_mul(r.steps_per_epoch))
+        };
+        if resume_epoch == 0 {
+            r.best = None;
+        } else {
+            let mut best = r.best.filter(|b| b.epoch <= resume_epoch);
+            for ep in &retained.epochs {
+                if best.is_none_or(|b| ep.val.map50_95 > b.map50_95) {
+                    best = Some(BestEpoch { epoch: ep.epoch, map50_95: ep.val.map50_95 });
+                }
+            }
+            if let Some(cb) = ckpt_best
+                && best.is_none_or(|b| cb.map50_95 > b.map50_95)
+            {
+                best = Some(cb);
+            }
+            r.best = best;
+        }
+        r.eta_s = None;
+        st.tail.clear();
+        self.persist(&st);
+    }
+}

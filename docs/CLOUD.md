@@ -109,6 +109,21 @@ stopped run shows exactly where it stopped):
   `cloud_auth_failed`, `cloud_refused` (no capacity, no balance),
   `cloud_unavailable`, `cloud_boot_failed` (the worker check, an instance whose setup failed, or a worker that
   cannot be downloaded: nothing is rented then), `cloud_sync_failed`, `cloud_instance_lost`.
+- **Preemption and automatic resume.** When a provisioned instance (`provisions: true`) is preempted or unexpectedly
+  disappears mid-training (the worker stops answering while the provider reports `stopped` or `gone` for `lost_grace`,
+  the worker restarts and answers `run_not_found`, or the instance vanishes before final weights are collected after
+  completion) and an incomplete synced checkpoint (`weights/last.folo`) is on disk, FOLO automatically recovers
+  instead of failing the run: it releases the dead instance, folds its cost into `Run.cloud.cost_usd`, rolls local
+  `metrics.jsonl` and `Run` progress back to the synced checkpoint epoch, logs the preemption and retry attempt
+  (`attempt N/3`), transitions `Run.cloud.phase` back to `provisioning`, waits briefly (`preemption_backoff`, default
+  10 s), launches a replacement worker under the run's remaining `max_hours` deadline, and continues training from
+  `weights/last.folo`. Up to 3 automatic recoveries (`max_preemption_retries`) are attempted per run (persisted in
+  `runs/<id>/cloud.json` across restarts). Automatic resume never runs after a manual termination
+  (`DELETE /api/cloud/instances/{id}` / `folo cloud terminate`), a user stop request (`POST /api/runs/{id}/stop` — a
+  stop requested during recovery backoff cancels recovery immediately and ends the run `stopped` without launching a
+  replacement), an expired `max_hours` deadline, on `remote` servers, or before any checkpoint has been synced. Once
+  the retry budget is exhausted, the run fails with `cloud_instance_lost` and keeps `weights/last.folo` on disk so it
+  can still be resumed manually.
 - **Resuming.** `POST /api/runs` with `resume_run_id` resumes a stopped or failed cloud run on a new instance of
   its `compute` (which may change, like `device`), with a new `Run.cloud`: the copied `weights/last.folo` is
   uploaded and the worker continues it (`checkpoint`, docs/API.md), so the step numbers go on. With `"compute":
@@ -356,7 +371,7 @@ folo cloud check cc_9b1c               # re-verify reachability, token and worke
 | `cloud_unavailable` (`502`) | Provider API unreachable, or `remote` server down, scheme mismatch (`https://` against plain HTTP or `http://` against TLS), or untrusted self-signed / private-CA certificate. | Check network / server status. Follow the scheme hint (`http://` vs `https://`), or set `FOLO_TLS_CA=<ca.pem>` for a self-signed or private-CA `remote` server. |
 | `cloud_boot_failed` (`502`) | Worker download URL answered `404` (unpublished dev version or private repo, checked before renting), pod failed setup and self-terminated, worker lacked a usable Vulkan GPU (`llvmpipe` / no adapter), or `amp: true` requested without tensor cores. | For dev builds, set `worker_base_url` or `FOLO_CLOUD_WORKER_BASE_URL` to a hosted `install.sh` + archive; check the pod log in RunPod's console; for `amp` on a `remote` server, start it with `--tensor-cores`. |
 | `cloud_sync_failed` (`502`) | Dataset/weights upload or final weight download failed after retries while the instance was still alive (e.g. prolonged network outage or worker disk full). | Check `compute.disk_gb` and link stability, then resume (`resume_run_id`) or start again; `remote` servers reuse already-uploaded fingerprinted datasets. |
-| `cloud_instance_lost` (`502`) | Instance was terminated by hand, stopped/disappeared for 10 min (`lost_grace`), `remote` worker was unreachable for 10 min, or worker restarted and lost the run (`run_not_found`). | Checkpoints already synced to `runs/<id>/weights/last.folo` stay on disk. Resume the run (`resume_run_id`) on a new instance or locally (`"compute": null`). |
+| `cloud_instance_lost` (`502`) | Instance was terminated by hand, preempted/lost before any checkpoint was synced or after automatic resume exhausted its 3 retries (`max_preemption_retries`), `remote` worker was unreachable for 10 min, or a stopped worker vanished before collection. | Checkpoints already synced to `runs/<id>/weights/last.folo` stay on disk. Resume the run (`resume_run_id`) on a new instance or locally (`"compute": null`). |
 | `offer_not_found` (`404`) | Offer ID is stale or no longer in the provider catalog. | Refresh offers (`GET /api/cloud/connections/{id}/offers?refresh=true` or `folo cloud offers <id>`). |
 | `connection_in_use` (`409`) | Tried to disconnect a connection that still has live instances or active cloud runs. | Stop active runs and wait for `folo cloud instances` to show all instances `terminated` (or terminate them manually). |
 | `invalid_config` (`400`) | `device` set to something other than `auto`, `max_hours` outside `0.25..=720`, or `disk_gb` outside `10..=4096`. | Omit `device` (or pass `"auto"`) and keep limits in range. |
@@ -365,7 +380,8 @@ folo cloud check cc_9b1c               # re-verify reachability, token and worke
 | `cloud/connections.json` malformed (`internal`) | File was hand-edited into invalid JSON. FOLO never overwrites it. | Fix the JSON syntax or move the file aside so FOLO can create a fresh one. |
 
 ## Limits
-- One GPU per run; on-demand instances only.
+- One GPU per run; provisioned runs automatically recover from mid-run spot/preemptible worker loss once a checkpoint
+  has synced (up to 3 retries by default), while RunPod's catalog currently launches on-demand Secure/Community pods.
 - Validation (`/api/val`, `/eval`), inference and export of a cloud run's models run on this machine, as for any
   model.
 - A cloud run does not feed this server's throughput table, and its time estimate is the reference machine's

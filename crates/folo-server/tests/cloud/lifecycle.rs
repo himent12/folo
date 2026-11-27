@@ -127,7 +127,8 @@ fn a_lost_or_stopped_run_resumes_on_a_new_instance_and_then_here() {
     no_gpu();
     let t = TestDir::new("cloud-resume");
     let cloud = TestCloud::new(&t.join("workers"));
-    let store = plane(&t.join("home"), &cloud, fast());
+    let store =
+        plane(&t.join("home"), &cloud, folo_server::cloud::Tuning { max_preemption_retries: 0, ..fast() });
     let ds = dataset(&store);
     let conn = connect(&store);
     cloud.hold_epochs(true);

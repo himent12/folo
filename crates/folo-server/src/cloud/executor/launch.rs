@@ -89,12 +89,12 @@ impl Exec {
             .log(LogLevel::Info, format!("launching {} at {} ({disk_gb} GB disk)", offer.gpu, info.name));
         let internal = |e: std::io::Error| failed("internal", e.to_string());
         let token = files::random_hex(32).map_err(internal)?;
-        self.arm_deadline();
+        let remaining = self.ensure_deadline()?;
         let deadline = self.private.deadline.map(rfc3339);
         let record = self
             .core
             .ledger
-            .create(&self.c.connection.id, &info.id, self.entry.id(), &offer, deadline, Some(self.limit()))
+            .create(&self.c.connection.id, &info.id, self.entry.id(), &offer, deadline, Some(remaining))
             .map_err(|e| failed(&e.body.code, e.body.message))?;
         // Nothing could terminate an instance launched on a connection removed since the run started. Removing one
         // looks for live records under the cloud lock this one was written under, so from here on it is refused.
@@ -112,7 +112,7 @@ impl Exec {
             offer_id: offer.id.clone(),
             disk_gb,
             token,
-            lifetime_s: self.limit().as_secs(),
+            lifetime_s: remaining.as_secs().max(1),
             worker_base_url: folo_cloud::worker_base_url(&values, env!("CARGO_PKG_VERSION")),
         };
         let nothing = |release: &mut Release, e: folo_cloud::Error| {

@@ -9,5 +9,6 @@ mod failures;
 mod harness;
 mod lifecycle;
 mod lost_instances;
+mod preemption;
 mod remote;
 mod routes;

@@ -64,6 +64,12 @@ pub(crate) struct Private {
     /// Unix seconds `weights/last.folo` was last copied.
     #[serde(default)]
     pub synced: Option<f64>,
+    /// Automatic preemption recovery attempts already started for this run.
+    #[serde(default)]
+    pub preemptions: u32,
+    /// Cumulative estimated USD cost of earlier instances replaced after preemption.
+    #[serde(default)]
+    pub prior_cost_usd: f64,
     /// How the run ended on the worker, once its weights were collected.
     #[serde(default)]
     pub outcome: Option<Outcome>,
@@ -76,6 +82,7 @@ impl std::fmt::Debug for Private {
             .field("instance_id", &self.instance_id)
             .field("worker_url", &self.worker_url)
             .field("run_id", &self.run_id)
+            .field("preemptions", &self.preemptions)
             .finish_non_exhaustive()
     }
 }

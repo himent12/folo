@@ -470,6 +470,8 @@ pub(super) fn fast() -> Tuning {
         release_wait: Duration::from_millis(500),
         require_gpu: false,
         max_run: None,
+        max_preemption_retries: 3,
+        preemption_backoff: Duration::from_millis(50),
         ..Tuning::default()
     }
 }

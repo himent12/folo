@@ -12,7 +12,6 @@ use folo_api::{
 };
 use folo_client::transfer::{self, Control, TransferError};
 use folo_client::{Client, encode};
-use folo_cloud::InstanceState;
 
 use crate::cloud::state::Outcome;
 use crate::cloud::worker;
@@ -278,9 +277,25 @@ impl Exec {
                 Err(TransferError::Stopped) => return Err(Halt::LetGo),
                 Err(e) => {
                     let file = if last { "last.folo" } else { "best.folo" };
-                    // An instance its provider says is gone is lost, whichever request noticed it: the run resumes
-                    // from the checkpoint copied before, as one lost while it trains does.
-                    if matches!(self.instance_state(), Some(InstanceState::Gone | InstanceState::Stopped)) {
+                    // An instance its provider says is gone is lost, whichever request noticed it: if training
+                    // completed without a user stop/deadline and an incomplete checkpoint is synced, auto-resume
+                    // may finish and collect on a replacement worker; otherwise the run fails with the checkpoint
+                    // kept on disk.
+                    if self.instance_state().is_some_and(|s| s.is_lost()) {
+                        if self.instance_ended() {
+                            return Err(self.lost_by_hand());
+                        }
+                        if self.c.provider.info().provisions
+                            && !self.entry.stop_requested()
+                            && !time_up
+                            && !self.past_deadline()
+                            && end.as_ref().is_some_and(|r| r.status == RunStatus::Completed)
+                        {
+                            return Err(Halt::Preempted(format!(
+                                "copying weights/{file}: {e}; its instance disappeared before final weights were \
+                                 collected"
+                            )));
+                        }
                         return Err(failed(
                             "cloud_instance_lost",
                             format!(

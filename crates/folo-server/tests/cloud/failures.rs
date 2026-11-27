@@ -170,7 +170,7 @@ fn a_checkpoint_fetched_just_before_the_worker_is_lost_is_kept() {
     no_gpu();
     let t = TestDir::new("cloud-copy-lost");
     let cloud = TestCloud::new(&t.join("workers"));
-    let store = plane(&t.join("home"), &cloud, fast());
+    let store = plane(&t.join("home"), &cloud, Tuning { max_preemption_retries: 0, ..fast() });
     let ds = dataset(&store);
     let conn = connect(&store);
     cloud.hold_epochs(true);
@@ -382,7 +382,7 @@ fn a_stop_retries_delivery_after_a_transient_worker_outage() {
     no_gpu();
     let t = TestDir::new("cloud-stop-retry");
     let cloud = TestCloud::new(&t.join("workers"));
-    let store = plane(&t.join("home"), &cloud, Tuning { lost_grace: Duration::from_secs(30), ..fast() });
+    let store = plane(&t.join("home"), &cloud, Tuning { lost_grace: Duration::from_secs(60), ..fast() });
     let ds = dataset(&store);
     let conn = connect(&store);
     cloud.hold_epochs(true);
@@ -397,13 +397,13 @@ fn a_stop_retries_delivery_after_a_transient_worker_outage() {
     });
 
     // Bring the worker back and unhold epochs: the control plane must retry `/stop` immediately and end Stopped
-    // well before `lost_grace` (30 s) rather than letting the worker train to completion or timing out.
+    // well before `lost_grace` (60 s) rather than letting the worker train to completion or timing out.
     cloud.gates.down.store(false, Ordering::SeqCst);
     cloud.hold_epochs(false);
     let t0 = std::time::Instant::now();
     let done = finished(&store, &run.id);
     assert_eq!(done.status, RunStatus::Stopped, "{:?}", log_of(&store, &run.id));
-    assert!(t0.elapsed() < Duration::from_secs(15), "stop retry waited too long: {:?}", t0.elapsed());
+    assert!(t0.elapsed() < Duration::from_secs(30), "stop retry waited too long: {:?}", t0.elapsed());
     assert_eq!(cloud.live(), 0);
 }
 

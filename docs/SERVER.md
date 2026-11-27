@@ -116,7 +116,8 @@ The services hang off the real store, all built in `RealStore::open_with_cloud`:
 out through `Store::labeler` and `Store::benches`; the mock has neither.
 
 ## Datasets, models and inference
-- The real store's datasets are read with folo-data and indexed into a JSON cache under the data dir, invalidated by
+- The real store's datasets are read with folo-data (YOLO, COCO, and Pascal VOC auto-detected under `format: "auto"`)
+  and indexed into a JSON cache under the data dir, invalidated by
   file mtimes (`index.rs`, `Fingerprint`: file sizes and modification times under the dataset folder). On startup
   `folo-index` checks and rebuilds registered datasets in parallel via rayon; image listings slice directly by split
   range and page in a single pass, and issue listings filter and count in a single pass.
@@ -126,7 +127,12 @@ out through `Store::labeler` and `Store::benches`; the mock has neither.
   `/eval` runs folo-vision's validator with single-flight deduplication per `(model, key)` (disk-cached under
   `cache/eval/`), derived `/weights?format=…` exports serialize per `(model, variant)`, and `GET /api/models`,
   `GET /api/models/{id}` and `GET /api/models/{id}/eval` support conditional weak-`ETag` (`304` / `412`) caching.
-- `/predict` keeps a single-flight LRU of loaded, fused `Predictor`s (`engine.rs`, `PREDICTOR_CACHE` models).
+- `/predict` keeps a single-flight LRU of loaded, fused `Predictor`s (`engine.rs`, `PREDICTOR_CACHE` models). When
+  `/api/health` and `/api/system` advertise `predict_options`, `POST /api/predict` accepts mutually exclusive optional
+  `tile` (SAHI) and `tta` (test-time augmentation) objects over both JSON and multipart requests, treats top-level
+  `max_det` as a hard response cap, and enforces server workload budgets (`MAX_PREDICT_TILES = 256`,
+  `MAX_PREDICT_TILE_BATCH = 32`, `MAX_PREDICT_CROP_BYTES = 256 MiB`, `MAX_PREDICT_TTA_VIEWS = 16`) before acquiring
+  the predictor lock.
 - Devices go through folo-vision's `resolve_device` / `can_place` (`auto` is the GPU when folo-gpu finds an adapter,
   else the CPU) and GPU info comes from folo-gpu.
 - The request and response types live in `folo-api`, a dependency-light crate (serde and serde_json; schemars behind
@@ -189,8 +195,12 @@ a run of this server.
   claim-execute-publish path) but not the queue or the device; its worker's history is mirrored poll by poll into the
   same `metrics.jsonl`, `log.jsonl` and `samples/`, so everything downstream of a run is unchanged.
 - A guard releases the instance on every way out, including a panic; a run that trains survives this server
-  (`runs/<id>/cloud.json` and an OS lock on `cloud.lock` let the next process follow it again).
-- Tests drive the whole lifecycle against an in-process worker (`tests/cloud/`).
+  (`runs/<id>/cloud.json` and an OS lock on `cloud.lock` let the next process follow it again). When a provisioned
+  worker is preempted or unexpectedly disappears mid-training after an incomplete `weights/last.folo` has synced, the
+  executor automatically releases the dead instance, rolls local metrics/progress back to the checkpoint, folds prior
+  instance cost into `Run.cloud.cost_usd`, and re-provisions a replacement worker under the remaining `max_hours`
+  deadline (up to `Tuning::max_preemption_retries = 3` attempts, honoring stop requests immediately during backoff).
+- Tests drive the whole lifecycle against an in-process worker (`tests/cloud/`, including `preemption.rs`).
 
 ## Agent labeling
 `folo_server::label` ([LABELING.md](LABELING.md)): labeling jobs under `<data dir>/label/<id>/` (unlabeled images,
