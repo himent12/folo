@@ -292,10 +292,11 @@ fn fmt_batch(r: &Run) -> String {
 /// Compares canonical IDs / exact numeric values (not formatted display labels) so distinct
 /// datasets, pretrained models with matching display names, or fine-grained numeric settings never
 /// falsely collapse to identical.
-pub fn hyperparam_rows(
+pub fn hyperparam_rows_with_arch(
     runs: &[Run],
     dataset_name: impl Fn(&Run) -> String,
     model_name: impl Fn(&str) -> String,
+    arch_of: impl Fn(&Run) -> crate::arch::ModelArch,
 ) -> Vec<HyperparamRow> {
     let make = |label: &'static str, f: &dyn Fn(&Run) -> (String, String)| -> HyperparamRow {
         let pairs: Vec<(String, String)> = runs.iter().map(f).collect();
@@ -310,7 +311,7 @@ pub fn hyperparam_rows(
     vec![
         make("Dataset", &|r| (r.config.dataset_id.clone(), dataset_name(r))),
         make("Architecture", &|r| {
-            let a = r.config.arch.as_str().to_string();
+            let a = arch_of(r).as_str().to_string();
             (a.clone(), a)
         }),
         make("Image size", &|r| (r.config.imgsz.to_string(), format!("{} px", r.config.imgsz))),
@@ -366,6 +367,15 @@ pub fn hyperparam_rows(
             (d.clone(), d)
         }),
     ]
+}
+
+#[cfg(test)]
+pub fn hyperparam_rows(
+    runs: &[Run],
+    dataset_name: impl Fn(&Run) -> String,
+    model_name: impl Fn(&str) -> String,
+) -> Vec<HyperparamRow> {
+    hyperparam_rows_with_arch(runs, dataset_name, model_name, |r| crate::arch::ModelArch::v1(r.config.arch))
 }
 
 #[cfg(test)]

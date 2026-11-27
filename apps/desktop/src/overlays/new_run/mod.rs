@@ -84,6 +84,8 @@ impl FoloApp {
         let gone_name = self.nr_gone_name();
         let f = self.new_run.as_ref().unwrap();
         let ds_i = datasets.iter().position(|d| d.id == f.dataset);
+        let model_arch = f.model_arch();
+        let arch_family = f.arch_family;
         let (
             arch,
             epochs,
@@ -200,11 +202,32 @@ impl FoloApp {
                 }
             }),
         );
+        let folo2_supported = self.store.system.ready().is_none() || self.store.supports_folo2();
+        let folo2_blocked = self.nr_folo2_blocked();
+        let fam_off = [
+            None,
+            (!folo2_supported).then(|| SharedString::from("Connected server does not advertise folo2_arch")),
+        ];
+        let arch_fam_seg = self.segmented_fill_with(
+            "nr-arch-fam",
+            &["FOLO v1", "FOLO v2"],
+            if arch_family.is_v2() { 1 } else { 0 },
+            &fam_off,
+            window,
+            cx,
+            Rc::new(|this, i, _, cx| {
+                let fam = if i == 1 { crate::arch::ArchFamily::Folo2 } else { crate::arch::ArchFamily::Folo };
+                this.nr_set_arch_family(fam, cx);
+            }),
+        );
         // Geist Mono, so "l" can't read as "1" or "|".
         let arch_seg = div()
             .w_full()
-            .font_family(crate::theme::MONO)
-            .child(self.segmented_fill(
+            .flex()
+            .flex_col()
+            .gap(px(6.))
+            .child(arch_fam_seg)
+            .child(div().w_full().font_family(crate::theme::MONO).child(self.segmented_fill(
                 "nr-arch",
                 &["n", "s", "m", "l", "x"],
                 arch,
@@ -213,7 +236,8 @@ impl FoloApp {
                 Rc::new(|this, i, _, cx| {
                     this.nr_set_arch(i, cx);
                 }),
-            ))
+            )))
+            .when_some(folo2_blocked, |d, why| d.child(text(ty::SM, t.danger_text).child(why)))
             .into_any_element();
         let (start_select, start_hint) = (self.start_from_select(window, cx), self.nr_start_hint());
         let weights_gone = self.nr_weights_gone();
@@ -596,7 +620,7 @@ impl FoloApp {
                         "Architecture",
                         arch_seg,
                         // The letter's size named, with compute scaled to the selected image size.
-                        Some(arch_caption(arch, imgsz_val)),
+                        Some(arch_caption(model_arch, imgsz_val)),
                     )))
                     .child(
                         div().flex_1().child(match size_help {
@@ -796,7 +820,8 @@ impl FoloApp {
             ds,
             cloud,
             cloud_offer,
-            arch,
+            model_arch,
+            folo2_blocked,
             epochs,
             batch: batch_val,
             imgsz: imgsz_val,
@@ -815,34 +840,62 @@ impl FoloApp {
 
 /// Architecture caption for the New Run dialog: name, parameter count, and GFLOPs scaled quadratically
 /// from the `docs/MODEL.md` 640 px reference to the selected `imgsz`.
-fn arch_caption(arch: usize, imgsz: u32) -> String {
-    const SPECS: [(&str, &str, f32); 5] = [
-        ("nano", "2.62 M", 6.54),
-        ("small", "9.46 M", 21.59),
-        ("medium", "20.1 M", 68.10),
-        ("large", "25.4 M", 87.15),
-        ("extra large", "57.0 M", 195.27),
-    ];
-    let idx = arch.min(SPECS.len() - 1);
-    let (size_name, params, gflops_640) = SPECS[idx];
-    let scale = (imgsz as f32 / 640.0).powi(2);
-    let gflops = gflops_640 * scale;
+fn arch_caption(arch: crate::arch::ModelArch, imgsz: u32) -> String {
+    const SIZE_NAMES: [&str; 5] = ["nano", "small", "medium", "large", "extra large"];
+    const PARAMS_V1: [&str; 5] = ["2.62 M", "9.46 M", "20.1 M", "25.4 M", "57.0 M"];
+    const PARAMS_V2: [&str; 5] = ["2.85 M", "9.85 M", "20.8 M", "26.2 M", "58.8 M"];
+    let idx = ARCHS.iter().position(|a| *a == arch.scale).unwrap_or(0);
+    let size_name = SIZE_NAMES[idx];
+    let params = if arch.is_v2() { PARAMS_V2[idx] } else { PARAMS_V1[idx] };
+    let scale = (imgsz as f64 / 640.0).powi(2);
+    let gflops = arch.gflops_640() * scale;
     let gf = if gflops >= 100.0 { format!("{gflops:.0}") } else { format!("{gflops:.1}") };
-    format!("{}, {size_name} · {params} params · {gf} GFLOPs at {imgsz} px", ARCHS[idx].as_str())
+    format!("{}, {size_name} · {params} params · {gf} GFLOPs at {imgsz} px", arch.as_str())
 }
 
 #[cfg(test)]
 mod tests {
     use super::arch_caption;
+    use crate::api::Arch;
+    use crate::arch::ModelArch;
 
     #[test]
     fn arch_caption_scales_gflops_with_image_size() {
-        assert_eq!(arch_caption(0, 640), "folo-n, nano · 2.62 M params · 6.5 GFLOPs at 640 px");
-        assert_eq!(arch_caption(0, 64), "folo-n, nano · 2.62 M params · 0.1 GFLOPs at 64 px");
-        assert_eq!(arch_caption(0, 1024), "folo-n, nano · 2.62 M params · 16.7 GFLOPs at 1024 px");
-        assert_eq!(arch_caption(2, 640), "folo-m, medium · 20.1 M params · 68.1 GFLOPs at 640 px");
-        assert_eq!(arch_caption(3, 640), "folo-l, large · 25.4 M params · 87.2 GFLOPs at 640 px");
-        assert_eq!(arch_caption(4, 640), "folo-x, extra large · 57.0 M params · 195 GFLOPs at 640 px");
-        assert_eq!(arch_caption(4, 1024), "folo-x, extra large · 57.0 M params · 500 GFLOPs at 1024 px");
+        assert_eq!(
+            arch_caption(ModelArch::v1(Arch::N), 640),
+            "folo-n, nano · 2.62 M params · 6.5 GFLOPs at 640 px"
+        );
+        assert_eq!(
+            arch_caption(ModelArch::v1(Arch::N), 64),
+            "folo-n, nano · 2.62 M params · 0.1 GFLOPs at 64 px"
+        );
+        assert_eq!(
+            arch_caption(ModelArch::v1(Arch::N), 1024),
+            "folo-n, nano · 2.62 M params · 16.7 GFLOPs at 1024 px"
+        );
+        assert_eq!(
+            arch_caption(ModelArch::v1(Arch::M), 640),
+            "folo-m, medium · 20.1 M params · 68.1 GFLOPs at 640 px"
+        );
+        assert_eq!(
+            arch_caption(ModelArch::v1(Arch::L), 640),
+            "folo-l, large · 25.4 M params · 87.2 GFLOPs at 640 px"
+        );
+        assert_eq!(
+            arch_caption(ModelArch::v1(Arch::X), 640),
+            "folo-x, extra large · 57.0 M params · 195 GFLOPs at 640 px"
+        );
+        assert_eq!(
+            arch_caption(ModelArch::v1(Arch::X), 1024),
+            "folo-x, extra large · 57.0 M params · 500 GFLOPs at 1024 px"
+        );
+        assert_eq!(
+            arch_caption(ModelArch::v2(Arch::S), 640),
+            "folo2-s, small · 9.85 M params · 22.4 GFLOPs at 640 px"
+        );
+        assert_eq!(
+            arch_caption(ModelArch::v2(Arch::N), 640),
+            "folo2-n, nano · 2.85 M params · 6.9 GFLOPs at 640 px"
+        );
     }
 }

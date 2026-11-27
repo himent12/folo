@@ -9,6 +9,8 @@ mod server;
 mod streams;
 mod transport;
 
+use std::collections::HashMap;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use serde::Serialize;
@@ -36,6 +38,10 @@ pub struct HttpBackend {
     /// The address as typed when it names no HTTP server ("abc def", "http://", "foo://x"):
     /// nothing is sent, and errors say so.
     not_an_address: Option<String>,
+    /// Canonical architecture strings (`"folo2-*"`) learned from `create_run_with_arch`, `run_cli`,
+    /// or `GET /api/models/{id}`'s `x-folo-arch` header.
+    run_archs: Mutex<HashMap<String, String>>,
+    model_archs: Mutex<HashMap<String, String>>,
 }
 
 impl HttpBackend {
@@ -61,6 +67,8 @@ impl HttpBackend {
             agent: agent(Some(Duration::from_secs(30))),
             stream_agent: stream_agent(handshake, silence),
             not_an_address,
+            run_archs: Mutex::new(HashMap::new()),
+            model_archs: Mutex::new(HashMap::new()),
         }
     }
 
@@ -214,8 +222,46 @@ impl Backend for HttpBackend {
         self.get(&format!("/runs/{}", seg(id)))
     }
 
+    fn model_arch(&self, id: &str) -> ApiResult<Option<String>> {
+        if let Some(cached) = self.model_archs.lock().unwrap().get(id).cloned() {
+            return Ok(Some(cached));
+        }
+        let (model, header) =
+            self.get_with_header::<Model>(&format!("/models/{}", seg(id)), "x-folo-arch")?;
+        if let Some(arch) = header.as_deref().and_then(crate::arch::ModelArch::parse) {
+            let s = arch.as_str().to_string();
+            self.model_archs.lock().unwrap().insert(id.to_string(), s.clone());
+            if let Some(run_id) = model.run_id {
+                self.run_archs.lock().unwrap().insert(run_id, s.clone());
+            }
+            return Ok(Some(s));
+        }
+        Ok(None)
+    }
+
+    fn known_archs(&self) -> (HashMap<String, String>, HashMap<String, String>) {
+        (self.run_archs.lock().unwrap().clone(), self.model_archs.lock().unwrap().clone())
+    }
+
     fn create_run(&self, config: TrainConfig) -> ApiResult<Run> {
         self.post("/runs", &config)
+    }
+
+    fn create_run_with_arch(&self, config: TrainConfig, arch_override: Option<&str>) -> ApiResult<Run> {
+        let Some(arch) = arch_override else {
+            return self.create_run(config);
+        };
+        let mut body = serde_json::to_value(&config)
+            .map_err(|e| ApiError::new("bad_request", format!("Could not encode run config: {e}")))?;
+        if let Some(obj) = body.as_object_mut() {
+            obj.insert("arch".into(), serde_json::Value::String(arch.into()));
+        }
+        let run: Run = self.post("/runs", &body)?;
+        self.run_archs.lock().unwrap().insert(run.id.clone(), arch.into());
+        if let Some(mid) = &run.model_id {
+            self.model_archs.lock().unwrap().insert(mid.clone(), arch.into());
+        }
+        Ok(run)
     }
 
     fn stop_run(&self, id: &str) -> ApiResult<Run> {
@@ -231,11 +277,31 @@ impl Backend for HttpBackend {
     }
 
     fn run_cli(&self, id: &str) -> ApiResult<CliCommand> {
-        self.get(&format!("/runs/{}/cli", seg(id)))
+        let cmd: CliCommand = self.get(&format!("/runs/{}/cli", seg(id)))?;
+        if let Some(arch) = crate::arch::ModelArch::from_cli_argv(&cmd.argv) {
+            self.run_archs.lock().unwrap().insert(id.to_string(), arch.as_str().to_string());
+        }
+        Ok(cmd)
     }
 
     fn estimate_run(&self, config: &TrainConfig) -> ApiResult<RunEstimate> {
         self.post("/runs/estimate", config)
+    }
+
+    fn estimate_run_with_arch(
+        &self,
+        config: &TrainConfig,
+        arch_override: Option<&str>,
+    ) -> ApiResult<RunEstimate> {
+        let Some(arch) = arch_override else {
+            return self.estimate_run(config);
+        };
+        let mut body = serde_json::to_value(config)
+            .map_err(|e| ApiError::new("bad_request", format!("Could not encode run config: {e}")))?;
+        if let Some(obj) = body.as_object_mut() {
+            obj.insert("arch".into(), serde_json::Value::String(arch.into()));
+        }
+        self.post("/runs/estimate", &body)
     }
 
     fn throughput(&self) -> ApiResult<ThroughputTable> {

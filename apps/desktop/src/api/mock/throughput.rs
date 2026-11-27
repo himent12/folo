@@ -101,9 +101,20 @@ impl MockBackend {
         })
     }
 
-    /// [`Backend::estimate_run`]'s answer.
-    pub(super) fn estimate_for(&self, config: &TrainConfig) -> ApiResult<RunEstimate> {
+    /// [`Backend::estimate_run`] / [`Backend::estimate_run_with_arch`]'s answer.
+    pub(super) fn estimate_for(
+        &self,
+        config: &TrainConfig,
+        arch_override: Option<&str>,
+    ) -> ApiResult<RunEstimate> {
         self.check()?;
+        let model_arch = crate::arch::ModelArch::from_raw_or(arch_override, config.arch);
+        if model_arch.is_v2() && config.compute.is_some() {
+            return Err(ApiError::new(
+                "invalid_config",
+                "folo2 architectures are not supported for cloud runs yet (train locally, or use folo-n..folo-x for cloud compute)",
+            ));
+        }
         let ds = self
             .datasets
             .iter()
@@ -115,16 +126,14 @@ impl MockBackend {
         // Reference rates (the app's own reference model) unless the table has a measured row of
         // this device with the run's arch, image size, batch and precision (docs/API.md: the
         // measured row first).
-        let arch = match config.arch.as_str() {
-            "folo-n" => 0,
-            "folo-s" => 1,
-            "folo-m" => 2,
-            "folo-l" => 3,
-            _ => 4,
-        };
         let cpu = config.device == "cpu";
-        let (secs, vram_gib) =
-            crate::overlays::estimate(arch, config.epochs as f32, config.batch, config.imgsz, train as u32);
+        let (secs, vram_gib) = crate::overlays::estimate_arch(
+            model_arch,
+            config.epochs as f32,
+            config.batch,
+            config.imgsz,
+            train as u32,
+        );
         let secs = if cpu { secs * 25. } else { secs };
         let vram_gib = if config.amp { vram_gib * 0.58 } else { vram_gib };
         let epochs = config.epochs.max(1);
@@ -311,7 +320,7 @@ impl MockBackend {
             est_peak_vram_bytes: (!cpu).then_some((vram_gib as f64 * (1u64 << 30) as f64) as u64),
             vram_source: (!cpu).then_some(ThroughputSource::Reference),
             close_mosaic: close,
-            cli: Some(self.cli_for(config).cli),
+            cli: Some(self.cli_for(config, arch_override).cli),
             cost,
         })
     }

@@ -407,6 +407,7 @@ impl FoloApp {
 
     fn install_models(&mut self, mut models: Vec<Model>, cx: &mut Context<Self>) {
         models.sort_by(|a, b| b.created.cmp(&a.created));
+        self.store.sync_known_archs();
         if self.store.models.ready() != Some(&models) {
             // A model gone from the list (its run deleted elsewhere).
             for (id, name) in gone_from(self.store.models.ready(), &models, |m| (&m.id, &m.name)) {
@@ -415,11 +416,48 @@ impl FoloApp {
             self.store.models = Load::Ready(models);
             self.close_menus();
         }
+        self.probe_missing_model_archs(cx);
         // The Playground's model is one of these, or replaced now.
         self.reconcile_play_model(cx);
     }
 
+    /// Lazily resolves `x-folo-arch` (`folo2-*`) headers once per unseen model id on HTTP backends
+    /// when `folo2_arch` is supported (no-op once cached or in mock mode where `known_archs` already
+    /// populates every v2 model).
+    pub(super) fn probe_missing_model_archs(&mut self, cx: &mut Context<Self>) {
+        if self.server_mode == super::ServerMode::Mock || !self.store.supports_folo2() {
+            return;
+        }
+        let ids: Vec<String> = self
+            .store
+            .models
+            .ready()
+            .into_iter()
+            .flatten()
+            .filter(|m| {
+                !self.store.model_archs.contains_key(&m.id)
+                    && self.store.probed_model_archs.insert(m.id.clone())
+            })
+            .map(|m| m.id.clone())
+            .collect();
+        for id in ids {
+            let mid = id.clone();
+            self.fetch(
+                cx,
+                move |api| api.model_arch(&mid),
+                move |this, r, _| {
+                    if let Ok(Some(raw)) = r
+                        && let Some(arch) = crate::arch::ModelArch::parse(&raw)
+                    {
+                        this.store.note_model_arch(&id, arch);
+                    }
+                },
+            );
+        }
+    }
+
     fn install_runs(&mut self, runs: Vec<Run>, cx: &mut Context<Self>) {
+        self.store.sync_known_archs();
         for (id, name) in gone_from(self.store.runs.ready(), &runs, |r| (&r.id, &r.name)) {
             self.removed_elsewhere(&id, name, cx);
         }

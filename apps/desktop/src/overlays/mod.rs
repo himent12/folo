@@ -24,7 +24,7 @@ use crate::theme::{Theme, radius, ty};
 use crate::ui::*;
 
 pub use confirm_close::closing_stops;
-pub use new_run_footer::estimate;
+pub use new_run_footer::estimate_arch;
 
 /// Keeps an overlay from taking the rest of the click that opened it: the second press of a
 /// double-click whose first press (or its release) opened the overlay would dismiss it at once on

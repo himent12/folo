@@ -69,6 +69,8 @@ mod sidebar;
 mod sprint14_tests;
 #[cfg(test)]
 mod sprint16_tests;
+#[cfg(test)]
+mod sprint17_tests;
 mod start_from;
 #[cfg(test)]
 pub(crate) mod tests;
@@ -77,6 +79,7 @@ mod text_input_tests;
 #[cfg(test)]
 mod theme_tests;
 mod titlebar;
+mod types;
 #[cfg(test)]
 mod unavailable_tests;
 
@@ -107,6 +110,10 @@ pub use playground::{IMAGE_FORMATS, PLAY_CONF_FLOOR};
 pub(crate) use playground_compare::{export_default_dir, picked_save};
 pub use preferences::{follow_system_appearance, is_dark};
 pub use sidebar::logo;
+pub use types::{
+    DeleteTarget, Drag, DsTab, Inspector, LogFilter, Palette, PlayImage, RunFilter, SampleSnapshot,
+    SampleView, ServerMode, SplitCounts, Toast,
+};
 
 actions!(
     folo,
@@ -170,132 +177,6 @@ pub type Action = Rc<dyn Fn(&mut FoloApp, &mut Window, &mut Context<FoloApp>)>;
 pub fn act(f: impl Fn(&mut FoloApp, &mut Window, &mut Context<FoloApp>) + 'static) -> Action {
     Rc::new(f)
 }
-
-/// What the delete confirmation is about.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub enum DeleteTarget {
-    /// A run that is not active: its folder, weights and models go.
-    Run(String),
-    /// A dataset: unregistered, its files stay (unless `delete_files`, for one the server wrote).
-    Dataset(String),
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum RunFilter {
-    All,
-    Active,
-    Completed,
-    Failed,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum DsTab {
-    Images,
-    Statistics,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum SampleView {
-    Predictions,
-    Truth,
-    Both,
-}
-
-/// The run log's level filter: every line, warnings, or errors.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum LogFilter {
-    All,
-    Warn,
-    Error,
-}
-
-pub struct Toast {
-    pub id: u64,
-    pub tone: Tone,
-    pub title: SharedString,
-    pub body: Option<SharedString>,
-    /// An optional follow-up ("Show in folder").
-    pub action: Option<(SharedString, Action)>,
-}
-
-/// Frozen filtered/sorted run-sample list and epoch captured when the inspector opens from a
-/// run's Validation samples panel so stepping, counter, and overlays stay aligned with the gallery
-/// even across live refreshes.
-#[derive(Clone, Debug)]
-pub struct SampleSnapshot {
-    pub epoch: u32,
-    pub conf: f32,
-    pub samples: Vec<Sample>,
-}
-
-/// The image inspector over a dataset grid.
-pub struct Inspector {
-    pub dataset: String,
-    /// Index into the filtered image list.
-    pub index: usize,
-    pub zoom: f32,
-    pub pan: (f32, f32),
-    pub drag_from: Option<(folo_ui::Point<Pixels>, (f32, f32))>,
-    pub hover_box: Option<usize>,
-    pub hover_from_stage: bool,
-    /// Box zoomed onto via clicking a label/prediction row (clicking again resets to fit).
-    pub focused_box: Option<usize>,
-    /// Whether bounding boxes are drawn on the stage (`B` toggles).
-    pub boxes: bool,
-    /// Whether label chips are drawn on bounding boxes (`L` toggles).
-    pub labels: bool,
-    /// An image to land on once the dataset's image list is in (opened from a run's sample).
-    pub want: Option<String>,
-    /// The image last shown and the filter/sort/list state it was shown under (class, empty-only,
-    /// filename query, image sort, loaded list length): when any of these change underneath (a page
-    /// arrives under a non-default sort, a server switch resets filters, class list reloads), the
-    /// inspector re-lands on the same image by id.
-    pub shown: Option<(String, Option<u32>, bool, String, crate::screens::datasets::ImageSort, usize)>,
-    /// Opened from a run's samples: that run and the view it was in. Images that are among its
-    /// samples show the epoch's predictions over the (dashed) labels, as the run page draws them.
-    pub sample: Option<(String, SampleView)>,
-    /// Frozen filtered & sorted sample snapshot captured when opened from the samples panel.
-    pub sample_snapshot: Option<SampleSnapshot>,
-}
-
-pub struct PlayImage {
-    pub name: SharedString,
-    pub input: PredictInput,
-    /// A dataset image's file as fetched (none in the demo, whose images are pixels): local runs
-    /// predict on it ([`PlayImage::predict_input`]).
-    pub encoded: Option<Arc<Vec<u8>>>,
-    pub image: Arc<folo_ui::RenderImage>,
-    pub width: u32,
-    pub height: u32,
-    /// When loaded from a Playground batch, identifies `(batch_id, item_index)` so predictions and
-    /// cached results never cross-contaminate same-basename files or failed stage loads.
-    pub batch_ref: Option<(u64, usize)>,
-}
-
-pub struct Palette {
-    pub input: Entity<TextInput>,
-    pub query: String,
-    pub selected: usize,
-    /// The rows as last drawn (group, title): when the list changes under the highlight (a run or
-    /// dataset deleted), the highlight stays on its item instead of on its old place.
-    pub shown: Vec<(&'static str, String)>,
-    pub scroll: ScrollHandle,
-    _sub: Subscription,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum ServerMode {
-    Mock,
-    Local,
-}
-
-/// Slider being dragged: its id and value range, mapped through its last laid-out bounds.
-pub struct Drag {
-    pub id: &'static str,
-}
-
-/// Per-class box counts of one split, keyed by (dataset, split, image count).
-pub type SplitCounts = ((String, crate::api::Split, usize, usize, usize), Vec<u64>);
 
 pub struct FoloApp {
     pub store: Store,
@@ -410,6 +291,8 @@ pub struct FoloApp {
 
     // Runs
     pub run_filter: RunFilter,
+    /// Architecture family filter on the Runs list (`None` = All, `Some(Folo)` = v1, `Some(Folo2)` = v2).
+    pub run_family_filter: Option<crate::arch::ArchFamily>,
     /// Architecture filter on the Runs list (`None` = All).
     pub run_arch_filter: Option<Arch>,
     /// Live search input on the Runs list (matches name, dataset, architecture, status, or id).
@@ -454,6 +337,8 @@ pub struct FoloApp {
     pub sample_epoch: Option<u32>,
 
     // Models
+    /// Architecture family filter on the Models list (`None` = All, `Some(Folo)` = v1, `Some(Folo2)` = v2).
+    pub models_family_filter: Option<crate::arch::ArchFamily>,
     /// Architecture filter on the Models list (`None` = All).
     pub models_arch_filter: Option<Arch>,
     /// Live search input on the Models list (matches name, class, dataset, source run, arch, or id).
@@ -469,6 +354,8 @@ pub struct FoloApp {
     pub exporting: std::collections::HashSet<(String, &'static str)>,
     /// Model Detail interactive Export & Inference CLI command builder state.
     pub model_cli: crate::screens::models::ModelCliState,
+    /// Side-by-side model comparison state (`Route::ModelCompare`).
+    pub model_compare: crate::screens::models::ModelCompareState,
     pub pr_hover: Option<f32>,
     /// The class isolated on the PR chart (hovered or focused in the per-class table).
     pub pr_focus: Option<u32>,
@@ -591,9 +478,9 @@ pub struct FoloApp {
     /// A New run form closed without starting (Esc, the scrim, Cancel): the next plain New run
     /// reopens it as it was, so a stray click doesn't lose a configured run.
     pub new_run_draft: Option<NewRunForm>,
-    /// The architecture, image size and epochs of the last run started from the dialog: a fresh
-    /// New run opens on them (this session), not on the defaults again.
-    pub new_run_last: Option<(usize, usize, f32)>,
+    /// The architecture family, scale, image size and epochs of the last run started from the dialog:
+    /// a fresh New run opens on them (this session), not on the defaults again.
+    pub new_run_last: Option<(crate::arch::ArchFamily, usize, usize, f32)>,
     /// `--open new-run`: open the dialog once the dataset list is in (it needs one to start from).
     pub open_new_run_pending: bool,
     /// The Generate synthetic dataset dialog.
@@ -819,6 +706,7 @@ impl FoloApp {
             inspector_return: None,
             hist_hover: HashMap::new(),
             run_filter: RunFilter::All,
+            run_family_filter: None,
             run_arch_filter: None,
             run_search,
             chart_hover: None,
@@ -844,6 +732,7 @@ impl FoloApp {
             log_last_y: px(0.),
             log_run: None,
             sample_epoch: None,
+            models_family_filter: None,
             models_arch_filter: None,
             model_search,
             bench_search,
@@ -852,6 +741,7 @@ impl FoloApp {
             export_open: false,
             exporting: Default::default(),
             model_cli: Default::default(),
+            model_compare: Default::default(),
             pr_hover: None,
             pr_focus: None,
             pr_pin: None,

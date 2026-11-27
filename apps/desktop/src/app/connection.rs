@@ -146,9 +146,12 @@ impl FoloApp {
         self.ds_img_dataset = None;
         self.ds_scroll_anchor = None;
         self.run_filter = super::RunFilter::All;
+        self.run_family_filter = None;
         self.run_arch_filter = None;
         self.run_search.update(cx, |i, cx| i.set_text("", cx));
+        self.models_family_filter = None;
         self.models_arch_filter = None;
+        self.model_compare.ids.clear();
         self.model_search.update(cx, |i, cx| i.set_text("", cx));
         self.bench_search.update(cx, |i, cx| i.set_text("", cx));
         self.label_search.update(cx, |i, cx| i.set_text("", cx));

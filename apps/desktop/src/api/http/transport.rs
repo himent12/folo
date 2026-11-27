@@ -258,6 +258,22 @@ impl HttpBackend {
         self.decode(resp)
     }
 
+    pub(super) fn get_with_header<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        header: &str,
+    ) -> ApiResult<(T, Option<String>)> {
+        let resp = self.agent.get(&self.url(path)).call().map_err(|e| self.unreachable(&e))?;
+        let hdr = resp
+            .headers()
+            .get(header)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let body = self.decode(resp)?;
+        Ok((body, hdr))
+    }
+
     pub(super) fn post<B: Serialize, T: DeserializeOwned>(&self, path: &str, body: &B) -> ApiResult<T> {
         let resp = self.agent.post(&self.url(path)).send_json(body).map_err(|e| self.unreachable(&e))?;
         self.decode(resp)

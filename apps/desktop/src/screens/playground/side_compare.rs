@@ -45,7 +45,7 @@ impl FoloApp {
                         SharedString::from(m.name.clone()),
                         Some(SharedString::from(format!(
                             "{}{}{}",
-                            m.arch.as_str(),
+                            self.store.model_arch(m).as_str(),
                             if self.model_e2e(m) { " · end-to-end" } else { " · NMS" },
                             m.metrics.as_ref().map_or(String::new(), |x| format!(" · {:.3}", x.map50_95)),
                         ))),
@@ -105,7 +105,7 @@ impl FoloApp {
             .when_some(model_b.as_ref(), |d, m| {
                 d.child(text(ty::SM, t.text_tertiary).child(format!(
                     "{} · {} px{}",
-                    m.arch.as_str(),
+                    self.store.model_arch(m).as_str(),
                     m.imgsz,
                     model_storage(m).map_or(String::new(), |s| format!(" · {s}")),
                 )))

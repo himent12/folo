@@ -1,20 +1,16 @@
 //! [`Backend`] for the mock: every call answered from the fixtures and the simulated clock.
 
 use std::sync::Arc;
-use std::time::Instant;
 
 use crate::api::time;
 use crate::api::*;
 use crate::synth::hash;
 
-use super::cloud::{
-    CloudSim, Ended, cloud_providers, launch_state, no_connection, no_instance, offers_of, secret_hint,
-    unencrypted,
-};
+use super::cloud::{Ended, cloud_providers, no_connection, no_instance, offers_of, secret_hint, unencrypted};
 use super::predictions::fake_predictions;
 use super::throughput::with_reference;
-use super::training::{Curve, RunFixture, epoch_line, initial_logs, log_cloud_end, resolve};
-use super::{CPU_DEVICE, GPU_DEVICE, MOCK_NOW, MockBackend, STEP_DT};
+use super::training::{epoch_line, log_cloud_end};
+use super::{MOCK_NOW, MockBackend, STEP_DT};
 
 impl Backend for MockBackend {
     fn describe(&self) -> String {
@@ -83,6 +79,7 @@ impl Backend for MockBackend {
             "run_cli".into(),
             "throughput".into(),
             "benchmark".into(),
+            crate::arch::FEATURE_FOLO2_ARCH.into(),
             folo_api::FEATURE_CLOUD.into(),
         ];
         if self.benches.enabled {
@@ -237,6 +234,17 @@ impl Backend for MockBackend {
         self.eval_for(id)
     }
 
+    fn model_arch(&self, id: &str) -> ApiResult<Option<String>> {
+        self.check()?;
+        Ok(self.model_archs.lock().unwrap().get(id).cloned())
+    }
+
+    fn known_archs(
+        &self,
+    ) -> (std::collections::HashMap<String, String>, std::collections::HashMap<String, String>) {
+        (self.run_archs.lock().unwrap().clone(), self.model_archs.lock().unwrap().clone())
+    }
+
     fn export_model(&self, id: &str, format: &str) -> ApiResult<ExportResult> {
         let fmt = if format == "onnx" { "onnx" } else { "folo-f16" };
         self.export_model_with_options(id, ModelExportOptions::plain(fmt))
@@ -289,91 +297,22 @@ impl Backend for MockBackend {
     }
 
     fn create_run(&self, config: TrainConfig) -> ApiResult<Run> {
-        self.check()?;
-        let ds = self.fixture(&config.dataset_id)?;
-        // A cloud run is checked like any run plus its compute (docs/API.md, Cloud runs).
-        let target = match &config.compute {
-            Some(c) => {
-                let (conn, offer) = self.compute_offer(c, &config)?;
-                if offer.availability == CloudAvailability::None {
-                    return Err(ApiError::new(
-                        "cloud_refused",
-                        format!("{} has no {} available right now", conn.name, crate::ui::offer_line(&offer)),
-                    )
-                    .with_hint("Pick another GPU, or try again in a few minutes."));
-                }
-                Some((c.clone(), conn, offer))
-            }
-            None => None,
-        };
-        let mut runs = self.runs.lock().unwrap();
-        let id = format!("run_{:04x}", hash(&format!("{}{}", config.name, runs.len())) & 0xFFFF);
-        let spe = (ds.ds.splits.train / config.batch.max(1) as u64).max(1);
-        let curve = Curve {
-            seed: hash(&id),
-            epochs: config.epochs,
-            spe,
-            lr0: resolve(&config, ds.ds.splits.train, ds.ds.classes.len()).lr0 as f32,
-            batch: config.batch,
-            map_max: 0.66,
-            ips: 380.0,
-            classes: ds.ds.classes.len() as u32,
-            close_mosaic: config.augment.close_mosaic,
-        };
-        let now = self.sim_now();
-        let mut f = RunFixture {
-            run: Run {
-                id: id.clone(),
-                name: config.name.clone(),
-                status: RunStatus::Running,
-                created: time::format(now),
-                started: Some(time::format(now)),
-                finished: None,
-                paused_s: None,
-                epoch: 0,
-                epochs: config.epochs,
-                step: 0,
-                steps_per_epoch: spe,
-                eta_s: None,
-                best: None,
-                device: if config.device == "cpu" { CPU_DEVICE.into() } else { GPU_DEVICE.into() },
-                model_id: None,
-                error: None,
-                error_code: None,
-                resolved: None,
-                queue_position: None,
-                cloud: None,
-                dataset: Some(RunDataset { name: ds.ds.name.clone(), classes: ds.ds.classes.clone() }),
-                config,
-            },
-            curve,
-            live: (!self.frozen && target.is_none()).then(|| (0, Instant::now())),
-            step: 0,
-            logs: Vec::new(),
-            cloud: None,
-        };
-        if let Some((compute, conn, offer)) = target {
-            let base = launch_state(&id, &compute, &conn.provider, offer, conn.provider == "runpod");
-            let mut sim = CloudSim::new(base, self.clock, self.clock.now(), f.run.epochs as u64 * spe);
-            // The dataset as FOLO sends it: about 180 kB an image.
-            sim.upload_bytes = ds.ds.splits.total() * 180_000;
-            f.cloud = Some(sim);
-        }
-        // A local run's lines follow its start; a cloud run's its launch, now.
-        f.logs = initial_logs(&f, if f.cloud.is_some() { now } else { now - 5 });
-        let run = Self::snapshot(&f);
-        runs.insert(0, f);
-        Ok(run)
+        self.create_run_inner(config, None)
+    }
+
+    fn create_run_with_arch(&self, config: TrainConfig, arch_override: Option<&str>) -> ApiResult<Run> {
+        self.create_run_inner(config, arch_override)
     }
 
     fn run_cli(&self, id: &str) -> ApiResult<CliCommand> {
         self.check()?;
+        let arch = self.run_archs.lock().unwrap().get(id).cloned();
         let runs = self.runs.lock().unwrap();
         let f = runs
             .iter()
             .find(|f| f.run.id == id)
             .ok_or_else(|| ApiError::new("run_not_found", format!("No run {id}")))?;
-        Ok(self.cli_for(&f.run.config))
+        Ok(self.cli_for(&f.run.config, arch.as_deref()))
     }
 
     fn throughput(&self) -> ApiResult<ThroughputTable> {
@@ -387,7 +326,15 @@ impl Backend for MockBackend {
     }
 
     fn estimate_run(&self, config: &TrainConfig) -> ApiResult<RunEstimate> {
-        self.estimate_for(config)
+        self.estimate_for(config, None)
+    }
+
+    fn estimate_run_with_arch(
+        &self,
+        config: &TrainConfig,
+        arch_override: Option<&str>,
+    ) -> ApiResult<RunEstimate> {
+        self.estimate_for(config, arch_override)
     }
 
     fn queue_run(&self, id: &str, _req: QueueRequest) -> ApiResult<Run> {

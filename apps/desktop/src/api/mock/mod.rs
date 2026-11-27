@@ -79,6 +79,9 @@ pub struct MockBackend {
     broken: Mutex<HashMap<String, (String, String)>>,
     /// Per-dataset revision overrides returned by `dataset(id)` ([`MockBackend::set_dataset_revision`]).
     revisions: Mutex<HashMap<String, String>>,
+    /// Canonical `folo2-*` architecture overrides by run id and model id.
+    run_archs: Mutex<HashMap<String, String>>,
+    model_archs: Mutex<HashMap<String, String>>,
     clock: Clock,
 }
 

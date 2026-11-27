@@ -190,6 +190,7 @@ impl FoloApp {
                     s.system
                 });
                 this.store.system = r.into();
+                this.probe_missing_model_archs(cx);
             },
         );
     }

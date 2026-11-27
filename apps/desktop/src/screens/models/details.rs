@@ -211,7 +211,18 @@ impl FoloApp {
         });
         let mut facts: Vec<(&str, AnyElement)> = Vec::new();
         let mut fact = |k: &'static str, v: AnyElement| facts.push((k, v));
-        fact("Architecture", value(&t, m.arch.as_str()).into_any_element());
+        let model_arch = self.store.model_arch(m);
+        fact(
+            "Architecture",
+            div()
+                .flex()
+                .items_center()
+                .justify_end()
+                .gap(px(6.))
+                .child(value(&t, model_arch.as_str()))
+                .when(model_arch.is_v2(), |d| d.child(badge(&t, "v2", Tone::Accent)))
+                .into_any_element(),
+        );
         fact("Input size", value(&t, format!("{} × {} px", m.imgsz, m.imgsz)).into_any_element());
         let (p, pu) = count_si(m.params);
         fact(
@@ -504,11 +515,11 @@ impl FoloApp {
                     Some(r) => value_with(
                         &t,
                         ms(r.latency_ms),
-                        format!("{} · 640 px · {}", m.arch.as_str(), r.measured_on),
+                        format!("{} · 640 px · {}", model_arch.as_str(), r.measured_on),
                     )
                     .into_any_element(),
                     None => text(ty::SM, t.text_tertiary)
-                        .child(format!("not measured for {} yet", m.arch.as_str()))
+                        .child(format!("not measured for {} yet", model_arch.as_str()))
                         .into_any_element(),
                 },
             );

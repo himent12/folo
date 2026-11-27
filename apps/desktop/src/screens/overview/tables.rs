@@ -99,11 +99,12 @@ impl FoloApp {
                         // The e2e tag rides its architecture, as in the Runs and Models lists; the
                         // dataset after them gives way first.
                         let ds_name = self.store.run_dataset_name(&r);
+                        let run_arch = self.store.run_arch(&r);
                         let meta = |w: f32| {
                             div().w(px(w)).flex_none().child(meta_row(
                                 ty::SM,
                                 t.text_tertiary,
-                                r.config.arch.as_str(),
+                                run_arch.as_str(),
                                 e2e.then(|| e2e_tag(&t, format!("e2e-ovr-{}-{w}", r.id))),
                                 std::slice::from_ref(&ds_name),
                             ))
@@ -305,7 +306,7 @@ impl FoloApp {
                         let key = format!("ov-model-{}", m.id);
                         let map = m.metrics.as_ref().map_or(0., |m| m.map50_95);
                         let map50 = m.metrics.as_ref().map(|m| m.map50);
-                        let arch = format!("{} · {} px", m.arch.as_str(), m.imgsz);
+                        let arch = format!("{} · {} px", self.store.model_arch(&m).as_str(), m.imgsz);
                         let created = time::parse(&m.created).map_or(String::new(), |c| time::ago(c, now));
                         // Keyboard focus says what hover does: the model and its dataset in full.
                         let focus_text = self

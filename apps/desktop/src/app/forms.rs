@@ -85,6 +85,11 @@ impl NewRunForm {
         self.device = i;
         self.custom_device = None;
     }
+
+    /// Canonical architecture selected in the New run form (`folo-*` or `folo2-*`).
+    pub fn model_arch(&self) -> crate::arch::ModelArch {
+        crate::arch::ModelArch::new(self.arch_family, ARCHS[self.arch.min(ARCHS.len() - 1)])
+    }
 }
 
 /// Parsed device string matching `folo_vision::train::config::resolve_device` (aliases, case,
@@ -219,10 +224,17 @@ pub fn run_name_error(name: &str) -> Option<String> {
     }
 }
 
+/// The name New run suggests for any canonical architecture (`shapes-n-4` for v1,
+/// `shapes-folo2-n-4` for v2), the dataset's part shortened to fit the length limit.
+pub fn suggested_model_name(dataset: &str, arch: crate::arch::ModelArch, n: usize) -> String {
+    fit_run_name(dataset, &format!("-{}-{n}", arch.name_suffix()))
+}
+
 /// The name New run suggests: the dataset, the architecture's letter and the run's number
 /// ("shapes-n-4"), the dataset's part shortened to fit the length limit.
+#[cfg(test)]
 pub fn suggested_name(dataset: &str, arch: Arch, n: usize) -> String {
-    fit_run_name(dataset, &format!("-{}-{n}", arch.as_str().trim_start_matches("folo-")))
+    suggested_model_name(dataset, crate::arch::ModelArch::v1(arch), n)
 }
 
 /// The name of a new run made from run `name` (New run from this run, Retry): `name-2`, or the next
@@ -234,14 +246,20 @@ pub fn again_run_name(name: &str, runs: &[Run]) -> String {
         .expect("a free number")
 }
 
-/// [`suggested_name`] numbered one past the run count, or the next number no run of `runs` is
+/// [`suggested_model_name`] numbered one past the run count, or the next number no run of `runs` is
 /// called: after a delete the count alone names a run that exists, and with no rename a second run
 /// (and its models) would keep that name.
-pub fn free_run_name(dataset: &str, arch: Arch, runs: &[Run]) -> String {
+pub fn free_model_run_name(dataset: &str, arch: crate::arch::ModelArch, runs: &[Run]) -> String {
     (runs.len() + 1..)
-        .map(|n| suggested_name(dataset, arch, n))
+        .map(|n| suggested_model_name(dataset, arch, n))
         .find(|name| !runs.iter().any(|r| r.name == *name))
         .expect("one of len + 1 names is free")
+}
+
+/// [`suggested_name`] numbered one past the run count, or the next number no run of `runs` is called.
+#[cfg(test)]
+pub fn free_run_name(dataset: &str, arch: Arch, runs: &[Run]) -> String {
+    free_model_run_name(dataset, crate::arch::ModelArch::v1(arch), runs)
 }
 
 pub struct NewRunForm {
@@ -254,6 +272,7 @@ pub struct NewRunForm {
     ///
     /// [`FoloApp::nr_dataset_gone`]: crate::app::FoloApp::nr_dataset_gone
     pub dataset: String,
+    pub arch_family: crate::arch::ArchFamily,
     pub arch: usize,
     pub epochs: f32,
     pub batch: usize,

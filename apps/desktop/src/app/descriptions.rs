@@ -10,7 +10,7 @@ impl FoloApp {
     /// surface uses (the hero, Recent runs, the run page, focus tips).
     pub fn run_meta(&self, r: &Run) -> String {
         let ds = self.store.run_dataset_name(r);
-        format!("{} · {ds}", r.config.arch.as_str())
+        format!("{} · {ds}", self.store.run_arch(r).as_str())
     }
 
     /// The split a run's per-epoch scores come from: "val", or "train" when its dataset has no
@@ -60,8 +60,9 @@ impl FoloApp {
             rest.push(format!("started {when}"));
         }
         // The architecture leads, its e2e tag right after it, as in every list.
+        let arch = self.store.run_arch(r);
         let tag = (r.config.head == Head::O2o).then(|| crate::ui::e2e_tag(t, format!("e2e-{id}-{}", r.id)));
-        crate::ui::meta_row(size, color, r.config.arch.as_str(), tag, &rest)
+        crate::ui::meta_row(size, color, arch.as_str(), tag, &rest)
     }
 
     /// Whether `m` is end-to-end (the one-to-one head: it predicts without NMS). The model's own

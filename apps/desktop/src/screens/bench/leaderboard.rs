@@ -180,7 +180,12 @@ impl FoloApp {
         match c {
             Contender::Model(id) => self.store.model(id).map_or_else(
                 || (id.clone().into(), None),
-                |m| (m.name.clone().into(), Some(format!("{} · {} px", m.arch.as_str(), m.imgsz).into())),
+                |m| {
+                    (
+                        m.name.clone().into(),
+                        Some(format!("{} · {} px", self.store.model_arch(m).as_str(), m.imgsz).into()),
+                    )
+                },
             ),
             Contender::Agent(a) => {
                 let agent = self.bench_agents().into_iter().find(|x| x.id == *a);

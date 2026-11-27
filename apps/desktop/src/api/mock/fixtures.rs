@@ -535,6 +535,11 @@ impl MockBackend {
             metrics.best_f1_conf = f.curve.epoch(best.epoch).val.best_f1_conf;
         }
         let fixture_runs = runs.iter().map(|f| f.run.id.clone()).collect();
+        let mut run_archs = HashMap::new();
+        let mut model_archs = HashMap::new();
+        // Seed one demo run + model as FOLO v2 (`folo2-n`) so legacy v1 and v2 sit side by side.
+        run_archs.insert("run_d204".into(), "folo2-n".into());
+        model_archs.insert("m_7c12".into(), "folo2-n".into());
         Self {
             datasets,
             models,
@@ -560,6 +565,8 @@ impl MockBackend {
             data_dir: None,
             broken: Default::default(),
             revisions: Default::default(),
+            run_archs: Mutex::new(run_archs),
+            model_archs: Mutex::new(model_archs),
             clock,
         }
     }

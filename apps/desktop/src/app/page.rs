@@ -21,6 +21,7 @@ impl FoloApp {
             Route::RunCompare => self.run_compare_view(window, cx),
             Route::Models => self.models(window, cx),
             Route::Model(id) => self.model_view(&id, window, cx),
+            Route::ModelCompare => self.model_compare_view(window, cx),
             Route::Benches => self.benches(window, cx),
             Route::Bench(id) => self.bench_view(&id, window, cx),
             Route::BenchEntry(b, e) => self.bench_entry_view(&b, &e, window, cx),

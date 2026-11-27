@@ -478,7 +478,19 @@ pub(super) fn fmt_thresh(v: f32) -> String {
 }
 
 /// Builds the exact, shell-safe CLI command matching `docs/CLI.md` for `m` under `state`.
+#[cfg(test)]
 pub fn build_model_cli(m: &Model, run_dataset_path: Option<&str>, state: &ModelCliState) -> BuiltCliCommand {
+    build_model_cli_with_arch(m, crate::arch::ModelArch::v1(m.arch), run_dataset_path, state)
+}
+
+/// Builds the exact, shell-safe CLI command matching `docs/CLI.md` for `m` under `state`
+/// with its canonical architecture (`folo-*` or `folo2-*`).
+pub fn build_model_cli_with_arch(
+    m: &Model,
+    model_arch: crate::arch::ModelArch,
+    run_dataset_path: Option<&str>,
+    state: &ModelCliState,
+) -> BuiltCliCommand {
     let int8_predict =
         state.mode == ModelCliMode::Predict && state.predict_precision == PredictPrecision::Int8;
     let effective_target = effective_predict_int8_target(m, state);
@@ -619,10 +631,18 @@ pub fn build_model_cli(m: &Model, run_dataset_path: Option<&str>, state: &ModelC
                         parts.push(out);
                     }
                     hint = Some(match state.quant_f32_policy {
+                        QuantF32Policy::Auto if model_arch.is_v2() => format!(
+                            "FOLO v2 selective-f32 auto policy (≤{} MACs in f32, SQNR < 35 dB, keeps P5 head & bottleneck pairs); calibrates 512 images on CPU.",
+                            state.quant_f32_macs.label()
+                        ),
                         QuantF32Policy::Auto => format!(
                             "Selective-f32 auto policy (≤{} MACs in f32, SQNR < 35 dB, keeps neck.out5.cv2 & bottleneck pairs); calibrates 512 images on CPU.",
                             state.quant_f32_macs.label()
                         ),
+                        QuantF32Policy::P5Tail if model_arch.is_v2() => {
+                            "Keeps the FOLO v2 P5 neck tail in f32 (`--f32-policy p5-tail`); calibrates 512 images on CPU."
+                                .into()
+                        }
                         QuantF32Policy::P5Tail => {
                             "Keeps the P5 neck tail (neck.out5.*) in f32 (`--f32-policy p5-tail`); calibrates 512 images on CPU."
                                 .into()

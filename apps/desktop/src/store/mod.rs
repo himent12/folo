@@ -119,11 +119,16 @@ pub struct Store {
     pub gpu_util: VecDeque<f32>,
     /// How many GPUs the server's last `/system` answer listed: what holds while it is asked again.
     pub last_gpu_count: Option<usize>,
+    /// Canonical architecture overrides (`folo2-*` or resolved `folo-*`) keyed by run id and model id.
+    pub run_archs: HashMap<String, crate::arch::ModelArch>,
+    pub model_archs: HashMap<String, crate::arch::ModelArch>,
+    /// Model ids already probed via `GET /api/models/{id}` for `x-folo-arch` on this backend.
+    pub probed_model_archs: std::collections::HashSet<String>,
 }
 
 impl Store {
     pub fn new(api: Arc<dyn Backend>) -> Self {
-        Self {
+        let mut store = Self {
             api,
             health: Load::Idle,
             system: Load::Idle,
@@ -152,7 +157,74 @@ impl Store {
             image_queue: LoadQueue::default(),
             gpu_util: VecDeque::new(),
             last_gpu_count: None,
+            run_archs: HashMap::new(),
+            model_archs: HashMap::new(),
+            probed_model_archs: Default::default(),
+        };
+        store.sync_known_archs();
+        store
+    }
+
+    /// Whether the connected server advertises `folo2_arch` (`folo2-n..x`) support.
+    pub fn supports_folo2(&self) -> bool {
+        self.features.iter().any(|f| f == crate::arch::FEATURE_FOLO2_ARCH)
+    }
+
+    /// Pull canonical `folo2-*` run/model architectures known to the backend into the store cache.
+    pub fn sync_known_archs(&mut self) {
+        let (runs, models) = self.api.known_archs();
+        for (id, raw) in runs {
+            if let Some(arch) = crate::arch::ModelArch::parse(&raw) {
+                self.run_archs.insert(id, arch);
+            }
         }
+        for (id, raw) in models {
+            if let Some(arch) = crate::arch::ModelArch::parse(&raw) {
+                self.model_archs.insert(id, arch);
+            }
+        }
+    }
+
+    /// Record a run's canonical architecture (and its linked model's, if known).
+    pub fn note_run_arch(&mut self, run_id: &str, arch: crate::arch::ModelArch) {
+        self.run_archs.insert(run_id.to_string(), arch);
+        if let Some(model_id) = self.run(run_id).and_then(|r| r.model_id.clone()) {
+            self.model_archs.insert(model_id, arch);
+        }
+    }
+
+    /// Record a model's canonical architecture (and its source run's, if known).
+    pub fn note_model_arch(&mut self, model_id: &str, arch: crate::arch::ModelArch) {
+        self.model_archs.insert(model_id.to_string(), arch);
+        if let Some(run_id) = self.model(model_id).and_then(|m| m.run_id.clone()) {
+            self.run_archs.insert(run_id, arch);
+        }
+    }
+
+    /// Canonical architecture for a run (`folo-*` or `folo2-*`).
+    pub fn run_arch(&self, r: &Run) -> crate::arch::ModelArch {
+        if let Some(&arch) = self.run_archs.get(&r.id) {
+            return arch;
+        }
+        if let Some(mid) = r.model_id.as_deref()
+            && let Some(&arch) = self.model_archs.get(mid)
+        {
+            return arch;
+        }
+        crate::arch::ModelArch::v1(r.config.arch)
+    }
+
+    /// Canonical architecture for a model (`folo-*` or `folo2-*`).
+    pub fn model_arch(&self, m: &Model) -> crate::arch::ModelArch {
+        if let Some(&arch) = self.model_archs.get(&m.id) {
+            return arch;
+        }
+        if let Some(rid) = m.run_id.as_deref()
+            && let Some(&arch) = self.run_archs.get(rid)
+        {
+            return arch;
+        }
+        crate::arch::ModelArch::v1(m.arch)
     }
 
     pub fn run(&self, id: &str) -> Option<&Run> {

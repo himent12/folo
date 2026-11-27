@@ -44,11 +44,23 @@ impl FoloApp {
         let a = &c.augment;
         // A rate's power of ten in a legible raised run (`sci`).
         let mono_v = |s: String| crate::ui::sci(ty::SM, t.text_primary, s);
+        let arch = self.store.run_arch(r);
         let col1 = div()
             .flex()
             .flex_col()
             .child(kv(&t, "Dataset", mono_v(ds_name.to_string())))
-            .child(kv(&t, "Architecture", mono_v(c.arch.as_str().to_string())))
+            .child(kv(
+                &t,
+                "Architecture",
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_end()
+                    .gap(px(6.))
+                    .child(mono_v(arch.as_str().to_string()))
+                    .when(arch.is_v2(), |d| d.child(badge(&t, "v2", Tone::Accent)))
+                    .into_any_element(),
+            ))
             // The start model by name (the config holds its id).
             .child(kv(
                 &t,

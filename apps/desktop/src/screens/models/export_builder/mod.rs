@@ -20,8 +20,8 @@ use crate::ui::*;
 
 pub use command::{
     CliExportFormat, MODEL_CLI_CONF, MODEL_CLI_IOU, ModelCliMode, ModelCliState, PredictInt8Target,
-    PredictPrecision, QuantF32MacBudget, QuantF32Policy, QuantMethod, ServerExportSupport, build_model_cli,
-    check_server_export_support, effective_predict_int8_target, predict_uses_iou,
+    PredictPrecision, QuantF32MacBudget, QuantF32Policy, QuantMethod, ServerExportSupport,
+    build_model_cli_with_arch, check_server_export_support, effective_predict_int8_target, predict_uses_iou,
 };
 
 impl FoloApp {
@@ -39,7 +39,8 @@ impl FoloApp {
             .and_then(|rid| self.store.run(rid))
             .and_then(|r| self.store.dataset_summary(&r.config.dataset_id))
             .map(|d| d.path.clone());
-        let built = build_model_cli(m, run_ds_path.as_deref(), &self.model_cli);
+        let built =
+            build_model_cli_with_arch(m, self.store.model_arch(m), run_ds_path.as_deref(), &self.model_cli);
         let mode_idx = usize::from(self.model_cli.mode == ModelCliMode::Predict);
         let mode_seg = self.segmented(
             "model-cli-mode",
