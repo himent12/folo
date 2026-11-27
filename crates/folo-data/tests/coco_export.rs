@@ -271,6 +271,18 @@ fn export_coco_reference_resolves_unambiguously_even_with_decoy_image() {
     let resolved = std::fs::canonicalize(gt.images[0].path.as_ref().unwrap()).unwrap();
     let expected = std::fs::canonicalize(src.join("a.png")).unwrap();
     assert_eq!(resolved, expected, "ground truth resolved to decoy instead of original");
+
+    // Removing a source image after `open` must cause `Reference` export to fail rather than serialize a dangling path.
+    std::fs::remove_file(src.join("a.png")).unwrap();
+    let out_missing = t.join("work/exports/missing");
+    assert!(
+        export_coco(
+            &ds,
+            &out_missing,
+            &CocoExportOptions { images: CocoImageMode::Reference, ..Default::default() }
+        )
+        .is_err()
+    );
 }
 
 #[test]

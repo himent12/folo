@@ -428,20 +428,8 @@ pub(crate) fn read_file_bytes<R>(
     let mut buf =
         TLS_SCRATCH.try_with(|ts| std::mem::take(&mut ts.borrow_mut().file_buf)).unwrap_or_default();
     buf.clear();
-    if let Ok(meta) = file.metadata()
-        && let Ok(len) = usize::try_from(meta.len())
-        && let Some(need) = len.checked_add(1)
-        && buf.capacity() < need
-    {
-        // Reserve `len + 1` (like `std::fs::read`) so `read_to_end`'s trailing EOF probe never doubles the buffer,
-        // using fallible reservation so huge/special file sizes return an IO error instead of aborting.
-        buf.try_reserve(need - buf.len()).map_err(|_| {
-            crate::error::DataError::io(
-                path,
-                std::io::Error::new(std::io::ErrorKind::OutOfMemory, "failed to allocate file read buffer"),
-            )
-        })?;
-    }
+    // `File::read_to_end` queries file size once and uses fallible `try_reserve(len + 1)`, so steady-state
+    // reused buffers incur zero allocations and zero extra metadata syscalls while huge files fail cleanly.
     let read_res = file.read_to_end(&mut buf).map_err(|e| crate::error::DataError::io(path, e));
     let out = match read_res {
         Ok(_) => f(&buf),

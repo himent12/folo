@@ -184,7 +184,7 @@ pub fn export_coco(ds: &LoadedDataset, out: &Path, opts: &CocoExportOptions) -> 
                 // Anchor relative paths at `<out>/annotations/` (candidate #0 in `coco::image_base`) so both
                 // `open(out)` and `open(out/annotations/instances_<split>.json)` resolve unambiguously even when
                 // a same-named decoy exists under `<out>/`.
-                let ann_base = canonical_or_normalized(&ann_dir)?;
+                let ann_base = canonical_existing(&ann_dir)?;
                 let mut names = Vec::with_capacity(ordered.len());
                 for e in &ordered {
                     crate::guard::check(&e.image).map_err(|err| DataError::io(&e.image, err))?;
@@ -331,13 +331,18 @@ fn validate_entries(ds: &LoadedDataset, splits: &[Split], image_mode: CocoImageM
 /// Orders entries deterministically so exports do not depend on filesystem directory iteration order.
 fn deterministic_entries(entries: &[ImageEntry]) -> Vec<&ImageEntry> {
     #[cfg(windows)]
-    let mut ordered: Vec<(&ImageEntry, String)> =
-        entries.iter().map(|e| (e, e.image.to_string_lossy().replace('\\', "/"))).collect();
+    {
+        let mut ordered: Vec<(&ImageEntry, String)> =
+            entries.iter().map(|e| (e, e.image.to_string_lossy().replace('\\', "/"))).collect();
+        ordered.sort_by(|a, b| a.1.cmp(&b.1));
+        ordered.into_iter().map(|(e, _)| e).collect()
+    }
     #[cfg(not(windows))]
-    let mut ordered: Vec<(&ImageEntry, &std::ffi::OsStr)> =
-        entries.iter().map(|e| (e, e.image.as_os_str())).collect();
-    ordered.sort_by(|a, b| a.1.cmp(&b.1));
-    ordered.into_iter().map(|(e, _)| e).collect()
+    {
+        let mut ordered: Vec<&ImageEntry> = entries.iter().collect();
+        ordered.sort_by(|a, b| a.image.as_os_str().cmp(b.image.as_os_str()));
+        ordered
+    }
 }
 
 /// Sanitizes a source image's stem and extension into safe single-component parts, stripping separators, drive
@@ -475,11 +480,19 @@ fn should_fallback_from_link(e: &std::io::Error) -> bool {
 }
 
 /// Produces a path for `CocoImageMode::Reference` relative to `base` (`<out>/annotations/`) when possible, or a
-/// normalized absolute path if `base` and `target` lie on different roots/drives. Enforces the read guard on the
-/// resolved target as well so symlinks cannot escape confinement.
+/// normalized absolute path if `base` and `target` lie on different roots/drives. Propagates missing-file
+/// canonicalization errors, verifies the resolved target is a regular file, and enforces the read guard on the
+/// resolved target so symlinks cannot escape confinement.
 fn reference_file_name(base: &Path, target: &Path) -> Result<String> {
-    let target_norm = canonical_or_normalized(target)?;
+    let target_norm = canonical_existing(target)?;
     crate::guard::check(&target_norm).map_err(|e| DataError::io(&target_norm, e))?;
+    let meta = std::fs::metadata(&target_norm).map_err(|e| DataError::io(&target_norm, e))?;
+    if !meta.is_file() {
+        return Err(DataError::io(
+            &target_norm,
+            std::io::Error::new(ErrorKind::InvalidInput, "referenced image path is not a regular file"),
+        ));
+    }
     let chosen = diff_paths(&target_norm, base).unwrap_or(target_norm);
     let s = chosen.to_str().ok_or_else(|| {
         DataError::Config(format!("image path is not valid UTF-8 for COCO JSON: {}", target.display()))
@@ -498,18 +511,9 @@ fn reference_file_name(base: &Path, target: &Path) -> Result<String> {
     }
 }
 
-fn canonical_or_normalized(p: &Path) -> Result<PathBuf> {
-    let abs = match std::fs::canonicalize(p) {
-        Ok(c) => strip_windows_verbatim(c),
-        Err(_) => {
-            if p.is_absolute() {
-                p.to_path_buf()
-            } else {
-                std::env::current_dir().map_err(|e| DataError::io(p, e))?.join(p)
-            }
-        }
-    };
-    Ok(lexical_normalize(&abs))
+fn canonical_existing(p: &Path) -> Result<PathBuf> {
+    let canon = std::fs::canonicalize(p).map_err(|e| DataError::io(p, e))?;
+    Ok(lexical_normalize(&strip_windows_verbatim(canon)))
 }
 
 #[cfg(windows)]
@@ -582,11 +586,10 @@ fn components_equal(a: Component<'_>, b: Component<'_>) -> bool {
     #[cfg(windows)]
     {
         match (a, b) {
+            // Canonical Windows paths preserve exact on-disk casing for normal components (important for
+            // per-directory case-sensitive NTFS folders), while drive prefixes remain case-insensitive.
             (Component::Prefix(pa), Component::Prefix(pb)) => {
                 pa.as_os_str().to_string_lossy().eq_ignore_ascii_case(&pb.as_os_str().to_string_lossy())
-            }
-            (Component::Normal(na), Component::Normal(nb)) => {
-                na.to_string_lossy().eq_ignore_ascii_case(&nb.to_string_lossy())
             }
             _ => a == b,
         }
