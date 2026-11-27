@@ -4,7 +4,7 @@ import Copy from '$icons/copy';
 import TriangleAlert from '$icons/triangle-alert';
 import { computed, css, Index, signal } from 'fw';
 import type { Model, TrainConfig } from '$lib/api/types';
-import { SHELL, trainCommand, withAutoBatch } from '$lib/trainCli';
+import { SHELL, splitCliFlags, trainCommand, withAutoBatch } from '$lib/trainCli';
 import Button from '$lib/ui/Button';
 import { toast } from '$lib/ui/toast';
 
@@ -16,7 +16,10 @@ import { toast } from '$lib/ui/toast';
 export function cliOf(config: () => TrainConfig, data: () => string, model: () => Model | undefined, served: () => string | null) {
   const own = computed(() => trainCommand(config(), data(), model()));
   return {
-    parts: computed(() => served()?.split(/ (?=--)/) ?? own.get().parts),
+    parts: computed(() => {
+      const s = served();
+      return s ? splitCliFlags(s) : own.get().parts;
+    }),
     line: computed(() => served() ?? own.get().line),
     placeholder: computed(() => (served() ? null : own.get().placeholder)),
   };
@@ -203,6 +206,11 @@ css`
   }
   .cli-auto input {
     accent-color: var(--accent-solid);
+  }
+  @media (pointer: coarse) {
+    .cli-auto {
+      min-height: 44px;
+    }
   }
   .cli-body {
     position: relative;

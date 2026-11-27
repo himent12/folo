@@ -278,4 +278,81 @@ describe('CheckpointCli and Run page export integration', () => {
     flushSync();
     expect(target.querySelector('[data-checkpoint-cli] pre.line')?.textContent).toContain('folo val --model');
   });
+
+  it('reads current run metadata when exporting after a live run transitions from running to completed', async () => {
+    const api = new MockApi('normal', 0);
+    const baseRun = (await api.runs()).find((r) => r.status === 'running')!;
+    let currentRun: Run = { ...baseRun, status: 'running', epoch: 1, finished: null, model_id: null };
+    let emitStatus: ((ev: { status: Run['status']; error: string | null }) => void) | undefined;
+    const realRun = api.run.bind(api);
+    vi.spyOn(api, 'run').mockImplementation(async (id) => (id === baseRun.id ? { ...currentRun } : realRun(id)));
+    const realEvents = api.runEvents.bind(api);
+    vi.spyOn(api, 'runEvents').mockImplementation((id, handlers) => {
+      if (id === baseRun.id) emitStatus = handlers.status;
+      return realEvents(id, handlers);
+    });
+
+    const createdBlobs: Blob[] = [];
+    vi.spyOn(URL, 'createObjectURL').mockImplementation((b) => {
+      createdBlobs.push(b as Blob);
+      return `blob:live-transition/${createdBlobs.length}`;
+    });
+    vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {});
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+
+    hub.api = api;
+    hub.mode = 'mock';
+    router.route = parse(`#/runs/${baseRun.id}`);
+    mounted = render(() => <RunPage />, target);
+    await vi.waitFor(() => {
+      flushSync();
+      if (!target.querySelector('#per-class button[aria-label="Export run metrics"]')) {
+        throw new Error('waiting for live run export button');
+      }
+    });
+
+    // Transition the live run to completed; sameItems retains menu structure, callback must read latest Run.
+    currentRun = {
+      ...currentRun,
+      status: 'completed',
+      epoch: 2,
+      finished: '2026-11-27T01:00:00Z',
+      model_id: 'm_completed_best',
+      best: { epoch: 2, map50_95: 0.654 },
+    };
+    emitStatus?.({ status: 'completed', error: null });
+    await vi.waitFor(() => {
+      flushSync();
+      if (!target.querySelector('a[href="#/models/m_completed_best"]')) throw new Error('waiting for completed run refresh');
+    });
+
+    target.querySelector<HTMLButtonElement>('#per-class button[aria-label="Export run metrics"]')!.click();
+    flushSync();
+    const jsonItem = [...target.querySelectorAll<HTMLButtonElement>('#per-class [role="menuitem"]')].find(
+      (b) => b.textContent?.trim() === 'Export metrics (JSON)',
+    )!;
+    jsonItem.click();
+    expect(createdBlobs).toHaveLength(1);
+    const exported = JSON.parse(await createdBlobs[0]!.text()) as {
+      run: { status: string; finished: string | null; model_id: string | null; best: { map50_95: number } | null };
+    };
+    expect(exported.run.status).toBe('completed');
+    expect(exported.run.finished).toBe('2026-11-27T01:00:00Z');
+    expect(exported.run.model_id).toBe('m_completed_best');
+    expect(exported.run.best?.map50_95).toBe(0.654);
+  });
+
+  it('keeps the <images> placeholder hint visible in Predict mode even when model path is also a placeholder', () => {
+    const bundle = buildCheckpointCli(SAMPLE_RUN, undefined, undefined, null)!;
+    mounted = render(() => <CheckpointCli bundle={bundle} />, target);
+    flushSync();
+    target.querySelector<HTMLButtonElement>('.ckpt-toggle')!.click();
+    flushSync();
+    const predictBtn = [...target.querySelectorAll<HTMLButtonElement>('[role="radio"]')].find((b) => b.textContent?.trim() === 'Predict')!;
+    predictBtn.click();
+    flushSync();
+    const hint = target.querySelector('.ckpt-hint')?.textContent ?? '';
+    expect(hint).toContain('<path to fasteners-s-best.folo>');
+    expect(hint).toContain('<images>');
+  });
 });

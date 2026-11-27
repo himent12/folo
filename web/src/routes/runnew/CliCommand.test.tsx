@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { hub } from '$lib/api/index';
 import { MockApi } from '$lib/api/mock';
 import { parse, router } from '$lib/router';
-import { withAutoBatch } from '$lib/trainCli';
+import { splitCliFlags, withAutoBatch } from '$lib/trainCli';
 import { toast } from '$lib/ui/toast';
 import { render, type Rendered } from '../../../framework/testing';
 import RunNew from '../RunNew';
@@ -41,6 +41,14 @@ describe('CliCommand auto-batch preview', () => {
     const second = withAutoBatch(first.parts, first.line);
     expect(second.line).toBe(first.line);
     expect(second.parts).toEqual(first.parts);
+
+    // Flag text inside a quoted dataset path must NOT trick withAutoBatch into omitting the real override
+    const trickyLine = "folo train --data 'D:/datasets --set auto_batch=true backup' --batch 16";
+    const trickyParts = splitCliFlags(trickyLine);
+    expect(trickyParts).toEqual(['folo train', "--data 'D:/datasets --set auto_batch=true backup'", '--batch 16']);
+    const withOverride = withAutoBatch(trickyParts, trickyLine);
+    expect(withOverride.line).toBe(`${trickyLine} --set auto_batch=true`);
+    expect(withOverride.parts.at(-1)).toBe('--set auto_batch=true');
   });
 
   it('toggles --set auto_batch=true in preview & clipboard copy and disables on CPU', async () => {

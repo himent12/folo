@@ -18,8 +18,6 @@ import X from '$icons/x';
 import WifiOff from '$icons/wifi-off';
 import TriangleAlert from '$icons/triangle-alert';
 import Copy from '$icons/copy';
-import Download from '$icons/download';
-import FileJson from '$icons/file-json';
 import Play from '$icons/play';
 import RotateCcw from '$icons/rotate-ccw';
 import CloudUpload from '$icons/cloud-upload';
@@ -78,7 +76,7 @@ import WaitingPanels from './run/WaitingPanels';
 import { exactTime } from './runs/when';
 import DeleteRun from './run/DeleteRun';
 import { goneEvalOn } from './run/goneEvalOn';
-import { buildCheckpointCli, buildLatestPerClass, downloadRunMetricsCsv, downloadRunMetricsJson, runExportMenuItems } from './run/runExport';
+import { buildCheckpointCli, runExportMenuItems, runExportPageCommands } from './run/runExport';
 import { stopDescription, stoppedToast } from './run/StopRun';
 
 type Section = 'pr' | 'lr' | 'samples' | 'classes' | 'logs' | 'cloud' | 'config';
@@ -262,12 +260,11 @@ export default function Run() {
   const headerModel = computed(() => (status.get() === 'completed' ? (run.get()?.model_id ?? null) : null));
   const runModel = computed(() => { const mid = run.get()?.model_id; return mid ? models.data?.find((m) => m.id === mid) : undefined; });
   const checkpointCli = computed(() => { const r = run.get(); return r ? buildCheckpointCli(r, runModel.get(), dataset.get(), evalOn.get()) : null; });
-  const hasPerClass = computed(() => (void live.version, buildLatestPerClass(live.epochs, classes.get()).length > 0));
-  const exportItems = computed<MenuItem[]>(() => {
-    const r = run.get();
-    if (!r || epochsDone.get() === 0) return [];
-    return runExportMenuItems(r, () => live.epochs, () => classes.get(), () => datasetName.get(), hasPerClass.get());
-  }, { equals: sameItems });
+  const hasPerClass = computed(() => (void live.version, (live.epochs[live.epochs.length - 1]?.val.per_class.length ?? 0) > 0));
+  const exportItems = computed<MenuItem[]>(
+    () => (run.get() && epochsDone.get() > 0 ? runExportMenuItems(() => run.peek(), () => live.epochs, () => classes.get(), () => datasetName.get(), hasPerClass.get()) : []),
+    { equals: sameItems },
+  );
   const stopOpen = signal(false);
   const deleteOpen = signal(false);
   const busy = signal(false);
@@ -391,15 +388,7 @@ export default function Run() {
     out.push({ id: 'run-copy-id', label: 'Copy run id', match: [r.id], icon: Copy, run: () => void copyText(r.id, 'run id') });
     const line = runCli.get();
     if (line) out.push({ id: 'run-copy-cli', label: 'Copy CLI command', match: ['folo train', 'PowerShell'], icon: Copy, run: () => void copyText(line, 'CLI command') });
-    const ckpt = checkpointCli.get();
-    if (ckpt) {
-      out.push({ id: 'run-copy-val-cli', label: 'Copy checkpoint val CLI', match: ['folo val'], icon: Copy, run: () => void copyText(ckpt.val, 'val CLI command') });
-      out.push({ id: 'run-copy-predict-cli', label: 'Copy checkpoint predict CLI', match: ['folo predict'], icon: Copy, run: () => void copyText(ckpt.predict, 'predict CLI command') });
-    }
-    if (epochsDone.get() > 0) {
-      out.push({ id: 'run-export-csv', label: 'Export metrics (CSV)', match: ['download csv'], icon: Download, run: () => void downloadRunMetricsCsv(r, live.epochs) });
-      out.push({ id: 'run-export-json', label: 'Export metrics (JSON)', match: ['download json'], icon: FileJson, run: () => void downloadRunMetricsJson(r, live.epochs, classes.get(), datasetName.get()) });
-    }
+    out.push(...runExportPageCommands(() => run.peek(), () => live.epochs, () => classes.get(), () => datasetName.get(), checkpointCli.get(), epochsDone.get() > 0, hasPerClass.get()));
     return out;
   });
 

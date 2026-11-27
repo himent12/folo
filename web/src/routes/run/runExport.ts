@@ -1,10 +1,12 @@
 // Pure run-detail export builders (CSV/JSON of real loaded per-epoch metrics, run config, and per-class AP)
 // and shell-safe checkpoint CLI command builders (`folo val` / `folo predict`, matching docs/CLI.md).
+import Copy from '$icons/copy';
 import Download from '$icons/download';
 import FileJson from '$icons/file-json';
 import type { Dataset, Epoch, Model, Run } from '$lib/api/types';
 import type { EvalSource } from '$lib/evaluated';
 import { withoutInexactSeed } from '$lib/seed';
+import { copyText, type PageCommand } from '$lib/shell/pageCommands';
 import { exportTableCsv, exportTableJson, type CsvCell } from '$lib/tableExport';
 import { quote, weightsRef } from '$lib/trainCli';
 import type { MenuItem } from '$lib/ui/Menu';
@@ -275,7 +277,7 @@ export function buildCheckpointCli(
 
 /** Shared export menu items for Run detail (`⋯` menu and Per-class panel header) when epochs are loaded. */
 export function runExportMenuItems(
-  run: Run,
+  getRun: () => Run | undefined,
   getEpochs: () => readonly Epoch[],
   getClasses: () => readonly string[],
   getDatasetName: () => string | undefined,
@@ -285,20 +287,72 @@ export function runExportMenuItems(
     {
       label: 'Export metrics (CSV)',
       icon: Download,
-      onclick: () => void downloadRunMetricsCsv(run, getEpochs()),
+      onclick: () => {
+        const r = getRun();
+        if (r) void downloadRunMetricsCsv(r, getEpochs());
+      },
     },
   ];
   if (hasPerClass) {
     items.push({
       label: 'Export per-class AP (CSV)',
       icon: Download,
-      onclick: () => void downloadRunPerClassCsv(run, getEpochs(), getClasses()),
+      onclick: () => {
+        const r = getRun();
+        if (r) void downloadRunPerClassCsv(r, getEpochs(), getClasses());
+      },
     });
   }
   items.push({
     label: 'Export metrics (JSON)',
     icon: FileJson,
-    onclick: () => void downloadRunMetricsJson(run, getEpochs(), getClasses(), getDatasetName()),
+    onclick: () => {
+      const r = getRun();
+      if (r) void downloadRunMetricsJson(r, getEpochs(), getClasses(), getDatasetName());
+    },
   });
   return items;
+}
+
+/** Command palette entries for checkpoint CLI quick-copy and metrics export on Run detail. */
+export function runExportPageCommands(
+  getRun: () => Run | undefined,
+  getEpochs: () => readonly Epoch[],
+  getClasses: () => readonly string[],
+  getDatasetName: () => string | undefined,
+  ckpt: CheckpointCliBundle | null,
+  hasEpochs: boolean,
+  hasPerClass: boolean,
+): PageCommand[] {
+  const out: PageCommand[] = [];
+  if (ckpt) {
+    out.push({ id: 'run-copy-val-cli', label: 'Copy checkpoint val CLI', match: ['folo val'], icon: Copy, run: () => void copyText(ckpt.val, 'val CLI command') });
+    out.push({ id: 'run-copy-predict-cli', label: 'Copy checkpoint predict CLI', match: ['folo predict'], icon: Copy, run: () => void copyText(ckpt.predict, 'predict CLI command') });
+  }
+  if (hasEpochs) {
+    out.push({
+      id: 'run-export-csv',
+      label: 'Export metrics (CSV)',
+      match: ['download csv'],
+      icon: Download,
+      run: () => { const r = getRun(); if (r) void downloadRunMetricsCsv(r, getEpochs()); },
+    });
+    if (hasPerClass) {
+      out.push({
+        id: 'run-export-per-class-csv',
+        label: 'Export per-class AP (CSV)',
+        match: ['download per-class csv'],
+        icon: Download,
+        run: () => { const r = getRun(); if (r) void downloadRunPerClassCsv(r, getEpochs(), getClasses()); },
+      });
+    }
+    out.push({
+      id: 'run-export-json',
+      label: 'Export metrics (JSON)',
+      match: ['download json'],
+      icon: FileJson,
+      run: () => { const r = getRun(); if (r) void downloadRunMetricsJson(r, getEpochs(), getClasses(), getDatasetName()); },
+    });
+  }
+  return out;
 }

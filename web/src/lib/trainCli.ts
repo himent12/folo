@@ -99,9 +99,41 @@ export interface TrainCommand {
 /** CLI override flag enabling the GPU VRAM-budget auto-batch prober (`TrainConfig.auto_batch`, docs/VISION.md). */
 export const AUTO_BATCH_FLAG = '--set auto_batch=true';
 
-/** Appends `--set auto_batch=true` to an existing CLI command preview (`parts` and `line`) without mutating it. */
+/**
+ * Splits a PowerShell CLI command line into top-level flag segments (`folo train`, `--data ...`, `--set ...`),
+ * ignoring ` --` inside PowerShell single-quoted strings (`'...'`, including typographic single quotes).
+ */
+export function splitCliFlags(line: string): string[] {
+  const parts: string[] = [];
+  let start = 0;
+  let inQuote = false;
+  const isSingleQuote = (c: string) => c === "'" || c === '\u2018' || c === '\u2019' || c === '\u201A' || c === '\u201B';
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i]!;
+    if (isSingleQuote(ch)) {
+      if (inQuote && i + 1 < line.length && isSingleQuote(line[i + 1]!)) {
+        i++;
+      } else {
+        inQuote = !inQuote;
+      }
+      continue;
+    }
+    if (!inQuote && ch === ' ' && line.startsWith('--', i + 1)) {
+      parts.push(line.slice(start, i));
+      start = i + 1;
+    }
+  }
+  parts.push(line.slice(start));
+  return parts;
+}
+
+/** Appends `--set auto_batch=true` to a structured CLI preview (`parts` and `line`) without mutating inputs. */
 export function withAutoBatch(parts: readonly string[], line: string): { parts: string[]; line: string } {
-  if (parts.some((p) => p === AUTO_BATCH_FLAG) || /(?:^|\s)--set(?:=|\s+)auto_batch=true(?:\s|$)/.test(line)) {
+  const hasAutoBatch = parts.some((p) => {
+    const t = p.trim();
+    return t === AUTO_BATCH_FLAG || t === '--set=auto_batch=true';
+  });
+  if (hasAutoBatch) {
     return { parts: [...parts], line };
   }
   return { parts: [...parts, AUTO_BATCH_FLAG], line: `${line} ${AUTO_BATCH_FLAG}` };

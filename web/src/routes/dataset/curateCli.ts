@@ -12,6 +12,8 @@ export interface CurateCliCommand {
   label: string;
   command: string;
   description: string;
+  /** Non-null when a class name or path cannot be represented safely in PowerShell / clap flags. */
+  warning: string | null;
 }
 
 export const CURATE_CLI_MODES: readonly { value: CurateCliMode; label: string }[] = [
@@ -20,6 +22,12 @@ export const CURATE_CLI_MODES: readonly { value: CurateCliMode; label: string }[
   { value: 'filter', label: 'Filter' },
   { value: 'merge', label: 'Merge' },
 ];
+
+/**
+ * Windows PowerShell 5.1 strips literal double quotes (`"`) when forwarding single-quoted strings to native
+ * executables, and raw CR/LF breaks one-line commands.
+ */
+const UNSAFE_PS_NATIVE_ARG = /["\r\n]/;
 
 /** Formats a flag + value safely even if `value` begins with `-`. */
 function flagValue(flag: string, value: string): string {
@@ -49,9 +57,13 @@ export function buildDatasetCurateCli(
   mode: CurateCliMode,
   opts: { stats?: DatasetStats; activeClass?: number } = {},
 ): CurateCliCommand {
-  const path = dataset.path || `<path to ${dataset.name}>`;
-  const hasRealPath = !!dataset.path;
+  const pathUnsafe = !!dataset.path && UNSAFE_PS_NATIVE_ARG.test(dataset.path);
+  const hasRealPath = !!dataset.path && !pathUnsafe;
+  const path = hasRealPath ? dataset.path : `<path to ${dataset.name}>`;
   const quoted = (p: string) => (hasRealPath ? quote(p) : p);
+  const pathWarning = pathUnsafe
+    ? 'Dataset path contains a quote or newline that Windows PowerShell cannot pass verbatim; replace the placeholder with your shell-quoted path.'
+    : null;
 
   if (mode === 'check') {
     const flags = ['--perceptual', '--fix-dry-run'];
@@ -62,6 +74,7 @@ export function buildDatasetCurateCli(
       command: `folo dataset check ${args.join(' ')}`,
       description:
         'Checks broken labels, corrupt images, exact byte duplicates, and 64-bit dHash perceptual near-duplicate / cross-split leakage (dry-run fix notes; modifies nothing).',
+      warning: pathWarning,
     };
   }
 
@@ -76,7 +89,8 @@ export function buildDatasetCurateCli(
       description:
         dataset.splits.val === 0
           ? 'This dataset has no validation split yet. Builds a deterministic multi-label stratified 80/20 train/val split in a new folder.'
-          : 'Re-splits into a deterministic multi-label stratified 80/20 train/val split in a new folder (adjust `--val` / `--test` ratios as needed).',
+          : 'Re-splits into a deterministic multi-label stratified 80/20 train/val split in a new folder (adjust --val / --test ratios as needed).',
+      warning: pathWarning,
     };
   }
 
@@ -84,21 +98,31 @@ export function buildDatasetCurateCli(
     const out = suggestedOut(dataset, 'filtered');
     const flags = [`--out ${out}`];
     const activeName = opts.activeClass !== undefined ? dataset.classes[opts.activeClass] : undefined;
-    if (activeName) {
-      flags.push(flagValue('--include-class', activeName));
+    let classWarning: string | null = null;
+    let includedClass = false;
+    if (activeName !== undefined) {
+      if (activeName.includes(',')) {
+        classWarning = `Class "${activeName}" contains a comma; folo dataset filter --include-class splits on commas, so --include-class was omitted.`;
+      } else if (UNSAFE_PS_NATIVE_ARG.test(activeName)) {
+        classWarning = `Class "${activeName}" contains a double quote or newline that Windows PowerShell 5.1 alters when passing native arguments, so --include-class was omitted.`;
+      } else {
+        flags.push(flagValue('--include-class', activeName));
+        includedClass = true;
+      }
     }
-    if ((opts.stats?.empty_images ?? 0) > 0 || !activeName) {
+    if ((opts.stats?.empty_images ?? 0) > 0 || !includedClass) {
       flags.push('--drop-empty-images');
     }
     const args = hasRealPath ? positionalPath(path, flags) : [path, ...flags];
-    const desc = activeName
-      ? `Exports only boxes of class ${activeName}${opts.stats?.empty_images ? ' and drops empty images' : ''} into a new dataset folder.`
-      : 'Filters classes, box dimensions, or empty background images into a new dataset folder (add `--include-class` or `--exclude-class` to narrow classes).';
+    const desc = includedClass
+      ? `Exports only boxes of class "${activeName}"${opts.stats?.empty_images ? ' and drops empty images' : ''} into a new dataset folder.`
+      : 'Filters classes, box dimensions, or empty background images into a new dataset folder (add --include-class or --exclude-class to narrow classes).';
     return {
       mode,
       label: 'Filter',
       command: `folo dataset filter ${args.join(' ')}`,
       description: desc,
+      warning: [pathWarning, classWarning].filter(Boolean).join(' ') || null,
     };
   }
 
@@ -112,5 +136,6 @@ export function buildDatasetCurateCli(
     command: `folo dataset merge ${inputs.join(' ')}`,
     description:
       'Merges this dataset with another YOLO, COCO, or Pascal VOC folder using collision-safe filenames and stratified train/val splits.',
+    warning: pathWarning,
   };
 }

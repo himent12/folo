@@ -24,9 +24,16 @@ export default function CheckpointCli(props: CheckpointCliProps) {
   const command = computed(() => (mode.get() === 'val' ? props.bundle.val : props.bundle.predict));
   const copied = computed(() =>
     mode.get() === 'val'
-      ? "Run this command in a terminal to evaluate the run's best checkpoint."
-      : "Run this command in a terminal to predict with the run's best checkpoint.",
+      ? 'Run this command in a terminal to evaluate the run checkpoint.'
+      : 'Run this command in a terminal to predict with the run checkpoint.',
   );
+  const placeholders = computed(() => {
+    const list: string[] = [];
+    if (props.bundle.modelPlaceholder) list.push(`<path to ${props.bundle.modelPlaceholder}>`);
+    if (mode.get() === 'val' && props.bundle.dataPlaceholder) list.push(`<path to ${props.bundle.dataPlaceholder}>`);
+    if (mode.get() === 'predict') list.push('<images>');
+    return list;
+  });
 
   return (
     <div class="ckpt-cli" data-checkpoint-cli>
@@ -51,19 +58,16 @@ export default function CheckpointCli(props: CheckpointCliProps) {
             label={mode.get() === 'val' ? 'Validate checkpoint CLI command' : 'Predict checkpoint CLI command'}
             copied={copied.get()}
           />
-          {props.bundle.modelPlaceholder || (mode.get() === 'val' && props.bundle.dataPlaceholder) ? (
+          {placeholders.get().length > 0 ? (
             <p class="ckpt-hint">
               Replace{' '}
-              {props.bundle.modelPlaceholder ? <span class="mono">&lt;path to {props.bundle.modelPlaceholder}&gt;</span> : null}
-              {props.bundle.modelPlaceholder && mode.get() === 'val' && props.bundle.dataPlaceholder ? ' and ' : null}
-              {mode.get() === 'val' && props.bundle.dataPlaceholder ? (
-                <span class="mono">&lt;path to {props.bundle.dataPlaceholder}&gt;</span>
-              ) : null}{' '}
-              with local paths on the server.
-            </p>
-          ) : mode.get() === 'predict' ? (
-            <p class="ckpt-hint">
-              Replace <span class="mono">&lt;images&gt;</span> with an image file or folder path.
+              {placeholders.get().map((ph, i) => (
+                <>
+                  {i > 0 ? ' and ' : null}
+                  <span class="mono">{ph}</span>
+                </>
+              ))}{' '}
+              with local paths{mode.get() === 'predict' && !props.bundle.modelPlaceholder ? ' (an image file or folder)' : ' on the server'}.
             </p>
           ) : null}
         </div>

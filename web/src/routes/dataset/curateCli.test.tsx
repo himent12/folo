@@ -67,6 +67,34 @@ describe('buildDatasetCurateCli', () => {
       'folo dataset filter D:/datasets/fasteners --out <out_dir>/fasteners-filtered --include-class=-washer',
     );
   });
+
+  it('omits --include-class with an explicit warning for comma or double-quote class names, and preserves backticks in descriptions', () => {
+    const edgeDs: Dataset = {
+      ...BASE_DATASET,
+      classes: ['nut, washer', 'kid"s class', 'back`tick'],
+    };
+
+    // Comma in class name: clap splits --include-class on commas
+    const comma = buildDatasetCurateCli(edgeDs, 'filter', { stats: { ...BASE_STATS, empty_images: 0 }, activeClass: 0 });
+    expect(comma.command).not.toContain('--include-class');
+    expect(comma.warning).toContain('comma');
+
+    // Double quote in class name: PowerShell 5.1 strips literal double quotes on native arguments
+    const dquote = buildDatasetCurateCli(edgeDs, 'filter', { stats: { ...BASE_STATS, empty_images: 0 }, activeClass: 1 });
+    expect(dquote.command).not.toContain('--include-class');
+    expect(dquote.warning).toContain('double quote');
+
+    // Backtick in class name: stays quoted safely and preserved verbatim in description
+    const backtick = buildDatasetCurateCli(edgeDs, 'filter', { stats: { ...BASE_STATS, empty_images: 0 }, activeClass: 2 });
+    expect(backtick.warning).toBeNull();
+    expect(backtick.command).toContain("--include-class 'back`tick'");
+    expect(backtick.description).toContain('back`tick');
+
+    // Unsafe dataset path with literal double quote falls back to placeholder + warning
+    const badPath = buildDatasetCurateCli({ ...BASE_DATASET, path: '/data/bad"dir' }, 'check');
+    expect(badPath.command).toContain('<path to fasteners>');
+    expect(badPath.warning).toContain('Windows PowerShell');
+  });
 });
 
 describe('DatasetInsights CLI curation integration', () => {
