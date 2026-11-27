@@ -29,7 +29,7 @@ fn to_class_normalize(m: ClassNormalizeMode) -> ClassNormalize {
     }
 }
 
-fn to_data_format(f: DatasetFormat) -> Format {
+pub(super) fn to_data_format(f: DatasetFormat) -> Format {
     match f {
         DatasetFormat::Auto => Format::Auto,
         DatasetFormat::Yolo => Format::Yolo,
@@ -37,7 +37,7 @@ fn to_data_format(f: DatasetFormat) -> Format {
     }
 }
 
-fn to_data_split(s: Split) -> folo_data::Split {
+pub(super) fn to_data_split(s: Split) -> folo_data::Split {
     match s {
         Split::Train => folo_data::Split::Train,
         Split::Val => folo_data::Split::Val,
@@ -111,7 +111,7 @@ fn is_confirmed_coco_annotation(path: &Path, input: &Path, root: &Path) -> bool 
 
 /// Rejects datasets with corrupt or dangling COCO split manifests or unreadable/dangling VOC ImageSets split
 /// files so curation never silently omits an entire split (mirroring `folo dataset convert/merge/filter`).
-fn check_unreadable_splits(ds: &LoadedDataset, input: &Path) -> Result<(), Error> {
+pub(super) fn check_unreadable_splits(ds: &LoadedDataset, input: &Path) -> Result<(), Error> {
     let bad: Vec<(PathBuf, String)> = match ds.format {
         Format::Coco => {
             let mut bad: Vec<(PathBuf, String)> = ds
@@ -175,7 +175,7 @@ fn check_unreadable_splits(ds: &LoadedDataset, input: &Path) -> Result<(), Error
     Ok(())
 }
 
-fn slug(name: &str) -> String {
+pub(super) fn slug(name: &str) -> String {
     let mut s = String::new();
     for c in name.chars() {
         if c.is_ascii_alphanumeric() {
@@ -221,7 +221,7 @@ fn allocate_dataset_dir(
 }
 
 /// Maps a [`DataError`] to an MCP tool error.
-fn data_error(e: DataError) -> Error {
+pub(super) fn data_error(e: DataError) -> Error {
     match &e {
         DataError::Config(m) => {
             if m.contains("nothing to merge")
@@ -260,7 +260,7 @@ impl Inner {
     /// Resolves a registered dataset's exact on-disk path (`ds.path`, matching `RealStore` and `models::eval`)
     /// for local disk tools (`audit_dataset`, `merge_datasets`, `filter_dataset`). Refuses mock procedural
     /// datasets and remote non-local proxies.
-    async fn resolve_local_dataset(
+    pub(super) async fn resolve_local_dataset(
         &self,
         tool: &str,
         dataset_id: &str,
@@ -306,7 +306,7 @@ impl Inner {
     /// Resolves the root `data_dir` where newly created datasets (`merge_datasets`, `filter_dataset`) are written.
     /// Refuses mock stores (embedded and proxied), remote non-local proxies, and any `<root>/datasets` escaping
     /// `--confine`.
-    async fn dataset_write_root(&self, tool: &str) -> Result<PathBuf, Error> {
+    pub(super) async fn dataset_write_root(&self, tool: &str) -> Result<PathBuf, Error> {
         let Some(proxy) = &self.proxy else {
             if self.blocking(|s| Ok(s.is_mock())).await? {
                 return Err(Error::new(

@@ -248,7 +248,7 @@ pub(super) fn tmp_dir(name: &str) -> TestDir {
     TestDir::new(&format!("mcp-test-{name}"))
 }
 
-pub(super) const ALL_TOOLS: [&str; 43] = [
+pub(super) const ALL_TOOLS: [&str; 44] = [
     "folo_info",
     "list_datasets",
     "get_dataset",
@@ -259,6 +259,7 @@ pub(super) const ALL_TOOLS: [&str; 43] = [
     "audit_dataset",
     "merge_datasets",
     "filter_dataset",
+    "dataset_export",
     "list_models",
     "train",
     "run_status",

@@ -705,3 +705,108 @@ fn folo2_end_to_end_embedded() {
 
     c.finish();
 }
+
+/// MCP `dataset_export`: exports registered datasets to COCO JSON with default and explicit `out`, split filtering,
+/// `reference` / `copy` image modes, `pretty` + `description`, refuses `--mock` with `not_supported`, and enforces
+/// `--confine` on `out`.
+#[test]
+fn dataset_export_coco_modes_and_guards() {
+    let dir = tmp_dir("mcp-dataset-export");
+    let home = dir.join("home");
+    let mut c = spawn(&["--data-dir", home.to_str().unwrap(), "--device", "cpu"], None);
+    init_old(&mut c);
+    let schemas = check_tools(&mut c, &ALL_TOOLS);
+
+    let ds = checked(
+        &mut c,
+        &schemas,
+        "create_synthetic_dataset",
+        json!({ "name": "export_src", "images": 8, "imgsz": 64, "classes": ["circle", "square"], "seed": 21 }),
+    );
+    let ds_id = ds["id"].as_str().unwrap().to_string();
+
+    // Default output under `<data_dir>/exports/` with copy mode.
+    let exp_default = checked(
+        &mut c,
+        &schemas,
+        "dataset_export",
+        json!({ "dataset_id": ds_id, "format": "coco", "pretty": true, "description": "mcp export" }),
+    );
+    assert_eq!(exp_default["format"], "coco");
+    assert_eq!(exp_default["images"], "copy");
+    assert_eq!(exp_default["categories"], 2);
+    assert_eq!(
+        exp_default["splits"]["train"].as_u64().unwrap() + exp_default["splits"]["val"].as_u64().unwrap(),
+        8,
+        "{exp_default}"
+    );
+    let default_out = std::path::PathBuf::from(exp_default["path"].as_str().unwrap());
+    assert!(default_out.join("annotations/instances_train.json").is_file(), "{exp_default}");
+    assert!(default_out.join("annotations/instances_val.json").is_file(), "{exp_default}");
+
+    // Explicit `out`, `splits: ["val"]`, and `images: "reference"`.
+    let custom_out = dir.join("custom_ref_export");
+    let exp_ref = checked(
+        &mut c,
+        &schemas,
+        "dataset_export",
+        json!({
+            "dataset_id": ds_id,
+            "out": custom_out.to_str().unwrap(),
+            "splits": ["val"],
+            "images": "reference"
+        }),
+    );
+    assert_eq!(exp_ref["images"], "reference");
+    assert_eq!(exp_ref["exported_splits"].as_array().unwrap().len(), 1, "{exp_ref}");
+    assert_eq!(exp_ref["exported_splits"][0]["split"], "val");
+    assert!(!custom_out.join("images").exists());
+    assert!(custom_out.join("annotations/instances_val.json").is_file());
+
+    // Non-empty target dir fails with `output_exists`.
+    c.tool_error(
+        "dataset_export",
+        json!({ "dataset_id": ds_id, "out": custom_out.to_str().unwrap() }),
+        "output_exists",
+    );
+
+    // Non-existent nested target inside the source dataset (both relative and absolute) is rejected before writing.
+    let ds_path = std::path::PathBuf::from(ds["path"].as_str().unwrap());
+    let ds_folder = ds_path.file_name().unwrap().to_str().unwrap();
+    let nested_rel = format!("datasets/{ds_folder}/nested_inside_new");
+    c.tool_error("dataset_export", json!({ "dataset_id": ds_id, "out": nested_rel }), "invalid_arguments");
+    assert!(!ds_path.join("nested_inside_new").exists(), "overlapping export must not create nested folder");
+    let nested_abs = ds_path.join("nested_abs_new");
+    c.tool_error(
+        "dataset_export",
+        json!({ "dataset_id": ds_id, "out": nested_abs.to_str().unwrap() }),
+        "invalid_arguments",
+    );
+    assert!(!nested_abs.exists(), "overlapping absolute export must not create nested folder");
+    c.finish();
+
+    // `--confine` refuses an `out` path escaping `--data-dir` with `path_outside_data_dir` and a write-specific hint.
+    let mut confined = spawn(&["--data-dir", home.to_str().unwrap(), "--confine", "--device", "cpu"], None);
+    init_old(&mut confined);
+    let outside = dir.join("escaped_export");
+    let conf_err = confined.tool_error(
+        "dataset_export",
+        json!({ "dataset_id": ds_id, "out": outside.to_str().unwrap() }),
+        "path_outside_data_dir",
+    );
+    let hint = conf_err["hint"].as_str().unwrap_or("");
+    assert!(hint.contains("output directory inside --data-dir"), "expected write-specific hint: {conf_err}");
+    assert!(!hint.contains("only reads"), "hint must not say read-only for an output path: {conf_err}");
+    assert!(!outside.exists(), "confined refusal must not create target directory");
+    confined.finish();
+
+    // `--mock` refuses `dataset_export` with `not_supported`.
+    let mock_home = dir.join("mock_home");
+    let mut mock_c = spawn(&["--data-dir", mock_home.to_str().unwrap(), "--mock"], None);
+    init_old(&mut mock_c);
+    let list = mock_c.ok("list_datasets", json!({}));
+    let mock_id = list["items"][0]["id"].as_str().unwrap().to_string();
+    mock_c.tool_error("dataset_export", json!({ "dataset_id": mock_id }), "not_supported");
+    assert!(!mock_home.join("exports").exists(), "mock mode must not create exports/");
+    mock_c.finish();
+}

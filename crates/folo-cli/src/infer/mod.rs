@@ -20,7 +20,7 @@ use folo_nn::io::ModelFile;
 use folo_vision::predict::f16_unavailable;
 use folo_vision::train::{can_place, resolve_device};
 use folo_vision::val::{ValConfig, check_config_detector, val_metrics, validate_detector};
-use folo_vision::{Detector, FoloModel, NmsConfig, Precision};
+use folo_vision::{Detector, NmsConfig, Precision};
 use serde_json::json;
 
 use crate::cli::{PrecisionArg, SplitArg, ValArgs, bounds};
@@ -104,19 +104,6 @@ fn open_int8(command: &str, path: &Path, device: &str, tensor_cores: bool) -> Re
         )
         .hint("pass --device cpu (or auto)"));
     }
-    let file = ModelFile::open(path).map_err(|e| weights_error(command, path, e))?;
-    if file.metadata().config.is_v2() {
-        return Err(CliError::new(
-            ExitCode::NotImplemented,
-            "not_supported",
-            format!(
-                "{} ({}) does not support --precision int8 yet",
-                folo_api::json::path(path),
-                file.metadata().arch
-            ),
-        )
-        .hint("use --precision f32, or --precision f16 on a GPU"));
-    }
     if !folo_vision::model::quant::uses_vnni() {
         eprintln!(
             "note: --precision int8: the int8 kernels take their portable path, several times slower than f32 \
@@ -126,6 +113,7 @@ fn open_int8(command: &str, path: &Path, device: &str, tensor_cores: bool) -> Re
     if tensor_cores {
         eprintln!("note: --tensor-cores only affects f16 inference (--half on a GPU); running without them");
     }
+    let file = ModelFile::open(path).map_err(|e| weights_error(command, path, e))?;
     // A missing, unreadable or mismatched calibration: the weights are fine, the int8 calibration is not.
     let calibration_error = |why: String| {
         CliError::new(ExitCode::Runtime, "invalid_weights", format!("{}: {why}", folo_api::json::path(path)))
@@ -136,19 +124,19 @@ fn open_int8(command: &str, path: &Path, device: &str, tensor_cores: bool) -> Re
         Ok(None) => return Err(calibration_error("no int8 calibration".into())),
         Err(e) => return Err(calibration_error(format!("unreadable int8 calibration ({e})"))),
     };
-    let mut model = FoloModel::from_file_for_inference(
+    let mut model = Detector::from_file_for_inference(
         &file,
         resolve_device("cpu").map_err(|e| engine_error(command, e))?,
         Precision::F32.dtype(),
     )
     .map_err(|e| nn_error(command, e))?;
     model.set_int8(Some(cal)).map_err(|e| calibration_error(e.to_string()))?;
-    Ok(Detector::from(model))
+    Ok(model)
 }
 
 /// The precision a model runs in: `f32`, `f16` or `int8`.
 pub(super) fn precision_of(model: &Detector) -> &'static str {
-    if model.as_v1().is_some_and(|m| m.int8().is_some()) {
+    if model.int8().is_some() {
         "int8"
     } else if model.dtype() == Precision::F16.dtype() {
         Precision::F16.as_str()

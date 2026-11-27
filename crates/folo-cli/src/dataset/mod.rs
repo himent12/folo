@@ -10,6 +10,7 @@
 //! - `filter.rs`: `folo dataset filter` (class whitelist/blacklist, split, box area/size, image dims, drop-empty).
 
 mod check;
+mod export;
 mod filter;
 mod merge;
 mod split;
@@ -34,6 +35,7 @@ pub fn run(cmd: DatasetCommand, out: Out) -> Result<(), CliError> {
         DatasetCommand::Split(a) => split::split(a, out),
         DatasetCommand::Merge(a) => merge::merge(a, out),
         DatasetCommand::Filter(a) => filter::filter(a, out),
+        DatasetCommand::Export(a) => export::export(a, out),
     }
 }
 

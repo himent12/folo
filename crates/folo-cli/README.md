@@ -28,7 +28,7 @@ and two constants, so tests can parse commands with the real parser; every comma
 | `src/output_file.rs` | The file `export` and `quantize` write: a temporary name, then one move to a free name (`folo_nn::io::publish_new`) |
 | `src/coco.rs` | `val --coco` / `--save-json`: upfront category validation (including strict subset splits), pycocotools-exact evaluation and COCO results files |
 | `src/draw.rs` | Annotated images for `predict --save` (class colours, a built-in digit font) |
-| `src/dataset/` | `folo dataset check \| stats \| synth \| convert \| split \| merge \| filter`, on folo-data: `mod.rs` (`stats`, `convert`, shared helpers), `check.rs` (`check`, COCO size-mismatch reconciliation, exact + `--perceptual` dHash cross-split duplicate leakage reporting, delegating dangling symlink diagnostics to `folo_server::index::links`), `synth.rs` (`synth`, atomic sibling-staging and rollback), `split.rs` (`split`, deterministic multi-label stratified splitting), `merge.rs` (`merge`, multi-dataset merging with class reconciliation and collision policies), `filter.rs` (`filter`, class/split/box/image filtering) |
+| `src/dataset/` | `folo dataset check \| stats \| synth \| convert \| split \| merge \| filter \| export`, on folo-data: `mod.rs` (`stats`, `convert`, shared helpers), `check.rs` (`check`, COCO size-mismatch reconciliation, exact + `--perceptual` dHash cross-split duplicate leakage reporting, delegating dangling symlink diagnostics to `folo_server::index::links`), `synth.rs` (`synth`, atomic sibling-staging and rollback), `split.rs` (`split`, deterministic multi-label stratified splitting), `merge.rs` (`merge`, multi-dataset merging with class reconciliation and collision policies), `filter.rs` (`filter`, class/split/box/image filtering), `export.rs` (`export`, COCO Detection JSON export with split selection and `copy`/`link`/`reference` image modes) |
 | `src/weights/` | `folo weights list \| pull` and published-name resolution (`mod.rs`); `download.rs` fetches a release over HTTPS, else with `gh` |
 | `src/cloud.rs` | `folo cloud ...` on the data dir, through `folo_server::cloud` |
 | `src/label/` | `folo label ...`: `mod.rs` opens the data dir's `folo serve` (or `--server`, else the data dir's labeler in this process, holding its lock; the store only for `export`) and runs folo-mcp's labeling operations (`folo_mcp::label::Labels`) with CLI hints; `print.rs` is the human output |
@@ -50,7 +50,7 @@ From the `Command` enum in `src/cli.rs` and the `run` match in `src/main.rs`.
 | `val`, `predict`, `export` | `src/infer/` (`mod.rs`, `diag.rs`, `predict.rs`, `export.rs`) |
 | `quantize` | `src/quantize.rs` |
 | `bench catalog \| list \| create \| show \| delete \| run \| status \| stop` | `src/bench/`, on folo-mcp's `bench` module |
-| `dataset check \| stats \| synth \| convert \| split \| merge \| filter` | `src/dataset/` (`mod.rs`, `check.rs`, `synth.rs`, `split.rs`, `merge.rs`, `filter.rs`) |
+| `dataset check \| stats \| synth \| convert \| split \| merge \| filter \| export` | `src/dataset/` (`mod.rs`, `check.rs`, `synth.rs`, `split.rs`, `merge.rs`, `filter.rs`, `export.rs`) |
 | `weights list \| pull` | `src/weights/mod.rs`, `src/weights/download.rs` |
 | `cloud providers \| connect \| connections \| check \| disconnect \| offers \| instances \| terminate` | `src/cloud.rs` |
 | `label agents \| jobs \| create \| add \| start \| stop \| status \| images \| view \| set \| review \| export` | `src/label/`, on folo-mcp's `label` module |

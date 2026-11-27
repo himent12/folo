@@ -296,12 +296,72 @@ fn folo2_train_val_predict_export_and_resume_end_to_end() {
         "exported folo2 ONNX must preserve real class names in `names` metadata"
     );
 
-    // 5. `folo quantize` and `--precision int8` on `folo2-n` fail cleanly with `not_supported` (exit 4).
-    let (code, lines, _) = folo(&["quantize", "--json", "--model", s(&best), "--data", s(&data)]);
-    assert_eq!((code, lines.last().unwrap()["error"]["code"].as_str()), (4, Some("not_supported")));
-    let (code, lines, _) =
-        folo(&["val", "--json", "--model", s(&best), "--data", s(&data), "--precision", "int8"]);
-    assert_eq!((code, lines.last().unwrap()["error"]["code"].as_str()), (4, Some("not_supported")));
+    // 5. `folo quantize` + `--precision int8` on `folo2-n` calibrates and runs CPU int8 val and predict end to end.
+    let v2_int8 = root.join("v2-int8.folo");
+    let (code, lines, stderr) = folo(&[
+        "quantize",
+        "--json",
+        "--model",
+        s(&best),
+        "--data",
+        s(&data),
+        "--images",
+        "4",
+        "--output",
+        s(&v2_int8),
+    ]);
+    assert_eq!(code, 0, "folo2 quantize failed: {stderr}");
+    assert!(lines[0]["boundaries"].as_u64().unwrap() > 10, "{}", lines[0]);
+    assert_eq!(lines[0]["f32_policy"], "auto");
+    let (code, lines, stderr) =
+        folo(&["val", "--json", "--model", s(&v2_int8), "--data", s(&data), "--precision", "int8"]);
+    assert_eq!(code, 0, "folo2 int8 val failed: {stderr}");
+    assert_eq!((lines[0]["dtype"].as_str(), lines[0]["device"].as_str()), (Some("int8"), Some("cpu")));
+    let (code, lines, stderr) =
+        folo(&["predict", "--json", "--model", s(&v2_int8), "--precision", "int8", s(&first_img)]);
+    assert_eq!(code, 0, "folo2 int8 predict failed: {stderr}");
+    assert_eq!(lines[0]["dtype"], "int8");
+
+    // Explicit `--f32-conv` works on `folo2-n` (valid conv accepted, unknown conv rejected upfront with `usage`).
+    let v2_int8_explicit = root.join("v2-int8-explicit.folo");
+    let (code, lines, stderr) = folo(&[
+        "quantize",
+        "--json",
+        "--model",
+        s(&best),
+        "--data",
+        s(&data),
+        "--images",
+        "2",
+        "--f32-policy",
+        "none",
+        "--f32-conv",
+        "neck.out5.cv2",
+        "--output",
+        s(&v2_int8_explicit),
+    ]);
+    assert_eq!(code, 0, "folo2 explicit --f32-conv failed: {stderr}");
+    assert_eq!(lines[0]["f32_convs"], serde_json::json!(["neck.out5.cv2"]), "{}", lines[0]);
+
+    let v2_int8_bad = root.join("v2-int8-bad.folo");
+    let (code, lines, _) = folo(&[
+        "quantize",
+        "--json",
+        "--model",
+        s(&best),
+        "--data",
+        s(&data),
+        "--images",
+        "2",
+        "--f32-policy",
+        "none",
+        "--f32-conv",
+        "bogus.layer",
+        "--output",
+        s(&v2_int8_bad),
+    ]);
+    assert_eq!((code, lines[0]["error"]["code"].as_str()), (2, Some("usage")), "{}", lines[0]);
+    assert!(!v2_int8_bad.exists());
 
     // 6. Stop + resume on `folo2-n` (refuses mismatched `--model`, resumes cleanly to epoch 2+).
     let long_run = project.join("v2-long");

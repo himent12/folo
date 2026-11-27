@@ -2,7 +2,7 @@
 //! weights (fused, `f32`) with the calibration in their metadata (`folo.quant`, docs/FORMAT.md), for
 //! `val` / `predict --precision int8`.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::Instant;
 
 use folo_core::Tensor;
@@ -11,7 +11,7 @@ use folo_nn::Module;
 use folo_nn::io::{FloatDType, ModelFile, write_export};
 use folo_vision::model::quant::{self, Calibration, Method, SensitivityPolicy};
 use folo_vision::train::resolve_device;
-use folo_vision::{FoloModel, Precision};
+use folo_vision::{Detector, Precision};
 use serde_json::json;
 
 use crate::cli::{F32PolicyArg, QuantMethodArg, QuantizeArgs, SplitArg, bounds};
@@ -112,20 +112,6 @@ pub fn quantize(args: QuantizeArgs, out: Out) -> Result<(), CliError> {
     }
     let path = crate::weights::resolve(&args.model)?;
     let file = ModelFile::open(&path).map_err(|e| crate::infer::weights_error("quantize", &path, e))?;
-    if file.metadata().config.is_v2() {
-        return Err(CliError::new(
-            ExitCode::NotImplemented,
-            "not_supported",
-            format!(
-                "{} ({}) does not support int8 quantization yet",
-                folo_api::json::path(&path),
-                file.metadata().arch
-            ),
-        )
-        .hint(
-            "int8 calibration currently supports v1 `folo-*` models; use f32 or f16 inference for `folo2-*`",
-        ));
-    }
     let model = open_cpu(&file)?;
     if !selective.explicit_convs.is_empty() {
         validate_explicit_convs(&model, &selective.explicit_convs)?;
@@ -160,7 +146,7 @@ pub fn quantize(args: QuantizeArgs, out: Out) -> Result<(), CliError> {
     let t = Instant::now();
     let (mut cal, n) =
         calibrate_raw(&model, part, args.images, args.seed, (imgsz, args.batch as usize, workers), method)?;
-    let analysis = quant::analyze_sensitivity(&model, &cal).map_err(nn_error)?;
+    let analysis = quant::analyze_sensitivity_detector(&model, &cal).map_err(nn_error)?;
     let by_name: HashMap<&str, &quant::ConvSensitivity> =
         analysis.iter().map(|e| (e.name.as_str(), e)).collect();
     for name in &selective.explicit_convs {
@@ -176,9 +162,12 @@ pub fn quantize(args: QuantizeArgs, out: Out) -> Result<(), CliError> {
     cal.f32_convs = selective.explicit_convs.clone();
     cal = match selective.policy {
         F32PolicyArg::Auto => cal
-            .with_sensitivity_f32(&model, selective.sensitivity.expect("auto sets sensitivity"))
+            .with_sensitivity_f32_detector(&model, selective.sensitivity.expect("auto sets sensitivity"))
             .map_err(nn_error)?,
-        F32PolicyArg::P5Tail => cal.with_p5_tail_f32(&model),
+        F32PolicyArg::P5Tail => match &model {
+            Detector::V1(m) => cal.with_p5_tail_f32(m),
+            Detector::V2(m) => cal.with_p5_tail_f32_v2(m),
+        },
         F32PolicyArg::None => cal,
     };
     write(&file, &model, &cal, imgsz, &mut output)?;
@@ -260,9 +249,9 @@ pub fn quantize(args: QuantizeArgs, out: Out) -> Result<(), CliError> {
 }
 
 /// Runs two-pass activation calibration on `images` randomly sampled images from `part` without yet applying any
-/// selective-`f32` policy (mirroring `folo_vision::model::quant::calibrate_sample`).
+/// selective-`f32` policy (mirroring `folo_vision::model::quant::calibrate_sample_detector`).
 fn calibrate_raw(
-    model: &FoloModel,
+    model: &Detector,
     part: &FileDataset,
     images: usize,
     seed: u64,
@@ -286,7 +275,7 @@ fn calibrate_raw(
             Ok(Tensor::from_vec(std::mem::take(&mut b.images), b.shape)?)
         })
     };
-    let cal = quant::calibrate(model, batches, method).map_err(nn_error)?;
+    let cal = quant::calibrate_detector(model, batches, method).map_err(nn_error)?;
     Ok((cal, n))
 }
 
@@ -294,7 +283,7 @@ fn calibrate_raw(
 /// the ones `cal` was measured on.
 fn write(
     file: &ModelFile,
-    model: &FoloModel,
+    model: &Detector,
     cal: &Calibration,
     imgsz: u32,
     output: &mut OutputFile,
@@ -316,147 +305,206 @@ fn write(
     Ok(())
 }
 
+/// Zero-compute symbolic executor that walks a detector's quantised backbone/neck graph to discover every
+/// boundary name so `quant::analyze_sensitivity_detector` can run upfront without calibration data.
+struct BoundaryCollector {
+    ranges: BTreeMap<String, [f32; 2]>,
+    pending_attn_dims: Option<[usize; 4]>,
+}
+
+impl BoundaryCollector {
+    fn record(&mut self, name: &str) {
+        self.ranges.entry(name.to_string()).or_insert([0.0, 1.0]);
+    }
+}
+
+impl quant::walk::Exec for BoundaryCollector {
+    type A = [usize; 4];
+
+    fn stem(&mut self, name: &str, conv: &folo_nn::ConvBnAct, x: &Tensor) -> folo_nn::Result<Self::A> {
+        self.record(name);
+        let [n, _, h, w] = x.dims4().map(|(n, c, h, w)| [n, c, h, w])?;
+        let cfg = conv.conv.config();
+        let (oh, ow) =
+            folo_core::cpu::q8::out_size(h, w, cfg.kernel, cfg.stride, cfg.padding).unwrap_or((h / 2, w / 2));
+        Ok([n, cfg.out_channels, oh, ow])
+    }
+
+    fn stem_v2(
+        &mut self,
+        name: &str,
+        stem: &folo_vision::model::v2::StemV2,
+        x: &Tensor,
+    ) -> folo_nn::Result<Self::A> {
+        self.record(name);
+        let [n, _, h, w] = x.dims4().map(|(n, c, h, w)| [n, c, h, w])?;
+        let cfg = stem.conv.conv.config();
+        let (in_h, in_w) = if stem.spd { (h / 2, w / 2) } else { (h, w) };
+        let (oh, ow) = folo_core::cpu::q8::out_size(in_h, in_w, cfg.kernel, cfg.stride, cfg.padding)
+            .unwrap_or((h / 2, w / 2));
+        Ok([n, cfg.out_channels, oh, ow])
+    }
+
+    fn conv(
+        &mut self,
+        name: &str,
+        conv: &folo_nn::ConvBnAct,
+        parts: &[&Self::A],
+        res: Option<&Self::A>,
+    ) -> folo_nn::Result<Self::A> {
+        self.record(name);
+        let [n, _, h, w] = *parts[0];
+        let cfg = conv.conv.config();
+        let (oh, ow) =
+            folo_core::cpu::q8::out_size(h, w, cfg.kernel, cfg.stride, cfg.padding).unwrap_or((h, w));
+        let (oh, ow) = match res {
+            Some(r) => (oh.max(r[2]), ow.max(r[3])),
+            None => (oh, ow),
+        };
+        Ok([n, cfg.out_channels, oh, ow])
+    }
+
+    fn rep_conv(
+        &mut self,
+        name: &str,
+        rep: &folo_vision::model::v2::WsQARepConv3x3,
+        x: &Self::A,
+        _out_f32: bool,
+    ) -> folo_nn::Result<Self::A> {
+        self.record(name);
+        let [n, _, h, w] = *x;
+        let (oh, ow) = rep
+            .fused
+            .as_ref()
+            .and_then(|c| {
+                let cfg = c.config();
+                folo_core::cpu::q8::out_size(h, w, cfg.kernel, cfg.stride, cfg.padding)
+            })
+            .unwrap_or((h, w));
+        Ok([n, rep.out_channels, oh, ow])
+    }
+
+    fn conv_f32(&mut self, _name: &str, _conv: &folo_nn::ConvBnAct, _x: &Self::A) -> folo_nn::Result<Tensor> {
+        Ok(Tensor::zeros([0]))
+    }
+
+    fn attend_and_pe(
+        &mut self,
+        a: &folo_vision::model::blocks::Attention,
+        _qkv: &Tensor,
+        b: usize,
+        h: usize,
+        w: usize,
+    ) -> folo_nn::Result<Tensor> {
+        self.pending_attn_dims = Some([b, a.proj.conv.config().in_channels, h, w]);
+        Ok(Tensor::zeros([0]))
+    }
+
+    fn hyper_attend_and_scene(
+        &mut self,
+        h_ctx: &folo_vision::model::v2::HyperContext,
+        _av: &Tensor,
+        b: usize,
+        h: usize,
+        w: usize,
+    ) -> folo_nn::Result<(Tensor, Tensor)> {
+        self.pending_attn_dims = Some([b, h_ctx.c_g, h, w]);
+        Ok((Tensor::zeros([0]), Tensor::zeros([0])))
+    }
+
+    fn fullpad_gate(
+        &mut self,
+        _gate: &folo_vision::model::v2::FullPadGate,
+        _feat: &Tensor,
+        _g_scene: &Tensor,
+    ) -> folo_nn::Result<Tensor> {
+        Ok(Tensor::zeros([0]))
+    }
+
+    fn conv_out_f32(
+        &mut self,
+        name: &str,
+        _conv: &folo_nn::ConvBnAct,
+        _parts: &[&Self::A],
+    ) -> folo_nn::Result<Tensor> {
+        self.record(name);
+        Ok(Tensor::zeros([0]))
+    }
+
+    fn quantize(&mut self, name: &str, x: &Tensor) -> folo_nn::Result<Self::A> {
+        self.record(name);
+        let dims = match self.pending_attn_dims.take() {
+            Some(d) => d,
+            None => {
+                let (n, c, h, w) = x.dims4()?;
+                [n, c, h, w]
+            }
+        };
+        Ok(dims)
+    }
+
+    fn dequantize(&mut self, _x: &Self::A) -> folo_nn::Result<Tensor> {
+        Ok(Tensor::zeros([0]))
+    }
+
+    fn narrow(&mut self, x: &Self::A, _start: usize, len: usize) -> folo_nn::Result<Self::A> {
+        Ok([x[0], len, x[2], x[3]])
+    }
+
+    fn max_pool(&mut self, x: &Self::A, _k: usize) -> folo_nn::Result<Self::A> {
+        Ok(*x)
+    }
+
+    fn upsample2(&mut self, x: &Self::A) -> folo_nn::Result<Self::A> {
+        Ok([x[0], x[1], 2 * x[2], 2 * x[3]])
+    }
+
+    fn space_to_depth2_parts(
+        &mut self,
+        x: &Self::A,
+        _consumer_is_f32: bool,
+    ) -> folo_nn::Result<[Self::A; 4]> {
+        let part = [x[0], x[1], x[2] / 2, x[3] / 2];
+        Ok([part; 4])
+    }
+
+    fn dims(&self, x: &Self::A) -> [usize; 4] {
+        *x
+    }
+}
+
 /// Symbolic zero-compute walk over `model`'s quantised backbone/neck graph to list every int8-eligible conv
 /// name before opening calibration images or running two-pass calibration.
-fn eligible_conv_names(model: &FoloModel) -> Result<Vec<String>, CliError> {
-    struct Collector {
-        input_hw: (usize, usize),
-        pending_attn_dims: Option<[usize; 4]>,
-        names: Vec<String>,
-    }
-    impl Collector {
-        fn inspect(
-            &mut self,
-            name: &str,
-            conv: &folo_nn::ConvBnAct,
-            parts: &[&[usize; 4]],
-            res: Option<&[usize; 4]>,
-        ) -> Option<(usize, usize)> {
-            let [n, _, h, w] = *parts[0];
-            let c: usize = parts.iter().map(|a| a[1]).sum();
-            let cfg = conv.conv.config();
-            let (o, k) = (cfg.out_channels, cfg.kernel);
-            let able = cfg.in_channels == c
-                && conv.bn.is_none()
-                && cfg.groups == 1
-                && cfg.dilation == 1
-                && matches!(conv.act, folo_nn::Activation::Silu | folo_nn::Activation::Identity)
-                && conv.conv.weight.dims() == [o, c, k, k]
-                && conv.conv.bias.as_ref().is_none_or(|b| b.dims() == [o])
-                && folo_core::cpu::q8::QConv::supports((o, c, k), cfg.stride, cfg.padding);
-            let out_hw = if able {
-                folo_core::cpu::q8::conv_size(n, c, o, h, w, k, cfg.stride, cfg.padding)
-                    .filter(|&(oh, ow)| res.is_none_or(|r| *r == [n, o, oh, ow]))
-            } else {
-                None
-            };
-            if out_hw.is_some() {
-                self.names.push(name.to_string());
-            }
-            out_hw
+fn eligible_conv_names(model: &Detector) -> Result<Vec<String>, CliError> {
+    let mut collector = BoundaryCollector { ranges: BTreeMap::new(), pending_attn_dims: None };
+    let _g = folo_core::no_grad();
+    match model {
+        Detector::V1(m) => {
+            let x = Tensor::zeros([1, m.config().in_channels, 64, 64]);
+            let _ = quant::walk::features(m, &mut collector, &x).map_err(nn_error)?;
+        }
+        Detector::V2(m) => {
+            let x = Tensor::zeros([1, m.config().in_channels, 64, 64]);
+            let _ = quant::walk::features_v2(m, &mut collector, &x).map_err(nn_error)?;
         }
     }
-    impl quant::walk::Exec for Collector {
-        type A = [usize; 4];
-
-        fn stem(&mut self, _name: &str, conv: &folo_nn::ConvBnAct, x: &Tensor) -> folo_nn::Result<Self::A> {
-            let n = x.dims()[0];
-            let (h, w) = self.input_hw;
-            let cfg = conv.conv.config();
-            let (oh, ow) = folo_core::cpu::q8::out_size(h, w, cfg.kernel, cfg.stride, cfg.padding)
-                .unwrap_or((h / 2, w / 2));
-            Ok([n, cfg.out_channels, oh, ow])
-        }
-
-        fn conv(
-            &mut self,
-            name: &str,
-            conv: &folo_nn::ConvBnAct,
-            parts: &[&Self::A],
-            res: Option<&Self::A>,
-        ) -> folo_nn::Result<Self::A> {
-            let [n, _, h, w] = *parts[0];
-            let cfg = conv.conv.config();
-            let (oh, ow) = self.inspect(name, conv, parts, res).unwrap_or((h, w));
-            let (oh, ow) = match res {
-                Some(r) => (oh.max(r[2]), ow.max(r[3])),
-                None => (oh, ow),
-            };
-            Ok([n, cfg.out_channels, oh, ow])
-        }
-
-        fn conv_f32(
-            &mut self,
-            name: &str,
-            conv: &folo_nn::ConvBnAct,
-            x: &Self::A,
-        ) -> folo_nn::Result<Tensor> {
-            let _ = self.inspect(name, conv, &[x], None);
-            Ok(Tensor::zeros([0]))
-        }
-
-        fn attend_and_pe(
-            &mut self,
-            a: &folo_vision::model::blocks::Attention,
-            _qkv: &Tensor,
-            b: usize,
-            h: usize,
-            w: usize,
-        ) -> folo_nn::Result<Tensor> {
-            self.pending_attn_dims = Some([b, a.proj.conv.config().in_channels, h, w]);
-            Ok(Tensor::zeros([0]))
-        }
-
-        fn conv_out_f32(
-            &mut self,
-            name: &str,
-            conv: &folo_nn::ConvBnAct,
-            parts: &[&Self::A],
-        ) -> folo_nn::Result<Tensor> {
-            let _ = self.inspect(name, conv, parts, None);
-            Ok(Tensor::zeros([0]))
-        }
-
-        fn quantize(&mut self, _name: &str, x: &Tensor) -> folo_nn::Result<Self::A> {
-            match self.pending_attn_dims.take() {
-                Some(d) => Ok(d),
-                None => {
-                    let (n, c, h, w) = x.dims4()?;
-                    Ok([n, c, h, w])
-                }
-            }
-        }
-
-        fn dequantize(&mut self, _x: &Self::A) -> folo_nn::Result<Tensor> {
-            Ok(Tensor::zeros([0]))
-        }
-
-        fn narrow(&mut self, x: &Self::A, _start: usize, len: usize) -> folo_nn::Result<Self::A> {
-            Ok([x[0], len, x[2], x[3]])
-        }
-
-        fn max_pool(&mut self, x: &Self::A, _k: usize) -> folo_nn::Result<Self::A> {
-            Ok(*x)
-        }
-
-        fn upsample2(&mut self, x: &Self::A) -> folo_nn::Result<Self::A> {
-            Ok([x[0], x[1], x[2] * 2, x[3] * 2])
-        }
-
-        fn dims(&self, x: &Self::A) -> [usize; 4] {
-            *x
-        }
-    }
-
-    let mut collector = Collector { input_hw: (640, 640), pending_attn_dims: None, names: Vec::new() };
-    let dummy = Tensor::zeros([1, 3, 1, 1]);
-    quant::walk::features(model, &mut collector, &dummy).map_err(nn_error)?;
-    Ok(collector.names)
+    let dummy = Calibration {
+        version: quant::VERSION_V2,
+        method: Method::MinMax,
+        images: 0,
+        ranges: collector.ranges,
+        channel_ranges: BTreeMap::new(),
+        u8_stem: false,
+        f32_convs: Vec::new(),
+        weights: None,
+    };
+    let analysis = quant::analyze_sensitivity_detector(model, &dummy).map_err(nn_error)?;
+    Ok(analysis.into_iter().map(|e| e.name).collect())
 }
 
 /// Validates every `--f32-conv` name against `model`'s int8-eligible convs upfront so typos fail before
 /// calibration runs.
-fn validate_explicit_convs(model: &FoloModel, explicit_convs: &[String]) -> Result<(), CliError> {
+fn validate_explicit_convs(model: &Detector, explicit_convs: &[String]) -> Result<(), CliError> {
     let eligible = eligible_conv_names(model)?;
     for name in explicit_convs {
         if !eligible.iter().any(|c| c == name) {
@@ -472,9 +520,9 @@ fn validate_explicit_convs(model: &FoloModel, explicit_convs: &[String]) -> Resu
 }
 
 /// `file`'s fused `f32` model on the CPU.
-fn open_cpu(file: &ModelFile) -> Result<FoloModel, CliError> {
+fn open_cpu(file: &ModelFile) -> Result<Detector, CliError> {
     let cpu = resolve_device("cpu").map_err(|e| engine_error("quantize", e))?;
-    FoloModel::from_file_for_inference(file, cpu, Precision::F32.dtype()).map_err(nn_error)
+    Detector::from_file_for_inference(file, cpu, Precision::F32.dtype()).map_err(nn_error)
 }
 
 #[cfg(test)]
@@ -561,5 +609,30 @@ mod tests {
             quantize(QuantizeArgs { f32_conv: vec!["  ".into()], ..base() }, Out { json: true }).unwrap_err();
         assert_eq!((err.exit, err.code.as_str()), (ExitCode::Usage, "usage"));
         assert!(err.message.contains("--f32-conv"), "{}", err.message);
+    }
+
+    #[test]
+    fn validate_explicit_convs_supports_v1_and_v2_detectors() {
+        let mut v1 = folo_vision::FoloModel::with_rng(
+            folo_vision::ModelConfig::new("n", 2).unwrap(),
+            &mut folo_core::rng::Rng::seed(1),
+        )
+        .unwrap();
+        v1.fuse().unwrap();
+        let mut v2 = folo_vision::FoloV2Model::with_rng(
+            folo_vision::FoloV2Config::new("n", 2).unwrap(),
+            &mut folo_core::rng::Rng::seed(2),
+        )
+        .unwrap();
+        v2.fuse().unwrap();
+
+        for detector in [Detector::V1(Box::new(v1)), Detector::V2(Box::new(v2))] {
+            validate_explicit_convs(&detector, &["neck.out5.cv2".to_string()])
+                .expect("neck.out5.cv2 must be accepted as eligible");
+            let err = validate_explicit_convs(&detector, &["bogus.conv".to_string()]).unwrap_err();
+            assert_eq!((err.exit, err.code.as_str()), (ExitCode::Usage, "usage"), "{err:?}");
+            assert!(err.message.contains("bogus.conv"), "{}", err.message);
+            assert!(err.hint.as_deref().unwrap_or("").contains("examples of eligible conv names"), "{err:?}");
+        }
     }
 }
