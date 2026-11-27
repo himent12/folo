@@ -534,7 +534,7 @@ fn folo2_candidate_first_f2x2_tile_patch_matches_dense_with_poison() {
     let dense_out = m.forward(&x).unwrap();
     let (_, scores) = dense_out.decode_images(DEFAULT_IOU_FUSION_ALPHA).unwrap().pop().unwrap();
     let p5_offset = 80 * 80 + 40 * 40;
-    let mut p5_cls0: Vec<f32> = scores[p5_offset * 2..].chunks_exact(2).map(|c| c[0]).collect();
+    let mut p5_cls0: Vec<f32> = scores[p5_offset * 2..].as_chunks::<2>().0.iter().map(|c| c[0]).collect();
     p5_cls0.sort_by(|a, b| b.total_cmp(a));
     assert!(p5_cls0[0] > p5_cls0[1], "expected unique P5 peak, got top-2 {:?}", &p5_cls0[..2]);
     let conf = 0.5 * (p5_cls0[0] + p5_cls0[1]);

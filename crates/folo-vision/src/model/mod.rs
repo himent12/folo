@@ -650,11 +650,12 @@ impl FoloModel {
 
     /// Whether CPU int8 inference with the direct `u8` stem is active for this model.
     pub(crate) fn int8_u8_stem_active(&self) -> bool {
-        self.active_int8()
-            .is_some_and(|p| p.calibration().u8_stem && !p.calibration().is_f32("backbone.stem"))
-            && self.device().is_cpu()
+        self.device().is_cpu()
             && !self.is_training()
             && self.config.in_channels == 3
+            && self
+                .active_int8()
+                .is_some_and(|p| p.calibration().u8_stem && !p.calibration().is_f32("backbone.stem"))
     }
 
     /// Forward pass reading a pre-packed `[b, h, w]` `u32` `[R, G, B, 0]` canvas straight into the direct `u8`
@@ -712,10 +713,10 @@ impl FoloModel {
     /// Without a trace, the neck's Concat layers (12, 15, 18, 21) are never written: the C3k2 after each reads
     /// both parts in place ([`C3k2::forward_cat`]).
     fn features(&self, x: &Tensor, mut trace: Option<&mut LayerTrace<'_>>) -> Result<[Tensor; 3]> {
-        if let Some(plan) = self.active_int8()
-            && trace.is_none()
+        if trace.is_none()
             && x.device().is_cpu()
             && !self.is_training()
+            && let Some(plan) = self.active_int8()
         {
             return quant::exec::features(self, plan, x);
         }

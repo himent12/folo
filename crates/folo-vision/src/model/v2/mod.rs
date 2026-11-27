@@ -651,11 +651,12 @@ impl FoloV2Model {
 
     /// Whether CPU int8 inference with the direct `u8` stem (`SPD(2×2) + 1×1` or `3×3 s=2`) is active.
     pub(crate) fn int8_u8_stem_active(&self) -> bool {
-        self.active_int8()
-            .is_some_and(|p| p.calibration().u8_stem && !p.calibration().is_f32("backbone.stem.conv"))
-            && self.device().is_cpu()
+        self.device().is_cpu()
             && !self.is_training()
             && self.config.in_channels == 3
+            && self
+                .active_int8()
+                .is_some_and(|p| p.calibration().u8_stem && !p.calibration().is_f32("backbone.stem.conv"))
     }
 
     /// Forward pass reading a pre-packed `[b, h, w]` `u32` `[R, G, B, 0]` canvas straight into the direct `u8`
@@ -678,9 +679,9 @@ impl FoloV2Model {
     /// float barriers in CPU int8 mode.
     pub fn forward_features(&self, x: &Tensor) -> Result<[Tensor; 3]> {
         self.check_input(x)?;
-        if let Some(plan) = self.active_int8()
-            && x.device().is_cpu()
+        if x.device().is_cpu()
             && !self.is_training()
+            && let Some(plan) = self.active_int8()
         {
             return quant::exec::features_v2(self, plan, x);
         }
