@@ -250,6 +250,22 @@ pub(super) fn train_cloud(args: TrainArgs, out: Out) -> Result<(), CliError> {
     let data_arg = args.data.as_deref().expect("clap requires --data without --resume");
     let session = open_session(&args)?;
 
+    // Resolve weights architecture before registering any dataset so invalid or v2 `--weights` fails cleanly.
+    if let Some(w) = &args.weights {
+        let model_arch = session.store.model_arch(w).map_err(api_error)?;
+        let (parsed, ov) = parse_arch_override(&model_arch).map_err(api_error)?;
+        if ov.is_some() {
+            return Err(CliError::new(
+                ExitCode::Usage,
+                "invalid_config",
+                format!("`--weights {w}` uses {model_arch} (FOLO v2-Iso), which is not supported for cloud runs yet"),
+            )
+            .hint("use v1 weights (`folo-n`..`folo-x`) for `--cloud`, or omit `--cloud` to train locally"));
+        }
+        arch = parsed;
+        arch_override = None;
+    }
+
     // Resolve dataset: an existing registered dataset id, else register the path on the store/server.
     let dataset_id = match session.store.get_dataset(data_arg) {
         Ok(ds) => ds.id,
@@ -269,22 +285,6 @@ pub(super) fn train_cloud(args: TrainArgs, out: Out) -> Result<(), CliError> {
         }
         Err(e) => return Err(api_error(e)),
     };
-
-    // Resolve weights architecture if `--weights` was provided.
-    if let Some(w) = &args.weights {
-        let model_arch = session.store.model_arch(w).map_err(api_error)?;
-        let (parsed, ov) = parse_arch_override(&model_arch).map_err(api_error)?;
-        if ov.is_some() {
-            return Err(CliError::new(
-                ExitCode::Usage,
-                "invalid_config",
-                format!("`--weights {w}` uses {model_arch} (FOLO v2-Iso), which is not supported for cloud runs yet"),
-            )
-            .hint("use v1 weights (`folo-n`..`folo-x`) for `--cloud`, or omit `--cloud` to train locally"));
-        }
-        arch = parsed;
-        arch_override = None;
-    }
 
     // Resolve offer: explicit `--offer`, else cheapest in-stock offer on the connection.
     let offer_id = match &args.offer {
@@ -459,7 +459,15 @@ fn follow_cloud_run_with_poll(
                 }
             }
         }
-        let (run, preemption) = session.store.get_run_with_preemption(run_id).map_err(api_error)?;
+        let (run, preemption) = match session.store.get_run_with_preemption(run_id) {
+            Ok(v) => v,
+            Err(_) if stop.load(Ordering::Relaxed) && !stop_acknowledged => {
+                // Ctrl+C arrived while the status request was in flight and failed; route into the stop retry loop
+                // rather than exiting without attempting to stop the paid cloud run.
+                continue;
+            }
+            Err(e) => return Err(api_error(e)),
+        };
         let sig = ProgressSig {
             status: run.status,
             phase: run.cloud.as_ref().map(|c| c.phase.as_str().to_string()),
@@ -729,6 +737,8 @@ mod tests {
             fail_stops: AtomicU32,
             stop_calls: AtomicU32,
             stopped: AtomicBool,
+            /// Optional flag flipped inside the first `get_run` error to simulate Ctrl+C arriving mid-poll.
+            trigger_stop_on_poll: Option<Arc<AtomicBool>>,
         }
         impl Store for StopStore {
             fn is_mock(&self) -> bool {
@@ -800,6 +810,11 @@ mod tests {
                 unimplemented!()
             }
             fn get_run(&self, id: &str) -> folo_server::error::Result<Run> {
+                if let Some(flag) = &self.trigger_stop_on_poll
+                    && !flag.swap(true, Ordering::SeqCst)
+                {
+                    return Err(ServerError::internal("poll failed as Ctrl+C arrived"));
+                }
                 // Simulate a full server outage while `stop_calls <= fail_stops` so `get_run` also fails during
                 // the outage window and only succeeds once the server recovers.
                 if !self.stopped.load(Ordering::SeqCst)
@@ -879,6 +894,7 @@ mod tests {
             fail_stops: AtomicU32::new(1),
             stop_calls: AtomicU32::new(0),
             stopped: AtomicBool::new(false),
+            trigger_stop_on_poll: None,
         });
         let session = CloudSession { store: transient.clone(), local: None };
         let stop = AtomicBool::new(true);
@@ -898,6 +914,7 @@ mod tests {
             fail_stops: AtomicU32::new(100),
             stop_calls: AtomicU32::new(0),
             stopped: AtomicBool::new(false),
+            trigger_stop_on_poll: None,
         });
         let session2 = CloudSession { store: persistent.clone(), local: None };
         let err = follow_cloud_run_with_poll(
@@ -912,5 +929,25 @@ mod tests {
         assert_eq!(persistent.stop_calls.load(Ordering::SeqCst), MAX_STOP_RETRIES);
         assert_eq!(err.code, "internal");
         assert!(err.message.contains("run_p1"), "{}", err.message);
+
+        // Case 3: Ctrl+C arrives while an in-flight status GET fails -> routes into stop_run instead of exiting.
+        let late_stop = Arc::new(AtomicBool::new(false));
+        let in_flight = Arc::new(StopStore {
+            fail_stops: AtomicU32::new(0),
+            stop_calls: AtomicU32::new(0),
+            stopped: AtomicBool::new(false),
+            trigger_stop_on_poll: Some(late_stop.clone()),
+        });
+        let session3 = CloudSession { store: in_flight.clone(), local: None };
+        follow_cloud_run_with_poll(
+            &session3,
+            "run_f1",
+            &late_stop,
+            JsonEvents::All,
+            Out { json: false },
+            Duration::from_millis(1),
+        )
+        .unwrap();
+        assert_eq!(in_flight.stop_calls.load(Ordering::SeqCst), 1);
     }
 }

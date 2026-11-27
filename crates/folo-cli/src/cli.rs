@@ -384,7 +384,7 @@ pub struct TrainArgs {
         value_parser = clap::builder::NonEmptyStringValueParser::new()
     )]
     pub offer: Option<String>,
-    /// With --cloud: maximum wall-clock hours before the cloud instance is stopped [0.25..=720] [default: 8].
+    /// With --cloud: maximum wall-clock hours before the cloud instance is stopped [0.25..=720] [default: 12].
     #[arg(long, value_name = "HOURS", requires = "cloud")]
     pub max_hours: Option<f64>,
     /// With --cloud: cloud instance disk size in GB [10..=4096] [default: sized for the dataset].
