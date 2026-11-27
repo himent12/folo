@@ -444,6 +444,7 @@ export default function Dataset() {
                       counts={counts.get()}
                       version={changed.get()}
                       activeClass={cls.get()}
+                      activeSplit={split.get()}
                       onclass={(c) => setQuery({ tab: null, class: String(c), image: null }, !filtered.peek())}
                       onclearclass={() => setFilter({ class: null })}
                     />

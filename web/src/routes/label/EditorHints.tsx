@@ -119,6 +119,14 @@ export default function EditorHints(props: EditorHintsProps) {
             <span>Next unlabeled</span>
           </span>
           <span class="kh">
+            <Kbd keys="D" subtle />
+            <span>Duplicate</span>
+          </span>
+          <span class="kh">
+            <Kbd keys="P" subtle />
+            <span>Copy prev</span>
+          </span>
+          <span class="kh">
             <Kbd keys="Del" subtle />
             <span>Delete</span>
           </span>

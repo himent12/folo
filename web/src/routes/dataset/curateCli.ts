@@ -1,11 +1,12 @@
-// Shell-safe `folo dataset` curation CLI command builders paired with DatasetInsights:
+// Shell-safe `folo dataset` curation & export CLI command builders paired with DatasetInsights and StatsTab:
 // `check` (perceptual dHash duplicate/leakage audit + dry-run fixes), `split` (stratified train/val),
-// `filter` (class/empty-image curation), and `merge` (multi-dataset unification).
+// `filter` (class/split/empty-image curation), `merge` (multi-dataset unification), and `convert` (YOLO/COCO/VOC export).
 // Every subcommand and flag matches crates/folo-cli/src/cli/dataset.rs and docs/CLI.md verbatim.
-import type { Dataset, DatasetStats } from '$lib/api/types';
+import type { Dataset, DatasetStats, Split } from '$lib/api/types';
 import { quote } from '$lib/trainCli';
 
-export type CurateCliMode = 'check' | 'split' | 'filter' | 'merge';
+export type CurateCliMode = 'check' | 'split' | 'filter' | 'merge' | 'convert';
+export type ConvertTargetFormat = 'yolo' | 'coco' | 'voc';
 
 export interface CurateCliCommand {
   mode: CurateCliMode;
@@ -21,7 +22,19 @@ export const CURATE_CLI_MODES: readonly { value: CurateCliMode; label: string }[
   { value: 'split', label: 'Split' },
   { value: 'filter', label: 'Filter' },
   { value: 'merge', label: 'Merge' },
+  { value: 'convert', label: 'Convert' },
 ];
+
+export const CONVERT_TARGET_FORMATS: readonly { value: ConvertTargetFormat; label: string }[] = [
+  { value: 'yolo', label: 'YOLO' },
+  { value: 'coco', label: 'COCO' },
+  { value: 'voc', label: 'VOC' },
+];
+
+/** Picks the most useful default conversion target format for a dataset (YOLO for COCO datasets, else COCO). */
+export function defaultConvertTarget(format: string): ConvertTargetFormat {
+  return format.toLowerCase() === 'coco' ? 'yolo' : 'coco';
+}
 
 /**
  * Windows PowerShell 5.1 strips literal double quotes (`"`) when forwarding single-quoted strings to native
@@ -51,18 +64,23 @@ function suggestedOut(dataset: Dataset, suffix: string): string {
   return `<out_dir>/${slug}-${suffix}`;
 }
 
-/** Builds a shell-safe `folo dataset` curation command for the loaded dataset and current filter context. */
+/** Builds a shell-safe `folo dataset` curation or format-conversion command for the loaded dataset and filter context. */
 export function buildDatasetCurateCli(
   dataset: Dataset,
   mode: CurateCliMode,
-  opts: { stats?: DatasetStats; activeClass?: number } = {},
+  opts: {
+    stats?: DatasetStats;
+    activeClass?: number;
+    activeSplit?: 'all' | Split;
+    targetFormat?: ConvertTargetFormat;
+  } = {},
 ): CurateCliCommand {
   const pathUnsafe = !!dataset.path && UNSAFE_PS_NATIVE_ARG.test(dataset.path);
   const hasRealPath = !!dataset.path && !pathUnsafe;
-  const path = hasRealPath ? dataset.path : `<path to ${dataset.name}>`;
+  const path = hasRealPath ? dataset.path : '<dataset_path>';
   const quoted = (p: string) => (hasRealPath ? quote(p) : p);
   const pathWarning = pathUnsafe
-    ? 'Dataset path contains a quote or newline that Windows PowerShell cannot pass verbatim; replace the placeholder with your shell-quoted path.'
+    ? `Dataset "${dataset.name}" has a path with a quote or newline that Windows PowerShell cannot pass verbatim; replace <dataset_path> with your shell-quoted path.`
     : null;
 
   if (mode === 'check') {
@@ -110,19 +128,45 @@ export function buildDatasetCurateCli(
         includedClass = true;
       }
     }
-    if ((opts.stats?.empty_images ?? 0) > 0 || !includedClass) {
+    const splitFilter = opts.activeSplit && opts.activeSplit !== 'all' ? opts.activeSplit : null;
+    if (splitFilter) {
+      flags.push(`--split ${splitFilter}`);
+    }
+    if ((opts.stats?.empty_images ?? 0) > 0 || (!includedClass && !splitFilter)) {
       flags.push('--drop-empty-images');
     }
     const args = hasRealPath ? positionalPath(path, flags) : [path, ...flags];
-    const desc = includedClass
-      ? `Exports only boxes of class "${activeName}"${opts.stats?.empty_images ? ' and drops empty images' : ''} into a new dataset folder.`
-      : 'Filters classes, box dimensions, or empty background images into a new dataset folder (add --include-class or --exclude-class to narrow classes).';
+    const scopeParts: string[] = [];
+    if (includedClass) scopeParts.push(`boxes of class "${activeName}"`);
+    if (splitFilter) scopeParts.push(`the ${splitFilter} split`);
+    const desc = scopeParts.length
+      ? `Exports only ${scopeParts.join(' from ')}${opts.stats?.empty_images ? ' and drops empty images' : ''} into a new dataset folder.`
+      : 'Filters classes, splits, box dimensions, or empty background images into a new dataset folder (add --include-class or --exclude-class to narrow classes).';
     return {
       mode,
       label: 'Filter',
       command: `folo dataset filter ${args.join(' ')}`,
       description: desc,
       warning: [pathWarning, classWarning].filter(Boolean).join(' ') || null,
+    };
+  }
+
+  if (mode === 'convert') {
+    const to = opts.targetFormat ?? defaultConvertTarget(dataset.format);
+    const out = suggestedOut(dataset, to);
+    const flags = [`--to ${to}`];
+    const args = hasRealPath && path.startsWith('-') ? [...flags, '--', quoted(path), out] : [quoted(path), out, ...flags];
+    const formatNames: Record<ConvertTargetFormat, string> = {
+      yolo: 'YOLO (data.yaml + labels/*.txt)',
+      coco: 'COCO (annotations/instances_<split>.json)',
+      voc: 'Pascal VOC (Annotations/*.xml + ImageSets/Main/)',
+    };
+    return {
+      mode,
+      label: 'Convert',
+      command: `folo dataset convert ${args.join(' ')}`,
+      description: `Converts this ${dataset.format.toUpperCase()} dataset into ${formatNames[to]} in a new folder (images are copied unchanged).`,
+      warning: pathWarning,
     };
   }
 

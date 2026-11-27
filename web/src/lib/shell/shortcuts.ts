@@ -77,7 +77,10 @@ export const shortcutList: { keys: string; also?: string; label: string; group: 
   { keys: 'B', label: 'Show or hide boxes (inspector)', group: 'Datasets' },
   // The labeling editor's own keys: they work while it is the topmost dialog, whatever the setting.
   { keys: 'J K', label: 'Next / previous image (labeling editor)', group: 'Datasets' },
+  { keys: 'U', label: 'Next unlabeled image (labeling editor)', group: 'Datasets' },
   { keys: '1–9', label: "Set the active drawing or selected box's class (labeling editor)", group: 'Datasets' },
+  { keys: 'D', label: 'Duplicate the selected box (labeling editor)', group: 'Datasets' },
+  { keys: 'P', label: 'Copy boxes from the previous labeled image (labeling editor)', group: 'Datasets' },
   { keys: 'Delete', also: 'Backspace', label: 'Delete the selected box (labeling editor)', group: 'Datasets' },
   { keys: 'ArrowLeft ArrowRight ArrowUp ArrowDown', label: 'Move the selected box a pixel, with Shift ten (labeling editor)', group: 'Datasets' },
   { keys: 'Alt ArrowLeft ArrowRight ArrowUp ArrowDown', label: 'Resize the selected box from its bottom-right corner, with Shift by ten pixels (labeling editor)', group: 'Datasets' },

@@ -18,18 +18,13 @@
 import ChevronLeft from '$icons/chevron-left';
 import ChevronRight from '$icons/chevron-right';
 import Check from '$icons/check';
-import Plus from '$icons/plus';
-import Redo from '$icons/redo-2';
 import Sparkles from '$icons/sparkles';
 import Trash from '$icons/trash-2';
-import Undo from '$icons/undo-2';
-import X from '$icons/x';
-import { computed, createUniqueId, css, effect, Index, MediaQuery, onCleanup, onWindow, signal, untrack } from 'fw';
+import { computed, createUniqueId, css, effect, MediaQuery, onCleanup, onWindow, signal, untrack } from 'fw';
 import { ApiError } from '$lib/api/client';
 import { hub } from '$lib/api/index';
 import type { LiveLabelJob } from '$lib/api/liveLabel';
 import type { Box, LabelImage, LabelJob } from '$lib/api/types';
-import { classColor } from '$lib/design/tokens';
 import { num } from '$lib/format';
 import { boxRevision, NOTE_MAX } from '$lib/label';
 import { isTyping } from '$lib/keys';
@@ -43,13 +38,13 @@ import Field from '$lib/ui/Field.tsx';
 import Gate from '$lib/ui/Gate';
 import Input from '$lib/ui/Input';
 import Kbd from '$lib/ui/Kbd';
-import Select from '$lib/ui/Select';
 import { tooltip } from '$lib/ui/tooltip';
 import type { AgentChoice } from './agentChoice';
-import { keyStep, newBox, nudge, sameBoxes, stretch, tidy } from './boxEdit';
-import { boxDimensions, historyTooltip, nextToReview, nextUnlabeled } from './editorNav';
+import { adaptBoxesToImage, duplicateBox, keyStep, newBox, nudge, sameBox, sameBoxes, stretch, tidy } from './boxEdit';
+import { nextToReview, nextUnlabeled, previousLabeledImage } from './editorNav';
 import { History } from './history';
 import EditCanvas from './EditCanvas';
+import EditorBoxesPanel from './EditorBoxesPanel';
 import EditorHints from './EditorHints';
 import { askOutcome, imageState, leaveDescription } from './words';
 
@@ -140,10 +135,12 @@ export default function Editor(props: EditorProps) {
   const rev = signal(0);
   const undoCount = computed(() => (rev.get(), history.past.length));
   const redoCount = computed(() => (rev.get(), history.future.length));
-  const canUndo = computed(() => undoCount.get() > 0);
-  const canRedo = computed(() => redoCount.get() > 0);
   const drawClass = computed(() => Math.min(lastClass.get(), Math.max(0, props.job.classes.length - 1)));
   const activeClass = computed(() => picked.get()?.class ?? drawClass.get());
+  const prevLabeled = computed(() => {
+    const cur = img.get();
+    return cur ? previousLabeledImage(props.live.images, props.images, cur.id) : null;
+  });
   function forget() {
     history.clear();
     rev.set(rev.peek() + 1);
@@ -206,8 +203,6 @@ export default function Editor(props: EditorProps) {
   });
 
   const locked = computed(() => (img.get()?.status === 'labeling' ? 'The agent is labeling this image. You can edit it once it is done.' : null));
-  const undoTip = computed(() => historyTooltip('undo', undoCount.get(), !!locked.get()));
-  const redoTip = computed(() => historyTooltip('redo', redoCount.get(), !!locked.get()));
 
   // ---------- editing ----------
   /** Every edit of the draft goes through here, so it can be undone; `kind` joins a run of like edits into one step. */
@@ -278,6 +273,42 @@ export default function Editor(props: EditorProps) {
     if (!cur || locked.peek()) return;
     edit([...draft.peek(), newBox(cur.width, cur.height, drawClass.peek())]);
     selected.set(draft.peek().length - 1);
+  }
+  /** Duplicates the currently selected box with a small visible offset and selects the copy (`D` shortcut). */
+  function duplicateSelectedBox() {
+    const b = picked.peek();
+    const cur = img.peek();
+    if (!b || !cur || locked.peek()) return;
+    const dup = duplicateBox(b, cur.width, cur.height);
+    edit([...draft.peek(), dup]);
+    selected.set(draft.peek().length - 1);
+  }
+  /** Copies boxes from the nearest previous labeled image onto the current frame (`P` shortcut), as one undoable step. */
+  function copyPreviousBoxes() {
+    const cur = img.peek();
+    if (!cur || locked.peek()) return;
+    const prev = prevLabeled.peek();
+    if (!prev) {
+      status.info('No previous labeled image', 'No earlier image in this job has boxes to copy.');
+      return;
+    }
+    const adapted = adaptBoxesToImage(prev.boxes, prev.width, prev.height, cur.width, cur.height, props.job.classes.length);
+    if (adapted.length === 0) {
+      status.info('No boxes fit this image', `Every box from ${prev.file} was too small or out of range for this image.`);
+      return;
+    }
+    const existing = draft.peek();
+    const toAdd = adapted.filter((box) => !existing.some((x) => sameBox(x, box)));
+    if (toAdd.length === 0) {
+      status.info('Already copied', `Every box from ${prev.file} is already on this image.`);
+      return;
+    }
+    edit([...existing, ...toAdd]);
+    selected.set(null);
+    status.info(
+      `Copied ${toAdd.length} ${toAdd.length === 1 ? 'box' : 'boxes'} from ${prev.file}`,
+      'Undo anytime, or Save when ready.',
+    );
   }
   /** Arrow keys on the selected box: move it, or with Alt resize it from its bottom-right corner; Shift: ten steps. */
   function arrow(e: KeyboardEvent): boolean {
@@ -495,6 +526,11 @@ export default function Editor(props: EditorProps) {
     else if (k === 'j' || k === 'J') step(1);
     else if (k === 'k' || k === 'K') step(-1);
     else if (k === 'u' || k === 'U') jumpUnlabeled();
+    else if (k === 'd' || k === 'D') {
+      if (!e.repeat) duplicateSelectedBox();
+    } else if (k === 'p' || k === 'P') {
+      if (!e.repeat) copyPreviousBoxes();
+    }
     else if (/^[1-9]$/.test(k)) setClass(Number(k) - 1);
     // Enter on a control is that control's; anywhere else in the editor it is "Looks right", or with changes, Save and
     // on to the next image to review.
@@ -593,8 +629,6 @@ export default function Editor(props: EditorProps) {
       if (!disposed) removeBusy.set(false);
     }
   }
-
-  const name = (c: number) => props.job.classes[c] ?? `class ${c + 1}`;
 
   return (
     <>
@@ -699,61 +733,25 @@ export default function Editor(props: EditorProps) {
             </div>
 
             <aside class="side">
-              <section>
-                <div class="head">
-                  <h3>Boxes <span class="meta num">{draft.get().length}</span></h3>
-                  <span class="tools">
-                    <span class:off={!canUndo.get() || !!locked.get()} use:tooltip={undoTip.get()}>
-                      <Button variant="ghost" size="sm" icon={Undo} aria-label="Undo" disabled={!canUndo.get() || !!locked.get()} onclick={() => undo()} />
-                    </span>
-                    <span class:off={!canRedo.get() || !!locked.get()} use:tooltip={redoTip.get()}>
-                      <Button variant="ghost" size="sm" icon={Redo} aria-label="Redo" disabled={!canRedo.get() || !!locked.get()} onclick={() => undo(true)} />
-                    </span>
-                    <Button variant="ghost" size="sm" icon={Plus} disabled={!!locked.get()} data-add-box onclick={addBox}>Add box</Button>
-                  </span>
-                </div>
-                {undoCount.get() > 0 || redoCount.get() > 0 ? (
-                  <p class="hist-depth num">History: {undoCount.get()} undo · {redoCount.get()} redo</p>
-                ) : null}
-                {draft.get().length ? (
-                  <ul class="boxes scroll-shade" onpointerleave={() => hovered.set(null)}>
-                    <Index each={draft.get()}>
-                      {(b, i) => (
-                        <li>
-                          <button
-                            type="button"
-                            class:on={selected.get() === i}
-                            aria-current={selected.get() === i ? 'true' : undefined}
-                            aria-label={`${name(b().class)}, ${Math.round(b().x2 - b().x1)} by ${Math.round(b().y2 - b().y1)} pixels`}
-                            onpointerenter={(e) => e.pointerType !== 'touch' && hovered.set(i)}
-                            onclick={() => selected.set(selected.peek() === i ? null : i)}
-                          >
-                            <span class="sw" style:background={classColor(b().class)}></span>
-                            <span class="cn truncate">{name(b().class)}</span>
-                            <span class="sz num">{boxDimensions(b())}</span>
-                          </button>
-                        </li>
-                      )}
-                    </Index>
-                  </ul>
-                ) : (
-                  <p class="none">No boxes. Saved like this, the image is a background image: no objects.</p>
-                )}
-                {picked.get() ? (
-                  <div class="sel">
-                    <Field label="Class" for={`${uid}-class`} hint="Keys 1–9 set it too.">
-                      <Select
-                        id={`${uid}-class`}
-                        value={String(picked.get()!.class)}
-                        options={props.job.classes.map((c, i) => ({ value: String(i), label: `${i + 1} · ${c}` }))}
-                        disabled={!!locked.get()}
-                        onchange={(v) => setClass(Number(v))}
-                      />
-                    </Field>
-                    <Button size="sm" icon={X} disabled={!!locked.get()} onclick={removeBox}>Delete box</Button>
-                  </div>
-                ) : null}
-              </section>
+              <EditorBoxesPanel
+                uid={uid}
+                classes={props.job.classes}
+                draft={draft.get()}
+                selected={selected.get()}
+                locked={!!locked.get()}
+                undoCount={undoCount.get()}
+                redoCount={redoCount.get()}
+                prevLabeled={prevLabeled.get()}
+                onUndo={() => undo()}
+                onRedo={() => undo(true)}
+                onAddBox={addBox}
+                onCopyPrev={copyPreviousBoxes}
+                onDuplicateBox={duplicateSelectedBox}
+                onRemoveBox={removeBox}
+                onSelect={(i) => selected.set(i)}
+                onHover={(i) => hovered.set(i)}
+                onSetClass={setClass}
+              />
 
               <section>
                 <Field label="Ask the agent again" for={`${uid}-note`} hint="It labels this image alone; its new boxes replace these.">
@@ -872,102 +870,19 @@ css`
     gap: var(--space-4);
     min-width: 0;
   }
-  .side section {
+  .side :global(section) {
     display: grid;
     gap: var(--space-2);
   }
-  .side section + section {
+  .side :global(section + section) {
     padding-top: var(--space-4);
     border-top: 1px solid var(--line-subtle);
   }
-  h3 {
-    font-size: var(--type-base-size);
-    font-weight: var(--weight-medium);
-  }
-  .head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: var(--space-2);
-  }
-  .tools {
-    display: flex;
-    align-items: center;
-    gap: var(--space-1);
-  }
-  .tools > span {
-    display: inline-flex;
-  }
-  /* A disabled button takes no pointer events in some browsers: the wrapper takes the hover so contextual undo/redo tips show. */
-  .tools > span.off {
-    cursor: not-allowed;
-  }
-  .tools > span.off > :global(:disabled) {
-    pointer-events: none;
-  }
-  .hist-depth {
-    font-size: var(--type-sm-size);
-    line-height: var(--type-sm-line);
-    color: var(--text-tertiary);
-  }
-  .meta {
-    margin-left: var(--space-1);
-    color: var(--text-tertiary);
-    font-weight: var(--weight-regular);
-  }
-  .boxes {
-    max-height: 220px;
-    overflow-y: auto;
-  }
-  .boxes button {
-    display: grid;
-    grid-template-columns: 8px minmax(0, 1fr) auto;
-    align-items: center;
-    gap: var(--space-2);
-    width: 100%;
-    height: 28px;
-    padding: 0 var(--space-2);
-    border-radius: var(--radius-sm);
-    text-align: left;
-  }
-  @media (hover: hover) {
-    .boxes button:hover {
-      background: var(--bg-hover);
-    }
-  }
-  .boxes button.on {
-    background: var(--bg-active);
-    box-shadow: var(--select-bar);
-    border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
-  }
-  @media (pointer: coarse) {
-    .boxes button {
-      height: 44px;
-    }
-  }
-  .sw {
-    width: 8px;
-    height: 8px;
-    border-radius: 2px;
-  }
-  .sz {
-    font-size: var(--type-sm-size);
-    color: var(--text-tertiary);
-  }
-  .none,
   .why,
   .state {
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
     color: var(--text-secondary);
-  }
-  .sel {
-    display: grid;
-    gap: var(--space-2);
-    justify-items: start;
-  }
-  .sel :global(.field) {
-    width: 100%;
   }
   .foot {
     justify-items: start;

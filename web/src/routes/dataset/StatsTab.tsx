@@ -10,18 +10,23 @@ import ArrowRight from '$icons/arrow-right';
 import ChevronDown from '$icons/chevron-down';
 import CircleAlert from '$icons/circle-alert';
 import CircleCheck from '$icons/circle-check';
+import Download from '$icons/download';
+import FileJson from '$icons/file-json';
 import Info from '$icons/info';
 import TriangleAlert from '$icons/triangle-alert';
 import X from '$icons/x';
-import { computed, css, Dynamic, For, signal } from 'fw';
-import type { Dataset, DatasetStats, IssueCounts, IssueSeverity } from '$lib/api/types';
+import { computed, css, Dynamic, effect, For, signal } from 'fw';
+import type { Dataset, DatasetStats, IssueCounts, IssueSeverity, Split } from '$lib/api/types';
 import Histogram from '$lib/charts/Histogram.tsx';
 import { classInk } from '$lib/design/classInk';
 import { count, num } from '$lib/format';
 import { href } from '$lib/router';
+import Button from '$lib/ui/Button';
 import InfoButton from '$lib/ui/InfoButton';
 import Panel from '$lib/ui/Panel';
+import DatasetCurateCli from './DatasetCurateCli';
 import IssueList from './IssueList';
+import { exportDatasetReportCsv, exportDatasetReportJson } from './reportExport';
 import { swatchStyle } from './swatch';
 import { countBinLabel, findingLabel, healthChecks, imageCount, sizeBinLabel, TINY_SIZE, type Severity } from './health';
 
@@ -33,6 +38,8 @@ export interface StatsTabProps {
   version?: number;
   /** Currently active class filter index on the Dataset page, if any. */
   activeClass?: number;
+  /** Currently active split filter on the Dataset page, if any. */
+  activeSplit?: 'all' | Split;
   onclass: (cls: number) => void;
   /** Clears the active class filter from the Statistics tab. */
   onclearclass?: () => void;
@@ -95,9 +102,61 @@ export default function StatsTab(props: StatsTabProps) {
   });
   const presentClasses = computed(() => props.stats.class_counts.filter((c) => c > 0).length);
   const perClass = computed(() => (presentClasses.get() ? Math.round(props.stats.boxes / presentClasses.get()) : 0));
+  const curateOpen = signal(false);
+  let prevDatasetId = props.dataset.id;
+  effect(() => {
+    const id = props.dataset.id;
+    if (id !== prevDatasetId) {
+      prevDatasetId = id;
+      curateOpen.set(false);
+    }
+  });
 
   return (
     <div class="stats">
+      <div class="report-bar" data-dataset-report-bar>
+        <span class="report-title">Health &amp; class-balance report</span>
+        <div class="report-actions">
+          <Button
+            size="sm"
+            variant="ghost"
+            icon={Download}
+            data-dataset-report-export="csv"
+            aria-label="Export dataset health report CSV"
+            onclick={() => exportDatasetReportCsv(props.dataset, props.stats, props.counts)}
+          >
+            Export CSV
+          </Button>
+          <Button
+            size="sm"
+            variant="ghost"
+            icon={FileJson}
+            data-dataset-report-export="json"
+            aria-label="Export dataset health report JSON"
+            onclick={() => exportDatasetReportJson(props.dataset, props.stats, props.counts)}
+          >
+            Export JSON
+          </Button>
+          <Button
+            size="sm"
+            variant="ghost"
+            aria-expanded={curateOpen.get()}
+            data-stats-curate-toggle
+            onclick={() => curateOpen.set(!curateOpen.peek())}
+          >
+            CLI
+          </Button>
+        </div>
+        {curateOpen.get() ? (
+          <DatasetCurateCli
+            dataset={props.dataset}
+            stats={props.stats}
+            activeClass={props.activeClass}
+            activeSplit={props.activeSplit}
+          />
+        ) : null}
+      </div>
+
       {findings.get().length ? (
         /* One line at rest: each severity's icon and what its findings are; it opens to every finding and its next step. */
         <section class="health" id="ds-health" aria-labelledby="ds-health-title">
@@ -356,6 +415,31 @@ css`
   .stats {
     display: grid;
     gap: var(--space-4);
+  }
+  .report-bar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2) var(--space-3);
+    padding: var(--space-2) var(--space-3);
+    background: var(--bg-panel);
+    border: 1px solid var(--line-panel);
+    border-radius: var(--radius-lg);
+    min-width: 0;
+  }
+  .report-title {
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    color: var(--text-secondary);
+    font-weight: var(--weight-medium);
+  }
+  .report-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-1);
+    margin-left: auto;
   }
   /* Health: full width like the panels under it, the summary right after the title and Details at the right end. */
   .health {

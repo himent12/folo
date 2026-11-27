@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 import { flush as flushSync, tick } from 'fw';
 import { render } from '../../../framework/testing';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { hub } from '$lib/api/index';
 import { MockApi } from '$lib/api/mock';
 import StatsTab from './StatsTab';
@@ -129,5 +129,38 @@ describe('Dataset stats: Health heading', () => {
     expect(clearBtn.textContent).toContain('Clear filter');
     clearBtn.click();
     expect(cleared).toBe(1);
+  });
+
+  it('exports Dataset Health Report CSV & JSON and toggles verified CLI curation/convert helpers', async () => {
+    const dataset = await hub.api.dataset('ds_shapes_hard');
+    const counts = (await hub.api.datasetIssues('ds_shapes_hard', { limit: 1 })).counts;
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+    vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:stats-report');
+    vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {});
+
+    c = mount(StatsTab, { target, props: { dataset, stats: dataset.stats!, counts, activeSplit: 'val', onclass: () => {} } });
+    flushSync();
+
+    const csvBtn = target.querySelector<HTMLButtonElement>('[data-dataset-report-export="csv"]')!;
+    const jsonBtn = target.querySelector<HTMLButtonElement>('[data-dataset-report-export="json"]')!;
+    expect(csvBtn).not.toBeNull();
+    expect(jsonBtn).not.toBeNull();
+    csvBtn.click();
+    jsonBtn.click();
+    expect(click).toHaveBeenCalledTimes(2);
+
+    // Toggle CLI helper -> switch to Convert -> shows exact `folo dataset convert` command
+    const cliToggle = target.querySelector<HTMLButtonElement>('[data-stats-curate-toggle]')!;
+    expect(cliToggle.getAttribute('aria-expanded')).toBe('false');
+    cliToggle.click();
+    flushSync();
+    expect(cliToggle.getAttribute('aria-expanded')).toBe('true');
+    const convertRadio = [...target.querySelectorAll<HTMLButtonElement>('[data-dataset-curate-cli] [role="radio"]')].find(
+      (b) => b.textContent?.trim() === 'Convert',
+    )!;
+    convertRadio.click();
+    flushSync();
+    expect(target.querySelector('[data-dataset-curate-cli] pre.line')?.textContent).toContain('folo dataset convert');
+    expect(target.querySelector('[data-dataset-curate-cli] pre.line')?.textContent).toContain('--to coco');
   });
 });
