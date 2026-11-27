@@ -4,6 +4,7 @@
  */
 import { css } from 'fw';
 import type { Model, Prediction } from '$lib/api/types';
+import { inferenceMetaLabel } from '$lib/inference/browser';
 import Skeleton from '$lib/ui/Skeleton';
 import TimingBar from './TimingBar';
 import { deviceLabel } from './viewState';
@@ -29,7 +30,12 @@ export default function PlaygroundTiming(props: PlaygroundTimingProps) {
           <div class="ab-t-block">
             <p class="ab-t-head">A · {props.modelA?.name ?? 'Model A'}</p>
             {props.predA ? (
-              <TimingBar timing={props.predA.timing} device={deviceLabel(props.predA, props.adapter)} cold={props.predA.cold} />
+              <TimingBar
+                timing={props.predA.timing}
+                device={deviceLabel(props.predA, props.adapter)}
+                cold={props.predA.cold}
+                mode={inferenceMetaLabel(props.predA.inference)}
+              />
             ) : props.predictingA ? (
               <div class="t-sk">
                 <Skeleton h="24px" w="50%" />
@@ -42,7 +48,12 @@ export default function PlaygroundTiming(props: PlaygroundTimingProps) {
           <div class="ab-t-block">
             <p class="ab-t-head">B · {props.modelB?.name ?? 'Model B'}</p>
             {props.predB ? (
-              <TimingBar timing={props.predB.timing} device={deviceLabel(props.predB, props.adapter)} cold={props.predB.cold} />
+              <TimingBar
+                timing={props.predB.timing}
+                device={deviceLabel(props.predB, props.adapter)}
+                cold={props.predB.cold}
+                mode={inferenceMetaLabel(props.predB.inference)}
+              />
             ) : props.predictingB ? (
               <div class="t-sk">
                 <Skeleton h="24px" w="50%" />
@@ -55,7 +66,12 @@ export default function PlaygroundTiming(props: PlaygroundTimingProps) {
         </div>
       ) : props.predA ? (
         <>
-          <TimingBar timing={props.predA.timing} device={deviceLabel(props.predA, props.adapter)} cold={props.predA.cold} />
+          <TimingBar
+            timing={props.predA.timing}
+            device={deviceLabel(props.predA, props.adapter)}
+            cold={props.predA.cold}
+            mode={inferenceMetaLabel(props.predA.inference)}
+          />
           {!props.narrow && props.resultMsA !== null ? (
             <p class="refilter num">Thresholds re-filtered in {props.resultMsA < 0.01 ? '<0.01' : props.resultMsA.toFixed(2)} ms</p>
           ) : null}

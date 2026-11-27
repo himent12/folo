@@ -744,12 +744,23 @@ export class HttpApi implements Api {
       if (opts.conf !== undefined) fd.set('conf', String(opts.conf));
       if (opts.iou !== undefined) fd.set('iou', String(opts.iou));
       if (opts.max_det !== undefined) fd.set('max_det', String(opts.max_det));
+      if (opts.tile !== undefined) fd.set('tile', JSON.stringify(opts.tile));
+      if (opts.tta !== undefined) fd.set('tta', JSON.stringify(opts.tta));
       return this.#req<Prediction>('POST', '/predict', fd, signal);
     }
     return this.#req<Prediction>(
       'POST',
       '/predict',
-      { model_id: opts.model_id, dataset_id: input.dataset_id, image_id: input.image_id, conf: opts.conf, iou: opts.iou, max_det: opts.max_det },
+      {
+        model_id: opts.model_id,
+        dataset_id: input.dataset_id,
+        image_id: input.image_id,
+        conf: opts.conf,
+        iou: opts.iou,
+        max_det: opts.max_det,
+        ...(opts.tile !== undefined ? { tile: opts.tile } : {}),
+        ...(opts.tta !== undefined ? { tta: opts.tta } : {}),
+      },
       signal,
     );
   }

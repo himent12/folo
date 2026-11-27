@@ -20,6 +20,7 @@ import BatchFilmstrip from './playground/BatchFilmstrip';
 import CompareStage from './playground/CompareStage';
 import CompareSummaryPanel from './playground/CompareSummary';
 import DatasetPicker from './playground/DatasetPicker';
+import InferenceOptions from './playground/InferenceOptions';
 import LiveMediaCanvas from './playground/LiveMediaCanvas';
 import MediaBar from './playground/MediaBar';
 import MediaInputs from './playground/MediaInputs';
@@ -43,6 +44,7 @@ import { playgroundPath } from './playground/session';
 import { createCompareController } from './playground/useCompare';
 import { useBatchSession } from './playground/useBatchSession';
 import { usePlaygroundExport } from './playground/useExport';
+import { useInferenceOptions } from './playground/useInferenceOptions';
 import { useLocalWeights } from './playground/useLocalWeights';
 import { useMediaSession } from './playground/useMediaSession';
 import { useModelCatalog } from './playground/useModelCatalog';
@@ -81,7 +83,8 @@ export default function Playground() {
   const runOn = signal<RunOn>('server');
   const engine = new BrowserEngine();
   onCleanup(() => engine.dispose());
-  const { webgpu, browserOff, runOnNote } = useWasmAvailability(runOn);
+  const { webgpu, browserOff, runOnNote, serverPredictOptions } = useWasmAvailability(runOn);
+  const inf = useInferenceOptions({ runOn, engine, browserOff: () => browserOff.get(), serverPredictOptions: () => serverPredictOptions.get() });
 
   let weightsInput!: HTMLInputElement;
   const where = computed(() => whereLabel(pred.get()));
@@ -233,6 +236,7 @@ export default function Playground() {
     dropLocalB: (id, f, e) => dropLocal(id, f, e, badFileB),
     badFileB,
     engine,
+    inferenceFor: inf.effectiveFor,
     isLiveStream: () => isLiveStreamFn(),
   });
   clearCompare = cmp.clearResults;
@@ -311,6 +315,7 @@ export default function Playground() {
     model: () => model.peek(),
     modelId: () => modelId.get(),
     runOn,
+    inference: () => inf.effective.get(),
     localWeights,
     compare: cmp.compare,
     o2o: () => o2o.get(),
@@ -358,6 +363,7 @@ export default function Playground() {
     picked,
     conf,
     engine,
+    inference: () => inf.effective.get(),
     dropLocal: (id, f, e) => dropLocal(id, f, e, badFile),
     isLiveStream: () => mediaSession.liveStreaming.get(),
     isBatchRunningAll: () => batch.runningAll.get(),
@@ -505,10 +511,10 @@ export default function Playground() {
 
   // ---------- snippets ----------
   const displayToggles = () => <DisplayToggles bind:labels={labels} bind:scores={scores} bind:truth={truth} dataset={source.get()?.kind === 'dataset'} />;
-
+  const inferenceOpts = (inline: boolean) => <InferenceOptions ctrl={inf} inline={inline} />;
   const secondarySliders = (inline: boolean) => <SecondarySliders inline={inline} o2o={effectiveO2o.get()} bind:iou={iou} bind:maxDet={maxDet} />;
   const railThresholds = () => <RailThresholds bind:conf={conf} bind:iou={iou} bind:maxDet={maxDet} o2o={effectiveO2o.get()} />;
-  const moreBody = () => <MoreBody tablet={tablet.get()} o2o={effectiveO2o.get()} bind:conf={conf} bind:iou={iou} bind:maxDet={maxDet} toggles={displayToggles} />;
+  const moreBody = () => <MoreBody tablet={tablet.get()} o2o={effectiveO2o.get()} bind:conf={conf} bind:iou={iou} bind:maxDet={maxDet} toggles={displayToggles} inferenceOptions={() => inferenceOpts(true)} />;
 
   const resetButton = () => (
     <Button size="sm" variant="ghost" icon={RotateCcw} disabled={isDefault.get()} onclick={resetThresholds}>
@@ -564,54 +570,21 @@ export default function Playground() {
   // Stable snippet reference so `<CompareStage>` never remounts when Model A's `pred` or `dims` object identity changes.
   const compareStage = () => (
     <CompareStage
-      source={source.get()!}
-      src={src.get()}
-      dims={dims.get()!}
-      sourceName={sourceName.get()}
-      onImageLoad={(ok) => imageError.set(!ok)}
-      view={cmp.compareView.get()}
-      bind:splitPct={cmp.splitPct}
-      zoom={cmp.zoom}
-      zoomResetKey={zoomResetKey.get()}
-      keepPrevious={mediaSession.mode.get() !== 'none'}
-      labels={labels.get()}
-      scores={scores.get()}
-      truthBoxes={truthBoxes.get()}
-      truthOnly={truthOnly.get()}
-      modelA={model.get()}
-      predA={predAMatches.get() ? pred.get() : null}
-      keptA={predAMatches.get() ? kept.get() : []}
-      visibleCountA={predAMatches.get() ? rows.get().length : 0}
-      classesA={classes.get()}
-      onlyA={only.get()}
-      activeIdxA={activeIdx.get()}
-      selectedIdxA={selectedIdx.get()}
-      predictingA={predicting.get()}
-      errorA={error.get()}
-      onHoverA={(b) => hover.set(b)}
-      onSelectA={pickFromImage}
-      modelB={cmp.modelB.get()}
-      predB={predBMatches.get() ? cmp.predB.get() : null}
-      keptB={predBMatches.get() ? cmp.keptB.get() : []}
-      visibleCountB={predBMatches.get() ? cmp.rowsB.get().length : 0}
-      classesB={cmp.classesB.get()}
-      onlyB={cmp.onlyB.get()}
-      activeIdxB={cmp.activeIdxB.get()}
-      selectedIdxB={cmp.selectedIdxB.get()}
-      predictingB={cmp.predictingB.get()}
-      errorB={cmp.errorB.get()}
-      weightsMissingB={cmp.weightsMissingB.get()}
-      badFileB={badFileB.get()}
-      runOnB={cmp.runOnB.get()}
-      onHoverB={(b) => cmp.hoverB.set(b)}
-      onSelectB={pickFromImageB}
-      onRetryB={() => cmp.retryTickB.set((t) => t + 1)}
-      onChooseWeightsB={() => {
-        weightsTarget.set('b');
-        weightsInput.click();
-      }}
-      onServerB={() => cmp.runOnB.set('server')}
-      engine={engine}
+      source={source.get()!} src={src.get()} dims={dims.get()!} sourceName={sourceName.get()}
+      onImageLoad={(ok) => imageError.set(!ok)} view={cmp.compareView.get()} bind:splitPct={cmp.splitPct}
+      zoom={cmp.zoom} zoomResetKey={zoomResetKey.get()} keepPrevious={mediaSession.mode.get() !== 'none'}
+      labels={labels.get()} scores={scores.get()} truthBoxes={truthBoxes.get()} truthOnly={truthOnly.get()}
+      modelA={model.get()} predA={predAMatches.get() ? pred.get() : null} keptA={predAMatches.get() ? kept.get() : []}
+      visibleCountA={predAMatches.get() ? rows.get().length : 0} classesA={classes.get()} onlyA={only.get()}
+      activeIdxA={activeIdx.get()} selectedIdxA={selectedIdx.get()} predictingA={predicting.get()} errorA={error.get()}
+      onHoverA={(b) => hover.set(b)} onSelectA={pickFromImage}
+      modelB={cmp.modelB.get()} predB={predBMatches.get() ? cmp.predB.get() : null} keptB={predBMatches.get() ? cmp.keptB.get() : []}
+      visibleCountB={predBMatches.get() ? cmp.rowsB.get().length : 0} classesB={cmp.classesB.get()} onlyB={cmp.onlyB.get()}
+      activeIdxB={cmp.activeIdxB.get()} selectedIdxB={cmp.selectedIdxB.get()} predictingB={cmp.predictingB.get()}
+      errorB={cmp.errorB.get()} weightsMissingB={cmp.weightsMissingB.get()} badFileB={badFileB.get()} runOnB={cmp.runOnB.get()}
+      onHoverB={(b) => cmp.hoverB.set(b)} onSelectB={pickFromImageB} onRetryB={() => cmp.retryTickB.set((t) => t + 1)}
+      onChooseWeightsB={() => { weightsTarget.set('b'); weightsInput.click(); }}
+      onServerB={() => cmp.runOnB.set('server')} engine={engine}
     />
   );
 
@@ -914,6 +887,7 @@ export default function Playground() {
                 bind:conf={conf}
                 resetButton={resetButton}
                 secondarySliders={secondarySliders}
+                inferenceOptions={() => inferenceOpts(true)}
                 displayToggles={displayToggles}
                 showAllButton={showAllButton}
                 classList={classList}
@@ -922,6 +896,7 @@ export default function Playground() {
             ) : (
               <Rail
                 pickers={() => pickers(true)}
+                inferenceOptions={() => inferenceOpts(false)}
                 thresholds={railThresholds}
                 resetButton={resetButton}
                 toggles={source.get() ? displayToggles : null}

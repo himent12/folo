@@ -3,6 +3,7 @@ import type { Prediction } from '$lib/api/types';
 import type { SystemInfo } from '$lib/api/types';
 import {
   BrowserEngine,
+  DEFAULT_INFERENCE_CONFIG,
   probeWasm,
   resetDecodeCanvas,
   resetWasmProbe,
@@ -13,6 +14,8 @@ import {
   type Backend,
   type Detector,
   type WasmModule,
+  type WasmTileDetectOptions,
+  type WasmTtaDetectOptions,
 } from './browser';
 
 /** A fake folo-wasm: counts loads, records frees, and lets a test hold a detect call open. */
@@ -375,6 +378,96 @@ describe('BrowserEngine', () => {
     await expect(pA1).rejects.toThrow('invalid weights');
     await expect(pA2).rejects.toThrow('invalid weights');
     expect(e.phase).toBe('compile');
+  });
+
+  it('calls detectTiled and detectTta when available on folo-wasm, clamps loose iou for TTA mergeIou, and stamps inference metadata', async () => {
+    const tiledCalls: (WasmTileDetectOptions | undefined)[] = [];
+    const ttaCalls: (WasmTtaDetectOptions | undefined)[] = [];
+    const mod: WasmModule = {
+      default: async () => {},
+      FoloDetector: {
+        load: async (_bytes, { backend, modelId }) => ({
+          backend,
+          info: () => ({ backend, device: 'cpu', adapter: null, fallback: null, arch: 'folo-n', imgsz: 640, classes: ['a'] }),
+          detect: async () =>
+            ({
+              model_id: modelId,
+              image: { width: 1, height: 1 },
+              boxes: [],
+              timing: { preprocess_ms: 1, inference_ms: 2, postprocess_ms: 0.5, total_ms: 3.5 },
+              device: 'cpu',
+              backend,
+            }) as Prediction,
+          detectTiled: async (_img, _w, _h, opts) => {
+            tiledCalls.push(opts);
+            return {
+              model_id: modelId,
+              image: { width: 1, height: 1 },
+              boxes: [],
+              timing: { preprocess_ms: 2, inference_ms: 8, postprocess_ms: 1, total_ms: 11 },
+              device: 'cpu',
+              backend,
+            } as Prediction;
+          },
+          detectTta: async (_img, _w, _h, opts) => {
+            ttaCalls.push(opts);
+            return {
+              model_id: modelId,
+              image: { width: 1, height: 1 },
+              boxes: [],
+              timing: { preprocess_ms: 3, inference_ms: 12, postprocess_ms: 1, total_ms: 16 },
+              device: 'cpu',
+              backend,
+            } as Prediction;
+          },
+          free: () => {},
+        }),
+      },
+    };
+    const e = new BrowserEngine(async () => mod, pixels);
+    expect(e.capabilities).toEqual({ tiled: null, tta: null });
+
+    const sahiRes = await e.predict({
+      ...req('m1', null),
+      inference: {
+        ...DEFAULT_INFERENCE_CONFIG,
+        mode: 'sahi',
+        tile: { tileSize: 512, overlap: 0.3, fullImage: false },
+      },
+    });
+    expect(e.capabilities).toEqual({ tiled: true, tta: true });
+    expect(tiledCalls).toEqual([{ conf: 0.01, iou: 1, maxDet: 1000, tileSize: 512, overlap: 0.3, fullImage: false }]);
+    expect(sahiRes.inference).toEqual({ mode: 'sahi', tile_size: 512, overlap: 0.3, full_image: false });
+
+    const ttaRes = await e.predict({
+      ...req('m1', null),
+      inference: {
+        ...DEFAULT_INFERENCE_CONFIG,
+        mode: 'tta',
+        tta: { hflip: true, scales: [0.83, 1.0, 1.17] },
+      },
+    });
+    expect(ttaCalls).toEqual([{ conf: 0.01, iou: 1, maxDet: 1000, hflip: true, scales: [0.83, 1.0, 1.17], mergeIou: 0.7 }]);
+    expect(ttaRes.inference).toEqual({ mode: 'tta', hflip: true, scales: [0.83, 1.0, 1.17] });
+  });
+
+  it('detects older WASM bundles lacking detectTiled / detectTta and rejects cleanly with ApiError 501', async () => {
+    const w = fakeWasm();
+    const e = new BrowserEngine(async () => w.mod, pixels);
+    await expect(
+      e.predict({
+        ...req('m1', null),
+        inference: { ...DEFAULT_INFERENCE_CONFIG, mode: 'sahi' },
+      }),
+    ).rejects.toMatchObject({ status: 501, code: 'wasm_sahi_unsupported' });
+    expect(e.capabilities).toEqual({ tiled: false, tta: false });
+
+    await expect(
+      e.predict({
+        ...req('m1', null),
+        inference: { ...DEFAULT_INFERENCE_CONFIG, mode: 'tta' },
+      }),
+    ).rejects.toMatchObject({ status: 501, code: 'wasm_tta_unsupported' });
   });
 });
 

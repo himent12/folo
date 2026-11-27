@@ -7,6 +7,8 @@ import { css } from 'fw';
 
 export interface RailProps {
   pickers: () => JSX.Element;
+  /** Optional collapsible Inference Options section (SAHI / TTA). */
+  inferenceOptions?: (() => JSX.Element) | null;
   thresholds: () => JSX.Element;
   resetButton: () => JSX.Element;
   /** What is drawn on the image (Labels, Scores, Ground truth); none before an image is in. */
@@ -25,6 +27,11 @@ export default function Rail(props: RailProps) {
       <section class="sec" aria-label="Model">
         {props.pickers}
       </section>
+      {props.inferenceOptions ? (
+        <section class="sec inf" aria-label="Inference options">
+          {props.inferenceOptions}
+        </section>
+      ) : null}
       <section class="sec" aria-labelledby="pg-thresholds">
         <div class="sec-head">
           <h2 id="pg-thresholds">Thresholds</h2>
@@ -85,6 +92,9 @@ css`
     flex-wrap: wrap;
     gap: 2px;
     padding: var(--space-2) var(--space-4);
+  }
+  .sec.inf {
+    padding: var(--space-3) var(--space-4);
   }
   .sec-head {
     display: flex;

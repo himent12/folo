@@ -2,7 +2,7 @@
 import { computed, effect, signal, type Signal } from 'fw';
 import { hub } from '$lib/api/index';
 import type { Prediction } from '$lib/api/types';
-import type { BrowserEngine } from '$lib/inference/browser';
+import type { BrowserEngine, InferenceConfig } from '$lib/inference/browser';
 import { errorDetail, toast } from '$lib/ui/toast';
 import { ALL, ask, candidateFloor, noServerWeights, type RunOn } from './predict';
 import type { Source } from './source';
@@ -48,6 +48,8 @@ export function askAllWhenCut(o: {
   /** A prediction of the image is on its way: its answer, not the one on screen, is the one to complete. */
   busy: () => boolean;
   engine: BrowserEngine;
+  /** Active inference enhancement (SAHI / TTA / standard) for this prediction. */
+  inference?: () => InferenceConfig;
   /** In the browser, the server cannot send the model's file (`noServerWeights`) and none was picked. */
   weightsMissing: () => void;
   /** Optional hook called when full-candidate completion upgrades `pred`, so batch caches stay in sync. */
@@ -88,11 +90,12 @@ export function askAllWhenCut(o: {
     if (!explicitRetry && completionFailed.has(p)) return;
     completionFailed.delete(p);
     const file = o.file(id);
+    const inference = o.inference?.();
     const ctrl = new AbortController();
-    ask({ api: hub.api, engine: o.engine, model: id, source: s, on, file, options: ALL, signal: ctrl.signal }).then(
+    ask({ api: hub.api, engine: o.engine, model: id, source: s, on, file, options: ALL, inference, signal: ctrl.signal }).then(
       (all) => {
         if (ctrl.signal.aborted || o.pred.peek() !== p) return;
-        const next = { ...all, timing: p.timing, cold: p.cold };
+        const next = { ...all, timing: p.timing, cold: p.cold, ...(p.inference ? { inference: p.inference } : {}) };
         complete.add(next);
         takeBack();
         o.pred.set(next);

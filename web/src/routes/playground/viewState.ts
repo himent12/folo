@@ -1,6 +1,7 @@
 // View-state and DOM helpers extracted from Playground.tsx: detection filtering/grouping, source metadata,
 // smaller-model fallback lookup, keyboard row navigation, row scrolling, and JSON export formatting.
 import type { Model, Prediction } from '$lib/api/types';
+import { inferenceShortTag } from '$lib/inference/browser';
 import { BACKEND_NAME, DEFAULTS } from './predict';
 import type { Source } from './source';
 
@@ -22,9 +23,11 @@ export function smallerModelOf(model: Model | null, ranked: readonly Model[]): M
   }) ?? null;
 }
 
-/** Label for where the latest prediction ran ("server" or "browser · WebGPU"). */
+/** Label for where the latest prediction ran ("server", "browser · WebGPU", or with active SAHI/TTA tag). */
 export function whereLabel(pred: Prediction | null): string {
-  return pred?.backend ? `browser · ${BACKEND_NAME[pred.backend]}` : 'server';
+  const base = pred?.backend ? `browser · ${BACKEND_NAME[pred.backend]}` : 'server';
+  const tag = inferenceShortTag(pred?.inference);
+  return tag ? `${base} · ${tag}` : base;
 }
 
 /** Label for the device that ran the latest prediction. */
@@ -162,6 +165,7 @@ export function predictionJson(
     boxes: kept.map((b) => ({ class: b.class, name: b.name, score: b.score, x1: b.x1, y1: b.y1, x2: b.x2, y2: b.y2 })),
     timing: pred.timing,
     device: pred.device,
+    ...(pred.inference ? { inference: pred.inference } : {}),
     filter: filter.hiddenClasses?.length ? { ...baseFilter, hidden_classes: [...filter.hiddenClasses] } : baseFilter,
   };
 }

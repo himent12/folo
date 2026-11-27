@@ -1,8 +1,15 @@
 // Server predictions for the Playground: asked once with loose settings (`FETCH`), then filtered in the browser.
 import { ApiError, type Api } from '$lib/api/client';
 import type { MockApi } from '$lib/api/mock';
-import type { PredictInput, Prediction } from '$lib/api/types';
-import type { Backend, BrowserEngine } from '$lib/inference/browser';
+import type { PredictInput, PredictOptions, Prediction } from '$lib/api/types';
+import {
+  inferenceMetaOf,
+  toServerTilePayload,
+  toServerTtaPayload,
+  type Backend,
+  type BrowserEngine,
+  type InferenceConfig,
+} from '$lib/inference/browser';
 import { imageBlob, sourceImageKey, type Source } from './source';
 
 // The server is asked once with loose settings and no suppression (IoU 1 keeps every candidate); the controls below
@@ -50,11 +57,22 @@ export function ask(r: {
   /** A .folo the user picked for this model (the browser runs it instead of the server's weights). */
   file: File | null;
   options: typeof FETCH;
+  /** Optional SAHI tiled or TTA multi-view inference settings (standard single-pass when omitted). */
+  inference?: InferenceConfig;
   signal: AbortSignal;
 }): Promise<Prediction> {
-  const { api, model, source: s, on, options, signal } = r;
+  const { api, model, source: s, on, options, inference, signal } = r;
   const input: PredictInput = s.kind === 'file' ? { kind: 'file', file: s.file } : { kind: 'dataset', dataset_id: s.ds.id, image_id: s.img.id };
-  if (on === 'server') return api.predict(input, { model_id: model, ...options }, signal);
+  if (on === 'server') {
+    const opts: PredictOptions = { model_id: model, ...options };
+    if (inference?.mode === 'sahi') {
+      opts.tile = toServerTilePayload(inference.tile, options.max_det);
+    } else if (inference?.mode === 'tta') {
+      opts.tta = toServerTtaPayload(inference.tta, options.max_det, options.iou);
+    }
+    const meta = inferenceMetaOf(inference);
+    return api.predict(input, opts, signal).then((p) => (meta ? { ...p, inference: meta } : p));
+  }
   if (api.mock) return (api as unknown as MockApi).predictInPage(input, { model_id: model, ...options }).then((p) => simulate(p, on));
   return (r.file ? Promise.resolve(null) : api.modelWeightsTag(model, signal)).then((tag) => {
     // Superseded while asking for the ETag: do not start loading or running a model nobody waits for.
@@ -68,6 +86,7 @@ export function ask(r: {
       image: () => imageBlob(s, signal),
       imageKey: sourceImageKey(s),
       options: { conf: options.conf, iou: options.iou, maxDet: options.max_det },
+      inference,
       signal,
     });
   });

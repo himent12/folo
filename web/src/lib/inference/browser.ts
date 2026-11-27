@@ -5,8 +5,24 @@
 import { ApiError } from '$lib/api/client';
 import type { Prediction, SystemInfo } from '$lib/api/types';
 import { signal } from 'fw';
+import {
+  inferenceMetaOf,
+  toWasmTileOptions,
+  toWasmTtaOptions,
+  type InferenceConfig,
+  type WasmTileDetectOptions,
+  type WasmTtaDetectOptions,
+} from './options';
+
+export * from './options';
 
 export type Backend = 'webgpu' | 'cpu';
+
+/** Whether the loaded folo-wasm build exposes SAHI (`detectTiled`) and TTA (`detectTta`). `null` until loaded. */
+export interface BrowserCapabilities {
+  tiled: boolean | null;
+  tta: boolean | null;
+}
 
 /** `detector.info()` (docs/WASM.md). */
 export interface DetectorInfo {
@@ -25,12 +41,17 @@ export interface Detector {
   readonly backend: Backend;
   info(): DetectorInfo;
   detect(image: ImageData, width?: number, height?: number, options?: { conf?: number; iou?: number; maxDet?: number }): Promise<Prediction>;
+  detectTiled?(image: ImageData, width?: number, height?: number, options?: WasmTileDetectOptions): Promise<Prediction>;
+  detectTta?(image: ImageData, width?: number, height?: number, options?: WasmTtaDetectOptions): Promise<Prediction>;
   free(): void;
 }
 
 export interface WasmModule {
   default(): Promise<unknown>;
-  FoloDetector: { load(bytes: Uint8Array, options: { backend: Backend; modelId: string }): Promise<Detector> };
+  FoloDetector: {
+    load(bytes: Uint8Array, options: { backend: Backend; modelId: string }): Promise<Detector>;
+    prototype?: Partial<Pick<Detector, 'detectTiled' | 'detectTta'>>;
+  };
 }
 
 let wasm: Promise<WasmModule> | null = null;
@@ -159,6 +180,7 @@ export function isDetectorLoadError(e: unknown): boolean {
 export class BrowserEngine {
   #phase = signal<Phase>('idle');
   #info = signal<DetectorInfo | null>(null);
+  #capabilities = signal<BrowserCapabilities>({ tiled: null, tta: null });
   /** What the engine is doing for the latest request. */
   get phase(): Phase {
     return this.#phase.get();
@@ -172,6 +194,10 @@ export class BrowserEngine {
   }
   set info(v: DetectorInfo | null) {
     this.#info.set(v);
+  }
+  /** SAHI (`detectTiled`) and TTA (`detectTta`) support detected on the loaded folo-wasm build. */
+  get capabilities(): BrowserCapabilities {
+    return this.#capabilities.get();
   }
 
   #detectors = new Map<string, Entry>();
@@ -228,6 +254,8 @@ export class BrowserEngine {
     /** Stable identity for the image (e.g. dataset+image id or file id) so repeated runs skip re-fetching and re-decoding. */
     imageKey?: string;
     options: { conf: number; iou: number; maxDet: number };
+    /** Optional SAHI tiled or TTA multi-view inference config (calls `detectTiled` / `detectTta`). */
+    inference?: InferenceConfig;
     /** Aborted when a newer request replaces this one: it stops before decoding and before detecting. */
     signal?: AbortSignal;
   }): Promise<Prediction> {
@@ -247,16 +275,51 @@ export class BrowserEngine {
       }
       // Requests replaced while the detector loaded all wake here: only the latest advances phase, decodes and runs.
       superseded();
+      this.#recordDetectorCaps(det);
       this.#setPhase('ready', reqSeq, req.signal);
       const pixels = await this.#pixels(req, superseded);
       superseded();
-      const p = await det.detect(pixels, undefined, undefined, req.options);
+      const mode = req.inference?.mode ?? 'standard';
+      let p: Prediction;
+      if (mode === 'sahi' && req.inference) {
+        if (typeof det.detectTiled !== 'function') {
+          throw new ApiError(
+            501,
+            'wasm_sahi_unsupported',
+            'This browser runtime build does not support SAHI tiled inference.',
+            'Rebuild folo-wasm with scripts/build-wasm.sh (or scripts\\build-wasm.ps1) to enable detectTiled.',
+          );
+        }
+        p = await det.detectTiled(pixels, undefined, undefined, toWasmTileOptions(req.options, req.inference.tile));
+      } else if (mode === 'tta' && req.inference) {
+        if (typeof det.detectTta !== 'function') {
+          throw new ApiError(
+            501,
+            'wasm_tta_unsupported',
+            'This browser runtime build does not support Test-Time Augmentation.',
+            'Rebuild folo-wasm with scripts/build-wasm.sh (or scripts\\build-wasm.ps1) to enable detectTta.',
+          );
+        }
+        p = await det.detectTta(pixels, undefined, undefined, toWasmTtaOptions(req.options, req.inference.tta));
+      } else {
+        p = await det.detect(pixels, undefined, undefined, req.options);
+      }
       superseded();
       if (reqSeq === this.#requestSeq) this.info = det.info();
-      return p;
+      const meta = inferenceMetaOf(req.inference);
+      return meta ? { ...p, inference: meta } : p;
     } finally {
       entry.users--;
       this.#release(entry);
+    }
+  }
+
+  #recordDetectorCaps(det: Detector) {
+    const tiled = typeof det.detectTiled === 'function';
+    const tta = typeof det.detectTta === 'function';
+    const cur = this.#capabilities.peek();
+    if (cur.tiled !== tiled || cur.tta !== tta) {
+      this.#capabilities.set({ tiled, tta });
     }
   }
 
@@ -308,6 +371,13 @@ export class BrowserEngine {
       if (!this.#runtimeReady) setEntryPhase('runtime');
       const m = await this.load();
       this.#runtimeReady = true;
+      const proto = m.FoloDetector.prototype;
+      if (proto) {
+        this.#capabilities.set({
+          tiled: typeof proto.detectTiled === 'function',
+          tta: typeof proto.detectTta === 'function',
+        });
+      }
       setEntryPhase('weights');
       const dl = req.file ? null : this.#acquireDownload(req);
       let bytes: Uint8Array | null = null;
@@ -318,6 +388,7 @@ export class BrowserEngine {
         // Drop this closure's reference so the temporary weights buffer can be collected as soon as wasm finishes loading.
         bytes = null;
         const det = await loading;
+        this.#recordDetectorCaps(det);
         entry.phase = 'ready';
         return det;
       } finally {

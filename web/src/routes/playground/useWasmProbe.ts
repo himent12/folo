@@ -38,5 +38,10 @@ export function useWasmAvailability(runOn: Signal<RunOn>) {
   });
 
   const runOnNote = computed(() => (!browserOff.get() && !webgpu ? 'No WebGPU in this browser' : null));
-  return { webgpu, browserOff, runOnNote };
+  const serverPredictOptions = computed(
+    () =>
+      !hub.api.mock &&
+      (!!system.data?.features?.includes('predict_options') || !!hub.features?.includes('predict_options')),
+  );
+  return { webgpu, browserOff, runOnNote, serverPredictOptions };
 }

@@ -1,5 +1,6 @@
 // Inference: predictions and validation (docs/API.md, Inference).
 
+import type { InferenceMeta, ServerTilePayload, ServerTtaPayload } from '$lib/inference/options';
 import type { ScoredBox, Split } from './datasets';
 import type { Epoch } from './runs';
 
@@ -25,6 +26,8 @@ export interface Prediction {
   backend?: 'webgpu' | 'cpu';
   /** The model's first prediction since the server loaded it: `timing` includes its warm-up (absent: false). */
   cold?: boolean;
+  /** Client-attached enhancement metadata (SAHI or TTA) when non-standard inference produced this result. */
+  inference?: InferenceMeta;
 }
 
 export interface PredictOptions {
@@ -32,6 +35,10 @@ export interface PredictOptions {
   conf?: number;
   iou?: number;
   max_det?: number;
+  /** SAHI tiled inference config (only sent when the server advertises `predict_options`). */
+  tile?: ServerTilePayload;
+  /** Test-Time Augmentation config (only sent when the server advertises `predict_options`). */
+  tta?: ServerTtaPayload;
 }
 
 export type PredictInput =

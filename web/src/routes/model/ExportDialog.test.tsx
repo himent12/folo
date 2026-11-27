@@ -537,3 +537,87 @@ describe('ExportDialog: the demo creates no file', () => {
     });
   }
 });
+
+describe('ExportDialog: dynamic ONNX axes & CLI commands', () => {
+  it('wires independent dynamic_batch / dynamic_hw through POST /export when export_dynamic_axes is advertised', async () => {
+    const api = new HttpApi('http://folo.test');
+    vi.spyOn(api, 'system').mockResolvedValue({ ...SYS, features: ['export_onnx_switches', 'export_dynamic_axes', 'weights_onnx'] });
+    const exp = vi.spyOn(api, 'exportModel').mockResolvedValue({ path: 'D:/folo/exports/shapes-n-best-decoded.onnx', bytes: 10_200_000 });
+    const dl = vi.spyOn(api, 'onnxFile');
+    hub.api = api;
+    c = mount(ExportDialog, { target, props: { model: { ...model, path: 'D:/folo/models/shapes-n-best.folo' }, open: true } });
+    flushSync();
+
+    target.ownerDocument.querySelector<HTMLInputElement>('input[value="onnx"]')!.click();
+    const axesGroup = await until(
+      () => target.ownerDocument.querySelector('[role="radiogroup"][aria-label="Dynamic ONNX axes"]'),
+      'dynamic axes selector',
+    );
+    // Static defaults to direct download on weights_onnx servers.
+    expect(button('Download shapes-n-best.onnx')).toBeDefined();
+
+    // Pick Batch (--dynamic-batch): switches from direct download to POST /export so partial axes are not dropped.
+    const batchBtn = [...axesGroup.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === 'Batch')!;
+    batchBtn.click();
+    flushSync();
+    expect(button('Download')).toBeUndefined();
+    const expBtn = await until(() => button('Export'), 'Export button for split axes');
+
+    // Also check Decode boxes in the graph.
+    const decodeBox = target.ownerDocument.querySelectorAll<HTMLInputElement>('dialog [role="group"] input[type="checkbox"]')[0]!;
+    decodeBox.click();
+    flushSync();
+
+    expBtn.click();
+    await until(() => target.ownerDocument.querySelector('dialog .where code'), 'saved path');
+    expect(dl).not.toHaveBeenCalled();
+    expect(exp).toHaveBeenCalledWith('m_x', 'onnx', {
+      decode: true,
+      dynamic: false,
+      dynamic_batch: true,
+      dynamic_hw: false,
+      half: false,
+    });
+  });
+
+  it('shows copy-ready export and predict CLI snippets matching selected ONNX options', async () => {
+    const api = new HttpApi('http://folo.test');
+    vi.spyOn(api, 'system').mockResolvedValue({ ...SYS, features: ['export_onnx_switches', 'export_dynamic_axes'] });
+    hub.api = api;
+    c = mount(ExportDialog, {
+      target,
+      props: { model: { ...model, path: 'D:/folo/models/shapes-n-best.folo' }, open: true },
+    });
+    flushSync();
+
+    target.ownerDocument.querySelector<HTMLInputElement>('input[value="onnx"]')!.click();
+    const axesGroup = await until(
+      () => target.ownerDocument.querySelector('[role="radiogroup"][aria-label="Dynamic ONNX axes"]'),
+      'dynamic axes selector',
+    );
+    const hwBtn = [...axesGroup.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === 'H×W')!;
+    hwBtn.click();
+    flushSync();
+
+    // Expand CLI commands disclosure.
+    target.ownerDocument.querySelector<HTMLButtonElement>('[data-export-cli] button.cli-toggle')!.click();
+    flushSync();
+
+    const exportPre = await until(() => target.ownerDocument.querySelector('pre[aria-label="Export CLI command"]'), 'export CLI');
+    expect(exportPre.textContent).toBe('folo export --model D:/folo/models/shapes-n-best.folo --format onnx --dynamic-hw');
+
+    const predictPre = target.ownerDocument.querySelector('pre[aria-label="Predict CLI command"]')!;
+    expect(predictPre.textContent).toContain('--tile 640 --tile-overlap 0.2');
+
+    // Switch predict snippet to TTA and ByteTrack.
+    const predGroup = target.ownerDocument.querySelector('[role="radiogroup"][aria-label="Predict snippet mode"]')!;
+    const pickPred = (label: string) => {
+      [...predGroup.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === label)!.click();
+      flushSync();
+    };
+    pickPred('TTA');
+    expect(predictPre.textContent).toBe('folo predict --model D:/folo/models/shapes-n-best.folo <images> --tta');
+    pickPred('ByteTrack');
+    expect(predictPre.textContent).toBe('folo predict --model D:/folo/models/shapes-n-best.folo <frames_dir> --track');
+  });
+});

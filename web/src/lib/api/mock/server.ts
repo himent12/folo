@@ -213,7 +213,7 @@ export class MockServer {
         features: [
           ...(this.scenario === 'no-throughput'
             ? ['export_onnx_switches', 'queue_control', 'weights_onnx']
-            : ['export_onnx_switches', 'queue_control', 'weights_onnx', 'throughput', 'run_estimate', 'benchmark', 'run_cli']),
+            : ['export_onnx_switches', 'export_dynamic_axes', 'queue_control', 'weights_onnx', 'throughput', 'run_estimate', 'benchmark', 'run_cli']),
           // The in-browser runtime in this build (the name requested of the server; lib/inference `wasmFromSystem`).
           ...(this.scenario === 'no-wasm' ? [] : ['web_wasm']),
           ...(this.labeling() ? [LABEL_FEATURE] : []),
@@ -596,9 +596,17 @@ export class MockServer {
     return this.call(() => {
       const m = this.allModels().find((x) => x.id === id);
       if (!m) throw new ApiError(404, 'model_not_found', `No model with id ${id}.`);
-      const on = { decode: !!switches?.decode, dynamic: !!switches?.dynamic, half: !!switches?.half };
-      if (format !== 'onnx' && (on.decode || on.dynamic || on.half))
-        throw new ApiError(400, 'invalid_body', 'decode, dynamic and half apply to ONNX exports only.');
+      const on = {
+        decode: !!switches?.decode,
+        dynamic: !!switches?.dynamic,
+        dynamic_batch: switches?.dynamic_batch,
+        dynamic_hw: switches?.dynamic_hw,
+        half: !!switches?.half,
+      };
+      if (format !== 'onnx' && (on.decode || on.dynamic || on.half || on.dynamic_batch !== undefined || on.dynamic_hw !== undefined))
+        throw new ApiError(400, 'invalid_body', 'decode, dynamic, dynamic_batch, dynamic_hw and half apply to ONNX exports only.');
+      if (on.dynamic && (on.dynamic_batch === false || on.dynamic_hw === false))
+        throw new ApiError(400, 'invalid_body', '`dynamic: true` cannot be combined with `dynamic_batch: false` or `dynamic_hw: false`');
       // The real server's names (docs/API.md): `<name>-f16.folo`, `<name>.onnx`, `-decoded` with `decode`, `-f16` with `half`.
       const file = format === 'onnx' ? `${m.name}${on.decode ? '-decoded' : ''}${on.half ? '-f16' : ''}.onnx` : `${m.name}-f16.folo`;
       const perParam = format === 'onnx' ? (on.half ? 2.05 : 4.1) : 2.03;

@@ -71,8 +71,8 @@ export function RailThresholds(props: SliderValues & { o2o: boolean }) {
   );
 }
 
-/** The phone sheet's every threshold, or the tablet popover's Max detections; then what is drawn on the image. */
-export function MoreBody(props: SliderValues & { tablet: boolean; o2o?: boolean; toggles: () => JSX.Element }) {
+/** The phone sheet's every threshold, or the tablet popover's Max detections; then inference options and what is drawn on the image. */
+export function MoreBody(props: SliderValues & { tablet: boolean; o2o?: boolean; toggles: () => JSX.Element; inferenceOptions?: (() => JSX.Element) | null }) {
   const conf = bindable(props, 'conf', DEFAULTS.conf);
   const iou = bindable(props, 'iou', DEFAULTS.iou);
   const maxDet = bindable(props, 'maxDet', DEFAULTS.maxDet);
@@ -96,6 +96,7 @@ export function MoreBody(props: SliderValues & { tablet: boolean; o2o?: boolean;
           </>
         )}
       </div>
+      {props.inferenceOptions ? props.inferenceOptions() : null}
       <div class="more-toggles">{props.toggles()}</div>
     </div>
   );
