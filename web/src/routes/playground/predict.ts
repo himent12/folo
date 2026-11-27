@@ -1,9 +1,10 @@
 // Server predictions for the Playground: asked once with loose settings (`FETCH`), then filtered in the browser.
-import { ApiError, type Api } from '$lib/api/client';
+import { ApiError, type Api, type WeightsFormat } from '$lib/api/client';
 import type { MockApi } from '$lib/api/mock';
 import type { PredictInput, PredictOptions, Prediction } from '$lib/api/types';
 import {
   inferenceMetaOf,
+  normalizeBrowserPrecision,
   toServerTilePayload,
   toServerTtaPayload,
   type Backend,
@@ -49,6 +50,26 @@ export function noServerWeights(e: unknown): boolean {
   return e instanceof ApiError && (e.status === 404 || e.status === 405 || e.status === 501) && e.code !== 'model_not_found';
 }
 
+/**
+ * Computes the server `conf` query value that retains every candidate down to `minWantedConf` (inclusively, even
+ * though the server applies strict `score > conf` when `minWantedConf < FETCH.conf`).
+ */
+export function serverFetchConf(minWantedConf: number): number {
+  if (!Number.isFinite(minWantedConf) || minWantedConf >= FETCH.conf) return FETCH.conf;
+  if (minWantedConf <= 1e-4) return 0;
+  return Math.max(0, Math.floor((minWantedConf - 1e-4) * 1_000_000) / 1_000_000);
+}
+
+/**
+ * Selects which server weights representation to download for browser WASM inference:
+ * CPU `auto` and explicit `int8` fetch the untouched stored `.folo` so embedded `folo.quant` calibration matches
+ * the exact weights; WebGPU and explicit `f32`/`f16` use the compact `?format=f16` export.
+ */
+export function browserWeightsFormat(backend: Backend, precision?: BrowserPrecision): WeightsFormat {
+  const p = normalizeBrowserPrecision(precision);
+  return backend === 'cpu' && (p === 'auto' || p === 'int8') ? 'stored' : 'f16';
+}
+
 /** One prediction of the Playground's image with `options`, wherever it runs: the server, or this browser. */
 export function ask(r: {
   api: Api;
@@ -87,6 +108,8 @@ export function ask(r: {
     return api.predict(input, opts, signal).then((p) => (meta ? { ...p, inference: meta } : p));
   }
   if (api.mock) return (api as unknown as MockApi).predictInPage(input, { model_id: model, ...options }).then((p) => simulate(p, on));
+  const effPrec = normalizeBrowserPrecision(r.precision ?? inference?.precision);
+  const weightsFormat = browserWeightsFormat(on, effPrec);
   const wasmOpts = buildWasmDetectOptions({
     conf: options.conf,
     iou: options.iou,
@@ -94,16 +117,22 @@ export function ask(r: {
     perClassConf: r.perClassConf,
     confInclusive: r.confInclusive,
   });
-  return (r.file ? Promise.resolve(null) : api.modelWeightsTag(model, signal)).then((tag) => {
+  const tagPromise = r.file
+    ? Promise.resolve(null)
+    : weightsFormat === 'stored'
+      ? api.modelWeightsTag(model, signal, 'stored')
+      : api.modelWeightsTag(model, signal);
+  return tagPromise.then((tag) => {
     // Superseded while asking for the ETag: do not start loading or running a model nobody waits for.
     if (signal.aborted) throw new DOMException('Superseded', 'AbortError');
     return r.engine.predict({
       modelId: model,
       file: r.file,
-      download: () => api.modelWeights(model),
+      download: () => (weightsFormat === 'stored' ? api.modelWeights(model, undefined, 'stored') : api.modelWeights(model)),
       tag,
+      weightsFormat,
       backend: on,
-      precision: r.precision ?? inference?.precision,
+      precision: effPrec,
       image: () => imageBlob(s, signal),
       imageKey: sourceImageKey(s),
       options: {

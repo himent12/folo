@@ -53,7 +53,7 @@ export function RailThresholds(props: SliderValues & { o2o: boolean; perClassThr
     <>
       <div class="r-sliders">
         <span use:tooltip={CONF_HINT}>
-          <Slider label="Confidence" bind:value={conf} min={0.01} max={0.95} step={0.01} />
+          <Slider label="Confidence" bind:value={conf} min={0} max={1} step={0.01} />
         </span>
         {props.o2o ? (
           <p class="no-nms">
@@ -102,7 +102,7 @@ export function MoreBody(
           </>
         ) : (
           <>
-            <Slider inline label="Confidence" bind:value={conf} min={0.01} max={0.95} step={0.01} />
+            <Slider inline label="Confidence" bind:value={conf} min={0} max={1} step={0.01} />
             <SecondarySliders inline o2o={props.o2o} bind:iou={iou} bind:maxDet={maxDet} />
           </>
         )}

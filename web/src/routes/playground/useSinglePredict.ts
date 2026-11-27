@@ -2,6 +2,7 @@
 import { computed, effect, untrack, type Signal } from 'fw';
 import { hub } from '$lib/api/index';
 import type { Prediction } from '$lib/api/types';
+import { effectiveMinConf } from '$lib/detect/nms';
 import {
   DEFAULT_INFERENCE_CONFIG,
   inferenceConfigKey,
@@ -11,9 +12,10 @@ import {
   type BrowserPrecision,
   type InferenceConfig,
 } from '$lib/inference/browser';
-import { askAllWhenCut, recordFetchedFloors } from './allCandidates';
-import { hasPerClassConf, type PerClassConfMap } from './perClassConf';
-import { ask, FETCH, noServerWeights, type RunOn } from './predict';
+import { askAllWhenCut, loosePerClassFloor, recordFetchedFloors } from './allCandidates';
+import { looksLikeFolo } from './folo';
+import type { PerClassConfMap } from './perClassConf';
+import { ask, FETCH, noServerWeights, serverFetchConf, type RunOn } from './predict';
 import { sourceImageKey, type Source } from './source';
 import type { Det } from './viewState';
 
@@ -124,8 +126,11 @@ export function useSinglePredict(o: SinglePredictInput): () => boolean {
     }
     const frameKey = sourceImageKey(s);
     const ctrl = (activeCtrl = new AbortController());
-    const pccSnap = on !== 'server' ? untrack(() => o.perClassConf?.peek()) : undefined;
-    const wasmPcc = hasPerClassConf(pccSnap) ? pccSnap : undefined;
+    const confSnap = untrack(() => o.conf.peek());
+    const pccSnap = untrack(() => o.perClassConf?.peek());
+    const lowMap = on !== 'server' ? loosePerClassFloor(pccSnap) : undefined;
+    const reqConf = on === 'server' ? serverFetchConf(effectiveMinConf(confSnap, pccSnap)) : Math.min(FETCH.conf, confSnap);
+    const reqOpts = reqConf === FETCH.conf ? FETCH : { ...FETCH, conf: reqConf };
     const precChanged = on !== 'server' && lastPredPrecision !== null && lastPredPrecision !== prec;
     lastPredPrecision = on !== 'server' ? prec : null;
     untrack(() => {
@@ -150,8 +155,9 @@ export function useSinglePredict(o: SinglePredictInput): () => boolean {
       source: s,
       on,
       file,
-      options: FETCH,
-      ...(wasmPcc ? { perClassConf: wasmPcc, confInclusive: true } : {}),
+      options: reqOpts,
+      ...(lowMap ? { perClassConf: lowMap, confInclusive: true } : {}),
+      ...(on !== 'server' && reqConf < FETCH.conf ? { confInclusive: true } : {}),
       precision: prec,
       inference: inf,
       signal: ctrl.signal,
@@ -160,7 +166,7 @@ export function useSinglePredict(o: SinglePredictInput): () => boolean {
       (p) => {
         if (ctrl.signal.aborted) return;
         if (activeCtrl === ctrl) activeCtrl = null;
-        if (on !== 'server') recordFetchedFloors(p, FETCH.conf, wasmPcc);
+        recordFetchedFloors(p, reqOpts.conf, lowMap, on !== 'server' && (!!lowMap || reqConf < FETCH.conf));
         o.pred.set(p);
         o.predSourceKey.set(frameKey);
         o.hover.set(null);
@@ -168,17 +174,24 @@ export function useSinglePredict(o: SinglePredictInput): () => boolean {
         o.predicting.set(false);
         o.onBatchResult?.(s, id, on, p, null, infKey);
       },
-      (e: unknown) => {
+      async (e: unknown) => {
         if (ctrl.signal.aborted) return;
         if (activeCtrl === ctrl) activeCtrl = null;
         o.predicting.set(false);
         if (file && on !== 'server' && isDetectorLoadError(e)) {
+          const keepPrecisionFile = prec === 'int8' && (await looksLikeFolo(file));
+          if (ctrl.signal.aborted) return;
           o.pred.set(null);
           o.predSourceKey.set(null);
           o.hover.set(null);
           o.picked.set(null);
           o.onBatchBusy?.(s, false);
-          o.dropLocal(id, file, e);
+          if (keepPrecisionFile) {
+            o.error.set(e);
+            o.onBatchResult?.(s, id, on, null, e, infKey);
+          } else {
+            o.dropLocal(id, file, e);
+          }
           return;
         }
         if (on !== 'server' && !file && noServerWeights(e)) {

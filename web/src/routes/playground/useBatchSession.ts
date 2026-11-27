@@ -3,6 +3,7 @@
 import { computed, effect, onCleanup, onWindow, signal, untrack, type Signal } from 'fw';
 import { hub } from '$lib/api/index';
 import type { Model, Prediction } from '$lib/api/types';
+import { effectiveMinConf } from '$lib/detect/nms';
 import {
   DEFAULT_INFERENCE_CONFIG,
   inferenceConfigKey,
@@ -14,7 +15,17 @@ import {
 } from '$lib/inference/browser';
 import { isOom } from '$lib/oom';
 import { toast } from '$lib/ui/toast';
-import { isPredictionCutAt, markCompletionFailed, markPredictionComplete, needsCompletionAt, recordFetchedFloors } from './allCandidates';
+import {
+  hasCompletionFailed,
+  isPredictionCutAt,
+  loosePerClassFloor,
+  markCompletionFailed,
+  markPredictionComplete,
+  needsCandidateRefresh,
+  needsPerClassFloorRefresh,
+  recordFetchedFloors,
+} from './allCandidates';
+import { looksLikeFolo } from './folo';
 import { perClassConfKey, type PerClassConfMap } from './perClassConf';
 import {
   batchItemSource,
@@ -31,7 +42,7 @@ import {
   type BatchQaFilter,
 } from './batch';
 import { takeImage } from './intake';
-import { ALL, ask, FETCH, noServerWeights, type RunOn } from './predict';
+import { ALL, ask, FETCH, noServerWeights, serverFetchConf, type RunOn } from './predict';
 import { sourceImageKey, type Source } from './source';
 
 export interface UseBatchSessionInput {
@@ -361,7 +372,7 @@ export function useBatchSession(o: UseBatchSessionInput) {
     }
   }
 
-  /** Fetches full candidate set for a cut prediction (`FETCH.max_det` hit above current `conf` / `perClassConf`). */
+  /** Refreshes a batch prediction when it hit the candidate cap or needs a lower fetched floor for `conf` / `perClassConf`. */
   async function completeIfCut(
     itemSource: Extract<Source, { kind: 'file' }>,
     p: Prediction,
@@ -370,10 +381,13 @@ export function useBatchSession(o: UseBatchSessionInput) {
     localFile: File | null,
     inference: InferenceConfig,
     precision: BrowserPrecision,
+    confVal: number,
     perClassConf: PerClassConfMap | undefined,
     signal: AbortSignal,
   ): Promise<{ pred: Prediction; haltError?: unknown }> {
-    if (!needsCompletionAt(p, o.conf.peek(), perClassConf)) return { pred: p };
+    const plan = needsCandidateRefresh(p, confVal, perClassConf, on);
+    if (!plan) return { pred: p };
+    const reqOpts = { ...(plan.useAll ? ALL : FETCH), conf: plan.fetchConf };
     try {
       const all = await ask({
         api: hub.api,
@@ -382,15 +396,18 @@ export function useBatchSession(o: UseBatchSessionInput) {
         source: itemSource,
         on,
         file: localFile,
-        options: ALL,
+        options: reqOpts,
+        ...(on !== 'server' && plan.lowMap ? { perClassConf: plan.lowMap, confInclusive: true } : {}),
+        ...(on !== 'server' && plan.fetchConf < FETCH.conf ? { confInclusive: true } : {}),
         precision,
         inference,
         signal,
       });
       if (signal.aborted) return { pred: p };
       const next = { ...all, timing: p.timing, cold: p.cold, ...(p.inference ? { inference: p.inference } : {}) };
-      markPredictionComplete(next);
-      if (on !== 'server') recordFetchedFloors(next, ALL.conf);
+      o.engine.copyPredictionInfo(all, next);
+      if (plan.useAll) markPredictionComplete(next);
+      recordFetchedFloors(next, reqOpts.conf, on !== 'server' ? plan.lowMap : undefined, on !== 'server' && (!!plan.lowMap || reqOpts.conf < FETCH.conf));
       return { pred: next };
     } catch (e: unknown) {
       if (signal.aborted) return { pred: p };
@@ -402,7 +419,7 @@ export function useBatchSession(o: UseBatchSessionInput) {
     }
   }
 
-  /** Sequentially runs inference on every pending/failed batch item with full abort safety. */
+  /** Sequentially runs inference on every pending/failed/under-covered batch item with full abort safety. */
   async function runAll() {
     const id = o.modelId();
     const list = items.peek();
@@ -411,12 +428,25 @@ export function useBatchSession(o: UseBatchSessionInput) {
     const on = o.runOn.peek();
     const inf = untrack(currentInference);
     const prec = currentPrecision(on);
+    const confSnap = o.conf.peek();
     const pccSnap = o.perClassConf?.peek();
+    const lowMap = on !== 'server' ? loosePerClassFloor(pccSnap) : undefined;
+    const reqConf = on === 'server' ? serverFetchConf(effectiveMinConf(confSnap, pccSnap)) : Math.min(FETCH.conf, confSnap);
+    const reqOpts = reqConf === FETCH.conf ? FETCH : { ...FETCH, conf: reqConf };
     const key = batchPredKey(id, on, inferenceConfigKey(inf), prec);
     const localFile = on === 'server' ? null : (o.localWeights.peek().get(id) ?? null);
 
-    // If all items are already complete for this model/backend, nothing to run.
-    if (list.every((it) => it.status === 'done' && it.pred && it.predKey === key)) return;
+    const itemNeedsRunAll = (it: BatchItem): boolean => {
+      if (it.status !== 'done' || !it.pred || it.predKey !== key) return true;
+      const plan = needsCandidateRefresh(it.pred, confSnap, pccSnap, on);
+      if (!plan) return false;
+      // Do not replay a cap-only ALL failure during Run All when the fetched confidence floor already covers current thresholds.
+      if (plan.useAll && !needsPerClassFloorRefresh(it.pred, confSnap, pccSnap) && hasCompletionFailed(it.pred)) return false;
+      return true;
+    };
+
+    // If all items are already complete AND satisfy current floor/cap coverage for this model/backend, nothing to run.
+    if (list.every((it) => !itemNeedsRunAll(it))) return;
 
     // Cancel any in-flight single-image or export completion request synchronously before dispatching batch work.
     o.cancelSinglePredict();
@@ -443,7 +473,7 @@ export function useBatchSession(o: UseBatchSessionInput) {
         if (destroyed || seq !== runSeq || ctrl.signal.aborted) break;
         const item = items.peek()[i];
         if (!item) break;
-        if (item.status === 'done' && item.pred && item.predKey === key) continue;
+        if (!itemNeedsRunAll(item)) continue;
 
         runningIndex.set(i);
         updateItem(i, { status: 'running', error: null });
@@ -456,23 +486,35 @@ export function useBatchSession(o: UseBatchSessionInput) {
         const itemSource = batchItemSource(item);
         const frameKey = sourceImageKey(itemSource);
         try {
-          const raw = await ask({
-            api: hub.api,
-            engine: o.engine,
-            model: id,
-            source: itemSource,
-            on,
-            file: localFile,
-            options: FETCH,
-            precision: prec,
-            inference: inf,
-            signal: ctrl.signal,
-          });
-          if (destroyed || seq !== runSeq || ctrl.signal.aborted) break;
-          if (on !== 'server') recordFetchedFloors(raw, FETCH.conf);
-          const completed = await completeIfCut(itemSource, raw, id, on, localFile, inf, prec, pccSnap, ctrl.signal);
-          if (destroyed || seq !== runSeq || ctrl.signal.aborted) break;
-          const p = completed.pred;
+          let p: Prediction;
+          let haltError: unknown;
+          if (item.status === 'done' && item.pred && item.predKey === key) {
+            const completed = await completeIfCut(itemSource, item.pred, id, on, localFile, inf, prec, confSnap, pccSnap, ctrl.signal);
+            if (destroyed || seq !== runSeq || ctrl.signal.aborted) break;
+            p = completed.pred;
+            haltError = completed.haltError;
+          } else {
+            const raw = await ask({
+              api: hub.api,
+              engine: o.engine,
+              model: id,
+              source: itemSource,
+              on,
+              file: localFile,
+              options: reqOpts,
+              ...(lowMap ? { perClassConf: lowMap, confInclusive: true } : {}),
+              ...(on !== 'server' && reqConf < FETCH.conf ? { confInclusive: true } : {}),
+              precision: prec,
+              inference: inf,
+              signal: ctrl.signal,
+            });
+            if (destroyed || seq !== runSeq || ctrl.signal.aborted) break;
+            recordFetchedFloors(raw, reqOpts.conf, lowMap, on !== 'server' && (!!lowMap || reqConf < FETCH.conf));
+            const completed = await completeIfCut(itemSource, raw, id, on, localFile, inf, prec, confSnap, pccSnap, ctrl.signal);
+            if (destroyed || seq !== runSeq || ctrl.signal.aborted) break;
+            p = completed.pred;
+            haltError = completed.haltError;
+          }
           updateItem(i, { pred: p, predKey: key, status: 'done', error: null });
           if (i === activeIndex.peek()) {
             o.pred.set(p);
@@ -483,11 +525,14 @@ export function useBatchSession(o: UseBatchSessionInput) {
             o.weightsMissing.set(false);
             o.predicting.set(false);
           }
-          if (completed.haltError) {
+          if (haltError) {
             haltedOnNotice = true;
-            const he = completed.haltError;
+            const he = haltError;
             if (localFile && on !== 'server' && isDetectorLoadError(he)) {
-              o.dropLocal(id, localFile, he);
+              const keepPrecisionFile = prec === 'int8' && (await looksLikeFolo(localFile));
+              if (destroyed || seq !== runSeq || ctrl.signal.aborted) break;
+              if (keepPrecisionFile) o.error.set(he);
+              else o.dropLocal(id, localFile, he);
             } else if (on !== 'server' && !localFile && noServerWeights(he)) {
               o.weightsMissing.set(true);
             } else if (isOom(he)) {
@@ -499,14 +544,18 @@ export function useBatchSession(o: UseBatchSessionInput) {
         } catch (e: unknown) {
           if (destroyed || seq !== runSeq || ctrl.signal.aborted) break;
           if (localFile && on !== 'server' && isDetectorLoadError(e)) {
-            updateItem(i, { status: 'idle', error: null });
+            const keepPrecisionFile = prec === 'int8' && (await looksLikeFolo(localFile));
+            if (destroyed || seq !== runSeq || ctrl.signal.aborted) break;
+            updateItem(i, { status: keepPrecisionFile ? 'error' : 'idle', error: keepPrecisionFile ? errorText(e) : null });
             haltedOnNotice = true;
             if (i === activeIndex.peek()) {
               o.predicting.set(false);
               o.pred.set(null);
               o.predSourceKey.set(null);
+              if (keepPrecisionFile) o.error.set(e);
             }
-            o.dropLocal(id, localFile, e);
+            if (!keepPrecisionFile) o.dropLocal(id, localFile, e);
+            else o.error.set(e);
             break;
           }
           if (on !== 'server' && !localFile && noServerWeights(e)) {
@@ -619,10 +668,10 @@ export function useBatchSession(o: UseBatchSessionInput) {
       return exportBatchCsv(input);
     };
 
-    // Complete every eligible capped item in the batch so filtered exports never miss boxes hidden past FETCH.max_det.
+    // Complete every eligible capped or under-floored item before selecting the QA export subset.
     const cutIndices = items
       .peek()
-      .map((item, index) => (item.status === 'done' && needsCompletionAt(item.pred, snap.filter.conf, snap.filter.perClassConf) ? index : -1))
+      .map((item, index) => (item.status === 'done' && needsCandidateRefresh(item.pred, snap.filter.conf, snap.filter.perClassConf, snap.runOn) ? index : -1))
       .filter((index) => index >= 0);
 
     if (cutIndices.length === 0) {
@@ -651,6 +700,7 @@ export function useBatchSession(o: UseBatchSessionInput) {
           localFile,
           snap.inf,
           snap.precision,
+          snap.filter.conf,
           snap.filter.perClassConf,
           ctrl.signal,
         );

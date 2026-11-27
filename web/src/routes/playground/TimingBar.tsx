@@ -17,6 +17,11 @@ export default function TimingBar(props: {
   precision?: WasmPrecision | null;
   precisionFallback?: string | null;
 }) {
+  const displayEngineBadge = computed(() => {
+    const b = props.engineBadge;
+    if (!b) return null;
+    return props.precision === 'int8' ? b.replace(/\s*·\s*INT8$/, '') : b;
+  });
   const parts = computed(() => [
     { key: 'pre', label: 'Preprocess', what: 'decode, resize', v: props.timing.preprocess_ms, color: 'var(--text-tertiary)' },
     { key: 'inf', label: 'Inference', what: 'the model', v: props.timing.inference_ms, color: 'var(--text-primary)' },
@@ -63,7 +68,7 @@ export default function TimingBar(props: {
       <p class="device">
         <span class="faint">Device</span> <span class="mono">{props.device}</span>
       </p>
-      {props.engineBadge ? (
+      {displayEngineBadge.get() ? (
         <p class="device engine" data-browser-engine-info>
           <span class="faint">Engine</span>
           <span class="engine-val">
@@ -72,7 +77,7 @@ export default function TimingBar(props: {
                 INT8
               </span>
             ) : null}
-            <span class="mono">{props.engineBadge}</span>
+            <span class="mono">{displayEngineBadge.get()}</span>
           </span>
         </p>
       ) : null}

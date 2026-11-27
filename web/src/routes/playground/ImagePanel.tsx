@@ -369,7 +369,7 @@ export default function ImagePanel(props: ImagePanelProps) {
             Confidence and Overlap side by side (Confidence alone for end-to-end o2o models), the less-used settings one tap away. */}
         {props.source ? (
           <div class="qconf" class:covered={props.sheetShown && !props.tablet} class:single={props.tablet && !!props.o2o}>
-            <Slider inline label="Confidence" bind:value={conf} min={0.01} max={0.95} step={0.01} />
+            <Slider inline label="Confidence" bind:value={conf} min={0} max={1} step={0.01} />
             {props.tablet && !props.o2o ? (
               <div class="qiou" title="Non-max suppression: a lower-scoring box of the same class is dropped when it overlaps a kept one by more than this.">
                 <Slider inline label="Overlap (IoU)" bind:value={iou} min={0.05} max={0.95} step={0.05} />

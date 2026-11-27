@@ -3,7 +3,7 @@
 import { computed, effect, signal, untrack, type Signal } from 'fw';
 import { hub } from '$lib/api/index';
 import type { Model, Prediction } from '$lib/api/types';
-import { filterDetections } from '$lib/detect/nms';
+import { effectiveMinConf, filterDetections } from '$lib/detect/nms';
 import {
   DEFAULT_INFERENCE_CONFIG,
   inferenceConfigKey,
@@ -14,10 +14,11 @@ import {
   type InferenceConfig,
 } from '$lib/inference/browser';
 import type { ModelChoice } from '$lib/scoreSummary';
-import { askAllWhenCut, recordFetchedFloors } from './allCandidates';
+import { askAllWhenCut, loosePerClassFloor, recordFetchedFloors } from './allCandidates';
 import { comparePredictionJson, pickDefaultModelB, summarizeComparison, type CompareViewMode } from './compare';
-import { hasPerClassConf, mapPerClassConfToClasses, type PerClassConfMap } from './perClassConf';
-import { ask, FETCH, noServerWeights, type RunOn } from './predict';
+import { looksLikeFolo } from './folo';
+import { mapPerClassConfToClasses, type PerClassConfMap } from './perClassConf';
+import { ask, FETCH, noServerWeights, serverFetchConf, type RunOn } from './predict';
 import { sourceImageKey, type Source } from './source';
 import { classCounts, detectionIndex, visibleClasses, visibleRows, type Det } from './viewState';
 import { createZoomState, resetZoomState } from './zoomState';
@@ -245,8 +246,11 @@ export function createCompareController(input: CompareControllerInput) {
     }
     const frameKey = sourceImageKey(s);
     const ctrl = new AbortController();
-    const pccSnap = on !== 'server' ? untrack(() => perClassConfB.get()) : undefined;
-    const wasmPcc = hasPerClassConf(pccSnap) ? pccSnap : undefined;
+    const confSnap = untrack(() => input.conf.peek());
+    const pccSnap = untrack(() => perClassConfB.get());
+    const lowMap = on !== 'server' ? loosePerClassFloor(pccSnap) : undefined;
+    const reqConf = on === 'server' ? serverFetchConf(effectiveMinConf(confSnap, pccSnap)) : Math.min(FETCH.conf, confSnap);
+    const reqOpts = reqConf === FETCH.conf ? FETCH : { ...FETCH, conf: reqConf };
     const precChanged = on !== 'server' && lastPrecB !== null && lastPrecB !== prec;
     lastPrecB = on !== 'server' ? prec : null;
     untrack(() => {
@@ -268,8 +272,9 @@ export function createCompareController(input: CompareControllerInput) {
       source: s,
       on,
       file,
-      options: FETCH,
-      ...(wasmPcc ? { perClassConf: wasmPcc, confInclusive: true } : {}),
+      options: reqOpts,
+      ...(lowMap ? { perClassConf: lowMap, confInclusive: true } : {}),
+      ...(on !== 'server' && reqConf < FETCH.conf ? { confInclusive: true } : {}),
       precision: prec,
       inference: inf,
       signal: ctrl.signal,
@@ -277,20 +282,27 @@ export function createCompareController(input: CompareControllerInput) {
       (p) => {
         if (ctrl.signal.aborted) return;
         input.badFileB.set(null);
-        if (on !== 'server') recordFetchedFloors(p, FETCH.conf, wasmPcc);
+        recordFetchedFloors(p, reqOpts.conf, lowMap, on !== 'server' && (!!lowMap || reqConf < FETCH.conf));
         predB.set(p);
         predBSourceKey.set(frameKey);
         hoverB.set(null);
         pickedB.set(null);
         predictingB.set(false);
       },
-      (e: unknown) => {
+      async (e: unknown) => {
         if (ctrl.signal.aborted) return;
         predictingB.set(false);
         if (file && on !== 'server' && isDetectorLoadError(e)) {
+          const keepPrecisionFile = prec === 'int8' && (await looksLikeFolo(file));
+          if (ctrl.signal.aborted) return;
           predB.set(null);
           predBSourceKey.set(null);
-          input.dropLocalB(id, file, e);
+          if (keepPrecisionFile) {
+            input.badFileB.set(null);
+            errorB.set(e);
+          } else {
+            input.dropLocalB(id, file, e);
+          }
           return;
         }
         if (on !== 'server' && !file && noServerWeights(e)) {

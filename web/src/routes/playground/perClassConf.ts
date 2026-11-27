@@ -5,8 +5,6 @@
 export type PerClassConfMap = Record<number, number>;
 
 const CANONICAL_INT = /^(?:0|[1-9]\d*)$/;
-const GLOBAL_MIN = 0.01;
-const GLOBAL_MAX = 0.95;
 
 /** Rounds a finite confidence in `[0, 1]` to at most 4 decimal places (preserving 0.001 calibration grid steps). */
 export function roundConf(v: number): number {
@@ -96,11 +94,13 @@ export function perClassConfForExport(
 }
 
 export interface ThresholdCalibrationExport {
+  /** Threshold-only export schema (round-trips cleanly in Playground; omits evaluation metrics like F1/precision/recall). */
+  schema: 'folo.thresholds.v1';
   global: { best_conf: number };
   per_class: { class: number; name?: string; best_conf: number }[];
 }
 
-/** Exports global and per-class thresholds in `#802`-compatible `ThresholdCalibration` JSON shape. */
+/** Exports global and per-class thresholds in threshold-only JSON shape (`folo.thresholds.v1`, round-tripping in Playground). */
 export function exportThresholdsJson(
   globalConf: number,
   perClassConf: Readonly<Record<number, number>>,
@@ -116,6 +116,7 @@ export function exportThresholdsJson(
       best_conf: norm[id]!,
     }));
   return {
+    schema: 'folo.thresholds.v1',
     global: { best_conf: roundConf(globalConf) },
     per_class,
   };
@@ -124,7 +125,7 @@ export function exportThresholdsJson(
 export type ParseThresholdsResult =
   | {
       ok: true;
-      /** Global confidence threshold when supplied by the JSON (clamped to slider range `[0.01, 0.95]`), else `null`. */
+      /** Global confidence threshold in `[0, 1]` when supplied by the JSON, else `null`. */
       globalConf: number | null;
       perClassConf: PerClassConfMap;
       /** True when parsed from a calibrated `ThresholdCalibration` object (`score >= conf` inclusive semantics). */
@@ -160,23 +161,13 @@ function resolveClassKey(rawKey: string, classes: readonly string[]): { id: numb
   return { unknown: rawKey };
 }
 
-function clampGlobalSlider(v: number, warnings: string[]): number {
-  if (v < GLOBAL_MIN) {
-    warnings.push(`Global best_conf ${v} clamped to slider minimum ${GLOBAL_MIN}.`);
-    return GLOBAL_MIN;
-  }
-  if (v > GLOBAL_MAX) {
-    warnings.push(`Global best_conf ${v} clamped to slider maximum ${GLOBAL_MAX}.`);
-    return GLOBAL_MAX;
-  }
-  return roundConf(v);
-}
-
 /**
- * Parses per-class threshold JSON in either:
- * 1. `folo-vision`'s `ThresholdCalibration` format (`{ global: { best_conf }, per_class: [{ class, best_conf }] }`,
- *    or wrapped under `{ thresholds: { ... } }` as in `folo val --json`), OR
- * 2. A simple object map keyed by class ID (`{ "0": 0.4 }`) or class name (`{ "person": 0.4 }`).
+ * Parses per-class threshold JSON in any of these formats:
+ * 1. `folo-vision`'s `ThresholdCalibration` (`{ global: { best_conf }, per_class: [{ class, best_conf }] }`,
+ *    or wrapped under `{ thresholds: { ... } }`) and Playground's `folo.thresholds.v1` export,
+ * 2. A `folo val --json` record carrying top-level `best_f1_conf` (applies global threshold with a note when
+ *    `per_class` contains evaluation metrics without per-class `best_conf`), OR
+ * 3. A simple object map keyed by class ID (`{ "0": 0.4 }`) or class name (`{ "person": 0.4 }`).
  */
 export function parseThresholdsJson(raw: string, classes: readonly string[]): ParseThresholdsResult {
   const trimmed = raw.trim();
@@ -192,7 +183,7 @@ export function parseThresholdsJson(raw: string, classes: readonly string[]): Pa
   }
 
   let root = parsed as Record<string, unknown>;
-  // Unwrap `folo val --json` / `EvalReport` wrapper `{ thresholds: { global, per_class } }`.
+  // Unwrap `{ thresholds: { global, per_class } }` when present.
   if (
     root.thresholds &&
     typeof root.thresholds === 'object' &&
@@ -203,6 +194,33 @@ export function parseThresholdsJson(raw: string, classes: readonly string[]): Pa
   }
 
   const warnings: string[] = [];
+
+  // Format 1b: `folo val --json` record with top-level `best_f1_conf` and metrics-only `per_class` (no `best_conf`).
+  const isValMetricsOnly =
+    typeof root.best_f1_conf === 'number' &&
+    !('global' in root) &&
+    Array.isArray(root.per_class) &&
+    root.per_class.every(
+      (e) =>
+        e &&
+        typeof e === 'object' &&
+        !('best_conf' in (e as Record<string, unknown>)) &&
+        !('conf' in (e as Record<string, unknown>)),
+    );
+  if (isValMetricsOnly) {
+    if (!isFiniteUnit(root.best_f1_conf)) {
+      return { ok: false, error: `best_f1_conf must be a finite number in [0, 1], got ${String(root.best_f1_conf)}.` };
+    }
+    warnings.push('No per-class best_conf entries found; applied global best_f1_conf only.');
+    return {
+      ok: true,
+      globalConf: roundConf(root.best_f1_conf),
+      perClassConf: {},
+      confInclusive: true,
+      appliedCount: 0,
+      warnings,
+    };
+  }
 
   // Format 1: ThresholdCalibration (`{ global, per_class }`)
   const isCalibrationShape =
@@ -215,7 +233,7 @@ export function parseThresholdsJson(raw: string, classes: readonly string[]): Pa
         if (!isFiniteUnit(root.global)) {
           return { ok: false, error: `global threshold must be a finite number in [0, 1], got ${root.global}.` };
         }
-        globalConf = clampGlobalSlider(root.global, warnings);
+        globalConf = roundConf(root.global);
       } else if (typeof root.global === 'object' && !Array.isArray(root.global)) {
         const g = root.global as Record<string, unknown>;
         const gv = 'best_conf' in g ? g.best_conf : g.conf;
@@ -223,7 +241,7 @@ export function parseThresholdsJson(raw: string, classes: readonly string[]): Pa
           if (!isFiniteUnit(gv)) {
             return { ok: false, error: `global.best_conf must be a finite number in [0, 1], got ${String(gv)}.` };
           }
-          globalConf = clampGlobalSlider(gv, warnings);
+          globalConf = roundConf(gv);
         }
       } else {
         return { ok: false, error: 'global must be an object with best_conf or a number in [0, 1].' };

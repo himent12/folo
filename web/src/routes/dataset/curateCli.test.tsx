@@ -68,7 +68,7 @@ describe('buildDatasetCurateCli', () => {
       'folo dataset convert --to coco -- -leading-dash <out_dir>/fasteners-coco',
     );
     expect(buildDatasetCurateCli(BASE_DATASET, 'export').command).toBe(
-      'folo dataset export D:/datasets/fasteners --out <out_dir>/fasteners-coco-export --format coco --images copy',
+      'folo dataset export D:/datasets/fasteners --out <out_dir> --format coco --images copy',
     );
     expect(
       buildDatasetCurateCli(BASE_DATASET, 'export', {
@@ -77,12 +77,12 @@ describe('buildDatasetCurateCli', () => {
         cocoPretty: true,
       }).command,
     ).toBe(
-      'folo dataset export D:/datasets/fasteners --out <out_dir>/fasteners-coco-export --format coco --split val --images reference --pretty',
+      'folo dataset export D:/datasets/fasteners --out <out_dir> --format coco --split val --images reference --pretty',
     );
     expect(
       buildDatasetCurateCli({ ...BASE_DATASET, path: '-leading-dash' }, 'export', { cocoImageMode: 'link' }).command,
     ).toBe(
-      'folo dataset export --out <out_dir>/fasteners-coco-export --format coco --images link -- -leading-dash',
+      'folo dataset export --out <out_dir> --format coco --images link -- -leading-dash',
     );
     expect(curateCliCopiedMessage(buildDatasetCurateCli(BASE_DATASET, 'export'))).toBe(
       'Replace <out_dir> before running this export coco command.',
@@ -160,6 +160,17 @@ describe('buildDatasetCurateCli', () => {
     expect(curateCliCopiedMessage(buildDatasetCurateCli(literalAngle, 'filter', { stats: BASE_STATS, activeClass: 0 }))).toBe(
       'Replace <out_dir> before running this filter command.',
     );
+    // Trailing backslashes in spaced Windows paths are stripped to avoid CRT `\"` quoting bugs; drive roots use forward slash.
+    expect(buildDatasetCurateCli({ ...BASE_DATASET, path: 'D:\\my datasets\\fasteners\\' }, 'export').command).toBe(
+      "folo dataset export 'D:\\my datasets\\fasteners' --out <out_dir> --format coco --images copy",
+    );
+    expect(buildDatasetCurateCli({ ...BASE_DATASET, path: 'D:\\' }, 'export').command).toBe(
+      'folo dataset export D:/ --out <out_dir> --format coco --images copy',
+    );
+    // Literal `--%` is PowerShell's stop-parsing token; prefix with `./` so it passes as a plain path.
+    expect(buildDatasetCurateCli({ ...BASE_DATASET, path: '--%' }, 'export').command).toBe(
+      'folo dataset export ./--% --out <out_dir> --format coco --images copy',
+    );
   });
 });
 
@@ -220,7 +231,7 @@ describe('DatasetInsights CLI curation integration', () => {
     exportBtn.click();
     flushSync();
     expect(target.querySelector('[data-dataset-curate-cli] pre.line')?.textContent).toBe(
-      'folo dataset export D:/datasets/fasteners --out <out_dir>/fasteners-coco-export --format coco --images copy',
+      'folo dataset export D:/datasets/fasteners --out <out_dir> --format coco --images copy',
     );
     const refBtn = [...target.querySelectorAll<HTMLButtonElement>('[data-coco-export-options] [role="radio"]')].find(
       (b) => b.textContent?.trim() === 'Reference',
@@ -229,7 +240,7 @@ describe('DatasetInsights CLI curation integration', () => {
     target.querySelector<HTMLButtonElement>('[data-coco-export-options] [role="switch"]')!.click();
     flushSync();
     expect(target.querySelector('[data-dataset-curate-cli] pre.line')?.textContent).toBe(
-      'folo dataset export D:/datasets/fasteners --out <out_dir>/fasteners-coco-export --format coco --images reference --pretty',
+      'folo dataset export D:/datasets/fasteners --out <out_dir> --format coco --images reference --pretty',
     );
 
     // Switching dataset collapses the helper cleanly

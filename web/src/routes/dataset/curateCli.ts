@@ -58,10 +58,27 @@ function flagValue(flag: string, value: string): string {
   return value.startsWith('-') ? quote(`${flag}=${value}`) : `${flag} ${quote(value)}`;
 }
 
+/**
+ * Normalizes a dataset path so Windows PowerShell 5.1 passes it verbatim to native executables:
+ * - A literal `--%` folder name is prefixed with `./` because PowerShell 5.1 strips `--%` even inside single quotes.
+ * - A trailing backslash on a path containing spaces (or any non-root path) is trimmed or converted to `/` so
+ *   Windows CRT `CommandLineToArgvW` never interprets `\"` as an escaped quote absorbing subsequent flags.
+ */
+export function normalizeCliPath(raw: string): string {
+  if (raw === '--%') return './--%';
+  if (/^[A-Za-z]:\\+$/.test(raw)) return `${raw.slice(0, 2)}/`;
+  if (raw.length > 1 && raw.endsWith('\\')) {
+    const stripped = raw.replace(/\\+$/, '');
+    return stripped.length > 0 ? stripped : raw;
+  }
+  return raw;
+}
+
 /** Quotes a positional dataset path; prefixes `--` when the path starts with `-` so clap never reads it as a flag. */
 function positionalPath(path: string, trailingFlags: string[]): string[] {
-  if (path.startsWith('-')) return [...trailingFlags, '--', quote(path)];
-  return [quote(path), ...trailingFlags];
+  const safe = normalizeCliPath(path);
+  if (safe.startsWith('-')) return [...trailingFlags, '--', quote(safe)];
+  return [quote(safe), ...trailingFlags];
 }
 
 /** Suggests a sibling output folder name derived cleanly from the dataset name (never inside the input folder). */
@@ -190,17 +207,16 @@ export function buildDatasetCurateCli(
   }
 
   if (mode === 'export') {
-    const out = suggestedOut(dataset, 'coco-export');
     const imageMode: CocoImageMode = opts.cocoImageMode ?? 'copy';
     const splitFilter = opts.activeSplit && opts.activeSplit !== 'all' ? opts.activeSplit : null;
-    const flags = [`--out ${out}`, '--format coco'];
+    const flags = ['--out <out_dir>', '--format coco'];
     if (splitFilter) flags.push(`--split ${splitFilter}`);
     flags.push(`--images ${imageMode}`);
     if (opts.cocoPretty) flags.push('--pretty');
     const args = hasRealPath ? positionalPath(path, flags) : [path, ...flags];
     const imageDesc: Record<CocoImageMode, string> = {
-      copy: 'copies source images into <out>/images/<split>/',
-      link: 'hard-links source images into <out>/images/<split>/ (falls back to copy across filesystems)',
+      copy: 'copies source images into <out_dir>/images/<split>/',
+      link: 'hard-links source images into <out_dir>/images/<split>/ (falls back to copy across filesystems)',
       reference: 'references source images in place via relative paths without duplicating files',
     };
     const splitDesc = splitFilter ? `the ${splitFilter} split` : 'all non-empty splits';

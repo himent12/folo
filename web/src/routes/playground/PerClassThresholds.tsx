@@ -275,7 +275,7 @@ export default function PerClassThresholds(props: PerClassThresholdsProps) {
                         class="pc-num num"
                         min={0}
                         max={1}
-                        step={0.01}
+                        step="any"
                         aria-label={`${name()} confidence threshold`}
                         placeholder={props.globalConf.toFixed(2)}
                         value={hasOv() ? String(props.perClassConf[id()]!) : ''}

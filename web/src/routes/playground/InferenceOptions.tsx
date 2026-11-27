@@ -64,10 +64,11 @@ export default function InferenceOptions(props: InferenceOptionsProps) {
 
   const activeBadge = computed(() => props.ctrl.badge.get());
   const availNote = computed(() => props.ctrl.availability.get().note);
+  const precisionFallback = computed(() => props.ctrl.activePrecisionFallback.get());
   const precisionNote = computed(() => {
     if (!props.ctrl.hasBrowserBackend.get()) return null;
-    const info = props.ctrl.engineInfo.get();
-    if (info?.precisionFallback) return info.precisionFallback;
+    const fb = precisionFallback.get();
+    if (fb) return fb;
     const p = props.ctrl.precision.get();
     if (p === 'int8' && props.ctrl.hasWebGpuBackend.get()) {
       return 'INT8 runs on the CPU backend; WebGPU executes in f32.';
@@ -119,8 +120,8 @@ export default function InferenceOptions(props: InferenceOptionsProps) {
               {precisionNote.get() ? (
                 <p
                   class="inf-note"
-                  class:warn={!!props.ctrl.engineInfo.get()?.precisionFallback}
-                  data-precision-fallback-hint={props.ctrl.engineInfo.get()?.precisionFallback ? '' : undefined}
+                  class:warn={!!precisionFallback.get()}
+                  data-precision-fallback-hint={precisionFallback.get() ? '' : undefined}
                 >
                   {precisionNote.get()}
                 </p>

@@ -597,16 +597,42 @@ describe('BrowserEngine', () => {
     expect(tiledCalls[0]).toMatchObject({ perClassConf: { 1: 0.6 }, confInclusive: true, tileSize: 640 });
 
     // TTA forwards perClassConf & confInclusive too, and requesting int8 on WebGPU surfaces precisionFallback
-    await e.predict({
+    const pInt8 = await e.predict({
+      ...req('m1', null, 'cpu'),
+      precision: 'auto',
+      weightsFormat: 'stored',
+      options: { conf: 0.01, iou: 1, maxDet: 1000 },
+    });
+    const pWebgpuFallback = await e.predict({
       ...req('m1', null, 'webgpu'),
       precision: 'int8',
+      weightsFormat: 'f16',
       options: { conf: 0.01, iou: 1, maxDet: 1000, perClassConf: { 0: 0.3 }, confInclusive: true },
       inference: { ...DEFAULT_INFERENCE_CONFIG, mode: 'tta' },
     });
-    expect(loadOpts[2]).toEqual({ backend: 'webgpu', modelId: 'm1', precision: 'int8' });
+    expect(loadOpts.at(-1)).toEqual({ backend: 'webgpu', modelId: 'm1', precision: 'int8' });
     expect(ttaCalls[0]).toMatchObject({ perClassConf: { 0: 0.3 }, confInclusive: true });
     expect(e.info?.precision).toBe('f32');
     expect(e.info?.precisionFallback).toContain('runs on the CPU');
+
+    // Per-prediction info survives subsequent predictions on other backends/models (Compare A/B).
+    expect(e.infoFor(pInt8)?.precision).toBe('int8');
+    expect(e.infoFor(pInt8)?.precisionFallback).toBeNull();
+    expect(e.precisionFor(pInt8)).toBe('auto');
+    expect(e.infoFor(pWebgpuFallback)?.precision).toBe('f32');
+    expect(e.infoFor(pWebgpuFallback)?.precisionFallback).toContain('runs on the CPU');
+    expect(e.precisionFor(pWebgpuFallback)).toBe('int8');
+
+    // copyPredictionInfo preserves per-prediction metadata across candidate-completion clones.
+    const cloned = { ...pInt8 };
+    e.copyPredictionInfo(pInt8, cloned);
+    expect(e.infoFor(cloned)?.precision).toBe('int8');
+    expect(e.precisionFor(cloned)).toBe('auto');
+
+    // Stored vs f16 weights formats never share one cached detector entry.
+    const loadsBefore = loadOpts.length;
+    await e.predict({ ...req('m1', null, 'cpu'), precision: 'f32', weightsFormat: 'stored' });
+    expect(loadOpts.length).toBe(loadsBefore + 1);
   });
 });
 

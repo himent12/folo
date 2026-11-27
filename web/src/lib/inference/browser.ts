@@ -295,6 +295,9 @@ export class BrowserEngine {
   #phase = signal<Phase>('idle');
   #info = signal<DetectorInfo | null>(null);
   #capabilities = signal<BrowserCapabilities>({ tiled: null, tta: null, tracker: null });
+  #predInfo = new WeakMap<Prediction, DetectorInfo>();
+  #predPrec = new WeakMap<Prediction, BrowserPrecision>();
+  #infoVersion = signal(0);
   /** What the engine is doing for the latest request. */
   get phase(): Phase {
     return this.#phase.get();
@@ -312,6 +315,28 @@ export class BrowserEngine {
   /** SAHI (`detectTiled`) and TTA (`detectTta`) support detected on the loaded folo-wasm build. */
   get capabilities(): BrowserCapabilities {
     return this.#capabilities.get();
+  }
+
+  /** Returns the `DetectorInfo` captured when `pred` was produced in this browser, or `null`. */
+  infoFor(pred: Prediction | null | undefined): DetectorInfo | null {
+    void this.#infoVersion.get();
+    return pred ? (this.#predInfo.get(pred) ?? null) : null;
+  }
+
+  /** Returns the requested `BrowserPrecision` that produced `pred`, or `null`. */
+  precisionFor(pred: Prediction | null | undefined): BrowserPrecision | null {
+    void this.#infoVersion.get();
+    return pred ? (this.#predPrec.get(pred) ?? null) : null;
+  }
+
+  /** Copies prediction-bound `DetectorInfo` & requested precision onto a candidate-upgraded copy of `from`. */
+  copyPredictionInfo(from: Prediction | null | undefined, to: Prediction): void {
+    if (!from) return;
+    const info = this.#predInfo.get(from);
+    if (info) this.#predInfo.set(to, info);
+    const prec = this.#predPrec.get(from);
+    if (prec) this.#predPrec.set(to, prec);
+    if (info || prec) this.#infoVersion.set((v) => v + 1);
   }
 
   #detectors = new Map<string, Entry>();
@@ -363,6 +388,8 @@ export class BrowserEngine {
     download: () => Promise<ArrayBuffer>;
     /** The server's version of the weights (an ETag): a new one loads them again. */
     tag?: string | null;
+    /** Server weights representation (`f16` default, or `stored` for untouched INT8 checkpoints). */
+    weightsFormat?: 'f16' | 'stored';
     backend: Backend;
     /** Optional compute precision override (`auto` lets folo-wasm pick INT8 for quantized CPU checkpoints, else f32). */
     precision?: BrowserPrecision;
@@ -427,9 +454,14 @@ export class BrowserEngine {
         p = await det.detect(pixels, undefined, undefined, toWasmDetectOptions(req.options));
       }
       superseded();
-      if (reqSeq === this.#requestSeq) this.info = det.info();
+      const detInfo = det.info();
+      if (reqSeq === this.#requestSeq) this.info = detInfo;
       const meta = inferenceMetaOf(req.inference);
-      return meta ? { ...p, inference: meta } : p;
+      const out = meta ? { ...p, inference: meta } : { ...p };
+      this.#predInfo.set(out, detInfo);
+      this.#predPrec.set(out, normalizeBrowserPrecision(req.precision));
+      this.#infoVersion.set((v) => v + 1);
+      return out;
     } finally {
       entry.users--;
       this.#release(entry);
@@ -502,19 +534,21 @@ export class BrowserEngine {
       file: File | null;
       download: () => Promise<ArrayBuffer>;
       tag?: string | null;
+      weightsFormat?: 'f16' | 'stored';
       backend: Backend;
       precision?: BrowserPrecision;
       signal?: AbortSignal;
     },
     reqSeq: number,
   ): Entry {
-    // One detector per model, weights source (and version), backend, and requested precision: the same file picked
-    // for two models loads twice, since a detector stamps its model id on every result; retrained weights (a run's
-    // last.folo changes every epoch) load again.
+    // One detector per model, weights source (and version/representation), backend, and requested precision: the same
+    // file picked for two models loads twice, since a detector stamps its model id on every result; retrained weights
+    // (a run's last.folo changes every epoch) load again.
     // Server weights without an ETag cannot be known to be unchanged: they load for this request only (not cached).
     const cacheable = !!req.file || !!req.tag;
     const prec = normalizeBrowserPrecision(req.precision);
-    const key = `${req.modelId}|${req.file ? `file#${fileId(req.file)}` : `server:${req.tag ?? ''}`}|${req.backend}|${prec}`;
+    const fmt = req.weightsFormat ?? 'f16';
+    const key = `${req.modelId}|${req.file ? `file#${fileId(req.file)}` : `server:${fmt}:${req.tag ?? ''}`}|${req.backend}|${prec}`;
     const hit = cacheable ? this.#detectors.get(key) : undefined;
     if (hit) {
       // Most recently used last; track the latest waiting request and publish the entry's current load phase.
@@ -574,10 +608,11 @@ export class BrowserEngine {
     return entry;
   }
 
-  #acquireDownload(req: { modelId: string; download: () => Promise<ArrayBuffer>; tag?: string | null }): DownloadSlot {
+  #acquireDownload(req: { modelId: string; download: () => Promise<ArrayBuffer>; tag?: string | null; weightsFormat?: 'f16' | 'stored' }): DownloadSlot {
     // Without an ETag the bytes may have changed: fetch directly without retaining them.
     if (!req.tag) return { key: null, bytes: req.download(), readers: 1 };
-    const key = `${req.modelId}|${req.tag}`;
+    const fmt = req.weightsFormat ?? 'f16';
+    const key = `${req.modelId}|${fmt}|${req.tag}`;
     if (this.#inFlightDownload?.key === key) {
       this.#inFlightDownload.readers++;
       return this.#inFlightDownload;

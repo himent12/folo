@@ -5,10 +5,10 @@
 import { computed, effect, onCleanup, signal, untrack } from 'fw';
 import { ApiError } from '$lib/api/client';
 import type { PredictBox, Prediction } from '$lib/api/types';
-import { effectiveMinConf, filterDetections } from '$lib/detect/nms';
+import { effectiveMinConf, filterDetections, thresholdForClass } from '$lib/detect/nms';
 import type { BrowserEngine, Tracker } from '$lib/inference/browser';
 import { toast } from '$lib/ui/toast';
-import type { PerClassConfMap } from './perClassConf';
+import { perClassConfKey, type PerClassConfMap } from './perClassConf';
 import { trackerOptionsForConf, TrackTrailHistory, type TrackTrail } from './tracking';
 import type { MediaMode } from './useMediaSession';
 
@@ -39,15 +39,17 @@ export function useTracking(input: UseTrackingInput) {
   const loadError = signal<string | null>(null);
   const activeCount = signal(0);
   const trails = signal<TrackTrail[]>([]);
-  const trackedFrame = signal<{ pred: Prediction; frameKey: string | null; boxes: PredictBox[] } | null>(null);
+  const trackedFrame = signal<{ pred: Prediction; frameKey: string | null; pccKey: string; boxes: PredictBox[] } | null>(null);
   const trackerReadyTick = signal(0);
 
   let tracker: Tracker | null = null;
   let trackerConf: number | null = null;
+  let trackerPccKey = '';
   let trackerSeq = 0;
   let alive = true;
   let lastProcessedPred: Prediction | null = null;
   let lastProcessedFrameKey: string | null = null;
+  const activeTrackedClasses = new Set<number>();
   const trailHistory = new TrackTrailHistory();
 
   const supported = computed(() => !input.browserOff() && !loadError.get() && input.engine.capabilities.tracker !== false);
@@ -60,6 +62,7 @@ export function useTracking(input: UseTrackingInput) {
 
   function clearOutputs(ignorePred: Prediction | null = null) {
     trailHistory.clear();
+    activeTrackedClasses.clear();
     trails.set([]);
     activeCount.set(0);
     trackedFrame.set(null);
@@ -188,12 +191,21 @@ export function useTracking(input: UseTrackingInput) {
     const on = enabled.get();
     const mode = input.mediaMode();
     const c = input.conf();
+    const pcc = input.perClassConf?.();
+    const eff = effectiveMinConf(c, pcc);
+    const pccKey = perClassConfKey(pcc);
     if (!on || mode === 'none') return;
     untrack(() => {
-      if (tracker && trackerConf !== null && Math.abs(trackerConf - c) > 1e-4) {
+      const confChanged = tracker && trackerConf !== null && Math.abs(trackerConf - eff) > 1e-4;
+      const overridesChanged = tracker && pccKey !== trackerPccKey;
+      trackerPccKey = pccKey;
+      if (confChanged) {
         clearOutputs();
+      } else if (overridesChanged && tracker) {
+        reset(null);
+        trackerReadyTick.set((t) => t + 1);
       }
-      void ensureTracker(c);
+      void ensureTracker(eff);
     });
   });
 
@@ -222,25 +234,35 @@ export function useTracking(input: UseTrackingInput) {
         fk === lastProcessedFrameKey &&
         cur &&
         cur.frameKey === fk &&
+        cur.pccKey === trackerPccKey &&
         cur.pred.model_id === p.model_id &&
         (cur.pred.backend ?? 'server') === (p.backend ?? 'server')
       ) {
         // Same physical frame & model/backend (e.g. candidate completion or repeat Detect frame): keep existing tracked boxes without advancing ByteTrack.
         lastProcessedPred = p;
-        trackedFrame.set({ pred: p, frameKey: fk, boxes: cur.boxes });
+        trackedFrame.set({ pred: p, frameKey: fk, pccKey: cur.pccKey, boxes: cur.boxes });
         return;
       }
       lastProcessedPred = p;
       lastProcessedFrameKey = fk;
       const c = input.conf();
+      const pcc = input.perClassConf?.();
+      const eff = effectiveMinConf(c, pcc);
       const iou = input.iou();
       const maxDet = input.maxDet();
       const o2o = input.o2o();
       const cls = input.classes();
-      // Preserve ByteTrack's two-stage low-confidence occlusion recovery by keeping candidates down to `min(0.1, minConf)`.
-      const low = Math.min(0.1, Math.max(0.01, effectiveMinConf(c, input.perClassConf?.())));
-      const candidates = filterDetections(p.boxes, { conf: low, iou: o2o ? 1 : iou, maxDet });
+      // Preserve ByteTrack's two-stage low-confidence occlusion recovery while preventing boxes below a class's
+      // raised per-class threshold from spawning new tracks or matching in stage 1.
+      const low = Math.min(0.1, eff);
+      const nmsCandidates = filterDetections(p.boxes, { conf: low, iou: o2o ? 1 : iou, maxDet });
+      const candidates = nmsCandidates.filter((b) => {
+        const t = thresholdForClass(b.class, c, pcc);
+        if (b.score >= t) return true;
+        return b.score >= Math.min(0.1, t) && b.score < eff && activeTrackedClasses.has(b.class);
+      });
       const tracked = tracker.update(candidates);
+      for (const t of tracked) activeTrackedClasses.add(t.class);
       const boxes: PredictBox[] = tracked.map((t) => ({
         class: t.class,
         name: cls[t.class] ?? t.name,
@@ -251,7 +273,7 @@ export function useTracking(input: UseTrackingInput) {
         y2: t.y2,
         track_id: t.track_id,
       }));
-      trackedFrame.set({ pred: p, frameKey: fk, boxes });
+      trackedFrame.set({ pred: p, frameKey: fk, pccKey: perClassConfKey(pcc), boxes });
       trails.set(trailHistory.update(tracked));
       activeCount.set(tracked.length);
     });
@@ -263,11 +285,12 @@ export function useTracking(input: UseTrackingInput) {
     freeTracker();
   });
 
-  /** Returns tracked boxes matching `p` when tracking is active for that frame, else null. */
+  /** Returns tracked boxes matching `p` when tracking is active for that frame and threshold map, else null. */
   function boxesFor(p: Prediction | null): PredictBox[] | null {
     if (!enabled.get() || !p) return null;
     const frame = trackedFrame.get();
-    return frame && frame.pred === p ? frame.boxes : null;
+    const curPccKey = perClassConfKey(input.perClassConf?.());
+    return frame && frame.pred === p && frame.pccKey === curPccKey ? frame.boxes : null;
   }
 
   return {

@@ -34,7 +34,7 @@ export default function SidePanels(props: SidePanelsProps) {
       <div class="thresholds">
         <Panel title="Thresholds" divided actions={props.resetButton}>
           <div class="sliders">
-            <Slider label="Confidence" bind:value={conf} min={0.01} max={0.95} step={0.01} hint="Hide boxes scored below this." />
+            <Slider label="Confidence" bind:value={conf} min={0} max={1} step={0.01} hint="Hide boxes scored below this." />
             {props.secondarySliders(false)}
           </div>
           {props.perClassThresholds ? props.perClassThresholds() : null}

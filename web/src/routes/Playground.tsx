@@ -38,7 +38,7 @@ import SidePanels from './playground/SidePanels';
 import Rail from './playground/Rail';
 import DisplayToggles from './playground/DisplayToggles';
 import { MoreBody, RailThresholds, SecondarySliders } from './playground/Thresholds';
-import { mapPerClassConfToClasses, normalizePerClassConf, type PerClassConfMap } from './playground/perClassConf';
+import { hasPerClassConf, mapPerClassConfToClasses, normalizePerClassConf, type PerClassConfMap } from './playground/perClassConf';
 import { DEFAULTS, type RunOn } from './playground/predict';
 import { keepSession } from './playground/keepSession';
 import { sampleImages } from './playground/samples';
@@ -88,9 +88,11 @@ export default function Playground() {
   onCleanup(() => engine.dispose());
   const { webgpu, browserOff, runOnNote, serverPredictOptions } = useWasmAvailability(runOn);
   let getCompareRunOn: () => RunOn | null = () => null;
+  let getComparePredB: () => Prediction | null = () => null;
   const inf = useInferenceOptions({
     runOn,
     compareRunOn: () => getCompareRunOn(),
+    activePredictions: () => [pred.get(), getComparePredB()],
     engine,
     browserOff: () => browserOff.get(),
     serverPredictOptions: () => serverPredictOptions.get(),
@@ -215,7 +217,8 @@ export default function Playground() {
     const t0 = performance.now();
     const tracked = trackingRef?.boxesFor(p) ?? null;
     const f = { conf: conf.get(), iou: o2o.get() ? 1 : iou.get(), maxDet: maxDet.get(), perClassConf: perClassConf.get() };
-    const boxes = tracked ? filterDetections(tracked, { ...f, conf: 0, perClassConf: undefined }) : filterDetections(p.boxes, f);
+    // ByteTrack output already enforces global + per-class thresholds while keeping stage-2 low-confidence recovery.
+    const boxes = tracked ? filterDetections(tracked, { conf: 0, iou: f.iou, maxDet: f.maxDet }) : filterDetections(p.boxes, f);
     return { boxes, ms: performance.now() - t0 };
   });
   const kept = computed(() => result.get()?.boxes ?? []);
@@ -238,6 +241,7 @@ export default function Playground() {
   clearCompare = cmp.clearResults;
   getModelBId = () => cmp.modelBId.peek();
   getCompareRunOn = () => (cmp.compare.get() ? cmp.runOnB.get() : null);
+  getComparePredB = () => (cmp.compare.get() ? cmp.predB.get() : null);
 
   const mediaSession = useMediaSession({
     onFrame: (f) => setLiveFrame(f.blob, f.name, f.width, f.height, mediaSession.mode.peek() === 'webcam' ? 'webcam' : 'video'),
@@ -276,18 +280,25 @@ export default function Playground() {
 
   // The image, its result and the thresholds outlive the page for the tab; a dataset image and the thresholds are in
   // the URL (./playground/session).
+  let lastModelId: string | null = null;
+  let lastModelClasses: string[] = [];
   const restored = keepSession({
     source, pred, predMatchesSource: () => predMatchesSourceFn(), runOn: runOn as Signal<string>,
     inference: { config: () => inf.config.get(), restore: inf.restore },
-    conf, iou, maxDet, perClassConf, labels, scores, truth, hidden,
+    conf, iou, maxDet, perClassConf, classes: () => classes.get(),
+    onRestorePerClassOrigin: (origin) => {
+      if (origin.modelId) {
+        lastModelId = origin.modelId;
+        lastModelClasses = origin.classes;
+      }
+    },
+    labels, scores, truth, hidden,
     compare: cmp.compare, modelB: () => cmp.modelBId.get() ?? cmp.pickedModelB.get(),
     pickModelB: (id) => cmp.pickedModelB.set(id), compareView: cmp.compareView,
     setSource, choose, model: () => modelId.get() ?? queryModel.get() ?? null,
     pickModel: (id) => pickedModel.set(id), onModelUrl: (write) => (syncModelUrl = write),
   });
 
-  let lastModelId: string | null = null;
-  let lastModelClasses: string[] = [];
   effect(() => {
     const id = modelId.get();
     const curClasses = classes.get();
@@ -593,7 +604,7 @@ export default function Playground() {
       predA={isUnsyncedVideoFn() ? null : pred.get()} predB={isUnsyncedVideoFn() ? null : cmp.predB.get()}
       predictingA={predicting.get()} predictingB={cmp.predictingB.get()}
       resultMsA={isUnsyncedVideoFn() ? null : (result.get()?.ms ?? null)}
-      adapter={engine.info?.adapter} engineInfo={engine.info}
+      adapter={engine.info?.adapter} engine={engine} engineInfo={engine.info}
     />
   );
 
@@ -693,6 +704,8 @@ export default function Playground() {
         pred={unsynced ? null : showingB.get() ? cmp.predB.get() : pred.get()}
         bind:conf={conf}
         maxDet={maxDet.get()}
+        hasPerClassOverrides={hasPerClassConf(showingB.get() ? cmp.perClassConfB.get() : perClassConf.get())}
+        onResetPerClass={() => perClassConf.set({})}
         hidden={showingB.get() ? cmp.hiddenB.get() : hidden.get()}
         bind:tbody={tbody}
         tabRow={tabRow.get()}

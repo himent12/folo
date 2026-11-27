@@ -78,6 +78,7 @@ describe('perClassConf JSON import/export & class remapping', () => {
 
     const exported = exportThresholdsJson(0.4, { 0: 0.25, 2: 0.65 }, classes);
     expect(exported).toEqual({
+      schema: 'folo.thresholds.v1',
       global: { best_conf: 0.4 },
       per_class: [
         { class: 0, name: 'person', best_conf: 0.25 },
@@ -87,6 +88,28 @@ describe('perClassConf JSON import/export & class remapping', () => {
     const reimported = parseThresholdsJson(JSON.stringify(exported), classes);
     expect(reimported.ok && reimported.globalConf).toBe(0.4);
     expect(reimported.ok && reimported.perClassConf).toEqual({ 0: 0.25, 2: 0.65 });
+
+    // Full [0, 1] global confidence values are preserved without clamping, and folo val --json metrics-only records warn cleanly.
+    const extreme = parseThresholdsJson(
+      JSON.stringify({ global: { best_conf: 0.005 }, per_class: [{ class: 0, best_conf: 0.985 }] }),
+      classes,
+    );
+    expect(extreme.ok && extreme.globalConf).toBe(0.005);
+    expect(extreme.ok && extreme.perClassConf).toEqual({ 0: 0.985 });
+
+    const valMetricsOnly = parseThresholdsJson(
+      JSON.stringify({
+        best_f1_conf: 0.37,
+        per_class: [{ class: 0, name: 'person', ap50: 0.88, ap50_95: 0.61 }],
+      }),
+      classes,
+    );
+    expect(valMetricsOnly.ok).toBe(true);
+    if (valMetricsOnly.ok) {
+      expect(valMetricsOnly.globalConf).toBe(0.37);
+      expect(valMetricsOnly.perClassConf).toEqual({});
+      expect(valMetricsOnly.warnings[0]).toContain('best_f1_conf');
+    }
   });
 
   it('imports simple numeric ID and class-name maps, and rejects invalid inputs cleanly', () => {
@@ -367,7 +390,8 @@ describe('Playground UI: per-class thresholds & browser INT8 precision', () => {
     );
     flushSync();
     expect(target.querySelector('[data-browser-precision="int8"]')?.textContent).toBe('INT8');
-    expect(target.querySelector('[data-browser-engine-info]')?.textContent).toContain('folo2-n · FOLO v2 · o2o · IoU head · INT8');
+    expect(target.querySelector('[data-browser-engine-info]')?.textContent).toContain('folo2-n · FOLO v2 · o2o · IoU head');
+    expect(target.querySelector('[data-browser-engine-info]')?.textContent).not.toContain('· INT8');
     expect(target.querySelector('[data-precision-fallback]')).toBeNull();
 
     mounted.unmount();
@@ -400,5 +424,6 @@ describe('Playground UI: per-class thresholds & browser INT8 precision', () => {
     expect(target.querySelector('[data-precision-fallback]')?.textContent).toBe(
       'int8 inference runs on the CPU; running in f32 on WebGPU',
     );
+    expect(target.querySelector('[data-browser-engine-info]')?.textContent).not.toContain('· INT8');
   });
 });

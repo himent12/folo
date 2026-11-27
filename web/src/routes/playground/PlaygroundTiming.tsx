@@ -4,7 +4,7 @@
  */
 import { css } from 'fw';
 import type { Model, Prediction } from '$lib/api/types';
-import { detectorInfoBadge, inferenceMetaLabel, type DetectorInfo } from '$lib/inference/browser';
+import { detectorInfoBadge, inferenceMetaLabel, type BrowserEngine, type DetectorInfo } from '$lib/inference/browser';
 import Skeleton from '$lib/ui/Skeleton';
 import TimingBar from './TimingBar';
 import { deviceLabel } from './viewState';
@@ -20,19 +20,33 @@ export interface PlaygroundTimingProps {
   predictingB: boolean;
   resultMsA: number | null;
   adapter?: string | null;
-  /** Loaded browser detector metadata (`folo-wasm` `detector.info()`), surfaced for browser predictions. */
+  /** Browser engine instance used to look up per-prediction `DetectorInfo` (preserves per-side metadata in Compare A/B). */
+  engine?: BrowserEngine | null;
+  /** Fallback loaded browser detector metadata (`folo-wasm` `detector.info()`), used when `engine` is not passed. */
   engineInfo?: DetectorInfo | null;
 }
 
-function matchedEngineInfo(pred: Prediction | null, info: DetectorInfo | null | undefined): DetectorInfo | null {
-  if (!pred?.backend || !info) return null;
-  return info.backend === pred.backend && (!info.modelId || info.modelId === pred.model_id) ? info : null;
+function matchedEngineInfo(
+  pred: Prediction | null,
+  engine: BrowserEngine | null | undefined,
+  fallbackInfo: DetectorInfo | null | undefined,
+): DetectorInfo | null {
+  if (!pred?.backend) return null;
+  const bound = engine?.infoFor(pred);
+  if (bound) return bound;
+  if (!fallbackInfo) return null;
+  return fallbackInfo.backend === pred.backend && (!fallbackInfo.modelId || fallbackInfo.modelId === pred.model_id)
+    ? fallbackInfo
+    : null;
 }
 
-function browserBadgeFor(pred: Prediction | null, info: DetectorInfo | null | undefined, model: Model | null): string | null {
+function browserBadgeFor(
+  pred: Prediction | null,
+  info: DetectorInfo | null,
+  model: Model | null,
+): string | null {
   if (!pred?.backend) return null;
-  const matched = matchedEngineInfo(pred, info);
-  if (matched) return detectorInfoBadge(matched);
+  if (info) return detectorInfoBadge(info);
   if (model) {
     const parts: string[] = [model.arch];
     if (model.arch.startsWith('folo2-')) parts.push('FOLO v2');
@@ -43,8 +57,8 @@ function browserBadgeFor(pred: Prediction | null, info: DetectorInfo | null | un
 }
 
 export default function PlaygroundTiming(props: PlaygroundTimingProps) {
-  const infoA = () => matchedEngineInfo(props.predA, props.engineInfo);
-  const infoB = () => matchedEngineInfo(props.predB, props.engineInfo);
+  const infoA = () => matchedEngineInfo(props.predA, props.engine, props.engineInfo);
+  const infoB = () => matchedEngineInfo(props.predB, props.engine, props.engineInfo);
   return (
     <>
       {props.compare ? (
@@ -54,9 +68,9 @@ export default function PlaygroundTiming(props: PlaygroundTimingProps) {
             {props.predA ? (
               <TimingBar
                 timing={props.predA.timing}
-                device={deviceLabel(props.predA, props.adapter)}
+                device={deviceLabel(props.predA, infoA()?.adapter ?? props.adapter)}
                 cold={props.predA.cold}
-                engineBadge={browserBadgeFor(props.predA, props.engineInfo, props.modelA)}
+                engineBadge={browserBadgeFor(props.predA, infoA(), props.modelA)}
                 precision={infoA()?.precision ?? null}
                 precisionFallback={infoA()?.precisionFallback ?? null}
                 mode={inferenceMetaLabel(props.predA.inference)}
@@ -75,9 +89,9 @@ export default function PlaygroundTiming(props: PlaygroundTimingProps) {
             {props.predB ? (
               <TimingBar
                 timing={props.predB.timing}
-                device={deviceLabel(props.predB, props.adapter)}
+                device={deviceLabel(props.predB, infoB()?.adapter ?? props.adapter)}
                 cold={props.predB.cold}
-                engineBadge={browserBadgeFor(props.predB, props.engineInfo, props.modelB)}
+                engineBadge={browserBadgeFor(props.predB, infoB(), props.modelB)}
                 precision={infoB()?.precision ?? null}
                 precisionFallback={infoB()?.precisionFallback ?? null}
                 mode={inferenceMetaLabel(props.predB.inference)}
@@ -96,9 +110,9 @@ export default function PlaygroundTiming(props: PlaygroundTimingProps) {
         <>
           <TimingBar
             timing={props.predA.timing}
-            device={deviceLabel(props.predA, props.adapter)}
+            device={deviceLabel(props.predA, infoA()?.adapter ?? props.adapter)}
             cold={props.predA.cold}
-            engineBadge={browserBadgeFor(props.predA, props.engineInfo, props.modelA)}
+            engineBadge={browserBadgeFor(props.predA, infoA(), props.modelA)}
             precision={infoA()?.precision ?? null}
             precisionFallback={infoA()?.precisionFallback ?? null}
             mode={inferenceMetaLabel(props.predA.inference)}

@@ -29,6 +29,10 @@ export interface Kept {
   iou: Signal<number>;
   maxDet: Signal<number>;
   perClassConf?: Signal<PerClassConfMap>;
+  /** Current model's class list, persisted with `perClassConf` so cross-model links remap by name cleanly. */
+  classes?: () => string[];
+  /** Called during restore when `perClassConf` was loaded from a saved model, providing its origin model & classes. */
+  onRestorePerClassOrigin?: (origin: { modelId: string | null; classes: string[] }) => void;
   labels: Signal<boolean>;
   scores: Signal<boolean>;
   truth: Signal<boolean>;
@@ -75,7 +79,13 @@ export function keepSession(k: Kept): (model: string, s: Source, runOn: string, 
     k.truth.set(saved.truth);
     k.runOn.set(saved.runOn);
     if (saved.inference && k.inference) k.inference.restore(saved.inference);
-    if (saved.perClassConf && k.perClassConf) k.perClassConf.set(normalizePerClassConf(saved.perClassConf));
+    if (saved.perClassConf && k.perClassConf) {
+      k.perClassConf.set(normalizePerClassConf(saved.perClassConf));
+      k.onRestorePerClassOrigin?.({
+        modelId: saved.perClassModelId ?? saved.pred?.model_id ?? null,
+        classes: saved.perClassClasses ?? [],
+      });
+    }
   }
   k.conf.set(url.conf ?? saved?.conf ?? DEFAULTS.conf);
   k.iou.set(url.iou ?? saved?.iou ?? DEFAULTS.iou);
@@ -222,7 +232,17 @@ export function keepSession(k: Kept): (model: string, s: Source, runOn: string, 
       conf: k.conf.get(),
       iou: k.iou.get(),
       maxDet: k.maxDet.get(),
-      ...(k.perClassConf ? { perClassConf: normalizePerClassConf(k.perClassConf.get()) } : {}),
+      ...(k.perClassConf
+        ? (() => {
+            const cls = k.classes ? [...k.classes()] : [];
+            const keepOrigin = cls.length === 0 && !!(saved?.perClassModelId ?? saved?.pred?.model_id);
+            return {
+              perClassConf: normalizePerClassConf(k.perClassConf.get()),
+              perClassModelId: keepOrigin ? (saved?.perClassModelId ?? saved?.pred?.model_id ?? null) : k.model(),
+              perClassClasses: keepOrigin ? (saved?.perClassClasses ?? []) : cls,
+            };
+          })()
+        : {}),
       labels: k.labels.get(),
       scores: k.scores.get(),
       truth: k.truth.get(),
