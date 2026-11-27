@@ -291,6 +291,13 @@ impl FoloApp {
     /// refreshes in place on the next render; a benchmark's page reloads when its stream opens.
     pub fn after_bench_navigate(&mut self) {
         self.bench.confirm_delete = None;
+        let open_bench = route_bench(&self.route).map(str::to_string);
+        if self.bench.events.as_ref().is_some_and(|(id, _)| Some(id) != open_bench.as_ref()) {
+            self.bench.events = None;
+        }
+        if open_bench.is_none() {
+            self.bench.sub_for = None;
+        }
         // Forms belong to the page they were opened on.
         if self.bench.design.as_ref().is_some_and(|f| route_bench(&self.route) != Some(f.bench.as_str())) {
             self.bench.design = None;

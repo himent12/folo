@@ -1,6 +1,6 @@
 //! Inline form controllers for Agent Labeling: New job, Add folder, Export dataset, and Esc/Ctrl+Enter.
 
-use folo_ui::{AppContext, Context, Focusable, Window};
+use folo_ui::{AppContext, Context, FocusHandle, Focusable, Window};
 
 use super::actions::{LABEL_VAL_FRACTIONS, validate_new_job};
 use super::state::{AddFolderForm, ExportDatasetForm, NewLabelJobForm};
@@ -10,12 +10,37 @@ use crate::input::TextInput;
 use crate::ui::Tone;
 
 impl FoloApp {
+    fn capture_label_return_focus(
+        &self,
+        openers: &[&'static str],
+        window: &Window,
+        cx: &Context<Self>,
+    ) -> Option<FocusHandle> {
+        let fh = window.focused(cx)?;
+        openers.iter().any(|k| self.focus.borrow().get(*k).is_some_and(|h| h.id == fh.id)).then_some(fh)
+    }
+
+    fn restore_label_focus(
+        &mut self,
+        target: Option<FocusHandle>,
+        fallback_key: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let fh = target.unwrap_or_else(|| self.fh(fallback_key, cx));
+        window.focus(&fh);
+        // Verify after prepaint so a button that vanished or became disabled (`*-disabled`) falls
+        // back to `root_focus` instead of stranding focus on an unmounted handle.
+        self.verify_focus = Some(fh);
+    }
+
     // ---------- New labeling job form ----------
 
     pub fn open_new_label_job(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.label_on() {
             return;
         }
+        let return_focus = self.capture_label_return_focus(&["label-new", "label-empty-new"], window, cx);
         self.label.form_seq += 1;
         let seq = self.label.form_seq;
         let name = cx.new(|cx| TextInput::new("e.g. street-scenes", cx));
@@ -31,6 +56,7 @@ impl FoloApp {
             classes,
             path,
             instructions,
+            return_focus,
             submitting: false,
             touched: false,
             error: None,
@@ -38,8 +64,21 @@ impl FoloApp {
         cx.notify();
     }
 
-    pub fn close_new_label_job(&mut self, cx: &mut Context<Self>) {
-        self.label.new_job = None;
+    pub fn close_new_label_job(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let ret = self.label.new_job.take().and_then(|f| f.return_focus);
+        self.restore_label_focus(ret, "label-new", window, cx);
+        cx.notify();
+    }
+
+    pub fn close_add_label_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let ret = self.label.add_folder.take().and_then(|f| f.return_focus);
+        self.restore_label_focus(ret, "label-add-folder", window, cx);
+        cx.notify();
+    }
+
+    pub fn close_export_label_dataset(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let ret = self.label.export_ds.take().and_then(|f| f.return_focus);
+        self.restore_label_focus(ret, "label-export-open", window, cx);
         cx.notify();
     }
 
@@ -138,14 +177,22 @@ impl FoloApp {
     // ---------- Add folder to existing job ----------
 
     pub fn open_add_label_folder(&mut self, job_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let return_focus =
+            self.capture_label_return_focus(&["label-add-folder", "label-imgs-empty-add"], window, cx);
         self.label.export_ds = None;
         self.label.form_seq += 1;
         let seq = self.label.form_seq;
         let path = cx.new(|cx| TextInput::new("Folder or image path on the server", cx));
         let fh = path.read(cx).focus_handle(cx);
         window.focus(&fh);
-        self.label.add_folder =
-            Some(AddFolderForm { job: job_id.to_string(), seq, path, submitting: false, error: None });
+        self.label.add_folder = Some(AddFolderForm {
+            job: job_id.to_string(),
+            seq,
+            path,
+            return_focus,
+            submitting: false,
+            error: None,
+        });
         cx.notify();
     }
 
@@ -239,6 +286,7 @@ impl FoloApp {
     // ---------- Export / Register as Dataset ----------
 
     pub fn open_export_label_dataset(&mut self, job: &LabelJob, window: &mut Window, cx: &mut Context<Self>) {
+        let return_focus = self.capture_label_return_focus(&["label-export-open"], window, cx);
         self.label.add_folder = None;
         self.label.form_seq += 1;
         let seq = self.label.form_seq;
@@ -255,6 +303,7 @@ impl FoloApp {
             seq,
             name,
             val_idx: 1, // 20%
+            return_focus,
             submitting: false,
             error: None,
         });
@@ -333,15 +382,24 @@ impl FoloApp {
         );
     }
 
-    /// Closes an inline labeling form or delete confirmation on `Esc`.
+    /// Closes an inline labeling form or delete confirmation on `Esc`, restoring focus to the
+    /// triggering control.
     pub fn dismiss_label_form(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if self.label.new_job.take().is_some()
-            || self.label.add_folder.take().is_some()
-            || self.label.export_ds.take().is_some()
-            || self.label.confirm_delete_job.take().is_some()
-            || self.label.confirm_delete_image.take().is_some()
-        {
-            window.focus(&self.root_focus);
+        if self.label.new_job.is_some() {
+            self.close_new_label_job(window, cx);
+            true
+        } else if self.label.add_folder.is_some() {
+            self.close_add_label_folder(window, cx);
+            true
+        } else if self.label.export_ds.is_some() {
+            self.close_export_label_dataset(window, cx);
+            true
+        } else if self.label.confirm_delete_job.take().is_some() {
+            self.restore_label_focus(None, "label-del-job", window, cx);
+            cx.notify();
+            true
+        } else if self.label.confirm_delete_image.take().is_some() {
+            self.restore_label_focus(None, "label-rm-img", window, cx);
             cx.notify();
             true
         } else if self.label.selected_box.take().is_some() {

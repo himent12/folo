@@ -278,6 +278,12 @@ impl FoloApp {
         else {
             return;
         };
+        if im.status == LabelImageStatus::Labeling {
+            self.label.review_error =
+                Some(ApiError::new("label_job_active", "The agent is labeling this image right now."));
+            cx.notify();
+            return;
+        }
         if sel.index >= im.boxes.len() || label_box_revision(&im.boxes) != sel.revision {
             self.label.selected_box = None;
             self.label.hover_box = None;
@@ -322,6 +328,12 @@ impl FoloApp {
         else {
             return;
         };
+        if im.status == LabelImageStatus::Labeling {
+            self.label.review_error =
+                Some(ApiError::new("label_job_active", "The agent is labeling this image right now."));
+            cx.notify();
+            return;
+        }
         if sel.index >= im.boxes.len() || label_box_revision(&im.boxes) != sel.revision {
             self.label.selected_box = None;
             self.label.hover_box = None;

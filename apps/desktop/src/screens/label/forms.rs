@@ -94,7 +94,7 @@ impl FoloApp {
             None,
             window,
             cx,
-            act(|this, _, cx| this.close_new_label_job(cx)),
+            act(|this, w, cx| this.close_new_label_job(w, cx)),
         );
         let submit = if form.submitting {
             self.button_disabled(
@@ -252,10 +252,7 @@ impl FoloApp {
             None,
             window,
             cx,
-            act(|this, _, cx| {
-                this.label.add_folder = None;
-                cx.notify();
-            }),
+            act(|this, w, cx| this.close_add_label_folder(w, cx)),
         );
         let submit = if form.submitting {
             self.button_disabled(
@@ -291,7 +288,7 @@ impl FoloApp {
                     .flex_col()
                     .gap(px(10.))
                     .child(
-                        text(ty::SM, t.text_tertiary).child(
+                        text(ty::SM, t.text_tertiary).whitespace_normal().child(
                             "Images in the folder on the server's machine are read in place, not copied.",
                         ),
                     )
@@ -357,10 +354,7 @@ impl FoloApp {
             None,
             window,
             cx,
-            act(|this, _, cx| {
-                this.label.export_ds = None;
-                cx.notify();
-            }),
+            act(|this, w, cx| this.close_export_label_dataset(w, cx)),
         );
         let submit = if form.submitting {
             self.button_disabled(
@@ -429,7 +423,7 @@ impl FoloApp {
                                     .child(val_seg),
                             ),
                     )
-                    .child(text(ty::SM, t.text_secondary).child(summary))
+                    .child(text(ty::SM, t.text_secondary).whitespace_normal().child(summary))
                     .children(err)
                     .child(div().flex().justify_end().gap(px(8.)).child(cancel).child(submit)),
             )

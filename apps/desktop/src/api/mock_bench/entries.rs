@@ -231,7 +231,7 @@ impl MockBench {
                         progress: BenchProgress { done: 0, total, condition: None, severity: None },
                         images: imgs,
                         conditions: run_conds,
-                        scored: false,
+                        scored: true,
                         fingerprint: b.bench.fingerprint.clone(),
                         missing_classes: Vec::new(),
                         score: None,
@@ -255,7 +255,7 @@ impl MockBench {
                         skill: EntrySkill {
                             map: 0.49,
                             fragility: 1.05,
-                            ece: 0.0,
+                            ece: 0.068,
                             iou: 0.75,
                             self_recall: 0.34,
                         },

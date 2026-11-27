@@ -4,7 +4,7 @@ use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use folo_ui::{Bounds, Entity, Pixels, ScrollHandle};
+use folo_ui::{Bounds, Entity, FocusHandle, Pixels, ScrollHandle};
 
 use crate::api::*;
 use crate::input::TextInput;
@@ -38,6 +38,7 @@ pub struct NewLabelJobForm {
     pub classes: Entity<TextInput>,
     pub path: Entity<TextInput>,
     pub instructions: Entity<TextInput>,
+    pub return_focus: Option<FocusHandle>,
     pub submitting: bool,
     pub touched: bool,
     pub error: Option<ApiError>,
@@ -48,6 +49,7 @@ pub struct AddFolderForm {
     pub job: String,
     pub seq: u64,
     pub path: Entity<TextInput>,
+    pub return_focus: Option<FocusHandle>,
     pub submitting: bool,
     pub error: Option<ApiError>,
 }
@@ -59,6 +61,7 @@ pub struct ExportDatasetForm {
     pub name: Entity<TextInput>,
     /// Index into `LABEL_VAL_FRACTIONS` (`0.1`, `0.2`, `0.3`; default `1` = 20%).
     pub val_idx: usize,
+    pub return_focus: Option<FocusHandle>,
     pub submitting: bool,
     pub error: Option<ApiError>,
 }
