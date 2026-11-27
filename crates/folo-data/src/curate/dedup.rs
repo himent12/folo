@@ -563,7 +563,8 @@ pub fn deduplicate_dataset(
 ///
 /// When `opts.dry_run` is `false`, `out` must not exist or must be an empty directory
 /// ([`crate::unfinished::claim`]). Fails with [`DataError::Config`] before creating `out` when no `train` or
-/// `val` images survive or any surviving entry has invalid YOLO box coordinates.
+/// `val` images survive, any surviving image is unreadable or has an invalid header, or any surviving entry has
+/// invalid YOLO box coordinates.
 pub fn write_deduplicated(dataset: &LoadedDataset, out: &Path, opts: &DedupOptions) -> Result<DedupReport> {
     let (pruned, mut report) = deduplicate_dataset(dataset, opts)?;
     if opts.dry_run {
@@ -581,6 +582,36 @@ pub fn write_deduplicated(dataset: &LoadedDataset, out: &Path, opts: &DedupOptio
             "a YOLO dataset needs train or val images, and the deduplicated dataset only has test images"
                 .into(),
         ));
+    }
+    if let Some(bad) =
+        report.unreadable.iter().find(|u| pruned.split(u.split).entries().iter().any(|e| e.image == u.path))
+    {
+        return Err(DataError::Config(format!(
+            "cannot write deduplicated dataset with unreadable surviving image {} ({}): {}",
+            bad.path.display(),
+            bad.split,
+            bad.message
+        )));
+    }
+    if !opts.perceptual {
+        let mut surviving: Vec<(Split, &Path)> = Vec::new();
+        for split in Split::ALL {
+            for e in pruned.split(split).entries() {
+                surviving.push((split, e.image.as_path()));
+            }
+        }
+        let probed: Vec<Option<(Split, &Path, DataError)>> = surviving
+            .par_iter()
+            .map(|&(split, path)| crate::par::serial(|| probe_size(path)).err().map(|err| (split, path, err)))
+            .collect();
+        if let Some((split, path, err)) = probed.into_iter().flatten().next() {
+            return Err(DataError::Config(format!(
+                "cannot write deduplicated dataset with unreadable surviving image {} ({}): {}",
+                path.display(),
+                split,
+                err
+            )));
+        }
     }
     for split in Split::ALL {
         for e in pruned.split(split).entries() {

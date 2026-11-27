@@ -575,12 +575,17 @@ unsafe fn finish_epi_chunk_wasm(
     }
 }
 
-/// Wasm SIMD128 [`Epi::apply_full`] over all `NR = 24` columns (`6 × 4` lanes), bit-exact with scalar `Epi::apply`.
-pub(super) fn apply_epi_wasm(
+/// Wasm SIMD128 [`Epi::apply_full`] / [`Epi::apply_full_u8_direct`] over raw pointers (`NR = 24 = 6 × 4` lanes),
+/// bit-exact with scalar `Epi::apply`.
+///
+/// # Safety
+/// `q_ptr` is writable for `NR` words when `epi.out` is `Out::U8`; `res_ptr` is readable for `NR` words when
+/// `epi.res.is_some()`.
+pub(super) unsafe fn apply_epi_wasm_ptr(
     epi: &Epi<'_>,
     acc: &Tile,
-    res: &[u32; NR],
-    q: &mut [u32; NR],
+    res_ptr: *const u32,
+    q_ptr: *mut u32,
     f: &mut [[f32; NR]; MR],
 ) {
     let (vc0, vc1, vc2, vc3) = (
@@ -601,7 +606,7 @@ pub(super) fn apply_epi_wasm(
         f32x4_splat(epi.bias[2]),
         f32x4_splat(epi.bias[3]),
     );
-    // SAFETY: fixed-size `[MR][NR]` and `[NR]` arrays with `NR = 24 = 6 * 4`.
+    // SAFETY: fixed-size `[MR][NR]` array (`NR = 24 = 6 * 4`) and caller pointer contract.
     unsafe {
         for k in 0..NR / 4 {
             let col = 4 * k;
@@ -633,18 +638,34 @@ pub(super) fn apply_epi_wasm(
                 ),
                 vb3,
             );
-            finish_epi_chunk_wasm(epi, y0, y1, y2, y3, res.as_ptr(), q.as_mut_ptr(), f, col);
+            finish_epi_chunk_wasm(epi, y0, y1, y2, y3, res_ptr, q_ptr, f, col);
         }
     }
 }
 
-/// Wasm SIMD128 [`Epi::apply_f32_full`] over all `NR = 24` columns (`6 × 4` lanes), bit-exact with scalar
-/// `Epi::apply_f32`.
-pub(super) fn apply_epi_f32_wasm(
+/// Safe wrapper over [`apply_epi_wasm_ptr`].
+pub(super) fn apply_epi_wasm(
     epi: &Epi<'_>,
-    tile: &TileF32,
+    acc: &Tile,
     res: &[u32; NR],
     q: &mut [u32; NR],
+    f: &mut [[f32; NR]; MR],
+) {
+    // SAFETY: `res` and `q` have length `NR`.
+    unsafe { apply_epi_wasm_ptr(epi, acc, res.as_ptr(), q.as_mut_ptr(), f) };
+}
+
+/// Wasm SIMD128 [`Epi::apply_f32_full`] / [`Epi::apply_f32_full_u8_direct`] over raw pointers (`NR = 24 = 6 × 4`
+/// lanes), bit-exact with scalar `Epi::apply_f32`.
+///
+/// # Safety
+/// `q_ptr` is writable for `NR` words when `epi.out` is `Out::U8`; `res_ptr` is readable for `NR` words when
+/// `epi.res.is_some()`.
+pub(super) unsafe fn apply_epi_f32_wasm_ptr(
+    epi: &Epi<'_>,
+    tile: &TileF32,
+    res_ptr: *const u32,
+    q_ptr: *mut u32,
     f: &mut [[f32; NR]; MR],
 ) {
     let (vb0, vb1, vb2, vb3) = (
@@ -653,7 +674,7 @@ pub(super) fn apply_epi_f32_wasm(
         f32x4_splat(epi.bias[2]),
         f32x4_splat(epi.bias[3]),
     );
-    // SAFETY: fixed-size `[MR][NR]` and `[NR]` arrays with `NR = 24 = 6 * 4`.
+    // SAFETY: fixed-size `[MR][NR]` array (`NR = 24 = 6 * 4`) and caller pointer contract.
     unsafe {
         for k in 0..NR / 4 {
             let col = 4 * k;
@@ -661,9 +682,21 @@ pub(super) fn apply_epi_f32_wasm(
             let y1 = f32x4_add(v128_load(tile[1].as_ptr().add(col) as *const v128), vb1);
             let y2 = f32x4_add(v128_load(tile[2].as_ptr().add(col) as *const v128), vb2);
             let y3 = f32x4_add(v128_load(tile[3].as_ptr().add(col) as *const v128), vb3);
-            finish_epi_chunk_wasm(epi, y0, y1, y2, y3, res.as_ptr(), q.as_mut_ptr(), f, col);
+            finish_epi_chunk_wasm(epi, y0, y1, y2, y3, res_ptr, q_ptr, f, col);
         }
     }
+}
+
+/// Safe wrapper over [`apply_epi_f32_wasm_ptr`].
+pub(super) fn apply_epi_f32_wasm(
+    epi: &Epi<'_>,
+    tile: &TileF32,
+    res: &[u32; NR],
+    q: &mut [u32; NR],
+    f: &mut [[f32; NR]; MR],
+) {
+    // SAFETY: `res` and `q` have length `NR`.
+    unsafe { apply_epi_f32_wasm_ptr(epi, tile, res.as_ptr(), q.as_mut_ptr(), f) };
 }
 
 #[cfg(test)]
@@ -802,6 +835,15 @@ mod tests {
                 init_tile[r][j] = rng.uniform(-3.0, 3.0);
             }
         }
+        // Extreme values and exact half-integer tie-to-even values (`inv[1] = 8.0`, `bias[1] = 0.0`, `zero[1] = 120`).
+        init_tile[0][0] = f32::NAN;
+        init_tile[0][1] = f32::INFINITY;
+        init_tile[0][2] = f32::NEG_INFINITY;
+        init_tile[0][3] = 1.0e6;
+        init_tile[0][4] = -1.0e6;
+        for (j, target) in [0.5f32, 1.5, 2.5, 120.5, 121.5, 254.5].into_iter().enumerate() {
+            init_tile[1][j] = (target - 120.0) / 8.0;
+        }
         let corr = [17i32, -31, 0, 128];
         let scale = [0.004f32, 0.012, 0.007, 0.019];
         let bias = [-0.25f32, 0.0, 0.75, -1.1];
@@ -819,7 +861,11 @@ mod tests {
         for r in 0..MR {
             for j in 0..NR {
                 dst_s[r][j] += (acc[r][j].wrapping_sub(corr[r]) as f32) * scale[r];
-                assert_eq!(dst_w[r][j].to_bits(), dst_s[r][j].to_bits());
+                if dst_s[r][j].is_nan() {
+                    assert!(dst_w[r][j].is_nan());
+                } else {
+                    assert_eq!(dst_w[r][j].to_bits(), dst_s[r][j].to_bits());
+                }
             }
         }
         for silu in [false, true] {
@@ -839,6 +885,11 @@ mod tests {
                     epi.apply(&acc, NR, &res, &mut qs, &mut fs);
                     if is_u8 {
                         assert_eq!(qw, qs, "apply_epi_wasm u8 mismatch silu={silu} res={has_res}");
+                        let mut qd = [0u32; NR];
+                        let res_ptr = if has_res { res.as_ptr() } else { std::ptr::null() };
+                        // SAFETY: `qd` holds `NR` words and `res_ptr` is valid when `has_res` is true.
+                        unsafe { epi.apply_full_u8_direct(&acc, res_ptr, qd.as_mut_ptr()) };
+                        assert_eq!(qd, qs, "apply_full_u8_direct mismatch silu={silu} res={has_res}");
                     } else {
                         for r in 0..MR {
                             for j in 0..NR {
@@ -852,10 +903,19 @@ mod tests {
                     epi.apply_f32(&dst_s, NR, &res, &mut qfs, &mut ffs);
                     if is_u8 {
                         assert_eq!(qfw, qfs, "apply_epi_f32_wasm u8 mismatch silu={silu} res={has_res}");
+                        let mut qfd = [0u32; NR];
+                        let res_ptr = if has_res { res.as_ptr() } else { std::ptr::null() };
+                        // SAFETY: `qfd` holds `NR` words and `res_ptr` is valid when `has_res` is true.
+                        unsafe { epi.apply_f32_full_u8_direct(&dst_w, res_ptr, qfd.as_mut_ptr()) };
+                        assert_eq!(qfd, qfs, "apply_f32_full_u8_direct mismatch silu={silu} res={has_res}");
                     } else {
                         for r in 0..MR {
                             for j in 0..NR {
-                                assert_eq!(ffw[r][j].to_bits(), ffs[r][j].to_bits());
+                                if ffs[r][j].is_nan() {
+                                    assert!(ffw[r][j].is_nan());
+                                } else {
+                                    assert_eq!(ffw[r][j].to_bits(), ffs[r][j].to_bits());
+                                }
                             }
                         }
                     }

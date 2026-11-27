@@ -1,8 +1,8 @@
 //! End-to-end integration tests for exact and perceptual (`dHash`) dataset deduplication (`curate::dedup`).
 
 use folo_data::{
-    AuditOptions, CrossSplitPolicy, DedupKeepPolicy, DedupMatchKind, DedupOptions, Image, ImageFormat, Split,
-    deduplicate_dataset, deduplicate_path, encode, open, write_deduplicated,
+    AuditOptions, CrossSplitPolicy, DedupKeepPolicy, DedupMatchKind, DedupOptions, Image, ImageFormat,
+    OpenOptions, Split, deduplicate_dataset, deduplicate_path, encode, open, open_with, write_deduplicated,
 };
 use folo_test_support::TestDir;
 use std::path::Path;
@@ -297,4 +297,76 @@ fn dedup_reports_unreadable_without_false_grouping() {
     assert!(!rep.is_clean());
     // Legitimate duplicate groups are still reported cleanly.
     assert_eq!(rep.groups.len(), 2);
+
+    // A dataset opened with `verify_images: false` containing a corrupt `.png` reports it on `dry_run`
+    // and refuses `write_deduplicated` BEFORE creating `out` (preventing entries disappearing on reopen).
+    let corrupt_src = dir.join("corrupt_src");
+    let corrupt_out = dir.join("corrupt_out");
+    let valid_png = encode(&patterned_image(40, 32, 0), ImageFormat::Png).unwrap();
+    write_file(&corrupt_src.join("data.yaml"), b"train: images/train\nnames:\n  0: circle\n");
+    write_file(&corrupt_src.join("images/train/good.png"), &valid_png);
+    write_file(&corrupt_src.join("labels/train/good.txt"), b"0 0.5 0.5 0.2 0.2\n");
+    write_file(&corrupt_src.join("images/train/broken.png"), b"not-a-valid-png-header");
+    write_file(&corrupt_src.join("labels/train/broken.txt"), b"0 0.5 0.5 0.2 0.2\n");
+
+    let unverified =
+        open_with(&corrupt_src, &OpenOptions { verify_images: false, ..Default::default() }).unwrap();
+    assert_eq!(unverified.split_sizes(), [2, 0, 0]);
+    let dry_rep =
+        write_deduplicated(&unverified, &corrupt_out, &DedupOptions { dry_run: true, ..Default::default() })
+            .unwrap();
+    assert_eq!(dry_rep.unreadable.len(), 1);
+    assert!(dry_rep.unreadable[0].path.ends_with("broken.png"));
+    assert!(!corrupt_out.exists());
+
+    let err = write_deduplicated(&unverified, &corrupt_out, &DedupOptions::default()).unwrap_err();
+    assert!(err.to_string().contains("unreadable"), "unexpected error: {err}");
+    assert!(!corrupt_out.exists(), "failed write_deduplicated must not create output dir");
+
+    // Exact-byte mode (`perceptual: false`) must also refuse unreadable/corrupt surviving images before claiming `out`.
+    let err_exact = write_deduplicated(
+        &unverified,
+        &corrupt_out,
+        &DedupOptions { perceptual: false, ..Default::default() },
+    )
+    .unwrap_err();
+    assert!(err_exact.to_string().contains("unreadable"), "unexpected error: {err_exact}");
+    assert!(!corrupt_out.exists(), "failed exact-mode write_deduplicated must not create output dir");
+
+    // Stem collision disambiguation (`same.png` + `same.jpg` in one split) and test-only refusal.
+    let coll_src = dir.join("coll_src");
+    let coll_out = dir.join("coll_out");
+    let img_a = encode(&patterned_image(40, 32, 0), ImageFormat::Png).unwrap();
+    let img_b = encode(&patterned_image(40, 32, 1), ImageFormat::Jpeg(90)).unwrap();
+    write_file(&coll_src.join("data.yaml"), b"train: images/train\nnames:\n  0: circle\n");
+    write_file(&coll_src.join("images/train/same.png"), &img_a);
+    write_file(&coll_src.join("labels/train/same.txt"), b"0 0.5 0.5 0.2 0.2\n");
+    write_file(&coll_src.join("images/train/sub/same.jpg"), &img_b);
+    write_file(&coll_src.join("labels/train/sub/same.txt"), b"0 0.4 0.4 0.2 0.2\n");
+    let coll_ds = open(&coll_src).unwrap();
+    let coll_rep = write_deduplicated(&coll_ds, &coll_out, &DedupOptions::default()).unwrap();
+    assert_eq!(coll_rep.output_splits, [2, 0, 0]);
+    assert_eq!(coll_rep.renamed_collisions, 2);
+    assert_eq!(open(&coll_out).unwrap().split_sizes(), [2, 0, 0]);
+
+    // Refuses to write when only `test` images survive (e.g. `PreferTest` drops the only `train` duplicate).
+    let test_only_src = dir.join("test_only_src");
+    let test_only_out = dir.join("test_only_out");
+    write_file(
+        &test_only_src.join("data.yaml"),
+        b"train: images/train\ntest: images/test\nnames:\n  0: circle\n",
+    );
+    write_file(&test_only_src.join("images/train/dup.png"), &img_a);
+    write_file(&test_only_src.join("labels/train/dup.txt"), b"0 0.5 0.5 0.2 0.2\n");
+    write_file(&test_only_src.join("images/test/dup.png"), &img_a);
+    write_file(&test_only_src.join("labels/test/dup.txt"), b"0 0.5 0.5 0.2 0.2\n");
+    let test_only_ds = open(&test_only_src).unwrap();
+    let err_test_only = write_deduplicated(
+        &test_only_ds,
+        &test_only_out,
+        &DedupOptions { cross_split: CrossSplitPolicy::PreferTest, ..Default::default() },
+    )
+    .unwrap_err();
+    assert!(err_test_only.to_string().contains("only has test images"), "unexpected error: {err_test_only}");
+    assert!(!test_only_out.exists(), "refused test-only write must not create output dir");
 }

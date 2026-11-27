@@ -57,8 +57,9 @@ pub(super) fn fmadd(a: f32, b: f32, c: f32) -> f32 {
     }
 }
 
-/// The epilogue's SiLU, `x / (1 + e^{−x})`, division-free and bit-exact between scalar, AVX2/AVX-512 (FMA),
-/// and Wasm SIMD128 (non-FMA) on all non-NaN inputs (`|err| / max(1, |ref|) < 3e-7` on `[-86, 86]`, finite at
+/// The epilogue's SiLU, `x / (1 + e^{−x})`, division-free and bit-exact within native FMA targets (scalar ==
+/// AVX2/AVX-512) and within Wasm non-FMA targets (scalar == Wasm SIMD128) on all non-NaN inputs
+/// (`|err| / max(1, |ref|) < 2.5e-7` on native FMA and `< 3e-7` on Wasm non-FMA over `[-86, 86]`, finite at
 /// extremes, `silu_q8(0.0) == 0.0`, `silu_q8(-0.0) == -0.0`, `silu_q8(+∞) == +∞`, NaN stays NaN).
 #[inline]
 pub fn silu_q8(x: f32) -> f32 {

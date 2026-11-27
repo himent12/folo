@@ -104,13 +104,13 @@ fn reference(
                         }
                     }
                     let p = oy * ow + ox;
-                    let mut yv = ((acc - corr) as i32 as f32).mul_add(sw[o], bias[o]);
+                    let mut yv = super::silu::fmadd((acc - corr) as i32 as f32, sw[o], bias[o]);
                     if c.silu {
                         yv = silu_q8(yv);
                     }
                     if let Some((r, rg)) = res {
                         let b = byte_of(&r[img * c.o / 4 * ohw..], o / 4, ohw, p, o % 4);
-                        yv = rg.scale.mul_add((b as i32 - rg.zero as i32) as f32, yv);
+                        yv = super::silu::fmadd(rg.scale, (b as i32 - rg.zero as i32) as f32, yv);
                     }
                     if c.f32_out {
                         fout[(img * c.o + o) * ohw + p] = yv;

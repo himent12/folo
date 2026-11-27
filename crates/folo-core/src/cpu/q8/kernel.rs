@@ -625,6 +625,12 @@ impl Epi<'_> {
             // SAFETY: AVX2 and FMA were detected; pointers guaranteed by caller.
             return unsafe { self.apply_avx2_ptr(acc, res_ptr, q_dst, &mut dummy) };
         }
+        #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+        if uses_wasm_simd() {
+            let mut dummy = [[0f32; NR]; MR];
+            // SAFETY: pointers guaranteed by caller.
+            return unsafe { super::wasm_simd::apply_epi_wasm_ptr(self, acc, res_ptr, q_dst, &mut dummy) };
+        }
         let mut resw = [0u32; NR];
         if self.res.is_some() {
             // SAFETY: `res_ptr` is readable for `NR` words.
@@ -820,6 +826,14 @@ impl Epi<'_> {
             let mut dummy = [[0f32; NR]; MR];
             // SAFETY: AVX2 and FMA were detected; pointers guaranteed by caller.
             return unsafe { self.apply_f32_avx2_ptr(tile, res_ptr, q_dst, &mut dummy) };
+        }
+        #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+        if uses_wasm_simd() {
+            let mut dummy = [[0f32; NR]; MR];
+            // SAFETY: pointers guaranteed by caller.
+            return unsafe {
+                super::wasm_simd::apply_epi_f32_wasm_ptr(self, tile, res_ptr, q_dst, &mut dummy)
+            };
         }
         let mut resw = [0u32; NR];
         if self.res.is_some() {
