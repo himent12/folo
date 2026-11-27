@@ -5,11 +5,12 @@
 //! - on the CPU, horizontally mirrors RGBA via SIMD128 `flip_rgba_h` into a reusable scratch buffer (zero
 //!   intermediate RGB allocation) and runs each scale through [`Detector::detect_cpu_raw`], matching
 //!   `Predictor::predict_tta` bit for bit;
-//! - on WebGPU, batches `[orig, flipped]` together per scale through [`Detector::detect_gpu_batch`] (compact
-//!   async candidate readback with OOM split fallback);
+//! - on WebGPU, batches `[orig, flipped]` together per scale through [`Detector::detect_gpu_batch`] without
+//!   cloning the pooled original RGB image (compact async candidate readback with OOM split fallback);
 //! - un-flips mirrored detections (`unflip_xyxy_h`) and merges all views deterministically via
 //!   [`folo_vision::tta::merge_tta_detections`].
 
+use folo_data::Image;
 use folo_vision::Timing;
 use folo_vision::nms::Detection;
 use folo_vision::tta::{merge_tta_detections, unflip_xyxy_h};
@@ -19,6 +20,38 @@ use crate::simd::flip_rgba_h;
 use super::{
     DetectResult, Detector, Instant, PooledRgb, TtaDetectOptions, err, ms, nms_config, validate_rgba,
 };
+
+/// Owns the WebGPU TTA view slice (`[orig]` or `[orig, flipped]`) without cloning `orig`, returning `orig`'s RGB
+/// buffer to `Detector`'s scratch pool on drop.
+struct PooledTtaViews<'a> {
+    detector: &'a Detector,
+    views: Vec<Image>,
+}
+
+impl<'a> PooledTtaViews<'a> {
+    fn new(pooled: PooledRgb<'a>, detector: &'a Detector, hflip: bool) -> Self {
+        let orig = pooled.into_image();
+        let views = if hflip {
+            let flipped = orig.oriented(2);
+            vec![orig, flipped]
+        } else {
+            vec![orig]
+        };
+        PooledTtaViews { detector, views }
+    }
+
+    fn as_slice(&self) -> &[Image] {
+        &self.views
+    }
+}
+
+impl Drop for PooledTtaViews<'_> {
+    fn drop(&mut self) {
+        if let Some(orig) = self.views.drain(..).next() {
+            self.detector.return_rgb_buffer(orig.data);
+        }
+    }
+}
 
 impl Detector {
     /// Detect objects using Test-Time Augmentation (multi-scale and/or horizontal-flip ensembling).
@@ -50,13 +83,13 @@ impl Detector {
         if let Some(ctx) = &self.gpu {
             let t_rgb = Instant::now();
             let pooled = PooledRgb::new(self, rgba, width, height)?;
-            let orig = pooled.image();
-            let views = if tta_cfg.hflip { vec![orig.clone(), orig.oriented(2)] } else { vec![orig.clone()] };
+            let views = PooledTtaViews::new(pooled, self, tta_cfg.hflip);
             pre_ms += ms(t_rgb);
 
             for &imgsz in &imgszs {
                 let scale_cfg = self.predict_config(opts.conf, opts.iou, opts.max_det, imgsz)?;
-                let (mut preds, timing) = self.detect_gpu_batch(ctx, &views, &scale_cfg, &nms).await?;
+                let (mut preds, timing) =
+                    self.detect_gpu_batch(ctx, views.as_slice(), &scale_cfg, &nms).await?;
                 pre_ms += timing.preprocess_ms;
                 inf_ms += timing.inference_ms;
                 post_ms += timing.postprocess_ms;

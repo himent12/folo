@@ -177,9 +177,8 @@ impl PendingRead {
             .map_err(|e| GpuError::Map(e.to_string()));
         let ctx = self.ctx.clone();
         drop(self);
-        let out = out?;
         ctx.take_error()?;
-        Ok(out)
+        out
     }
 }
 

@@ -63,7 +63,10 @@ pub(crate) fn flip_rgba_h(rgba: &[u8], width: u32, height: u32, dst: &mut Vec<u8
     let expected = w.checked_mul(h).and_then(|n| n.checked_mul(4)).expect("RGBA image size overflow");
     assert_eq!(rgba.len(), expected, "flip_rgba_h: RGBA buffer length mismatch");
     dst.resize(expected, 0);
-    let stride = w * 4;
+    if h == 0 || w == 0 {
+        return;
+    }
+    let stride = w.checked_mul(4).expect("RGBA stride overflow");
     for y in 0..h {
         let src_row = &rgba[y * stride..(y + 1) * stride];
         let dst_row = &mut dst[y * stride..(y + 1) * stride];
@@ -599,13 +602,16 @@ mod tests {
         assert_eq!(tile_rgb, want_crop.data);
 
         // Horizontal flip parity across non-multiple-of-4 widths + scratch reuse
-        for fw in [1u32, 3, 4, 5, 16, 19, 37] {
+        let mut flip_buf = Vec::new();
+        for fw in [37u32, 19, 16, 5, 4, 3, 1] {
             let src = pattern_rgba(fw, 7);
             let mut src_rgb = vec![0u8; (fw * 7 * 3) as usize];
             rgba_to_rgb(&src, &mut src_rgb);
             let want_flip = Image { width: fw, height: 7, data: src_rgb }.oriented(2);
-            let mut flip_buf = Vec::new();
             flip_rgba_h(&src, fw, 7, &mut flip_buf);
+            let ptr_before = flip_buf.as_ptr();
+            flip_rgba_h(&src, fw, 7, &mut flip_buf);
+            assert_eq!(flip_buf.as_ptr(), ptr_before, "flip scratch must not reallocate at width={fw}");
             let mut got_rgb = vec![0u8; (fw * 7 * 3) as usize];
             rgba_to_rgb(&flip_buf, &mut got_rgb);
             assert_eq!(got_rgb, want_flip.data, "flip mismatch at width={fw}");

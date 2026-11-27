@@ -91,7 +91,8 @@ images, matching `folo_vision::Predictor::predict_tiled`: slices the image into 
 (in bounded batches of `tileBatch` on WebGPU with automatic OOM half-splitting, or direct zero-RGB-intermediate RGBA
 crops on the CPU), optionally runs one full-image pass so large boundary-spanning objects stay intact, and merges all
 detections deterministically in original-image pixel coordinates. When the image fits in a single tile, it degrades
-directly to a single pass with zero slicing overhead.
+directly to a single pass with zero slicing overhead. Grids exceeding 4,096 tiles (`MAX_BROWSER_TILES`, checked in
+`O(1)` before allocating the tile grid) reject with an `Error`.
 
 Options extend `FoloDetectOptions` (`conf`, `iou`, `maxDet`):
 
@@ -160,8 +161,8 @@ and reuse it per image: loading parses and fuses the model and, on WebGPU, compi
   tensor) return a "use the async variant" error in the browser instead of hanging. To avoid downloading the full
   `~2.8 MiB` decoded head on every frame, `Detector::detect` runs device-side candidate extraction
   (`Tensor::detect_candidates`, reusing a cached `[3, A]` device anchors tensor per canvas shape) and awaits a compact
-  async readback (`download_candidate_records`: `~28 KiB` for the count plus up to `CANDIDATE_READBACK` = 1,024 7-word
-  records, issuing a second readback only on overflow and falling back to dense `decoded_on_device()` when candidate
+  async readback (`download_candidate_records_batch`: `~28 KiB` per image for the count plus up to
+  `CANDIDATE_READBACK` = 1,024 7-word records, issuing a second readback only on overflow and falling back to dense `decoded_on_device()` when candidate
   extraction is unavailable). Shader compile errors are
   reported through the device's error sink at the next readback (natively they still come from an error scope at
   pipeline creation). The kernels are the native WGSL unchanged; Chrome's compiler (Tint) is stricter than Naga in

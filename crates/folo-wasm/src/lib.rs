@@ -25,7 +25,7 @@ use wasm_bindgen::prelude::*;
 
 pub use detector::{
     Backend, BackendChoice, DetectOptions, DetectResult, Detector, DetectorInfo, LoadOptions,
-    TileDetectOptions, TtaDetectOptions,
+    MAX_BROWSER_TILES, TileDetectOptions, TtaDetectOptions,
 };
 
 #[wasm_bindgen(typescript_custom_section)]
@@ -71,6 +71,8 @@ export interface FoloTileDetectOptions extends FoloDetectOptions {
   overlapY?: number;
   /** Also run a full-image pass alongside the tiles (default true). */
   fullImage?: boolean;
+  /** Alias for `fullImage`. */
+  fullImagePass?: boolean;
   /** Maximum tiles predicted per WebGPU batch (default 8). */
   tileBatch?: number;
   /** Cross-tile merge overlap metric ("ios" default, or "iou"). */
@@ -187,59 +189,200 @@ fn js_err(msg: impl std::fmt::Display) -> JsValue {
     js_sys::Error::new(&msg.to_string()).into()
 }
 
-/// Recursively reject `NaN` / `±Infinity` inside JS options before `JSON.stringify` would silently coerce them
-/// into `null` (which serde would otherwise turn into `None` for optional numeric fields).
-fn reject_non_finite_numbers(v: &JsValue, path: &str, depth: usize) -> Result<(), JsValue> {
+/// Call a global constructor's static method (`global[ctor][method](arg)`) through `Reflect::apply` so hostile
+/// proxies / revoked proxies reject cleanly instead of throwing synchronously out of wasm.
+fn call_static1(ctor_name: &str, method_name: &str, arg: &JsValue) -> Result<JsValue, JsValue> {
+    let ctor = js_sys::Reflect::get(&js_sys::global(), &ctor_name.into())
+        .map_err(|_| js_err(format!("missing global `{ctor_name}`")))?;
+    let method = js_sys::Reflect::get(&ctor, &method_name.into())
+        .map_err(|_| js_err(format!("missing `{ctor_name}.{method_name}`")))?;
+    let func = method
+        .dyn_into::<js_sys::Function>()
+        .map_err(|_| js_err(format!("`{ctor_name}.{method_name}` is not a function")))?;
+    let args = js_sys::Array::of1(arg);
+    js_sys::Reflect::apply(&func, &ctor, &args).map_err(|_| js_err("options are not readable"))
+}
+
+/// Catching `Array.isArray(v)` (safe even on revoked proxies).
+fn is_js_array(v: &JsValue) -> Result<bool, JsValue> {
+    Ok(call_static1("Array", "isArray", v)?.is_truthy())
+}
+
+/// Catching `Object.keys(v)` (safe on proxies whose `ownKeys` / `getOwnPropertyDescriptor` trap throws).
+fn own_enumerable_keys(v: &JsValue) -> Result<js_sys::Array, JsValue> {
+    call_static1("Object", "keys", v)?
+        .dyn_into::<js_sys::Array>()
+        .map_err(|_| js_err("options must be an object"))
+}
+
+/// Read a single JS value into a [`serde_json::Value`] once via catching `Reflect` calls, honouring `toJSON()`,
+/// unwrapping boxed primitives, and strictly rejecting `NaN` / `±Infinity` (unlike `JSON.stringify`, which turns
+/// them into `null`).
+fn js_to_json_value(v: &JsValue, path: &str, depth: usize) -> Result<Option<serde_json::Value>, JsValue> {
     if depth > 8 {
         return Err(js_err("invalid options: object nesting too deep"));
     }
-    if v.is_undefined() || v.is_null() {
-        return Ok(());
-    }
-    if let Some(f) = v.as_f64() {
-        if !f.is_finite() {
-            return Err(js_err(format!("invalid options: {path} must be finite, got {f}")));
+    // Honour `toJSON()` once, just like `JSON.stringify`, then validate the returned value in the same pass.
+    let owned;
+    let cur = if v.is_object() {
+        let to_json = js_sys::Reflect::get(v, &"toJSON".into())
+            .map_err(|_| js_err("invalid options: cannot read property `toJSON`"))?;
+        if let Ok(func) = to_json.dyn_into::<js_sys::Function>() {
+            owned = js_sys::Reflect::apply(&func, v, &js_sys::Array::new())
+                .map_err(|_| js_err("invalid options: `toJSON()` threw"))?;
+            &owned
+        } else {
+            v
         }
-        return Ok(());
+    } else {
+        v
+    };
+
+    if cur.is_undefined() || cur.is_function() || cur.is_symbol() {
+        return Ok(None);
     }
-    if js_sys::Array::is_array(v) {
-        let arr: &js_sys::Array = v.unchecked_ref();
-        for i in 0..arr.length() {
-            let item = js_sys::Reflect::get_u32(v, i)
+    if cur.is_null() {
+        return Ok(Some(serde_json::Value::Null));
+    }
+    if let Some(b) = cur.as_bool() {
+        return Ok(Some(serde_json::Value::Bool(b)));
+    }
+    if let Some(s) = cur.as_string() {
+        return Ok(Some(serde_json::Value::String(s)));
+    }
+    if let Some(f) = cur.as_f64() {
+        return json_number_from_f64(f, path).map(Some);
+    }
+    if cur.is_bigint() {
+        return Err(js_err(format!("invalid options: {path} cannot be a BigInt")));
+    }
+    if !cur.is_object() {
+        return Err(js_err("invalid options: unsupported JS value"));
+    }
+    // Unwrap boxed JS primitives (`new Number(NaN)`, `new String(...)`, `new Boolean(...)`) safely.
+    if cur.is_instance_of::<js_sys::Number>()
+        || cur.is_instance_of::<js_sys::JsString>()
+        || cur.is_instance_of::<js_sys::Boolean>()
+    {
+        let value_of = js_sys::Reflect::get(cur, &"valueOf".into())
+            .map_err(|_| js_err(format!("invalid options: cannot unwrap {path}")))?
+            .dyn_into::<js_sys::Function>()
+            .map_err(|_| js_err(format!("invalid options: cannot unwrap {path}")))?;
+        let prim = js_sys::Reflect::apply(&value_of, cur, &js_sys::Array::new())
+            .map_err(|_| js_err(format!("invalid options: cannot unwrap {path}")))?;
+        if let Some(f) = prim.as_f64() {
+            return json_number_from_f64(f, path).map(Some);
+        }
+        if let Some(b) = prim.as_bool() {
+            return Ok(Some(serde_json::Value::Bool(b)));
+        }
+        if let Some(s) = prim.as_string() {
+            return Ok(Some(serde_json::Value::String(s)));
+        }
+    }
+    if is_js_array(cur)? {
+        let len_val = js_sys::Reflect::get(cur, &"length".into())
+            .map_err(|_| js_err(format!("invalid options: cannot read {path}.length")))?;
+        let Some(len_f) = len_val.as_f64() else {
+            return Err(js_err(format!("invalid options: {path}.length is not a number")));
+        };
+        if !len_f.is_finite() || len_f < 0.0 || len_f > 10_000.0 || len_f.fract() != 0.0 {
+            return Err(js_err(format!("invalid options: invalid array length for {path}")));
+        }
+        let len = len_f as u32;
+        let mut items = Vec::with_capacity(len as usize);
+        for i in 0..len {
+            let item = js_sys::Reflect::get_u32(cur, i)
                 .map_err(|_| js_err(format!("invalid options: cannot read {path}[{i}]")))?;
-            reject_non_finite_numbers(&item, &format!("{path}[{i}]"), depth + 1)?;
+            let val = js_to_json_value(&item, &format!("{path}[{i}]"), depth + 1)?
+                .unwrap_or(serde_json::Value::Null);
+            items.push(val);
         }
-        return Ok(());
+        return Ok(Some(serde_json::Value::Array(items)));
     }
-    if v.is_object() {
-        let keys = js_sys::Object::keys(v.unchecked_ref::<js_sys::Object>());
-        for i in 0..keys.length() {
-            let key = keys.get(i);
-            let name = key.as_string().unwrap_or_default();
-            let val = js_sys::Reflect::get(v, &key)
-                .map_err(|_| js_err(format!("invalid options: cannot read property `{name}`")))?;
-            let child = if path.is_empty() { name } else { format!("{path}.{name}") };
-            reject_non_finite_numbers(&val, &child, depth + 1)?;
+    let keys = own_enumerable_keys(cur)?;
+    let mut map = serde_json::Map::with_capacity(keys.length() as usize);
+    for i in 0..keys.length() {
+        let key = keys.get(i);
+        let Some(name) = key.as_string() else {
+            continue;
+        };
+        let prop = js_sys::Reflect::get(cur, &key)
+            .map_err(|_| js_err(format!("invalid options: cannot read property `{name}`")))?;
+        let child = if path.is_empty() { name.clone() } else { format!("{path}.{name}") };
+        if let Some(val) = js_to_json_value(&prop, &child, depth + 1)? {
+            map.insert(name, val);
+        }
+    }
+    Ok(Some(serde_json::Value::Object(map)))
+}
+
+fn json_number_from_f64(f: f64, path: &str) -> Result<serde_json::Value, JsValue> {
+    if !f.is_finite() {
+        return Err(js_err(format!("invalid options: {path} must be finite, got {f}")));
+    }
+    // Preserve exact integer representation when possible so serde integer fields accept JS integers cleanly.
+    if f.fract() == 0.0 && f >= 0.0 && f <= u64::MAX as f64 && (f as u64) as f64 == f {
+        return Ok(serde_json::Value::Number(serde_json::Number::from(f as u64)));
+    }
+    let num = serde_json::Number::from_f64(f)
+        .ok_or_else(|| js_err(format!("invalid options: {path} must be finite, got {f}")))?;
+    Ok(serde_json::Value::Number(num))
+}
+
+/// Validate `f64` option ranges BEFORE `serde` narrows them to `f32` (preventing values like `1.00000001` or
+/// `-1e-12` from silently rounding into `[0, 1]` when cast to `f32`).
+fn validate_option_f64_ranges(map: &serde_json::Map<String, serde_json::Value>) -> Result<(), String> {
+    let check_closed = |key: &str| -> Result<(), String> {
+        if let Some(v) = map.get(key)
+            && !v.is_null()
+            && let Some(f) = v.as_f64()
+            && (!f.is_finite() || !(0.0..=1.0).contains(&f))
+        {
+            return Err(format!("invalid options: {key} must be finite and in [0, 1], got {f}"));
+        }
+        Ok(())
+    };
+    let check_half_open = |key: &str| -> Result<(), String> {
+        if let Some(v) = map.get(key)
+            && !v.is_null()
+            && let Some(f) = v.as_f64()
+            && (!f.is_finite() || !(0.0..1.0).contains(&f) || (f as f32) >= 1.0)
+        {
+            return Err(format!("invalid options: {key} must be finite and in [0, 1), got {f}"));
+        }
+        Ok(())
+    };
+    for key in ["conf", "iou", "mergeThreshold", "mergeIou"] {
+        check_closed(key)?;
+    }
+    for key in ["overlap", "overlapX", "overlapY"] {
+        check_half_open(key)?;
+    }
+    if let Some(serde_json::Value::Array(scales)) = map.get("scales") {
+        for (i, item) in scales.iter().enumerate() {
+            if let Some(f) = item.as_f64()
+                && (!f.is_finite() || f <= 0.0 || (f as f32) <= 0.0)
+            {
+                return Err(format!("invalid options: scales[{i}] must be finite and positive, got {f}"));
+            }
         }
     }
     Ok(())
 }
 
-/// Parse a JS options object through JSON (undefined / null give the defaults).
+/// Parse a JS options object cleanly via single-pass catching `Reflect` traversal (undefined / null give defaults).
 fn options<T: serde::de::DeserializeOwned + Default>(v: Option<&JsValue>) -> Result<T, JsValue> {
     let Some(v) = v.filter(|v| !v.is_undefined() && !v.is_null()) else { return Ok(T::default()) };
-    if !v.is_object() || js_sys::Array::is_array(v) {
+    if !v.is_object() || is_js_array(v)? {
         return Err(js_err("options must be an object"));
     }
-    reject_non_finite_numbers(v, "", 0)?;
-    let s: String = js_sys::JSON::stringify(v)
-        .map_err(|_| js_err("options are not JSON-serialisable"))?
-        .as_string()
-        .ok_or_else(
-            // `JSON.stringify` gives `undefined` for a function, a symbol or a `toJSON` returning undefined.
-            || js_err("options must be an object"),
-        )?;
-    serde_json::from_str(&s).map_err(|e| js_err(format!("invalid options: {e}")))
+    let Some(serde_json::Value::Object(map)) = js_to_json_value(v, "", 0)? else {
+        return Err(js_err("options must be an object"));
+    };
+    validate_option_f64_ranges(&map).map_err(js_err)?;
+    serde_json::from_value(serde_json::Value::Object(map))
+        .map_err(|e| js_err(format!("invalid options: {e}")))
 }
 
 fn to_js(v: &impl serde::Serialize) -> Result<JsValue, JsValue> {
@@ -287,7 +430,7 @@ fn byte_view(v: &JsValue, what: &str) -> Result<(Option<Uint8Array>, usize), JsV
     if js_sys::Reflect::get(&buf, &"detached".into()).is_ok_and(|d| d.is_truthy()) {
         return Err(js_err(format!("{what}: the buffer is detached (it was transferred)")));
     }
-    if !off.is_finite() || off < 0.0 || !len.is_finite() || len < 0.0 || len > usize::MAX as f64 {
+    if !off.is_finite() || off < 0.0 || !len.is_finite() || len < 0.0 || len > isize::MAX as f64 {
         return Err(bad());
     }
     let byte_len = len as usize;
@@ -361,6 +504,7 @@ impl FoloDetector {
         let expected = (w as usize)
             .checked_mul(h as usize)
             .and_then(|n| n.checked_mul(4))
+            .filter(|&b| b <= isize::MAX as usize)
             .ok_or_else(|| js_err(format!("{op}: image is too large ({w}x{h})")))?;
         let (view, byte_len) = byte_view(&data, op)?;
         if byte_len != expected {
@@ -466,5 +610,25 @@ impl FoloDetector {
             let res = inner.detect_tta(&rgba.buf, w, h, opts).await.map_err(js_err)?;
             to_js(&res)
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_option_f64_ranges;
+
+    #[test]
+    fn f64_range_validator_catches_precision_narrowing_overflows() {
+        let parse_map = |s: &str| match serde_json::from_str::<serde_json::Value>(s).unwrap() {
+            serde_json::Value::Object(m) => m,
+            _ => unreachable!(),
+        };
+        assert!(validate_option_f64_ranges(&parse_map(r#"{"conf":1.0,"iou":0.0,"overlap":0.9999}"#)).is_ok());
+        assert!(validate_option_f64_ranges(&parse_map(r#"{"conf":1.00000001}"#)).is_err());
+        assert!(validate_option_f64_ranges(&parse_map(r#"{"iou":-1e-12}"#)).is_err());
+        assert!(validate_option_f64_ranges(&parse_map(r#"{"mergeThreshold":1.00000001}"#)).is_err());
+        assert!(validate_option_f64_ranges(&parse_map(r#"{"mergeIou":1.00000001}"#)).is_err());
+        assert!(validate_option_f64_ranges(&parse_map(r#"{"overlap":0.99999999}"#)).is_err());
+        assert!(validate_option_f64_ranges(&parse_map(r#"{"scales":[1e-50]}"#)).is_err());
     }
 }

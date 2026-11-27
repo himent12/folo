@@ -31,7 +31,12 @@ export async function check(bytes: Uint8Array, buffer: ArrayBuffer, img: ImageDa
     maxDet: 100,
   };
   const r4: FoloDetectResult = await a.detectTiled(img, undefined, undefined, tileOpts);
-  const r5: FoloDetectResult = await b.detectTiled(rgba, 64, 48, { tileWidth: 32, tileHeight: 32, mergeIou: 0.5 });
+  const r5: FoloDetectResult = await b.detectTiled(rgba, 64, 48, {
+    tileWidth: 32,
+    tileHeight: 32,
+    mergeIou: 0.5,
+    fullImagePass: false,
+  });
   const ttaOpts: FoloTtaDetectOptions = {
     hflip: true,
     scales: [0.83, 1.0, 1.17],

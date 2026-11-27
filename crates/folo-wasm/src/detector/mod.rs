@@ -16,11 +16,13 @@
 //! - [`Detector::detect_tta`] ([`tta`]) runs multi-scale and/or horizontal-flip Test-Time Augmentation with
 //!   deterministic cross-view merging (`folo_vision::tta`).
 
+mod options;
 mod tiled;
 mod tta;
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
+use std::future::Future;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use std::time::Instant;
@@ -33,17 +35,17 @@ use folo_data::{Image, Letterbox, LetterboxOptions, PAD_VALUE};
 use folo_gpu::GpuContext;
 use folo_nn::io::{ModelFile, Purpose};
 use folo_vision::boxes::Xyxy;
-use folo_vision::fusion::BoxFusion;
 use folo_vision::model::HeadMode;
 use folo_vision::nms::{Candidate, Detection, NmsConfig, nms_candidates, topk_candidates};
-use folo_vision::tta::DEFAULT_TTA_SCALES;
-use folo_vision::{
-    FoloModel, HeadOutput, Precision, PredictConfig, Predictor, TileConfig, TileMergeMetric, Timing,
-    TtaConfig,
-};
-use serde::{Deserialize, Serialize};
+use folo_vision::{FoloModel, HeadOutput, Precision, PredictConfig, Predictor, Timing};
 
 use crate::simd::{RgbaScratch, letterbox_rgba_planar_f32_with_scratch, rgba_to_rgb};
+
+pub use options::{
+    Backend, BackendChoice, DetectOptions, DetectResult, DetectorInfo, LoadOptions, TileDetectOptions,
+    TtaDetectOptions,
+};
+pub use tiled::MAX_BROWSER_TILES;
 
 /// `u8` pixel → network input (`folo_vision::predict::INV_255`).
 const INV_255: f32 = 1.0 / 255.0;
@@ -59,255 +61,29 @@ struct CachedAnchors {
     tensor: Tensor,
 }
 
-/// Which backend [`Detector::load`] should use.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum BackendChoice {
-    /// WebGPU when it initialises and runs, otherwise the CPU.
-    #[default]
-    Auto,
-    /// WebGPU or an error.
-    Webgpu,
-    /// The wasm CPU backend.
-    Cpu,
+/// Typed GPU batch error preserving whether a failure is an OOM / device-buffer-limit error eligible for
+/// chunk-halving fallback.
+pub(crate) enum BatchError {
+    Oom(String),
+    Other(String),
 }
 
-/// The backend a [`Detector`] runs on.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Backend {
-    /// folo-gpu on WebGPU (natively: Vulkan / DX12 / Metal).
-    Webgpu,
-    /// folo-core's CPU kernels (vectorised to wasm SIMD128 in browser builds).
-    Cpu,
-}
-
-impl Backend {
-    /// `"webgpu"` or `"cpu"`.
-    pub fn as_str(self) -> &'static str {
+impl BatchError {
+    fn into_string(self) -> String {
         match self {
-            Backend::Webgpu => "webgpu",
-            Backend::Cpu => "cpu",
+            BatchError::Oom(s) | BatchError::Other(s) => s,
         }
     }
-}
 
-/// [`Detector::load`] options (the JS `load` options object; unknown fields are ignored).
-#[derive(Clone, Debug, Default, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
-pub struct LoadOptions {
-    /// `auto` (default), `webgpu` or `cpu`.
-    pub backend: BackendChoice,
-    /// Echoed as `model_id` in every result (docs/API.md); empty by default.
-    pub model_id: Option<String>,
-    /// Letterbox size; defaults to the file's `folo.imgsz`.
-    pub imgsz: Option<u32>,
-    /// `f32` (default) or `f16`: half precision on WebGPU with `shader-f16`; f32 elsewhere (the CPU, an adapter
-    /// without it), with the reason in [`DetectorInfo::precision_fallback`].
-    pub precision: Precision,
-}
-
-/// Per-call options (the JS `detect` options object), with docs/API.md's `/api/predict` defaults.
-#[derive(Clone, Copy, Debug, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
-pub struct DetectOptions {
-    /// Score threshold in `0..=1`.
-    pub conf: f32,
-    /// NMS IoU threshold in `0..=1`.
-    pub iou: f32,
-    /// Detections kept, at least 1.
-    pub max_det: usize,
-}
-
-impl Default for DetectOptions {
-    fn default() -> Self {
-        DetectOptions { conf: 0.25, iou: 0.7, max_det: 300 }
+    fn from_vision(e: folo_vision::Error) -> Self {
+        let is_oom = e.is_gpu_out_of_memory()
+            || matches!(&e, folo_vision::Error::Core(ce) | folo_vision::Error::Nn(folo_nn::Error::Core(ce)) if is_core_gpu_oom(ce));
+        if is_oom { BatchError::Oom(e.to_string()) } else { BatchError::Other(e.to_string()) }
     }
-}
 
-/// Per-call options for SAHI tiled inference ([`Detector::detect_tiled`]).
-#[derive(Clone, Debug, PartialEq, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
-pub struct TileDetectOptions {
-    /// Score threshold in `0..=1` (default `0.25`).
-    pub conf: f32,
-    /// Per-tile NMS IoU threshold in `0..=1` (default `0.7`).
-    pub iou: f32,
-    /// Maximum detections kept per tile and after cross-tile merging, at least `1` (default `300`).
-    pub max_det: usize,
-    /// Convenience square tile size in pixels (`tileWidth` / `tileHeight` override it when set; default `640`).
-    pub tile_size: Option<u32>,
-    /// Target tile width in pixels (defaults to `tileSize`, or `640`).
-    pub tile_width: Option<u32>,
-    /// Target tile height in pixels (defaults to `tileSize`, or `640`).
-    pub tile_height: Option<u32>,
-    /// Convenience symmetric overlap ratio in `[0, 1)` (`overlapX` / `overlapY` override it; default `0.2`).
-    pub overlap: Option<f32>,
-    /// Horizontal overlap ratio between adjacent tiles in `[0, 1)`.
-    pub overlap_x: Option<f32>,
-    /// Vertical overlap ratio between adjacent tiles in `[0, 1)`.
-    pub overlap_y: Option<f32>,
-    /// Also run a full-image pass alongside the tiles to preserve large boundary-spanning objects (default `true`).
-    #[serde(alias = "fullImagePass")]
-    pub full_image: bool,
-    /// Maximum cropped tiles predicted per WebGPU batch, at least `1` (default `8`).
-    pub tile_batch: usize,
-    /// Cross-tile merge overlap metric: `"ios"` (default) or `"iou"`.
-    pub merge_metric: TileMergeMetric,
-    /// Cross-tile merge overlap threshold in `0..=1` (default `0.5`; also accepts JS alias `mergeIou`).
-    #[serde(alias = "mergeIou")]
-    pub merge_threshold: f32,
-    /// Cross-tile box fusion rule: `"vote"` (default), `"none"`, `"dfl"`, or `"sebf"`.
-    pub merge_fusion: BoxFusion,
-    /// Merge overlapping detections across different classes (default `false`).
-    pub class_agnostic: bool,
-}
-
-impl Default for TileDetectOptions {
-    fn default() -> Self {
-        let def = TileConfig::default();
-        TileDetectOptions {
-            conf: 0.25,
-            iou: 0.7,
-            max_det: def.max_det,
-            tile_size: None,
-            tile_width: None,
-            tile_height: None,
-            overlap: None,
-            overlap_x: None,
-            overlap_y: None,
-            full_image: def.full_image,
-            tile_batch: def.tile_batch,
-            merge_metric: def.merge_metric,
-            merge_threshold: def.merge_threshold,
-            merge_fusion: def.merge_fusion,
-            class_agnostic: def.class_agnostic,
-        }
+    fn from_core(e: folo_core::Error) -> Self {
+        if is_core_gpu_oom(&e) { BatchError::Oom(e.to_string()) } else { BatchError::Other(e.to_string()) }
     }
-}
-
-impl TileDetectOptions {
-    /// Validate and resolve into a [`TileConfig`].
-    pub fn to_tile_config(&self) -> Result<TileConfig, String> {
-        if let Some(0) = self.tile_size {
-            return Err("tile_size must be positive, got 0".into());
-        }
-        if let Some(o) = self.overlap
-            && (!o.is_finite() || !(0.0..1.0).contains(&o))
-        {
-            return Err(format!("tile overlap must be finite and in [0, 1), got {o}"));
-        }
-        let def = TileConfig::default();
-        let tile_cfg = TileConfig {
-            tile_width: self.tile_width.unwrap_or_else(|| self.tile_size.unwrap_or(def.tile_width)),
-            tile_height: self.tile_height.unwrap_or_else(|| self.tile_size.unwrap_or(def.tile_height)),
-            overlap_x: self.overlap_x.unwrap_or_else(|| self.overlap.unwrap_or(def.overlap_x)),
-            overlap_y: self.overlap_y.unwrap_or_else(|| self.overlap.unwrap_or(def.overlap_y)),
-            full_image: self.full_image,
-            tile_batch: self.tile_batch,
-            merge_metric: self.merge_metric,
-            merge_threshold: self.merge_threshold,
-            merge_fusion: self.merge_fusion,
-            class_agnostic: self.class_agnostic,
-            max_det: self.max_det,
-        };
-        tile_cfg.validate().map_err(err)?;
-        Ok(tile_cfg)
-    }
-}
-
-/// Per-call options for Test-Time Augmentation ([`Detector::detect_tta`]).
-#[derive(Clone, Debug, PartialEq, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
-pub struct TtaDetectOptions {
-    /// Score threshold in `0..=1` (default `0.25`).
-    pub conf: f32,
-    /// Per-view NMS IoU threshold in `0..=1` (default `0.7`).
-    pub iou: f32,
-    /// Maximum detections kept per view and after cross-view merging, at least `1` (default `300`).
-    pub max_det: usize,
-    /// Also evaluate a horizontally flipped mirror at each scale (default `true`).
-    pub hflip: bool,
-    /// Multi-scale multipliers applied to the detector's `imgsz` (default `[0.83, 1.0, 1.17]`).
-    pub scales: Vec<f32>,
-    /// Cross-view merge IoU threshold in `0..=1` (defaults to `iou` when omitted).
-    pub merge_iou: Option<f32>,
-    /// Cross-view box fusion rule: `"vote"` (default), `"none"`, `"dfl"`, or `"sebf"`.
-    pub merge_fusion: BoxFusion,
-    /// Merge overlapping detections across different classes (default `false`).
-    pub class_agnostic: bool,
-}
-
-impl Default for TtaDetectOptions {
-    fn default() -> Self {
-        let def = TtaConfig::default();
-        TtaDetectOptions {
-            conf: 0.25,
-            iou: 0.7,
-            max_det: 300,
-            hflip: def.hflip,
-            scales: DEFAULT_TTA_SCALES.to_vec(),
-            merge_iou: def.merge_iou,
-            merge_fusion: def.merge_fusion,
-            class_agnostic: def.class_agnostic,
-        }
-    }
-}
-
-impl TtaDetectOptions {
-    /// Validate and resolve into a [`TtaConfig`].
-    pub fn to_tta_config(&self) -> Result<TtaConfig, String> {
-        let tta_cfg = TtaConfig {
-            hflip: self.hflip,
-            scales: self.scales.clone(),
-            merge_iou: self.merge_iou,
-            merge_fusion: self.merge_fusion,
-            class_agnostic: self.class_agnostic,
-            max_det: Some(self.max_det),
-        };
-        tta_cfg.validate().map_err(err)?;
-        Ok(tta_cfg)
-    }
-}
-
-/// What [`Detector::info`] reports.
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DetectorInfo {
-    /// `webgpu` or `cpu`.
-    pub backend: Backend,
-    /// docs/API.md's device string: `gpu:0` or `cpu`.
-    pub device: String,
-    /// The GPU adapter's name (WebGPU only; `None` when the browser does not disclose it, as Chrome does).
-    pub adapter: Option<String>,
-    /// Why `auto` fell back to the CPU, if it did.
-    pub fallback: Option<String>,
-    /// The precision the model runs in: `f32` or `f16`.
-    pub precision: Precision,
-    /// Why a requested `f16` runs in `f32`, if it does.
-    pub precision_fallback: Option<String>,
-    /// Whether the CPU kernels were built with wasm SIMD128.
-    pub simd128: bool,
-    /// CPU threads (1: the wasm build is single-threaded).
-    pub threads: usize,
-    /// Model family and scale, e.g. `folo-n`.
-    pub arch: String,
-    /// Letterbox size.
-    pub imgsz: u32,
-    /// Class names, indexed by class id.
-    pub classes: Vec<String>,
-    /// The `model_id` echoed in results.
-    pub model_id: String,
-}
-
-/// A detection result: docs/API.md's `/api/predict` response plus the backend that produced it.
-#[derive(Clone, Debug, Serialize)]
-pub struct DetectResult {
-    /// The `/api/predict` fields.
-    #[serde(flatten)]
-    pub response: folo_api::PredictResponse,
-    /// `webgpu` or `cpu`.
-    pub backend: Backend,
 }
 
 /// A loaded model ready to detect. See the module docs.
@@ -384,15 +160,18 @@ impl<'a> PooledRgb<'a> {
     pub(crate) fn image(&self) -> &Image {
         self.img.as_ref().expect("PooledRgb image present until drop")
     }
+
+    /// Take ownership of the pooled `Image` (caller is responsible for returning `img.data` via
+    /// [`Detector::return_rgb_buffer`]).
+    pub(crate) fn into_image(mut self) -> Image {
+        self.img.take().expect("PooledRgb image present until taken")
+    }
 }
 
 impl Drop for PooledRgb<'_> {
     fn drop(&mut self) {
         if let Some(img) = self.img.take() {
-            let mut scratch = self.detector.scratch.borrow_mut();
-            if img.data.capacity() > scratch.rgb.capacity() {
-                scratch.rgb = img.data;
-            }
+            self.detector.return_rgb_buffer(img.data);
         }
     }
 }
@@ -476,6 +255,14 @@ impl Detector {
         }
     }
 
+    /// Return a previously taken RGB staging buffer to the scratch pool, retaining the larger backing capacity.
+    pub(crate) fn return_rgb_buffer(&self, buf: Vec<u8>) {
+        let mut scratch = self.scratch.borrow_mut();
+        if buf.capacity() > scratch.rgb.capacity() {
+            scratch.rgb = buf;
+        }
+    }
+
     /// The backend in use.
     pub fn backend(&self) -> Backend {
         self.backend
@@ -553,8 +340,10 @@ impl Detector {
 
         let pooled = PooledRgb::new(self, rgba, width, height)?;
         let rgb_ms = ms(t0);
-        let (mut dets, timing) =
-            self.detect_gpu_batch_once(ctx, std::slice::from_ref(pooled.image()), cfg, nms).await?;
+        let (mut dets, timing) = self
+            .detect_gpu_batch_once(ctx, std::slice::from_ref(pooled.image()), cfg, nms)
+            .await
+            .map_err(BatchError::into_string)?;
         let detections = dets.pop().expect("one image in, one out");
         let timing = Timing::new(rgb_ms + timing.preprocess_ms, timing.inference_ms, timing.postprocess_ms);
         Ok(self.build_result(width, height, detections, timing))
@@ -659,26 +448,7 @@ impl Detector {
         cfg: &PredictConfig,
         nms: &NmsConfig,
     ) -> Result<(Vec<Vec<Detection>>, Timing), String> {
-        let mut pending: VecDeque<&[Image]> = VecDeque::from([imgs]);
-        let mut all_dets = Vec::with_capacity(imgs.len());
-        let (mut pre, mut inf, mut post) = (0.0f64, 0.0f64, 0.0f64);
-        while let Some(chunk) = pending.pop_front() {
-            match self.detect_gpu_batch_once(ctx, chunk, cfg, nms).await {
-                Ok((dets, t)) => {
-                    all_dets.extend(dets);
-                    pre += t.preprocess_ms;
-                    inf += t.inference_ms;
-                    post += t.postprocess_ms;
-                }
-                Err(e) if chunk.len() > 1 && is_gpu_oom_msg(&e) => {
-                    let mid = chunk.len() / 2;
-                    pending.push_front(&chunk[mid..]);
-                    pending.push_front(&chunk[..mid]);
-                }
-                Err(e) => return Err(e),
-            }
-        }
-        Ok((all_dets, Timing::new(pre, inf, post)))
+        run_chunks_with_oom_fallback(imgs, |chunk| self.detect_gpu_batch_once(ctx, chunk, cfg, nms)).await
     }
 
     /// Execute one WebGPU batch (`imgs.len() >= 1`) with device-side candidate extraction and compact async
@@ -689,17 +459,17 @@ impl Detector {
         imgs: &[Image],
         cfg: &PredictConfig,
         nms: &NmsConfig,
-    ) -> Result<(Vec<Vec<Detection>>, Timing), String> {
+    ) -> Result<(Vec<Vec<Detection>>, Timing), BatchError> {
         let t0 = Instant::now();
         let (batch, pre, t1, out, canvas) = {
             let mut p = self.predictor.borrow_mut();
-            p.set_config(cfg.clone()).map_err(err)?;
-            let batch = p.prepare(imgs, cfg.rect).map_err(err)?;
+            p.set_config(cfg.clone()).map_err(BatchError::from_vision)?;
+            let batch = p.prepare(imgs, cfg.rect).map_err(BatchError::from_vision)?;
             let dims = batch.input.dims();
             let canvas = [dims[2], dims[3]];
             let pre = ms(t0);
             let t1 = Instant::now();
-            let out = p.forward(&batch).map_err(err)?;
+            let out = p.forward(&batch).map_err(BatchError::from_vision)?;
             (batch, pre, t1, out, canvas)
         };
 
@@ -725,16 +495,16 @@ impl Detector {
             }
             None => {
                 let nc = out.num_classes;
-                let dec = out.decoded_on_device().map_err(err)?;
+                let dec = out.decoded_on_device().map_err(|e| BatchError::from_vision(e.into()))?;
                 drop(out);
-                let host = folo_gpu::download_async(ctx, &dec).await.map_err(err)?;
+                let host = folo_gpu::download_async(ctx, &dec).await.map_err(BatchError::from_core)?;
                 let inf = ms(t1);
                 let t2 = Instant::now();
-                let all = host.to_vec::<f32>().map_err(err)?;
+                let all = host.to_vec::<f32>().map_err(BatchError::from_core)?;
                 let a = dec.dims()[1];
                 let decoded = HeadOutput::split_decoded(&all, a, nc);
                 let mut p = self.predictor.borrow_mut();
-                p.set_config(cfg.clone()).map_err(err)?;
+                p.set_config(cfg.clone()).map_err(BatchError::from_vision)?;
                 (p.finish(&batch, decoded, nc), inf, t2)
             }
         };
@@ -751,7 +521,7 @@ impl Detector {
         out: &HeadOutput,
         canvas: [usize; 2],
         nms: &NmsConfig,
-    ) -> Result<Option<(Tensor, HeadMode, usize, usize)>, String> {
+    ) -> Result<Option<(Tensor, HeadMode, usize, usize)>, BatchError> {
         let _g = no_grad();
         let (b, a, nc, rm) = (out.batch(), out.num_anchors(), out.num_classes, out.reg_max);
         if b == 0
@@ -765,8 +535,8 @@ impl Detector {
         let dev = out.box_raw.device();
         let anchors = self.gpu_anchors(out, canvas, dev)?;
         let params = DetectDecode { reg_max: rm, num_classes: nc, conf: nms.candidate_conf_for(out.mode) };
-        let Some(cands) =
-            Tensor::detect_candidates(&out.box_raw, &out.cls_raw, &anchors, &params).map_err(err)?
+        let Some(cands) = Tensor::detect_candidates(&out.box_raw, &out.cls_raw, &anchors, &params)
+            .map_err(BatchError::from_core)?
         else {
             return Ok(None);
         };
@@ -774,7 +544,7 @@ impl Detector {
     }
 
     /// Returns a cached `[3, A]` device anchors tensor for `canvas`, uploading it once per canvas shape.
-    fn gpu_anchors(&self, out: &HeadOutput, canvas: [usize; 2], dev: Device) -> Result<Tensor, String> {
+    fn gpu_anchors(&self, out: &HeadOutput, canvas: [usize; 2], dev: Device) -> Result<Tensor, BatchError> {
         let a = out.num_anchors();
         if let Some(cached) = self.anchors.borrow().as_ref()
             && cached.canvas == canvas
@@ -787,10 +557,45 @@ impl Detector {
         v.extend(out.anchors.points.iter().map(|p| p[0]));
         v.extend(out.anchors.points.iter().map(|p| p[1]));
         v.extend_from_slice(&out.anchors.strides);
-        let tensor = Tensor::from_vec(v, [3, a]).map_err(err)?.to_device(dev).map_err(err)?;
+        let tensor = Tensor::from_vec(v, [3, a])
+            .map_err(BatchError::from_core)?
+            .to_device(dev)
+            .map_err(BatchError::from_core)?;
         *self.anchors.borrow_mut() = Some(CachedAnchors { canvas, num_anchors: a, tensor: tensor.clone() });
         Ok(tensor)
     }
+}
+
+/// Iterative chunk-halving driver for GPU batch execution: splits a failing chunk in half on [`BatchError::Oom`]
+/// while preserving exact input order and failing immediately on non-OOM or single-element errors.
+async fn run_chunks_with_oom_fallback<'a, T, R, F, Fut>(
+    items: &'a [T],
+    mut run_chunk: F,
+) -> Result<(Vec<R>, Timing), String>
+where
+    F: FnMut(&'a [T]) -> Fut,
+    Fut: Future<Output = Result<(Vec<R>, Timing), BatchError>>,
+{
+    let mut pending: VecDeque<&'a [T]> = VecDeque::from([items]);
+    let mut all = Vec::with_capacity(items.len());
+    let (mut pre, mut inf, mut post) = (0.0f64, 0.0f64, 0.0f64);
+    while let Some(chunk) = pending.pop_front() {
+        match run_chunk(chunk).await {
+            Ok((out, t)) => {
+                all.extend(out);
+                pre += t.preprocess_ms;
+                inf += t.inference_ms;
+                post += t.postprocess_ms;
+            }
+            Err(BatchError::Oom(_)) if chunk.len() > 1 => {
+                let mid = chunk.len() / 2;
+                pending.push_front(&chunk[mid..]);
+                pending.push_front(&chunk[..mid]);
+            }
+            Err(e) => return Err(e.into_string()),
+        }
+    }
+    Ok((all, Timing::new(pre, inf, post)))
 }
 
 /// Converts a [`PredictConfig`] into its matching [`NmsConfig`].
@@ -806,9 +611,21 @@ pub(crate) fn nms_config(cfg: &PredictConfig) -> NmsConfig {
     }
 }
 
-/// Whether a GPU error string indicates an out-of-memory or device buffer-limit failure suitable for batch splitting.
-fn is_gpu_oom_msg(msg: &str) -> bool {
-    if msg.contains("bytes exceeds the device limit") {
+/// Whether a `folo_core::Error` from `wgpu` indicates an out-of-memory or device buffer-limit failure
+/// (`GpuError::Limit` / `HeadroomBlocker` / WebGPU OOM) suitable for chunk halving.
+fn is_core_gpu_oom(e: &folo_core::Error) -> bool {
+    let folo_core::Error::Backend { backend: "wgpu", msg } = e else {
+        return false;
+    };
+    is_wgpu_oom_or_limit_msg(msg)
+}
+
+fn is_wgpu_oom_or_limit_msg(msg: &str) -> bool {
+    if msg.contains("exceeds max_storage_buffer_binding_size")
+        || msg.contains("exceeds max_buffer_size")
+        || msg.contains("exceeds estimated remaining VRAM")
+        || msg.contains("bytes exceeds the device limit")
+    {
         return true;
     }
     let lower = msg.to_ascii_lowercase();
@@ -822,27 +639,42 @@ async fn download_candidate_records_batch(
     cands: &Tensor,
     b: usize,
     a: usize,
-) -> Result<Vec<Vec<u32>>, String> {
+) -> Result<Vec<Vec<u32>>, BatchError> {
     const W: usize = DETECT_RECORD_WORDS;
     let cap = CANDIDATE_READBACK.min(a);
     let stride = 1 + W * cap;
-    let head_view = cands.narrow(1, 0, stride).map_err(err)?;
-    let head = folo_gpu::download_async(ctx, &head_view).await.map_err(err)?.to_vec::<u32>().map_err(err)?;
+    let head_view = cands.narrow(1, 0, stride).map_err(BatchError::from_core)?;
+    let head = folo_gpu::download_async(ctx, &head_view)
+        .await
+        .map_err(BatchError::from_core)?
+        .to_vec::<u32>()
+        .map_err(BatchError::from_core)?;
     if head.len() != b * stride {
-        return Err(format!("detect_candidates: expected {} header words, got {}", b * stride, head.len()));
+        return Err(BatchError::Other(format!(
+            "detect_candidates: expected {} header words, got {}",
+            b * stride,
+            head.len()
+        )));
     }
     let mut records = Vec::with_capacity(b);
     for (i, row) in head.chunks_exact(stride).enumerate() {
         let n = row[0] as usize;
         if n > a {
-            return Err(format!("detect_candidates: {n} candidates for {a} anchors"));
+            return Err(BatchError::Other(format!("detect_candidates: {n} candidates for {a} anchors")));
         }
         if n <= cap {
             records.push(row[1..1 + W * n].to_vec());
         } else {
-            let full_view = cands.narrow(0, i, 1).map_err(err)?.narrow(1, 1, W * n).map_err(err)?;
-            let full =
-                folo_gpu::download_async(ctx, &full_view).await.map_err(err)?.to_vec::<u32>().map_err(err)?;
+            let full_view = cands
+                .narrow(0, i, 1)
+                .map_err(BatchError::from_core)?
+                .narrow(1, 1, W * n)
+                .map_err(BatchError::from_core)?;
+            let full = folo_gpu::download_async(ctx, &full_view)
+                .await
+                .map_err(BatchError::from_core)?
+                .to_vec::<u32>()
+                .map_err(BatchError::from_core)?;
             records.push(full);
         }
     }
@@ -876,10 +708,10 @@ pub(crate) fn validate_rgba(rgba: &[u8], width: u32, height: u32) -> Result<usiz
     if width == 0 || height == 0 {
         return Err(format!("image is empty ({width}x{height})"));
     }
-    // Checked: `usize` is 32 bits on wasm32, where 65536 x 65536 x 4 would wrap to 0.
+    // Checked: `usize` is 32 bits on wasm32, where 65536 x 65536 x 4 would wrap to 0; also cap at `isize::MAX`.
     let n = (width as usize)
         .checked_mul(height as usize)
-        .filter(|n| n.checked_mul(4).is_some())
+        .filter(|n| n.checked_mul(4).is_some_and(|b| b <= isize::MAX as usize))
         .ok_or_else(|| format!("image is too large ({width}x{height})"))?;
     if rgba.len() != n * 4 {
         return Err(format!(
@@ -901,7 +733,7 @@ pub fn rgba_to_image(rgba: &[u8], width: u32, height: u32) -> Result<Image, Stri
 
 #[cfg(test)]
 mod tests {
-    use super::{is_gpu_oom_msg, validate_detect_params, validate_imgsz};
+    use super::*;
 
     #[test]
     fn validators_and_oom_classifier_cover_edge_cases() {
@@ -917,8 +749,60 @@ mod tests {
         assert!(validate_detect_params(0.5, f32::INFINITY, 10).is_err());
         assert!(validate_detect_params(0.5, 0.5, 0).is_err());
 
-        assert!(is_gpu_oom_msg("buffer of 200 bytes exceeds the device limit (128 bytes)"));
-        assert!(is_gpu_oom_msg("wgpu Out of Memory"));
-        assert!(!is_gpu_oom_msg("invalid tensor shape"));
+        for msg in [
+            "storage buffer of 200 bytes (200 B) exceeds max_storage_buffer_binding_size (128 bytes / 128 B)",
+            "buffer of 200 bytes (200 B) exceeds max_buffer_size (128 bytes / 128 B)",
+            "storage buffer of 200 bytes (200 B) exceeds estimated remaining VRAM (128 bytes / 128 B)",
+            "buffer of 200 bytes exceeds the device limit (128 bytes)",
+            "wgpu Out of Memory",
+        ] {
+            let core_err = folo_core::Error::Backend { backend: "wgpu", msg: msg.into() };
+            assert!(is_core_gpu_oom(&core_err), "must classify as GPU OOM/limit: {msg}");
+            assert!(matches!(BatchError::from_core(core_err), BatchError::Oom(_)));
+        }
+        let non_oom = folo_core::Error::Backend { backend: "wgpu", msg: "invalid tensor shape".into() };
+        assert!(!is_core_gpu_oom(&non_oom));
+        assert!(matches!(BatchError::from_core(non_oom), BatchError::Other(_)));
+    }
+
+    #[test]
+    fn oom_fallback_splits_storage_limit_batches_in_order() {
+        let items = [10u32, 20, 30, 40, 50, 60];
+        let mut seen_lens = Vec::new();
+        let (out, timing) = pollster::block_on(run_chunks_with_oom_fallback(&items, |chunk| {
+            seen_lens.push(chunk.len());
+            let chunk_vec = chunk.to_vec();
+            async move {
+                if chunk_vec.len() > 2 {
+                    let err = folo_core::Error::Backend {
+                        backend: "wgpu",
+                        msg: "storage buffer of 268435456 bytes exceeds max_storage_buffer_binding_size (134217728 bytes)".into(),
+                    };
+                    return Err(BatchError::from_core(err));
+                }
+                Ok((chunk_vec, Timing::new(1.0, 2.0, 0.5)))
+            }
+        }))
+        .unwrap();
+        assert_eq!(out, items);
+        assert_eq!(seen_lens, vec![6, 3, 1, 2, 3, 1, 2]);
+        assert!(timing.total_ms > 0.0);
+
+        // Non-OOM errors must NOT split or retry.
+        let mut calls = 0usize;
+        let err = pollster::block_on(run_chunks_with_oom_fallback(&items, |_| {
+            calls += 1;
+            async { Err::<(Vec<u32>, Timing), _>(BatchError::Other("shader validation failed".into())) }
+        }))
+        .unwrap_err();
+        assert_eq!(calls, 1);
+        assert!(err.contains("shader validation failed"));
+
+        // Single-element OOM cannot split further and fails cleanly.
+        let err = pollster::block_on(run_chunks_with_oom_fallback(&items[..1], |_| async {
+            Err::<(Vec<u32>, Timing), _>(BatchError::Oom("exceeds max_buffer_size".into()))
+        }))
+        .unwrap_err();
+        assert!(err.contains("max_buffer_size"));
     }
 }

@@ -465,6 +465,11 @@ fn rejects_bad_images_and_invalid_parameters() {
         );
     }
     assert!(pollster::block_on(det.detect_tiled(&[], 0, 4, TileDetectOptions::default())).is_err());
+    // Exceeding MAX_BROWSER_TILES (100x100 with tile_size = 1 -> 10,000 tiles > 4,096) rejects cleanly.
+    let img_100 = vec![0u8; 100 * 100 * 4];
+    let too_many_tiles = TileDetectOptions { tile_size: Some(1), overlap: Some(0.0), ..Default::default() };
+    let err = pollster::block_on(det.detect_tiled(&img_100, 100, 100, too_many_tiles)).unwrap_err();
+    assert!(err.contains("browser limit"), "{err}");
 
     // TTA parameter validation.
     for bad in [
@@ -535,4 +540,53 @@ fn options_parse_from_js_json() {
     // Invalid enum values reject cleanly.
     assert!(serde_json::from_str::<TileDetectOptions>(r#"{"mergeMetric":"giou"}"#).is_err());
     assert!(serde_json::from_str::<TtaDetectOptions>(r#"{"mergeFusion":"invalid"}"#).is_err());
+}
+
+#[test]
+fn concurrent_detect_and_tta_futures_do_not_conflict() {
+    use std::future::Future;
+    use std::pin::pin;
+    use std::task::{Context, Poll, Waker};
+
+    let bytes = model_bytes();
+    let backend = if has_gpu() { BackendChoice::Webgpu } else { BackendChoice::Cpu };
+    let det = load_with_imgsz(bytes, backend, Precision::F32, 128).unwrap();
+    let (w, h) = (160, 128);
+    let img = rgba(w, h);
+    let tta_opts = TtaDetectOptions {
+        conf: OPTS.conf,
+        iou: OPTS.iou,
+        max_det: OPTS.max_det,
+        hflip: true,
+        scales: vec![0.75, 1.25],
+        ..Default::default()
+    };
+
+    let mut f_tta = pin!(det.detect_tta(&img, w, h, tta_opts));
+    let mut f_single = pin!(det.detect(&img, w, h, OPTS));
+    let mut cx = Context::from_waker(Waker::noop());
+    let mut r_tta = None;
+    let mut r_single = None;
+    for _ in 0..10_000 {
+        if r_tta.is_none()
+            && let Poll::Ready(res) = f_tta.as_mut().poll(&mut cx)
+        {
+            r_tta = Some(res.unwrap());
+        }
+        if r_single.is_none()
+            && let Poll::Ready(res) = f_single.as_mut().poll(&mut cx)
+        {
+            r_single = Some(res.unwrap());
+        }
+        if r_tta.is_some() && r_single.is_some() {
+            break;
+        }
+        std::thread::yield_now();
+    }
+    let single = r_single.expect("single detect future completed");
+    let tta = r_tta.expect("TTA future completed");
+    let baseline = pollster::block_on(det.detect(&img, w, h, OPTS)).unwrap();
+    assert_eq!(single.response.boxes, baseline.response.boxes);
+    assert!(!tta.response.boxes.is_empty());
+    assert_eq!(det.info().imgsz, 128);
 }
