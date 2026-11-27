@@ -14,6 +14,7 @@ pub use v2::{features_v2, features_v2_rgb0_u8};
 use std::cell::{OnceCell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use folo_core::Tensor;
@@ -73,6 +74,8 @@ pub struct Int8Plan {
     scratch: Mutex<Vec<ScratchPool>>,
     /// Cumulative scratch pool stats across all checked-in forwards (for diagnostics and tests).
     stats: Mutex<ScratchStats>,
+    /// Set when the owning model's weights are replaced in place (`load`) and no longer match `cal.weights`.
+    invalidated: AtomicBool,
 }
 
 impl Int8Plan {
@@ -107,7 +110,19 @@ impl Int8Plan {
             uniform_grids: RwLock::new(HashMap::with_hasher(FnvBuildHasher)),
             scratch: Mutex::new(Vec::new()),
             stats: Mutex::new(ScratchStats::default()),
+            invalidated: AtomicBool::new(false),
         }
+    }
+
+    /// Mark this plan stale after its model's weights were replaced with incompatible ones.
+    pub(crate) fn invalidate(&self) {
+        self.invalidated.store(true, Ordering::Release);
+    }
+
+    /// Whether this plan is still valid for the model's current weights.
+    #[inline]
+    pub(crate) fn is_valid(&self) -> bool {
+        !self.invalidated.load(Ordering::Acquire)
     }
 
     /// The calibration.

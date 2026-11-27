@@ -225,16 +225,23 @@ fn folo2_int8_fp32_parity_determinism_and_scratch_reuse() {
     assert!(max_score_diff < 0.05, "int8 vs fp32 max score diff too large: {max_score_diff}");
     assert!(max_box_diff < 2.0, "int8 vs fp32 max box diff too large: {max_box_diff}");
 
-    // Thread-count bit-determinism: 1 thread vs 4 threads produce identical outputs.
+    // Thread-count bit-determinism: 1 thread vs 4 threads produce identical outputs (with `no_grad` created
+    // inside each worker closure because `no_grad` is thread-local).
     let p1 = rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap();
     let p4 = rayon::ThreadPoolBuilder::new().num_threads(4).build().unwrap();
     let y1: Vec<Vec<f32>> = p1
-        .install(|| quant::exec::features_v2(&m_f32, &plan, &x_test).unwrap())
+        .install(|| {
+            let _g = no_grad();
+            quant::exec::features_v2(&m_f32, &plan, &x_test).unwrap()
+        })
         .into_iter()
         .map(|t| t.to_vec::<f32>().unwrap())
         .collect();
     let y4: Vec<Vec<f32>> = p4
-        .install(|| quant::exec::features_v2(&m_f32, &plan, &x_test).unwrap())
+        .install(|| {
+            let _g = no_grad();
+            quant::exec::features_v2(&m_f32, &plan, &x_test).unwrap()
+        })
         .into_iter()
         .map(|t| t.to_vec::<f32>().unwrap())
         .collect();
@@ -277,12 +284,70 @@ fn folo2_int8_dot_folo_save_load_round_trip() {
     let y_loaded = loaded.forward(&x_cal).unwrap().cls_raw.to_vec::<f32>().unwrap();
     assert_eq!(y_orig, y_loaded, "save/open_int8 round-trip must be bit-identical");
 
+    // Exporting as F32 preserves `folo.quant` so `open_int8` round-trips cleanly.
+    let path_f32_exp = dir.path().join("folo2-f32-export.folo");
+    m.export(&path_f32_exp, folo_nn::io::FloatDType::F32).unwrap();
+    let exp_loaded = FoloV2Model::open_int8(&path_f32_exp).unwrap();
+    assert_eq!(exp_loaded.int8().unwrap().f32_convs, expected_f32_convs);
+
     // Exporting as F16 strips `folo.quant`, so `open_int8` reports missing calibration.
     let path_f16 = dir.path().join("folo2-f16.folo");
     m.export(&path_f16, folo_nn::io::FloatDType::F16).unwrap();
     let f16_file = ModelFile::open(&path_f16).unwrap();
     assert!(Calibration::from_metadata(f16_file.metadata()).unwrap().is_none());
     assert!(FoloV2Model::open_int8(&path_f16).is_err());
+
+    // Replacing weights via `load()` invalidates a fingerprinted int8 plan so neither inference nor `save()`
+    // reuses the old activation ranges / fingerprint.
+    let other_v2 = tiny_v2(FoloV2Config::new("n", 4).unwrap(), 59, &x_cal);
+    let path_other = dir.path().join("folo2-other.folo");
+    other_v2.save(&path_other).unwrap();
+    let other_file = ModelFile::open(&path_other).unwrap();
+    let reloaded = FoloV2Model::open_int8(&path_q8).unwrap();
+    assert!(reloaded.int8().is_some());
+    reloaded.load(&other_file, folo_nn::io::LoadOptions::strict(folo_nn::io::Purpose::Inference)).unwrap();
+    assert!(reloaded.int8().is_none(), "load() with different weights must invalidate fingerprinted int8");
+    let path_after_load = dir.path().join("folo2-after-load.folo");
+    reloaded.save(&path_after_load).unwrap();
+    assert!(
+        Calibration::from_metadata(ModelFile::open(&path_after_load).unwrap().metadata()).unwrap().is_none(),
+        "save() after weight replacement must not persist stale folo.quant"
+    );
+
+    // Lossy `to_dtype(F16) -> to_dtype(F32)` round-trip invalidates int8 on both `FoloV2Model` and `FoloModel`.
+    let mut cast_v2 = FoloV2Model::open_int8(&path_q8).unwrap();
+    cast_v2.to_dtype(folo_core::DType::F16).unwrap();
+    assert!(cast_v2.int8().is_none());
+    cast_v2.to_dtype(folo_core::DType::F32).unwrap();
+    assert!(cast_v2.int8().is_none());
+
+    let mut v1 = folo_vision::model::FoloModel::with_rng(
+        folo_vision::model::ModelConfig::new("n", 4).unwrap(),
+        &mut Rng::seed(53),
+    )
+    .unwrap();
+    v1.fuse().unwrap();
+    let v1_cal = quant::calibrate(&v1, || std::iter::once(Ok(x_cal.clone())), Method::MinMax).unwrap();
+    v1.set_int8(Some(v1_cal)).unwrap();
+    let mut v1_other = folo_vision::model::FoloModel::with_rng(
+        folo_vision::model::ModelConfig::new("n", 4).unwrap(),
+        &mut Rng::seed(54),
+    )
+    .unwrap();
+    v1_other.fuse().unwrap();
+    let path_v1_other = dir.path().join("folo-v1-other.folo");
+    v1_other.save(&path_v1_other).unwrap();
+    v1.load(
+        &ModelFile::open(&path_v1_other).unwrap(),
+        folo_nn::io::LoadOptions::strict(folo_nn::io::Purpose::Inference),
+    )
+    .unwrap();
+    assert!(v1.int8().is_none(), "v1 load() with different weights must invalidate fingerprinted int8");
+    let path_v1_after = dir.path().join("folo-v1-after.folo");
+    v1.save(&path_v1_after).unwrap();
+    assert!(
+        Calibration::from_metadata(ModelFile::open(&path_v1_after).unwrap().metadata()).unwrap().is_none()
+    );
 
     // Tampering with weights invalidates the embedded calibration fingerprint.
     let mut tampered = m.fused_eval_clone().unwrap();
@@ -383,4 +448,120 @@ fn folo2_int8_predictor_and_validator_end_to_end() {
     assert_eq!(r1.report.per_class.len(), 3);
     assert!(r1.report.map50.is_finite());
     assert_eq!(r1.report.map50, r2.report.map50);
+}
+
+/// Regression: isolated interior candidate on a `folo2-m` P5 level (`20×20`, `64→64` `conv1` eligible for
+/// Winograd F(2×2)) with poisoned uninitialized CPU buffers must match dense box logits bit-for-bit.
+#[test]
+fn folo2_candidate_first_f2x2_tile_patch_matches_dense_with_poison() {
+    folo_core::cpu::poison_uninit(true);
+    let mut m = FoloV2Model::with_rng(FoloV2Config::new("m", 2).unwrap(), &mut Rng::seed(81)).unwrap();
+    m.fuse().unwrap();
+
+    // Force only a single isolated interior candidate on P5 (`20×20`, site `(7, 9)`) while keeping all other
+    // sites strongly negative, so `conv1` (`64→64`, `20×20 < 24`) exercises Winograd F(2×2) sparsely.
+    {
+        let _g = no_grad();
+        for lv in &m.head.levels {
+            let zeros_w = Tensor::zeros(lv.cls_branch.out.weight.dims().to_vec());
+            lv.cls_branch.out.weight.copy_from(&zeros_w).unwrap();
+            if let Some(b) = &lv.cls_branch.out.bias {
+                b.copy_from(&Tensor::full(b.dims().to_vec(), -20.0)).unwrap();
+            }
+        }
+    }
+    // Use a 640×640 input so P5 is 20×20 (`< 24` -> F(2×2) branch); bump a single P5 spatial feature to fire
+    // via a deterministic input and low enough P5 bias only on level 2.
+    let p5 = &m.head.levels[2];
+    {
+        let _g = no_grad();
+        // Set P5 cls bias to `-10.0` except make class 0 respond to spatial peak via an interior site check:
+        // even simpler, give class 0 a tiny weight on channel 0 and tune conf so only a handful of sites fire.
+        let mut w_cls = vec![0.0f32; p5.cls_branch.out.weight.numel()];
+        w_cls[0] = 1.0;
+        p5.cls_branch
+            .out
+            .weight
+            .copy_from(&Tensor::from_vec(w_cls, p5.cls_branch.out.weight.dims().to_vec()).unwrap())
+            .unwrap();
+        if let Some(b) = &p5.cls_branch.out.bias {
+            b.copy_from(&Tensor::from_vec(vec![0.0, -20.0], [2]).unwrap()).unwrap();
+        }
+    }
+
+    let x = Tensor::rand_uniform([1, 3, 640, 640], 0.0, 1.0, &mut Rng::seed(82));
+    let _g = no_grad();
+    // Pick a threshold just below the maximum P5 class-0 score so only 1..5 isolated P5 sites survive.
+    let dense_out = m.forward(&x).unwrap();
+    let (_, scores) = dense_out.decode_images(DEFAULT_IOU_FUSION_ALPHA).unwrap().pop().unwrap();
+    let p5_offset = 80 * 80 + 40 * 40;
+    let max_p5 = scores[p5_offset * 2..].iter().copied().fold(0.0f32, f32::max);
+    assert!(max_p5 > 0.01, "expected positive P5 score");
+    let nms = NmsConfig { conf: (max_p5 - 1e-4).max(0.0), ..NmsConfig::default() };
+    let dense = dense_out.detections(&nms, DEFAULT_IOU_FUSION_ALPHA).unwrap();
+    let lazy: Vec<_> =
+        m.predict_candidates(&x, &nms).unwrap().iter().map(|c| m.finish_candidates(c, &nms)).collect();
+    assert!(!dense[0].is_empty(), "expected at least one isolated P5 detection");
+    assert_eq!(
+        dense, lazy,
+        "F(2×2) isolated P5 candidate must match dense bit-for-bit even with poisoned buffers"
+    );
+}
+
+/// Regression: fused `HyperContext::attend_and_scene_cpu_fast` must add `(ffn2_gemm + bias)` before adding
+/// `e_t`, matching the reference `e_t + (ffn2_gemm + bias)` bit-for-bit on cancelling large values.
+#[test]
+fn hypercontext_ffn_residual_bias_cancellation_matches_reference() {
+    use folo_vision::model::blocks::{Fuse, Init};
+    use folo_vision::model::v2::HyperContext;
+
+    let mut rng = Rng::seed(91);
+    let mut init = Init::new(&mut rng);
+    let mut hc = HyperContext::new(4, 2, &mut init);
+    hc.fuse_().unwrap();
+    let cg = hc.ffn1.weight.dims()[0];
+    let m_edges = hc.m_edges;
+    let c_av = hc.av_proj.conv.config().out_channels;
+    assert_eq!(c_av, m_edges + cg);
+
+    {
+        let _g = no_grad();
+        // Make `av_proj` output `A = 0` (uniform attention -> `e_t = 1.0` everywhere) and `V = 1.0`.
+        hc.av_proj.conv.weight.copy_from(&Tensor::zeros([c_av, 4, 1, 1])).unwrap();
+        let mut av_b = vec![0.0f32; c_av];
+        for v in &mut av_b[m_edges..] {
+            *v = 1.0;
+        }
+        hc.av_proj.conv.bias.as_ref().unwrap().copy_from(&Tensor::from_vec(av_b, [c_av]).unwrap()).unwrap();
+
+        // Make `ffn1(e_t)` output `1.0`, so `silu(1.0) = s1`, and set `ffn2.bias = -(s1 * w2)` with
+        // `s1 * w2 ≈ +2^24` so `(ffn2_gemm + bias) == 0.0` exactly while `(1.0 + ffn2_gemm) + bias == 0.0`.
+        hc.ffn1.weight.copy_from(&Tensor::zeros([cg, cg])).unwrap();
+        let s1 = folo_core::cpu::silu(1.0f32);
+        let w_val = 16_777_216.0f32 / s1;
+        let prod = s1 * w_val;
+        hc.ffn1.bias.as_ref().unwrap().copy_from(&Tensor::full([cg], 1.0)).unwrap();
+        let mut w2 = vec![0.0f32; cg * cg];
+        for c in 0..cg {
+            w2[c * cg] = w_val;
+        }
+        hc.ffn2.weight.copy_from(&Tensor::from_vec(w2, [cg, cg]).unwrap()).unwrap();
+        hc.ffn2.bias.as_ref().unwrap().copy_from(&Tensor::full([cg], -prod)).unwrap();
+    }
+
+    let x = Tensor::zeros([1, 4, 2, 2]);
+    // Grad-enabled runs the tensor reference path (`e_t + (ffn2_gemm + bias)`).
+    let (_, g_ref) = hc.forward_with_scene(&x).unwrap();
+    // `no_grad` runs `attend_and_scene_cpu_fast`.
+    let (_, g_fast) = {
+        let _g = no_grad();
+        hc.forward_with_scene(&x).unwrap()
+    };
+    let rv = g_ref.to_vec::<f32>().unwrap();
+    let fv = g_fast.to_vec::<f32>().unwrap();
+    assert_eq!(rv, fv, "HyperContext FFN cancellation diverged between fast and reference paths");
+    assert!(
+        fv.iter().all(|&v| (v - 1.0).abs() < 1e-3),
+        "expected residual e_t = 1.0 preserved after cancelling +2^24 / -2^24, got {fv:?}"
+    );
 }

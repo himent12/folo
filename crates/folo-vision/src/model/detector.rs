@@ -294,7 +294,7 @@ impl Detector {
     /// Cast floating weights and buffers to `dtype` in place.
     pub fn to_dtype(&mut self, dtype: DType) -> Result<()> {
         match self {
-            Detector::V1(m) => Module::to_dtype(m.as_mut(), dtype),
+            Detector::V1(m) => m.to_dtype(dtype),
             Detector::V2(m) => m.to_dtype(dtype),
         }
     }

@@ -73,8 +73,7 @@ impl FoloV2Model {
             ));
         }
         let plan = self
-            .int8
-            .as_ref()
+            .active_int8()
             .ok_or_else(|| Error::Invalid("predict_candidates_rgb0_u8 requires an int8 plan".into()))?;
         folo_core::cpu::in_pool(|| {
             let _g = no_grad();
@@ -238,6 +237,9 @@ impl FoloV2Model {
                 let j = j as usize;
                 sites.push((i * hw + j) as u32);
                 let (y0, x0) = (j / w, j % w);
+                // `conv1` is a 3×3 s=1 p=1 conv that may dispatch Winograd F(4×4) (reading a tile-aligned
+                // 6×6 patch when `h >= 24 && w >= 24`) or Winograd F(2×2) (reading a tile-aligned 4×4 patch
+                // for smaller maps, which also strictly contains the 3×3 direct receptive field).
                 let (y_lo, y_hi, x_lo, x_hi) = if wino4 {
                     let (ty, tx) = (y0 / 4, x0 / 4);
                     (
@@ -247,7 +249,13 @@ impl FoloV2Model {
                         (4 * tx + 5).min(w),
                     )
                 } else {
-                    (y0.saturating_sub(1), (y0 + 2).min(h), x0.saturating_sub(1), (x0 + 2).min(w))
+                    let (ty, tx) = (y0 / 2, x0 / 2);
+                    (
+                        (2 * ty).saturating_sub(1),
+                        (2 * ty + 3).min(h),
+                        (2 * tx).saturating_sub(1),
+                        (2 * tx + 3).min(w),
+                    )
                 };
                 for y in y_lo..y_hi {
                     field[i * hw + y * w + x_lo..i * hw + y * w + x_hi].fill(true);

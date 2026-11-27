@@ -139,18 +139,19 @@ pub(super) fn single_label_block(
             *m = m.max(v);
         }
     }
-    // Precompute a conservative logit lower bound so we skip `sigmoid(m)` (`exp`) for almost all 8,400
-    // anchors while still running the exact sigmoid test on any borderline anchor (100% bit-identical).
-    let logit_bound = if conf <= 0.0 {
-        f32::NEG_INFINITY
-    } else if conf >= 1.0 {
-        f32::INFINITY
-    } else {
+    // Precompute a conservative logit lower bound for `0 < conf < 1` so we skip `sigmoid(m)` (`exp`) for almost
+    // all 8,400 anchors while leaving out-of-range thresholds (including `conf < 0` with `-inf` logits) to the
+    // exact sigmoid test below (100% bit-identical).
+    let logit_bound = if conf > 0.0 && conf < 1.0 {
         let c = f64::from(conf);
-        ((c / (1.0 - c)).ln() as f32) - 1e-3
+        Some(((c / (1.0 - c)).ln() as f32) - 1e-3)
+    } else {
+        None
     };
     for (j, &m) in (j0..j1).zip(best.iter()) {
-        if m <= logit_bound || m.is_nan() {
+        if let Some(bound) = logit_bound
+            && (m <= bound || m.is_nan())
+        {
             continue;
         }
         // A margin of a few ulp, so even a libm `exp` that is not monotonic cannot skip a candidate; the exact

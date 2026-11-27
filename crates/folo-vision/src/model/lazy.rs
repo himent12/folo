@@ -164,7 +164,7 @@ impl FoloModel {
                     .into(),
             ));
         }
-        let plan = self.int8.as_ref().ok_or_else(|| {
+        let plan = self.active_int8().ok_or_else(|| {
             folo_nn::Error::Invalid("predict_candidates_rgb0_u8 requires an int8 plan".into())
         })?;
         folo_core::cpu::in_pool(|| {
@@ -323,7 +323,8 @@ impl FoloModel {
         // the full 6×6 input patch of each site's 4×4 tile when `conv1` may take Winograd F(4×4, 3×3).
         let bx = &level.box_branch;
         let c1 = bx.conv1.conv.config();
-        let wino4 = c1.kernel == 3 && c1.stride == 1 && c1.padding == 1 && h >= 24 && w >= 24;
+        let is_3x3_s1_p1 = c1.kernel == 3 && c1.stride == 1 && c1.padding == 1;
+        let wino4 = is_3x3_s1_p1 && h >= 24 && w >= 24;
         let mut sites = Vec::new();
         let mut field = vec![false; b * hw];
         for (i, v) in need.iter().enumerate() {
@@ -338,6 +339,14 @@ impl FoloModel {
                         (4 * ty + 5).min(h),
                         (4 * tx).saturating_sub(1),
                         (4 * tx + 5).min(w),
+                    )
+                } else if is_3x3_s1_p1 {
+                    let (ty, tx) = (y0 / 2, x0 / 2);
+                    (
+                        (2 * ty).saturating_sub(1),
+                        (2 * ty + 3).min(h),
+                        (2 * tx).saturating_sub(1),
+                        (2 * tx + 3).min(w),
                     )
                 } else {
                     (y0.saturating_sub(1), (y0 + 2).min(h), x0.saturating_sub(1), (x0 + 2).min(w))

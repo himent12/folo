@@ -297,9 +297,9 @@ impl<'a> Int8<'a> {
 
     fn space_to_depth2_u8(&mut self, u: &QActU8<'a>) -> Result<[QAct<'a>; 4]> {
         let [n, c, h, w] = u.dims;
-        if !h.is_multiple_of(2) || !w.is_multiple_of(2) {
+        if h == 0 || w == 0 || !h.is_multiple_of(2) || !w.is_multiple_of(2) {
             return Err(Error::Invalid(format!(
-                "int8 space_to_depth2: spatial dims ({h}, {w}) must be even"
+                "int8 space_to_depth2: spatial dims ({h}, {w}) must be positive and even"
             )));
         }
         let (oh, ow) = (h / 2, w / 2);
@@ -358,9 +358,9 @@ impl<'a> Int8<'a> {
                     return self.space_to_depth2_u8(&u);
                 }
                 let [n, c, h, w] = f.dims;
-                if !h.is_multiple_of(2) || !w.is_multiple_of(2) {
+                if h == 0 || w == 0 || !h.is_multiple_of(2) || !w.is_multiple_of(2) {
                     return Err(Error::Invalid(format!(
-                        "int8 space_to_depth2: spatial dims ({h}, {w}) must be even"
+                        "int8 space_to_depth2: spatial dims ({h}, {w}) must be positive and even"
                     )));
                 }
                 let (oh, ow) = (h / 2, w / 2);

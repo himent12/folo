@@ -521,7 +521,7 @@ impl FoloV2Model {
                 clone.to_dtype(dtype)?;
             }
         }
-        clone.int8 = self.int8.clone();
+        clone.int8 = self.active_int8().map(|p| Arc::new(quant::Int8Plan::new(p.calibration().clone())));
         clone.eval();
         for p in clone.parameters() {
             p.set_requires_grad(false);
@@ -572,7 +572,7 @@ impl FoloV2Model {
         if !self.fused {
             clone.fuse()?;
         }
-        clone.int8 = self.int8.clone();
+        clone.int8 = self.active_int8().map(|p| Arc::new(quant::Int8Plan::new(p.calibration().clone())));
         clone.eval();
         for p in clone.parameters() {
             p.set_requires_grad(false);
@@ -595,8 +595,12 @@ impl FoloV2Model {
         Module::to_device(self, device)
     }
 
-    /// Cast all floating weights and buffers to `dtype` in place.
+    /// Cast all floating weights and buffers to `dtype` in place. Converting away from `F32` (lossy) clears any
+    /// attached int8 calibration plan so a subsequent `F16 → F32` round-trip cannot reuse stale ranges.
     pub fn to_dtype(&mut self, dtype: DType) -> Result<()> {
+        if dtype != DType::F32 {
+            self.int8 = None;
+        }
         Module::to_dtype(self, dtype)
     }
 
@@ -627,15 +631,20 @@ impl FoloV2Model {
         Ok(())
     }
 
-    /// The calibration of the int8 plan, if [`FoloV2Model::set_int8`] turned it on.
+    /// Active, non-invalidated int8 plan (requires `F32` weights).
+    pub(crate) fn active_int8(&self) -> Option<&Arc<quant::Int8Plan>> {
+        (self.dtype() == DType::F32).then(|| self.int8.as_ref().filter(|p| p.is_valid())).flatten()
+    }
+
+    /// The calibration of the int8 plan, if [`FoloV2Model::set_int8`] turned it on and it has not been
+    /// invalidated by weight replacement or dtype conversion.
     pub fn int8(&self) -> Option<&quant::Calibration> {
-        self.int8.as_deref().map(quant::Int8Plan::calibration)
+        self.active_int8().map(|p| p.calibration())
     }
 
     /// Whether CPU int8 inference with the direct `u8` stem (`SPD(2×2) + 1×1` or `3×3 s=2`) is active.
     pub(crate) fn int8_u8_stem_active(&self) -> bool {
-        self.int8
-            .as_ref()
+        self.active_int8()
             .is_some_and(|p| p.calibration().u8_stem && !p.calibration().is_f32("backbone.stem.conv"))
             && self.device().is_cpu()
             && !self.is_training()
@@ -647,8 +656,7 @@ impl FoloV2Model {
     pub(crate) fn forward_rgb0_u8(&self, rgb0: &[u32], b: usize, h: usize, w: usize) -> Result<HeadOutputV2> {
         self.check_hw(b, h, w)?;
         let plan = self
-            .int8
-            .as_ref()
+            .active_int8()
             .ok_or_else(|| Error::Invalid("forward_rgb0_u8 requires an int8 plan".into()))?;
         folo_core::cpu::in_pool(|| {
             let feats = quant::exec::features_v2_rgb0_u8(self, plan, rgb0, b, h, w)?;
@@ -663,7 +671,7 @@ impl FoloV2Model {
     /// float barriers in CPU int8 mode.
     pub fn forward_features(&self, x: &Tensor) -> Result<[Tensor; 3]> {
         self.check_input(x)?;
-        if let Some(plan) = &self.int8
+        if let Some(plan) = self.active_int8()
             && x.device().is_cpu()
             && !self.is_training()
         {

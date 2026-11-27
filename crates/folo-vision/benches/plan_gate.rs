@@ -19,7 +19,6 @@ use folo_core::backend::synchronize;
 use folo_core::rng::Rng;
 use folo_core::{Tensor, no_grad};
 use folo_gpu::GpuContext;
-use folo_nn::Module;
 use folo_vision::model::{FoloModel, ModelConfig};
 use folo_vision::predict::{Precision, f16_unavailable};
 

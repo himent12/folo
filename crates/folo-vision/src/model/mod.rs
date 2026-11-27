@@ -547,9 +547,15 @@ impl FoloModel {
         Ok(())
     }
 
-    /// The calibration of the int8 plan, if [`FoloModel::set_int8`] turned it on.
+    /// Active, non-invalidated int8 plan (requires `F32` weights).
+    pub(crate) fn active_int8(&self) -> Option<&Arc<quant::Int8Plan>> {
+        (self.dtype() == folo_core::DType::F32).then(|| self.int8.as_ref().filter(|p| p.is_valid())).flatten()
+    }
+
+    /// The calibration of the int8 plan, if [`FoloModel::set_int8`] turned it on and it has not been
+    /// invalidated by weight replacement or dtype conversion.
     pub fn int8(&self) -> Option<&quant::Calibration> {
-        self.int8.as_deref().map(quant::Int8Plan::calibration)
+        self.active_int8().map(|p| p.calibration())
     }
 
     /// The raw outputs (MODEL.md §6.3) of an `[B, 3, H, W]` batch with `H` and `W` positive multiples of 32.
@@ -640,8 +646,7 @@ impl FoloModel {
 
     /// Whether CPU int8 inference with the direct `u8` stem is active for this model.
     pub(crate) fn int8_u8_stem_active(&self) -> bool {
-        self.int8
-            .as_ref()
+        self.active_int8()
             .is_some_and(|p| p.calibration().u8_stem && !p.calibration().is_f32("backbone.stem"))
             && self.device().is_cpu()
             && !self.is_training()
@@ -653,8 +658,7 @@ impl FoloModel {
     pub(crate) fn forward_rgb0_u8(&self, rgb0: &[u32], b: usize, h: usize, w: usize) -> Result<HeadOutput> {
         self.check_hw(b, h, w)?;
         let plan = self
-            .int8
-            .as_ref()
+            .active_int8()
             .ok_or_else(|| Error::Invalid("forward_rgb0_u8 requires an int8 plan".into()))?;
         let feats = quant::exec::features_rgb0_u8(self, plan, rgb0, b, h, w)?;
         self.head_from_features(feats, h, w, self.head_mode)
@@ -704,7 +708,7 @@ impl FoloModel {
     /// Without a trace, the neck's Concat layers (12, 15, 18, 21) are never written: the C3k2 after each reads
     /// both parts in place ([`C3k2::forward_cat`]).
     fn features(&self, x: &Tensor, mut trace: Option<&mut LayerTrace<'_>>) -> Result<[Tensor; 3]> {
-        if let Some(plan) = &self.int8
+        if let Some(plan) = self.active_int8()
             && trace.is_none()
             && x.device().is_cpu()
             && !self.is_training()
@@ -809,6 +813,15 @@ impl FoloModel {
     pub fn to_device(&mut self, device: Device) -> Result<()> {
         // The move writes every weight, which drops the int8 plan's packed weights (kept with them).
         Module::to_device(self, device)
+    }
+
+    /// Cast all floating weights and buffers to `dtype` in place. Converting away from `F32` (lossy) clears any
+    /// attached int8 calibration plan so a subsequent `F16 → F32` round-trip cannot reuse stale ranges.
+    pub fn to_dtype(&mut self, dtype: folo_core::DType) -> Result<()> {
+        if dtype != folo_core::DType::F32 {
+            self.int8 = None;
+        }
+        Module::to_dtype(self, dtype)
     }
 }
 

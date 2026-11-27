@@ -17,7 +17,13 @@ impl FoloModel {
         let mut m = Metadata::new(FileKind::Weights, self.config.clone(), self.classes.clone(), self.imgsz)?;
         m.fused = self.fused;
         if let Some(cal) = self.int8() {
-            cal.store(&mut m)?;
+            let matches_weights = match cal.weights.as_deref() {
+                Some(want) => quant::fingerprint(self)? == want,
+                None => true,
+            };
+            if matches_weights {
+                cal.store(&mut m)?;
+            }
         }
         Ok(m)
     }
@@ -134,7 +140,15 @@ impl FoloModel {
         if opts.classes.is_none() {
             opts.classes = Some(self.classes.clone());
         }
-        file.load(self, &opts)
+        let report = file.load(self, &opts)?;
+        // Invalidate a fingerprinted int8 plan if replacement weights no longer match its recorded fingerprint.
+        if let Some(plan) = self.active_int8()
+            && let Some(want) = plan.calibration().weights.as_deref()
+            && quant::fingerprint(self)? != want
+        {
+            plan.invalidate();
+        }
+        Ok(report)
     }
 
     /// Transfer learning: partial loading for training. Every tensor whose name, shape and dtype match is

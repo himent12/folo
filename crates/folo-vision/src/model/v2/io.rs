@@ -20,7 +20,13 @@ impl FoloV2Model {
         let mut m = Metadata::new(FileKind::Weights, mc, self.classes.clone(), self.imgsz)?;
         m.fused = self.fused;
         if let Some(cal) = self.int8() {
-            cal.store(&mut m)?;
+            let matches_weights = match cal.weights.as_deref() {
+                Some(want) => quant::fingerprint_v2(self)? == want,
+                None => true,
+            };
+            if matches_weights {
+                cal.store(&mut m)?;
+            }
         }
         Ok(m)
     }
@@ -128,7 +134,15 @@ impl FoloV2Model {
         if opts.classes.is_none() {
             opts.classes = Some(self.classes.clone());
         }
-        file.load(self, &opts)
+        let report = file.load(self, &opts)?;
+        // Invalidate a fingerprinted int8 plan if replacement weights no longer match its recorded fingerprint.
+        if let Some(plan) = self.active_int8()
+            && let Some(want) = plan.calibration().weights.as_deref()
+            && quant::fingerprint_v2(self)? != want
+        {
+            plan.invalidate();
+        }
+        Ok(report)
     }
 
     /// Transfer learning: partial loading for training (copies loaded `head.cls.*` weights into `head.o2o.*.cls`

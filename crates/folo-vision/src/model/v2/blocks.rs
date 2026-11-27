@@ -662,7 +662,7 @@ impl HyperContext {
                     match b2.as_deref() {
                         Some(bs) => {
                             for c in 0..cg {
-                                let ep = row_et[c] + row_ffn[c] + bs[c];
+                                let ep = row_et[c] + (row_ffn[c] + bs[c]);
                                 row_et[c] = ep;
                                 gs_out[c] += ep;
                             }
@@ -778,6 +778,7 @@ impl FullPadGate {
             && g_scene.dims()[0] == b
             && self.proj.weight.device().is_cpu()
             && self.proj.weight.dtype() == DType::F32
+            && self.proj.weight.dims().len() == 2
             && self.proj.weight.dims()[0] == c
         {
             let raw = self.proj.forward(g_scene)?;
