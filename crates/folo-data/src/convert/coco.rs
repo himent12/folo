@@ -5,20 +5,19 @@
 //! deterministic 1-based IDs, typed streaming atomic JSON writes, and safe path handling.
 
 use crate::Split;
-use crate::dataset::{Dataset, ImageEntry, LoadedDataset};
+use crate::dataset::{ImageEntry, LoadedDataset};
 use crate::error::{DataError, Result};
 use crate::image::probe_size;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::io::{BufWriter, ErrorKind, Write};
+use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
-use super::{copy, image_extension, mkdir};
-
-/// Monotonic counter for unique sibling temporary JSON filenames during atomic writes.
-static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+use super::{
+    copy, deterministic_entries, image_extension, mkdir, resolve_link_source, select_splits,
+    should_fallback_from_link, validate_common_entries, validate_single_component, write_file_atomic,
+};
 
 /// How [`export_coco`] handles source images.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -256,93 +255,22 @@ pub fn export_coco(ds: &LoadedDataset, out: &Path, opts: &CocoExportOptions) -> 
     })
 }
 
-/// Resolves requested splits in canonical `[Train, Val, Test]` order, rejecting empty selections before writing.
-fn select_splits(ds: &LoadedDataset, requested: &[Split]) -> Result<Vec<Split>> {
-    let candidates: Vec<Split> = if requested.is_empty() {
-        Split::ALL.into_iter().filter(|&s| !ds.split(s).is_empty()).collect()
-    } else {
-        let mut out = Vec::new();
-        for s in Split::ALL {
-            if requested.contains(&s) && !ds.split(s).is_empty() {
-                out.push(s);
-            }
-        }
-        out
-    };
-    if candidates.is_empty() {
-        if requested.is_empty() {
-            return Err(DataError::Config(format!(
-                "nothing to export: {} has no readable images",
-                crate::paths::shown(&ds.root)
-            )));
-        }
-        let names: Vec<&str> = requested.iter().map(|s| s.as_str()).collect();
-        return Err(DataError::Config(format!(
-            "nothing to export: {} has no readable images in requested splits [{}]",
-            crate::paths::shown(&ds.root),
-            names.join(", ")
-        )));
-    }
-    Ok(candidates)
-}
-
 /// Validates class indices, box coordinates, and (in `Reference` mode) UTF-8 paths before claiming `out`.
 fn validate_entries(ds: &LoadedDataset, splits: &[Split], image_mode: CocoImageMode) -> Result<()> {
-    let nc = ds.classes.len();
-    for &split in splits {
-        for e in ds.split(split).entries() {
-            if e.image.to_string_lossy().contains('\0') {
-                return Err(DataError::Config(format!(
-                    "cannot export image path containing NUL byte: {}",
-                    e.image.display()
-                )));
-            }
-            if image_mode == CocoImageMode::Reference && e.image.to_str().is_none() {
-                return Err(DataError::Config(format!(
-                    "image path is not valid UTF-8 for COCO JSON: {}",
-                    e.image.display()
-                )));
-            }
-            for b in &e.boxes {
-                if (b.class as usize) >= nc {
+    validate_common_entries(ds, splits)?;
+    if image_mode == CocoImageMode::Reference {
+        for &split in splits {
+            for e in ds.split(split).entries() {
+                if e.image.to_str().is_none() {
                     return Err(DataError::Config(format!(
-                        "cannot export {}: box class {} is out of range for {} classes",
-                        crate::paths::shown(&e.image),
-                        b.class,
-                        nc
-                    )));
-                }
-                if ![b.cx, b.cy, b.w, b.h].iter().all(|v| v.is_finite()) || b.w < 0.0 || b.h < 0.0 {
-                    return Err(DataError::Config(format!(
-                        "cannot export {}: invalid box coordinates ({}, {}, {}, {})",
-                        crate::paths::shown(&e.image),
-                        b.cx,
-                        b.cy,
-                        b.w,
-                        b.h
+                        "image path is not valid UTF-8 for COCO JSON: {}",
+                        e.image.display()
                     )));
                 }
             }
         }
     }
     Ok(())
-}
-
-/// Orders entries deterministically so exports do not depend on filesystem directory iteration order.
-fn deterministic_entries(entries: &[ImageEntry]) -> Vec<&ImageEntry> {
-    #[cfg(windows)]
-    {
-        let mut ordered: Vec<(&ImageEntry, String)> =
-            entries.iter().map(|e| (e, e.image.to_string_lossy().replace('\\', "/"))).collect();
-        ordered.sort_by(|a, b| a.1.cmp(&b.1));
-        ordered.into_iter().map(|(e, _)| e).collect()
-    }
-    #[cfg(not(windows))]
-    {
-        let mut ordered: Vec<&ImageEntry> = entries.iter().collect();
-        ordered.sort_by(|a, b| a.image.as_os_str().cmp(b.image.as_os_str()));
-        ordered
-    }
 }
 
 /// Sanitizes a source image's stem and extension into safe single-component parts, stripping separators, drive
@@ -400,21 +328,6 @@ fn reserve_exclusive_copy_targets(img_dir: &Path, ordered: &[&ImageEntry]) -> Re
     Ok(names)
 }
 
-/// Resolves a source path for hard-linking: checks the read guard on `from`, and if `from` is a symlink,
-/// canonicalizes it and re-checks the read guard on the resolved target so relative symlinks are never
-/// hard-linked as broken symlinks and confinement cannot be bypassed.
-fn resolve_link_source(from: &Path) -> Result<PathBuf> {
-    crate::guard::check(from).map_err(|e| DataError::io(from, e))?;
-    let meta = std::fs::symlink_metadata(from).map_err(|e| DataError::io(from, e))?;
-    if meta.file_type().is_symlink() {
-        let target = std::fs::canonicalize(from).map_err(|e| DataError::io(from, e))?;
-        crate::guard::check(&target).map_err(|e| DataError::io(&target, e))?;
-        Ok(target)
-    } else {
-        Ok(from.to_path_buf())
-    }
-}
-
 /// Materializes images for `Link` mode with atomic exclusive naming: hard-links each resolved source file
 /// (bumping the suffix on `AlreadyExists`), and reserves any cross-device/unsupported fallbacks exclusively
 /// before copying them in parallel.
@@ -463,20 +376,6 @@ fn materialize_links(img_dir: &Path, ordered: &[&ImageEntry]) -> Result<(Vec<Str
     let copied = fallback_copies.len();
     fallback_copies.par_iter().try_for_each(|(src, dest)| copy(src, dest))?;
     Ok((names, linked, copied))
-}
-
-fn validate_single_component(name: &str) -> Result<()> {
-    let p = Path::new(name);
-    let mut comps = p.components();
-    match (comps.next(), comps.next()) {
-        (Some(Component::Normal(_)), None) if !name.contains(['/', '\\', '\0']) => Ok(()),
-        _ => Err(DataError::Config(format!("unsafe exported filename {name:?}"))),
-    }
-}
-
-fn should_fallback_from_link(e: &std::io::Error) -> bool {
-    matches!(e.kind(), ErrorKind::CrossesDevices | ErrorKind::Unsupported | ErrorKind::PermissionDenied)
-        || (cfg!(windows) && matches!(e.raw_os_error(), Some(1 | 17 | 50 | 1142)))
 }
 
 /// Produces a path for `CocoImageMode::Reference` relative to `base` (`<out>/annotations/`) when possible, or a
@@ -603,41 +502,14 @@ fn components_equal(a: Component<'_>, b: Component<'_>) -> bool {
 /// Writes `value` as JSON atomically via a unique sibling temporary file and rename, cleaning up only the
 /// temporary file created by this call if serialization, flushing, or renaming fails.
 fn write_json_atomic<T: Serialize>(path: &Path, value: &T, pretty: bool) -> Result<()> {
-    let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
-    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("annotations.json");
-    let pid = std::process::id();
-    let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
-    let tmp = parent.join(format!(".{name}.{pid}-{seq}.tmp"));
-
-    // Acquire the temporary file before enabling cleanup so a pre-existing file is never removed on `AlreadyExists`.
-    let file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&tmp)
-        .map_err(|e| DataError::io(&tmp, e))?;
-
-    let write_res = (|| -> Result<()> {
-        let mut writer = BufWriter::with_capacity(256 << 10, file);
+    write_file_atomic(path, |writer| {
         let ser = if pretty {
-            serde_json::to_writer_pretty(&mut writer, value)
+            serde_json::to_writer_pretty(writer, value)
         } else {
-            serde_json::to_writer(&mut writer, value)
+            serde_json::to_writer(writer, value)
         };
-        ser.map_err(|e| DataError::Format(format!("failed to serialize {}: {e}", path.display())))?;
-        writer.flush().map_err(|e| DataError::io(&tmp, e))?;
-        Ok(())
-    })();
-
-    if let Err(err) = write_res {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(err);
-    }
-
-    if let Err(err) = std::fs::rename(&tmp, path) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(DataError::io(path, err));
-    }
-    Ok(())
+        ser.map_err(|e| DataError::Format(format!("failed to serialize {}: {e}", path.display())))
+    })
 }
 
 #[cfg(test)]

@@ -173,10 +173,11 @@ rebuilds its dataset indexes then). Nothing installs one by default; `folo mcp
   per-thread memory and returns an `AuditReport` with `duplicate_groups`, `split_leakage` (images whose exact bytes
   appear in two or more splits, with `has_train_val_leakage()`), `unreadable`, `stats`, and `empty_classes`.
   `LoadedDataset::audit_with(&AuditOptions::perceptual(max_hamming_distance))` / `audit::audit_dataset_with` adds
-  64-bit difference-hash (`dHash`) perceptual near-duplicate detection (`dhash_image`, `dhash_file`,
-  `hamming_distance`) using anti-aliased `9x8` BT.601 luminance gradients and exact pigeonhole multi-index hashing,
-  populating `near_duplicate_groups` and `near_duplicate_leakage` so recompressed, resized, or lightly cropped
-  cross-split leaks are caught alongside exact byte duplicates.
+  64-bit difference-hash (`dHash`) perceptual near-duplicate detection (`dhash_image`, `dhash_bytes`, `dhash_file`,
+  `hamming_distance`) using anti-aliased `9x8` BT.601 luminance gradients, exact pigeonhole multi-index hashing, and
+  decode deduplication across byte-identical copies, populating `near_duplicate_groups`, `near_duplicate_leakage`, and
+  `near_duplicate_image_count()` so recompressed, resized, brightened, EXIF-rotated, or lightly cropped cross-split
+  leaks are caught alongside exact byte duplicates.
 - `curate::remap_classes(&loaded, &RemapConfig)` / `LoadedDataset::remap_classes` renames, unifies, or drops classes
   with `ClassNormalize::Exact` or `ClassNormalize::CaseAndWhitespace`, compacting surviving class ids to `0..n` and
   optionally dropping images left empty.
@@ -205,6 +206,13 @@ rebuilds its dataset indexes then). Nothing installs one by default; `folo mcp
   symlinks before hard-linking, with transparent copy fallback), or `Reference` (relative paths from `annotations/`, no
   image copies), deterministic sorted entry ordering, 1-based image/annotation/category IDs, `area = w * h`,
   `iscrowd = 0`, optional pretty-printing, and typed streaming atomic JSON writes (sibling `.tmp` + rename).
+- `convert::export_voc(&loaded, out, &VocExportOptions)` (`src/convert/voc.rs`, also backing `convert(..., Format::Voc)`)
+  exports any loaded dataset to Pascal VOC XML (`Annotations/*.xml`, `ImageSets/Main/<split>.txt`, optional
+  `ImageSets/Main/trainval.txt`, and optional `classes.txt`) with selectable splits (deduplicated into canonical
+  `[train, val, test]` order), `VocImageMode::Copy`, `Link` (symlink-resolved hard links with copy fallback), or
+  `None` (annotations and split lists only, without creating `JPEGImages/`), `VocCoordMode::OneBased` (VOC2007/2012
+  1-based inclusive integers) or `ZeroBased` (0-based continuous pixel edges), strict XML 1.0 escaping and input
+  validation, deterministic ordering, exclusive cross-split collision-safe reservation, and atomic writes.
 - `detect_format(path, format)` finds the format without reading labels; a path with nothing recognisable fails with
   a `DataError::Format` whose message starts with `UNDETECTED`. A folder a writer has not finished (below) is refused
   as unfinished first, whatever it holds.

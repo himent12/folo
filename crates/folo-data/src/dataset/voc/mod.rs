@@ -450,20 +450,23 @@ pub(crate) fn read_and_parse_xml(path: &Path) -> std::result::Result<VocAnnotati
     parse_voc_xml(text)
 }
 
-/// Formats a [`LoadedDataset`] image's boxes as a Pascal VOC `<annotation>` XML document using classic 1-based
-/// inclusive **integer** pixel coordinates (matching [`VocCoordMode::OneBased`], VOC2007/VOC2012 devkit, and
-/// Detectron2's `int()` XML parser).
+/// Formats a [`LoadedDataset`] image's boxes as a Pascal VOC `<annotation>` XML document using the requested
+/// [`VocCoordMode`].
 ///
-/// Continuous 0-based edges `[x1, x2]` with width `>= 1` px round to `xmin = round(x1) + 1`, `xmax = round(x2)`
-/// clamped to `[1, width]` with `xmax >= xmin`. Sub-pixel boxes (`x2 - x1 < 1` px) map to the 1-pixel inclusive box
-/// `xmin = xmax = floor(midpoint) + 1` clamped to `[1, width]`.
-pub(crate) fn format_voc_xml(
+/// Under [`VocCoordMode::OneBased`] (the VOC2007/VOC2012 devkit and Detectron2 `int()` standard), continuous
+/// 0-based edges `[x1, x2]` with width `>= 1` px round to `xmin = round(x1) + 1`, `xmax = round(x2)` clamped
+/// to `[1, width]` with `xmax >= xmin`, while sub-pixel boxes (`x2 - x1 < 1` px) map to the 1-pixel inclusive
+/// box `xmin = xmax = floor(midpoint) + 1` clamped to `[1, width]`. Under [`VocCoordMode::ZeroBased`], continuous
+/// 0-based edges `[x1, y1, x2, y2]` are clamped to `[0, width]` / `[0, height]` with `xmax >= xmin` and
+/// `ymax >= ymin`.
+pub(crate) fn format_voc_xml_with(
     filename: &str,
     folder: &str,
     width: u32,
     height: u32,
     classes: &[String],
     boxes: &[crate::BBox],
+    coord_mode: VocCoordMode,
 ) -> String {
     use std::fmt::Write as _;
     let mut out = String::with_capacity(256 + boxes.len() * 180);
@@ -477,26 +480,46 @@ pub(crate) fn format_voc_xml(
     out.push_str("  </size>\n");
     out.push_str("  <segmented>0</segmented>\n");
     let (max_w, max_h) = (i64::from(width.max(1)), i64::from(height.max(1)));
+    let (wf, hf) = (f64::from(width), f64::from(height));
     for b in boxes {
         let class_name = classes.get(b.class as usize).map(String::as_str).unwrap_or("unknown");
         let [x1, y1, x2, y2] = b.pixel_xyxy(width, height);
-        let (xmin, xmax) = to_one_based_int_span(x1, x2, max_w);
-        let (ymin, ymax) = to_one_based_int_span(y1, y2, max_h);
         out.push_str("  <object>\n");
         let _ = writeln!(out, "    <name>{}</name>", xml::escape_text(class_name));
         out.push_str("    <pose>Unspecified</pose>\n");
         out.push_str("    <truncated>0</truncated>\n");
         out.push_str("    <difficult>0</difficult>\n");
         out.push_str("    <bndbox>\n");
-        let _ = writeln!(out, "      <xmin>{xmin}</xmin>");
-        let _ = writeln!(out, "      <ymin>{ymin}</ymin>");
-        let _ = writeln!(out, "      <xmax>{xmax}</xmax>");
-        let _ = writeln!(out, "      <ymax>{ymax}</ymax>");
+        match coord_mode {
+            VocCoordMode::OneBased => {
+                let (xmin, xmax) = to_one_based_int_span(x1, x2, max_w);
+                let (ymin, ymax) = to_one_based_int_span(y1, y2, max_h);
+                let _ = writeln!(out, "      <xmin>{xmin}</xmin>");
+                let _ = writeln!(out, "      <ymin>{ymin}</ymin>");
+                let _ = writeln!(out, "      <xmax>{xmax}</xmax>");
+                let _ = writeln!(out, "      <ymax>{ymax}</ymax>");
+            }
+            VocCoordMode::ZeroBased => {
+                let xmin = normalize_zero(f64::from(x1).clamp(0.0, wf));
+                let ymin = normalize_zero(f64::from(y1).clamp(0.0, hf));
+                let xmax = normalize_zero(f64::from(x2).clamp(xmin, wf));
+                let ymax = normalize_zero(f64::from(y2).clamp(ymin, hf));
+                let _ = writeln!(out, "      <xmin>{xmin}</xmin>");
+                let _ = writeln!(out, "      <ymin>{ymin}</ymin>");
+                let _ = writeln!(out, "      <xmax>{xmax}</xmax>");
+                let _ = writeln!(out, "      <ymax>{ymax}</ymax>");
+            }
+        }
         out.push_str("    </bndbox>\n");
         out.push_str("  </object>\n");
     }
     out.push_str("</annotation>\n");
     out
+}
+
+#[inline]
+fn normalize_zero(v: f64) -> f64 {
+    if v == 0.0 { 0.0 } else { v }
 }
 
 fn to_one_based_int_span(lo: f32, hi: f32, max_dim: i64) -> (i64, i64) {
