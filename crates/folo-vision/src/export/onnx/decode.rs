@@ -1,19 +1,27 @@
-//! `--decode` in the graph: the anchor grid (constant, or computed from the feature maps with `dynamic`), the
-//! DFL decode of MODEL.md §6.4, and the end-to-end top-k selection of an `o2o` head (§6.6).
+//! `--decode` in the graph: the anchor grid (constant when spatial dimensions are fixed, or computed from the
+//! feature maps when `axes.hw` is enabled), the DFL decode of MODEL.md §6.4 (with optional FOLO v2 `iou_out`
+//! geometric score fusion), and the end-to-end top-k selection of an `o2o` head (§6.6).
 
-use super::OnnxOptions;
 use super::graph::{Graph, attrs, ints};
 use super::proto::{AttrValue, DataType};
+use super::{DynamicAxes, OnnxOptions};
 use crate::Result;
-use crate::model::FoloModel;
+use crate::decode::make_anchors;
 use crate::model::head::LEVELS;
 
 impl Graph {
-    /// The anchor points `[2, A]` (x row, then y row, in grid units) and strides `[1, A]`: constants for a
-    /// fixed size, computed from the feature-map shapes with `dynamic`.
-    fn anchors(&mut self, m: &FoloModel, opts: &OnnxOptions, feats: &[String; 3]) -> (String, String) {
-        if !opts.dynamic {
-            let an = m.anchors(opts.height as usize, opts.width as usize);
+    /// The anchor points `[2, A]` (x row, then y row, in grid units) and strides `[1, A]`: constants when spatial
+    /// dimensions are fixed (`!axes.hw`, including batch-only dynamic graphs), computed from the feature-map
+    /// shapes when `axes.hw` is true.
+    fn anchors(
+        &mut self,
+        strides: &[u32; 3],
+        opts: &OnnxOptions,
+        axes: DynamicAxes,
+        feats: &[String; 3],
+    ) -> (String, String) {
+        if !axes.hw {
+            let an = make_anchors(opts.height, opts.width, strides, 0.5);
             let mut pts: Vec<f32> = an.points.iter().map(|p| p[0]).collect();
             pts.extend(an.points.iter().map(|p| p[1]));
             let a = an.len();
@@ -25,8 +33,8 @@ impl Graph {
         let (two, four) = (self.i64_const(&[2], false), self.i64_const(&[4], false));
         let to = AttrValue::Int(self.elem.code());
         let half = self.float_init("decode.half", &[], &[0.5]);
-        let (mut pts, mut strides) = (vec![], vec![]);
-        for ((x, name), s) in feats.iter().zip(LEVELS).zip(m.strides()) {
+        let (mut pts, mut strides_out) = (vec![], vec![]);
+        for ((x, name), &s) in feats.iter().zip(LEVELS).zip(strides) {
             let p = format!("decode.{name}");
             let shape = self.node("Shape", &format!("{p}.shape"), &[x], vec![]);
             let hw = self.node("Slice", &format!("{p}.hw"), &[&shape, &two, &four], vec![]);
@@ -58,23 +66,37 @@ impl Graph {
             pts.push(self.concat(&format!("{p}.points"), &[&gx, &gy], 0));
             let sv = self.float_init(&format!("{p}.stride"), &[1, 1], &[s as f32]);
             let n = self.node("Shape", &format!("{p}.count"), &[&gx], vec![]);
-            strides.push(self.node("Expand", &format!("{p}.strides"), &[&sv, &n], vec![]));
+            strides_out.push(self.node("Expand", &format!("{p}.strides"), &[&sv, &n], vec![]));
         }
         let pr: Vec<&str> = pts.iter().map(String::as_str).collect();
-        let sr: Vec<&str> = strides.iter().map(String::as_str).collect();
+        let sr: Vec<&str> = strides_out.iter().map(String::as_str).collect();
         (self.concat("decode.anchors", &pr, 1), self.concat("decode.strides", &sr, 1))
     }
 
     /// MODEL.md §6.4 in the graph: the decoded `[B, 4 + nc, A]` (boxes in input pixels, then class scores).
+    /// When `iou_raw` (`[B, 1, A]`) is supplied (FOLO v2 with `iou_head = true`), class probabilities are fused
+    /// via geometric mean `sqrt(sigmoid(cls_raw) * sigmoid(iou_raw))` (`DEFAULT_IOU_FUSION_ALPHA = 0.5`).
+    ///
+    /// When `f32_output` is true (used by end-to-end `o2o` selection), an `F16` graph widens boxes and logits to
+    /// `F32` before `Sigmoid` / IoU fusion and returns `F32` directly so `TopK` never loses precision through `F16`
+    /// rounding. For dense `F16` output with `iou_raw`, logits are still widened to `F32` before `Sigmoid` so
+    /// subnormal `F16` probabilities do not flush to zero before the square root, and only the fused scores are
+    /// narrowed back to `F16`.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn decode(
         &mut self,
-        m: &FoloModel,
+        strides: &[u32; 3],
+        reg_max: usize,
         opts: &OnnxOptions,
+        axes: DynamicAxes,
         feats: &[String; 3],
         box_raw: &str,
         cls_raw: &str,
+        iou_raw: Option<&str>,
+        f32_output: bool,
     ) -> Result<String> {
-        let r = m.head.reg_max;
+        let half = self.elem == DataType::Float16;
+        let r = reg_max;
         let logits = self.reshape("decode.dfl_logits", box_raw, &[0, 4, r as i64, -1]); // [B, 4, R, A]
         let prob =
             self.node("Softmax", "decode.dfl_softmax", &[&logits], attrs([("axis", AttrValue::Int(2))]));
@@ -90,13 +112,34 @@ impl Graph {
         ); // [B, 4, A]
         let [lt, rb]: [String; 2] =
             self.split("decode.ltrb", &dist, &[2, 2], 1).try_into().expect("two halves");
-        let (points, strides) = self.anchors(m, opts, feats);
+        let (points, strides) = self.anchors(strides, opts, axes, feats);
         let x1y1 = self.node("Sub", "decode.x1y1_cells", &[&points, &lt], vec![]);
         let x2y2 = self.node("Add", "decode.x2y2_cells", &[&points, &rb], vec![]);
         let x1y1 = self.node("Mul", "decode.x1y1", &[&x1y1, &strides], vec![]);
         let x2y2 = self.node("Mul", "decode.x2y2", &[&x2y2, &strides], vec![]);
-        let boxes = self.concat("decode.boxes", &[&x1y1, &x2y2], 1); // [B, 4, A]
-        let scores = self.node("Sigmoid", "decode.scores", &[cls_raw], vec![]);
+        let mut boxes = self.concat("decode.boxes", &[&x1y1, &x2y2], 1); // [B, 4, A]
+        let widen_scores = half && (iou_raw.is_some() || f32_output);
+        let cls_in = if widen_scores {
+            self.cast("decode.cls_f32", cls_raw, DataType::Float)
+        } else {
+            cls_raw.to_string()
+        };
+        let mut scores = self.node("Sigmoid", "decode.scores", &[&cls_in], vec![]);
+        if let Some(iou_logits) = iou_raw {
+            let iou_in = if widen_scores {
+                self.cast("decode.iou_logits_f32", iou_logits, DataType::Float)
+            } else {
+                iou_logits.to_string()
+            };
+            let p_iou = self.node("Sigmoid", "decode.iou_scores", &[&iou_in], vec![]);
+            let prod = self.mul("decode.iou_prod", &scores, &p_iou);
+            scores = self.node("Sqrt", "decode.iou_fused", &[&prod], vec![]);
+        }
+        if half && f32_output {
+            boxes = self.cast("decode.boxes_f32", &boxes, DataType::Float);
+        } else if widen_scores {
+            scores = self.cast("decode.scores_f16", &scores, DataType::Float16);
+        }
         Ok(self.concat("decode.channels", &[&boxes, &scores], 1)) // [B, 4 + nc, A]
     }
 
@@ -104,12 +147,12 @@ impl Graph {
     /// `detections: [B, K, 6]` output (`x1, y1, x2, y2, score, class`, by descending score). `TopK` puts equal
     /// values in index order, the tie rule of [`crate::nms::topk_detections`]. An `F16` graph selects in `F32`
     /// (the CPU `TopK` and `ReduceMax` of onnxruntime take no `float16`) and its rows stay `F32`, so class ids above
-    /// 2048 stay exact.
-    pub(super) fn topk(&mut self, all: &str, nc: usize, opts: &OnnxOptions) {
+    /// 2048 stay exact. `already_f32` avoids a redundant cast when `all` was already produced in `F32`.
+    pub(super) fn topk(&mut self, all: &str, nc: usize, opts: &OnnxOptions, already_f32: bool) {
         let half = self.elem == DataType::Float16;
         let to_f32 = || vec![("to".to_string(), AttrValue::Int(DataType::Float.code()))];
         let dets = self.transpose("e2e.anchor_major", all, &[0, 2, 1]); // [B, A, 4 + nc]
-        let dets = if half { self.node("Cast", "e2e.f32", &[&dets], to_f32()) } else { dets };
+        let dets = if half && !already_f32 { self.node("Cast", "e2e.f32", &[&dets], to_f32()) } else { dets };
         let [_, scores]: [String; 2] =
             self.split("e2e.split_anchors", &dets, &[4, nc as i64], 2).try_into().expect("two parts");
         let best = self.node(

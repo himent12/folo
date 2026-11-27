@@ -30,7 +30,7 @@ and [VISION.md](../../docs/VISION.md) is the tour of the implementation.
 | `src/tile.rs` | SAHI tiled inference (`TileConfig`, `TileRect`, `TileMergeMetric`, `compute_tiles`, `crop_tile`, `merge_tiled_detections`) wired into `Predictor::predict_tiled` |
 | `src/tta.rs` | Test-Time Augmentation (`TtaConfig`, `PredictOptions`, `unflip_xyxy_h`, `merge_tta_detections`) wired into `Predictor::predict_tta`, `predict_batch_tta`, `predict_file_tta`, and `predict_*_with_options` |
 | `src/track/` | ByteTrack multi-object tracking (`mod.rs`: `ByteTracker`, `TrackConfig`, `TrackedDetection`, `SequenceFrame`, `Predictor::predict_sequence`; `kalman.rs`: decoupled 8-state Kalman filter; `assign.rs`: sparse-pruned exact Hungarian IoU matcher) |
-| `src/export/` | `onnx/`: `mod.rs` (`export`, `OnnxOptions`, the op table), `graph.rs`, `blocks.rs`, `decode.rs`, `proto.rs` (protobuf encoder) |
+| `src/export/` | `onnx/`: `mod.rs` (`export`, `export_with_axes`, `export_v2`, `export_v2_with_axes`, `OnnxOptions`, `DynamicAxes`, the op table), `graph.rs`, `blocks.rs`, `v2.rs` (`FoloV2Model` export), `decode.rs`, `proto.rs` (protobuf encoder) |
 | `src/precompile.rs` | GPU pipeline precompile for a run's kernels |
 | `src/error.rs` | `Error`: the trainer's, the validator's and the predictor's |
 | `tests/` | Integration tests, listed below; `common/` (helpers, also used by benches), `golden/folo-n-names.txt`, `fixtures/` (`coco/`, `coco_full/`: from `bench/parity/coco_reference.py`; `fusion/`: from `bench/fusion/make_fixture.py`) |
@@ -86,7 +86,7 @@ and [VISION.md](../../docs/VISION.md) is the tour of the implementation.
 | Change a loss term | `src/loss/terms/`; on a GPU, folo-gpu's `src/detect.rs`, `src/kernels/detect.rs` and the shaders `det_bce_fwd.wgsl`, `det_bce_bwd.wgsl`, `det_box.wgsl` and `detect_common.wgsl` behind `src/loss/device.rs`; `tests/loss_cases.rs` and `tests/gpu_loss/`; MODEL.md §7.4 |
 | Change the post-process | `src/nms/` (`mod.rs`, `kernel.rs`, `topk.rs`) or `src/fusion/mod.rs`; `tests/nms_reference.rs`, `tests/fusion_reference.rs`, `tests/elc_postproc.rs`, and `tests/lazy_head.rs` / `tests/gpu_lazy_head.rs` (candidate-first must equal the dense path); MODEL.md §9.3, §9.4 |
 | Change a metric | `src/metrics.rs` or `src/cocoeval.rs`; `tests/metrics_known.rs`, `tests/coco_parity.rs`, `tests/coco_full.rs`; METRICS.md |
-| Change the ONNX export | `src/export/onnx/graph.rs` (layer helpers), `blocks.rs` or `decode.rs`; the unit tests and the op table in `src/export/onnx/mod.rs`; CLI.md (`folo export`) |
+| Change the ONNX export | `src/export/onnx/graph.rs` (layer helpers), `blocks.rs` (v1), `v2.rs` (FOLO v2-Iso) or `decode.rs`; the unit tests and the op table in `src/export/onnx/mod.rs`; `tests/onnx_export.rs`; CLI.md (`folo export`) |
 
 ## Tests and benchmarks
 
@@ -97,7 +97,7 @@ cargo test -p folo-vision --test train       # one integration test binary
 
 | Test | Covers |
 |---|---|
-| `model.rs`, `model_v2.rs` | Blocks and the whole model (MODEL.md §10.1, §10.2), the golden tensor names, and FOLO v2-Iso blocks/head/fusion/GPU parity |
+| `model.rs`, `model_v2.rs`, `onnx_export.rs` | Blocks and the whole model (MODEL.md §10.1, §10.2), the golden tensor names, FOLO v2-Iso blocks/head/fusion/GPU parity, and ONNX export for independent `DynamicAxes` (`batch` / `hw`) and `FoloV2Model` (with `onnxruntime` parity when available) |
 | `assign_cases.rs`, `loss_cases.rs`, `wave7_train_algos.rs` | The assigner and the loss on hand-checked cases, against an `f64` reference, gradient checks, and Wave-7 MAL / NWD-IoU / CWD / Floor Gauge / BCKD parity |
 | `o2o.rs` | The one-to-one head: assignment, dual loss, `.folo` round trips, the top-k post-process |
 | `nms_reference.rs`, `fusion_reference.rs`, `elc_postproc.rs` | NMS against a naive reference; DFL fusion against `bench/fusion/post.py`; ELC, DFL-consensus, and DFL-repulse post-processing |

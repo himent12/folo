@@ -4,7 +4,7 @@
 use std::collections::{BTreeMap, HashSet};
 
 use folo_core::{DType, Tensor, f16};
-use folo_nn::{Activation, Conv2d, ConvBnAct};
+use folo_nn::{Activation, Conv2d, ConvBnAct, Linear};
 
 use super::proto::{self, AttrValue, DataType, Msg};
 use super::{INPUT, IR_VERSION, OPSET, OnnxValue};
@@ -133,7 +133,7 @@ impl Graph {
     }
 
     /// A model tensor as an initializer under its `.folo` name.
-    fn weight(&mut self, name: &str, t: &Tensor) -> Result<String> {
+    pub(super) fn weight(&mut self, name: &str, t: &Tensor) -> Result<String> {
         if !self.used.insert(name.to_string()) {
             return Err(Error::Unsupported(format!("ONNX export: tensor `{name}` mapped twice")));
         }
@@ -145,6 +145,11 @@ impl Graph {
     }
 
     // ----- layers ---------------------------------------------------------------------------------------
+
+    /// Cast `x` to `to`.
+    pub(super) fn cast(&mut self, name: &str, x: &str, to: DataType) -> String {
+        self.node("Cast", name, &[x], attrs([("to", AttrValue::Int(to.code()))]))
+    }
 
     /// A bare `Conv2d` with optional bias (`p` is its prefix: `p.weight`, `p.bias`).
     pub(super) fn conv2d(&mut self, p: &str, c: &Conv2d, x: &str) -> Result<String> {
@@ -177,7 +182,20 @@ impl Graph {
         self.act(p, c.act, &y)
     }
 
-    fn act(&mut self, p: &str, act: Activation, x: &str) -> Result<String> {
+    /// A `Linear` layer (`y = x · Wᵀ + b`) over the last dimension of `x` (any rank ≥ 2).
+    pub(super) fn linear(&mut self, p: &str, l: &Linear, x: &str) -> Result<String> {
+        let w = self.weight(&format!("{p}.weight"), &l.weight)?;
+        let wt = self.transpose(&format!("{p}.w_t"), &w, &[1, 0]);
+        let y = self.node("MatMul", &format!("{p}.matmul"), &[x, &wt], vec![]);
+        Ok(if let Some(b) = &l.bias {
+            let b = self.weight(&format!("{p}.bias"), b)?;
+            self.add(p, &y, &b)
+        } else {
+            y
+        })
+    }
+
+    pub(super) fn act(&mut self, p: &str, act: Activation, x: &str) -> Result<String> {
         Ok(match act {
             Activation::Identity => x.to_string(),
             Activation::Silu => {
@@ -206,6 +224,13 @@ impl Graph {
         self.node_n("Split", name, &[x, &s], attrs([("axis", AttrValue::Int(axis))]), sizes.len())
     }
 
+    pub(super) fn slice_axis(&mut self, name: &str, x: &str, axis: i64, start: i64, end: i64) -> String {
+        let starts = self.i64_const(&[start], false);
+        let ends = self.i64_const(&[end], false);
+        let axes = self.i64_const(&[axis], false);
+        self.node("Slice", name, &[x, &starts, &ends, &axes], vec![])
+    }
+
     pub(super) fn reshape(&mut self, name: &str, x: &str, shape: &[i64]) -> String {
         let s = self.i64_const(shape, false);
         self.node("Reshape", name, &[x, &s], vec![])
@@ -217,6 +242,14 @@ impl Graph {
 
     pub(super) fn add(&mut self, name: &str, a: &str, b: &str) -> String {
         self.node("Add", name, &[a, b], vec![])
+    }
+
+    pub(super) fn sub(&mut self, name: &str, a: &str, b: &str) -> String {
+        self.node("Sub", name, &[a, b], vec![])
+    }
+
+    pub(super) fn mul(&mut self, name: &str, a: &str, b: &str) -> String {
+        self.node("Mul", name, &[a, b], vec![])
     }
 
     /// Encode the `ModelProto`.

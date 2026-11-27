@@ -45,7 +45,7 @@ impl Graph {
         self.conv(&format!("{p}.cv2"), &c.cv2, &cat)
     }
 
-    fn sppf(&mut self, p: &str, s: &Sppf, x: &str) -> Result<String> {
+    pub(super) fn sppf(&mut self, p: &str, s: &Sppf, x: &str) -> Result<String> {
         let y0 = self.conv(&format!("{p}.cv1"), &s.cv1, x)?;
         let (k, pad) = (s.k as i64, (s.k / 2) as i64);
         let a = || {
@@ -102,7 +102,7 @@ impl Graph {
         self.conv(&format!("{p}.cv2"), &c.cv2, &cat)
     }
 
-    fn upsample(&mut self, name: &str, x: &str) -> String {
+    pub(super) fn upsample(&mut self, name: &str, x: &str) -> String {
         let scales = self.f32_init("const.f32.upsample_scales", &[4], &[1.0, 1.0, 2.0, 2.0]);
         let a = attrs([
             ("mode", AttrValue::Str("nearest".into())),
