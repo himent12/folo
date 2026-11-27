@@ -446,3 +446,34 @@ fn check_base_url_validates_host_port_and_forbids_userinfo_or_query() {
         assert!(check_base_url(bad).is_err(), "{bad:?} should be rejected");
     }
 }
+
+#[test]
+fn tls_ca_rejects_missing_empty_and_malformed_pem() {
+    let dir = folo_test_support::TestDir::new("client-tls-ca");
+    let t = Duration::from_secs(2);
+    let err = Client::with_tls_ca_pem("https://127.0.0.1:7878", t, t, b"not a pem").unwrap_err();
+    assert!(err.contains("no PEM certificates"), "{err}");
+
+    let bad_pem = b"-----BEGIN CERTIFICATE-----\n!!!not-base64!!!\n-----END CERTIFICATE-----\n";
+    let err = Client::with_tls_ca_pem("https://127.0.0.1:7878", t, t, bad_pem).unwrap_err();
+    assert!(err.contains("invalid PEM certificate"), "{err}");
+
+    let err = Client::with_tls_ca_file("https://127.0.0.1:7878", t, t, &dir.join("missing.pem")).unwrap_err();
+    assert!(err.contains("does not exist"), "{err}");
+
+    let empty = dir.join("empty.pem");
+    std::fs::write(&empty, b"").unwrap();
+    let err = Client::with_tls_ca_file("https://127.0.0.1:7878", t, t, &empty).unwrap_err();
+    assert!(err.contains("no PEM certificates"), "{err}");
+
+    // Valid PEM framing containing bogus DER (`AA==`) must be rejected upfront as an invalid X.509 anchor.
+    let bad_der = b"-----BEGIN CERTIFICATE-----\nAA==\n-----END CERTIFICATE-----\n";
+    let err = Client::with_tls_ca_pem("https://127.0.0.1:7878", t, t, bad_der).unwrap_err();
+    assert!(err.contains("not a valid X.509 trust anchor"), "{err}");
+
+    // Malformed PEM header must never echo input bytes (e.g. if a combined cert+key file is mangled).
+    let sentinel = "SECRETKEYBYTES9999";
+    let mangled = format!("-----BEGIN PRIVATE KEY-----{sentinel}-----END PRIVATE KEY-----");
+    let err = Client::with_tls_ca_pem("https://127.0.0.1:7878", t, t, mangled.as_bytes()).unwrap_err();
+    assert!(!err.contains(sentinel) && !err.contains("83, 69, 67"), "{err}");
+}

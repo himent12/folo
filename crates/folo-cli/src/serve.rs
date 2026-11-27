@@ -44,6 +44,9 @@ pub(crate) fn serve(args: ServeArgs, out: Out) -> Result<(), CliError> {
         .precision
         .parse()
         .map_err(|e: folo_vision::Error| CliError::new(ExitCode::Usage, "usage", e.to_string()))?;
+    // Validate TLS credentials upfront before locking the data dir, binding a port, or opening the store.
+    let tls = load_tls(&args)?;
+    let tls_enabled = tls.is_some();
     if args.tensor_cores {
         // Before anything creates the GPU context: the device has to be created with them.
         folo_gpu::context::request_tensor_cores();
@@ -92,7 +95,7 @@ pub(crate) fn serve(args: ServeArgs, out: Out) -> Result<(), CliError> {
         let addr = listener
             .local_addr()
             .map_err(|e| CliError::new(ExitCode::Runtime, "bind_failed", e.to_string()))?;
-        let listen = ListenUrls::from_addr(addr);
+        let listen = ListenUrls::from_bind(&args.host, addr, tls_enabled);
         // Before the store opens (it can take a while): a second start can say where this one is.
         if let Some(lock) = &serve_lock
             && let Err(e) = lock.publish(&listen.url)
@@ -147,19 +150,49 @@ pub(crate) fn serve(args: ServeArgs, out: Out) -> Result<(), CliError> {
         if !args.mock {
             out.human(format!("  Data:   {}", folo_api::json::path(&data_dir)));
         }
+        if tls_enabled {
+            out.human("  TLS:    enabled");
+        }
         if token_set {
             out.human("  Token:  required on /api (Authorization: Bearer)");
         }
         out.human("Press Ctrl+C to stop.");
         out.record(&listen.listening_record(args.mock, web_dir.as_deref(), web_ready, &data_dir, token_set));
-        server
-            .serve(listener, folo_server::shutdown_signal())
-            .await
-            .map_err(|e| CliError::new(ExitCode::Runtime, "serve_failed", e.to_string()))?;
+        let served = match tls {
+            Some(tls) => server.serve_tls(listener, tls, folo_server::shutdown_signal()).await,
+            None => server.serve(listener, folo_server::shutdown_signal()).await,
+        };
+        served.map_err(|e| CliError::new(ExitCode::Runtime, "serve_failed", e.to_string()))?;
         out.record(&json!({ "event": "stopped" }));
         out.human("Stopped.");
         Ok(())
     })
+}
+
+fn load_tls(args: &ServeArgs) -> Result<Option<folo_server::TlsConfig>, CliError> {
+    if args.tls_cert.as_ref().is_some_and(|p| p.as_os_str().is_empty()) {
+        return Err(CliError::new(ExitCode::Usage, "usage", "--tls-cert must not be empty")
+            .hint("pass the path to a PEM certificate chain file to --tls-cert (or FOLO_TLS_CERT)"));
+    }
+    if args.tls_key.as_ref().is_some_and(|p| p.as_os_str().is_empty()) {
+        return Err(CliError::new(ExitCode::Usage, "usage", "--tls-key must not be empty")
+            .hint("pass the path to a PEM private key file to --tls-key (or FOLO_TLS_KEY)"));
+    }
+    match (&args.tls_cert, &args.tls_key) {
+        (None, None) => Ok(None),
+        (Some(_), None) => Err(CliError::new(ExitCode::Usage, "usage", "--tls-cert requires --tls-key")
+            .hint("pass both --tls-cert and --tls-key (or FOLO_TLS_CERT and FOLO_TLS_KEY)")),
+        (None, Some(_)) => Err(CliError::new(ExitCode::Usage, "usage", "--tls-key requires --tls-cert")
+            .hint("pass both --tls-cert and --tls-key (or FOLO_TLS_CERT and FOLO_TLS_KEY)")),
+        (Some(cert), Some(key)) => folo_server::TlsConfig::from_pem_files(cert, key).map(Some).map_err(|e| {
+            let (exit, code) = if e.is_not_found() {
+                (ExitCode::NotFound, "path_not_found")
+            } else {
+                (ExitCode::Runtime, "serve_failed")
+            };
+            CliError::new(exit, code, e.to_string()).hint(e.hint())
+        }),
+    }
 }
 
 /// Connectable URL and bound socket address derived from a bound listener.
@@ -172,21 +205,36 @@ pub(crate) fn serve(args: ServeArgs, out: Out) -> Result<(), CliError> {
 struct ListenUrls {
     url: String,
     bind: String,
-    wildcard: bool,
+    show_bind: bool,
+    tls: bool,
 }
 
 impl ListenUrls {
-    fn from_addr(addr: std::net::SocketAddr) -> Self {
-        Self {
-            url: serve_lock::local_url(addr),
-            bind: addr.to_string(),
-            wildcard: addr.ip().is_unspecified(),
-        }
+    fn from_bind(host: &str, addr: std::net::SocketAddr, tls: bool) -> Self {
+        let host = host.trim();
+        let is_dns_name = !host.is_empty()
+            && !host.starts_with('[')
+            && !host.contains('%')
+            && host.parse::<std::net::IpAddr>().is_err();
+        // When TLS is active and `--host` was given as a DNS name (e.g. `localhost` or `gpu.example.com`), keep
+        // that hostname in the advertised `https://` URL (and `serve.json`) so DNS-only certificate SANs verify
+        // cleanly instead of failing against the resolved IP literal, while `bind` preserves the socket address.
+        let (url, show_bind) = if tls && is_dns_name {
+            (format!("https://{host}:{}", addr.port()), true)
+        } else {
+            (serve_lock::local_url(addr, tls), addr.ip().is_unspecified())
+        };
+        Self { url, bind: addr.to_string(), show_bind, tls }
+    }
+
+    #[cfg(test)]
+    fn from_addr(addr: std::net::SocketAddr, tls: bool) -> Self {
+        Self::from_bind(&addr.ip().to_string(), addr, tls)
     }
 
     fn banner_line(&self, mock: bool) -> String {
         let mode = if mock { "mock data" } else { "the real store" };
-        if self.wildcard {
+        if self.show_bind {
             format!("FOLO {VERSION} serving {mode} on {} (bound to {})", self.url, self.bind)
         } else {
             format!("FOLO {VERSION} serving {mode} on {}", self.url)
@@ -212,6 +260,7 @@ impl ListenUrls {
             "web_ready": web_ready,
             "data_dir": (!mock).then(|| crate::output::record_path(data_dir)),
             "token": token,
+            "tls": self.tls,
         })
     }
 }
@@ -301,8 +350,8 @@ mod tests {
         let data = std::path::Path::new("data");
 
         // IPv4 wildcard -> clickable IPv4 loopback URL + explicit bind address.
-        let v4_wild = ListenUrls::from_addr("0.0.0.0:7878".parse().unwrap());
-        assert!(v4_wild.wildcard);
+        let v4_wild = ListenUrls::from_addr("0.0.0.0:7878".parse().unwrap(), false);
+        assert!(v4_wild.show_bind);
         assert_eq!(v4_wild.url, "http://127.0.0.1:7878");
         assert_eq!(v4_wild.bind, "0.0.0.0:7878");
         assert_eq!(
@@ -313,10 +362,11 @@ mod tests {
         assert_eq!(rec["url"], "http://127.0.0.1:7878");
         assert_eq!(rec["api"], "http://127.0.0.1:7878/api");
         assert_eq!(rec["bind"], "0.0.0.0:7878");
+        assert_eq!(rec["tls"], false);
 
         // IPv6 wildcard -> clickable IPv6 loopback URL + explicit bind address.
-        let v6_wild = ListenUrls::from_addr("[::]:7878".parse().unwrap());
-        assert!(v6_wild.wildcard);
+        let v6_wild = ListenUrls::from_addr("[::]:7878".parse().unwrap(), false);
+        assert!(v6_wild.show_bind);
         assert_eq!(v6_wild.url, "http://[::1]:7878");
         assert_eq!(v6_wild.bind, "[::]:7878");
         assert_eq!(
@@ -327,6 +377,31 @@ mod tests {
         assert_eq!(rec["url"], "http://[::1]:7878");
         assert_eq!(rec["api"], "http://[::1]:7878/api");
         assert_eq!(rec["bind"], "[::]:7878");
+        assert_eq!(rec["tls"], false);
+
+        // TLS wildcard and explicit hosts emit https:// and `"tls": true`.
+        let v4_tls = ListenUrls::from_addr("0.0.0.0:7878".parse().unwrap(), true);
+        assert_eq!(v4_tls.url, "https://127.0.0.1:7878");
+        assert_eq!(
+            v4_tls.banner_line(false),
+            format!(
+                "FOLO {VERSION} serving the real store on https://127.0.0.1:7878 (bound to 0.0.0.0:7878)"
+            )
+        );
+        let rec = v4_tls.listening_record(false, None, true, data, true);
+        assert_eq!(rec["url"], "https://127.0.0.1:7878");
+        assert_eq!(rec["api"], "https://127.0.0.1:7878/api");
+        assert_eq!(rec["tls"], true);
+
+        // TLS with a DNS `--host` preserves the DNS hostname in `url` while keeping the resolved IP in `bind`.
+        let dns_tls = ListenUrls::from_bind("localhost", "[::1]:7878".parse().unwrap(), true);
+        assert!(dns_tls.show_bind);
+        assert_eq!(dns_tls.url, "https://localhost:7878");
+        assert_eq!(dns_tls.bind, "[::1]:7878");
+        assert_eq!(
+            dns_tls.banner_line(false),
+            format!("FOLO {VERSION} serving the real store on https://localhost:7878 (bound to [::1]:7878)")
+        );
 
         // Explicit loopback and LAN hosts stay as bound without a redundant "(bound to ...)" suffix.
         for (raw, want_url, want_bind) in [
@@ -334,8 +409,8 @@ mod tests {
             ("[::1]:7878", "http://[::1]:7878", "[::1]:7878"),
             ("192.168.1.5:7878", "http://192.168.1.5:7878", "192.168.1.5:7878"),
         ] {
-            let l = ListenUrls::from_addr(raw.parse().unwrap());
-            assert!(!l.wildcard, "{raw}");
+            let l = ListenUrls::from_addr(raw.parse().unwrap(), false);
+            assert!(!l.show_bind, "{raw}");
             assert_eq!(l.url, want_url, "{raw}");
             assert_eq!(l.bind, want_bind, "{raw}");
             assert_eq!(l.banner_line(false), format!("FOLO {VERSION} serving the real store on {want_url}"));
@@ -348,8 +423,8 @@ mod tests {
         // Scoped IPv6 host is preserved verbatim.
         let scoped =
             std::net::SocketAddr::V6(std::net::SocketAddrV6::new("fe80::1234".parse().unwrap(), 7878, 0, 7));
-        let l = ListenUrls::from_addr(scoped);
-        assert!(!l.wildcard);
+        let l = ListenUrls::from_addr(scoped, false);
+        assert!(!l.show_bind);
         assert_eq!(l.url, "http://[fe80::1234%7]:7878");
         assert_eq!(l.bind, "[fe80::1234%7]:7878");
         assert!(!l.banner_line(false).contains("bound to"));

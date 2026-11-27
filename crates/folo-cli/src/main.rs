@@ -592,11 +592,21 @@ mod tests {
         assert_eq!(arg(&val, "precision")["conflicts_with"], json!(["--half"]));
         assert_eq!(val["groups"], json!([]));
 
-        // `mcp`: `FOLO_SERVER` env and symmetric `--mock` <-> `--server` conflict.
+        // `serve`: `--tls-cert` / `--tls-key` path flags with env vars.
+        let serve = describe::describe(&Cli::command(), &["serve".into()], false).unwrap();
+        assert_eq!(arg(&serve, "tls_cert")["type"], json!("path"));
+        assert_eq!(arg(&serve, "tls_cert")["env"], json!("FOLO_TLS_CERT"));
+        assert_eq!(arg(&serve, "tls_key")["type"], json!("path"));
+        assert_eq!(arg(&serve, "tls_key")["env"], json!("FOLO_TLS_KEY"));
+
+        // `mcp`: `FOLO_SERVER` / `FOLO_TLS_CA` env and symmetric `--mock` conflicts.
         let mcp = describe::describe(&Cli::command(), &["mcp".into()], false).unwrap();
         assert_eq!(arg(&mcp, "server")["env"], json!("FOLO_SERVER"));
         assert_eq!(arg(&mcp, "server")["conflicts_with"], json!(["--mock"]));
-        assert_eq!(arg(&mcp, "mock")["conflicts_with"], json!(["--server"]));
+        assert_eq!(arg(&mcp, "tls_ca")["type"], json!("path"));
+        assert_eq!(arg(&mcp, "tls_ca")["env"], json!("FOLO_TLS_CA"));
+        assert_eq!(arg(&mcp, "tls_ca")["conflicts_with"], json!(["--mock"]));
+        assert_eq!(arg(&mcp, "mock")["conflicts_with"], json!(["--server", "--tls-ca"]));
 
         // `bench create`: required exclusive `source` group and symmetric group conflicts.
         let bcreate = describe::describe(&Cli::command(), &["bench".into(), "create".into()], false).unwrap();

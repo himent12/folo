@@ -119,7 +119,7 @@ fn open(conn: &BenchServerArgs, device: Option<&str>) -> Result<Session, CliErro
             Ok(Session { benchmarks: Benchmarks::Store(store.clone()), store, local: Some(lock) })
         }
         Ok(Acquire::InUse { url: Some(url) })
-            if serve_lock::serves(&url, &data_dir, conn.token.as_deref()) =>
+            if serve_lock::serves(&url, &data_dir, conn.token.as_deref(), None) =>
         {
             Ok(http(&url))
         }

@@ -11,12 +11,13 @@ use std::path::{Path, PathBuf};
 /// The local URL another process on this machine can connect to for a listener bound to `addr`: unspecified
 /// wildcard hosts (`0.0.0.0`, `::`) become loopback (`127.0.0.1`, `[::1]`) because connecting to a wildcard
 /// address fails on Windows (`WSAEADDRNOTAVAIL`). Specific binds, including scoped IPv6 addresses, are
-/// formatted as bound.
-pub fn local_url(addr: SocketAddr) -> String {
+/// formatted as bound. Uses `https://` when `tls` is true, else `http://`.
+pub fn local_url(addr: SocketAddr, tls: bool) -> String {
+    let scheme = if tls { "https" } else { "http" };
     match addr.ip() {
-        IpAddr::V4(v4) if v4.is_unspecified() => format!("http://127.0.0.1:{}", addr.port()),
-        IpAddr::V6(v6) if v6.is_unspecified() => format!("http://[::1]:{}", addr.port()),
-        _ => format!("http://{addr}"),
+        IpAddr::V4(v4) if v4.is_unspecified() => format!("{scheme}://127.0.0.1:{}", addr.port()),
+        IpAddr::V6(v6) if v6.is_unspecified() => format!("{scheme}://[::1]:{}", addr.port()),
+        _ => format!("{scheme}://{addr}"),
     }
 }
 
@@ -91,14 +92,23 @@ const SERVES_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// Whether the `folo serve` at `url` serves `dir` (its `/api/system` `data_dir`): `serve.json` can be stale, and a
 /// new process may listen on a dead server's port. Connecting is quick or nothing listens there.
-pub fn serves(url: &str, dir: &Path, token: Option<&str>) -> bool {
-    serves_within(url, dir, token, SERVES_TIMEOUT)
+pub fn serves(url: &str, dir: &Path, token: Option<&str>, tls_ca: Option<&folo_client::TlsCa>) -> bool {
+    serves_within(url, dir, token, tls_ca, SERVES_TIMEOUT)
 }
 
 /// [`serves`] with `/api/system` given at most `timeout`.
-fn serves_within(url: &str, dir: &Path, token: Option<&str>, timeout: std::time::Duration) -> bool {
+fn serves_within(
+    url: &str,
+    dir: &Path,
+    token: Option<&str>,
+    tls_ca: Option<&folo_client::TlsCa>,
+    timeout: std::time::Duration,
+) -> bool {
     let connect = std::time::Duration::from_secs(3);
-    let mut client = folo_client::Client::with_timeouts(url, connect, timeout);
+    let mut client = match tls_ca {
+        Some(ca) => folo_client::Client::with_tls_ca(url, connect, timeout, ca),
+        None => folo_client::Client::with_timeouts(url, connect, timeout),
+    };
     if let Some(token) = token {
         client = client.token(token);
     }
@@ -184,19 +194,24 @@ mod tests {
         use std::time::Duration;
         let dir = TestDir::new("serve-lock-slow");
         let ms = Duration::from_millis;
-        assert!(!serves_within(&slow_server(dir.path(), ms(300)), dir.path(), None, ms(50)));
-        assert!(serves_within(&slow_server(dir.path(), ms(300)), dir.path(), None, ms(5000)));
+        assert!(!serves_within(&slow_server(dir.path(), ms(300)), dir.path(), None, None, ms(50)));
+        assert!(serves_within(&slow_server(dir.path(), ms(300)), dir.path(), None, None, ms(5000)));
     }
 
     #[test]
     fn wildcard_bind_addresses_publish_loopback_urls() {
-        assert_eq!(local_url("0.0.0.0:8080".parse().unwrap()), "http://127.0.0.1:8080");
-        assert_eq!(local_url("[::]:8080".parse().unwrap()), "http://[::1]:8080");
-        assert_eq!(local_url("127.0.0.1:8080".parse().unwrap()), "http://127.0.0.1:8080");
-        assert_eq!(local_url("[::1]:8080".parse().unwrap()), "http://[::1]:8080");
-        assert_eq!(local_url("192.168.1.5:8080".parse().unwrap()), "http://192.168.1.5:8080");
+        assert_eq!(local_url("0.0.0.0:8080".parse().unwrap(), false), "http://127.0.0.1:8080");
+        assert_eq!(local_url("[::]:8080".parse().unwrap(), false), "http://[::1]:8080");
+        assert_eq!(local_url("127.0.0.1:8080".parse().unwrap(), false), "http://127.0.0.1:8080");
+        assert_eq!(local_url("[::1]:8080".parse().unwrap(), false), "http://[::1]:8080");
+        assert_eq!(local_url("192.168.1.5:8080".parse().unwrap(), false), "http://192.168.1.5:8080");
         let scoped = SocketAddr::V6(std::net::SocketAddrV6::new("fe80::1234".parse().unwrap(), 8080, 0, 7));
-        assert_eq!(local_url(scoped), "http://[fe80::1234%7]:8080");
+        assert_eq!(local_url(scoped, false), "http://[fe80::1234%7]:8080");
+
+        assert_eq!(local_url("0.0.0.0:8080".parse().unwrap(), true), "https://127.0.0.1:8080");
+        assert_eq!(local_url("[::]:8080".parse().unwrap(), true), "https://[::1]:8080");
+        assert_eq!(local_url("127.0.0.1:8080".parse().unwrap(), true), "https://127.0.0.1:8080");
+        assert_eq!(local_url(scoped, true), "https://[fe80::1234%7]:8080");
     }
 
     #[test]
@@ -205,7 +220,9 @@ mod tests {
         let Acquire::Held(_first) = acquire(dir.path()).unwrap() else { panic!("the first takes the lock") };
         for (stored, want) in [
             ("http://0.0.0.0:4242", "http://127.0.0.1:4242"),
+            ("https://0.0.0.0:4242", "https://127.0.0.1:4242"),
             ("http://[::]:4242", "http://[::1]:4242"),
+            ("https://[::]:4242", "https://[::1]:4242"),
             ("http://127.0.0.1:4242", "http://127.0.0.1:4242"),
             ("http://192.168.1.5:4242", "http://192.168.1.5:4242"),
             ("http://[fe80::1234%7]:4242", "http://[fe80::1234%7]:4242"),
