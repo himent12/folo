@@ -10,7 +10,7 @@ import Download from '$icons/download';
 import FileJson from '$icons/file-json';
 import Play from '$icons/play';
 import Square from '$icons/square';
-import { css, effect, For, signal } from 'fw';
+import { computed, css, effect, For, signal } from 'fw';
 import Button from '$lib/ui/Button';
 import { fadeScroll } from '$lib/ui/fadeScroll';
 import { tooltip } from '$lib/ui/tooltip';
@@ -29,10 +29,13 @@ export default function BatchFilmstrip(props: BatchFilmstripProps) {
   const actionsEl = signal<HTMLDivElement | undefined>(undefined);
   let runBtnFocused = false;
 
+  // Track only the selected item's identity so per-item status/prediction updates during Run All never yank manual scroll.
+  const activeItemId = computed(() => b.items.get()[b.activeIndex.get()]?.id ?? null);
+
   // Keep the active thumbnail visible inside the horizontal filmstrip without scrolling ancestor containers (`window`).
   effect(() => {
     const idx = b.activeIndex.get();
-    void b.items.get();
+    void activeItemId.get();
     const root = stripEl.get();
     if (!root) return;
     const btn = root.querySelector<HTMLButtonElement>(`button[data-batch-idx="${idx}"]`);

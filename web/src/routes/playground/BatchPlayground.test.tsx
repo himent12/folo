@@ -612,13 +612,19 @@ describe('Playground multi-image batch filmstrip', () => {
       expect(runBtn.textContent?.trim()).toBe('Stop');
       expect(document.activeElement).toBe(runBtn);
 
-      // Finish item 1 -> Run all completes and disables runBtn -> focus moves cleanly to Batch JSON (never body)
+      // Finish item 1 -> Run all completes and disables runBtn -> focus moves cleanly to Batch JSON (never body),
+      // and background item status updates do NOT yank a user-scrolled filmstrip back to activeIndex (0).
+      const thumb0 = strip.querySelector<HTMLButtonElement>('button[data-batch-idx="0"]')!;
+      vi.spyOn(thumb0, 'getBoundingClientRect').mockReturnValue({ left: -80, right: 4, width: 84, top: 0, bottom: 60, height: 60, x: -80, y: 0, toJSON: () => ({}) } as DOMRect);
+      strip.scrollLeft = 60;
       const batchItem1Resolver = resolvers.at(-1)!;
       batchItem1Resolver(fakePrediction('m_hard_s', 1));
       await until(() => runBtn.disabled, 'run button disabled at completion');
       await until(() => document.activeElement === jsonBtn, 'focus moved to Batch JSON');
+      expect(strip.scrollLeft).toBe(60);
 
       // Step to clipped thumbnail 1 -> scrollLeft adjusts horizontally without calling scrollIntoView
+      strip.scrollLeft = 0;
       target.querySelector<HTMLButtonElement>('button[aria-label="Next image"]')!.click();
       flushSync();
       expect(strip.scrollLeft).toBeGreaterThan(0);
