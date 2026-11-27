@@ -77,7 +77,7 @@ export default function LabelJobs() {
   effect(() => {
     if (!askedNew.get()) return;
     untrack(() => {
-      if (!unsupported.peek()) creating.set(true);
+      if (!unsupported.peek() && hub.mode !== 'connecting') creating.set(true);
       const q = new URLSearchParams(router.route.query);
       q.delete('new');
       const s = q.toString();
@@ -85,7 +85,7 @@ export default function LabelJobs() {
     });
   });
   effect(() => {
-    if (unsupported.get() && creating.peek()) creating.set(false);
+    if ((unsupported.get() || hub.mode === 'connecting') && creating.peek()) creating.set(false);
   });
 
   // Status filter and search query live in the URL query (./label/listState) so Back, reload and shared links restore them.

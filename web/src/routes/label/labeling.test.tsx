@@ -622,4 +622,45 @@ describe('the job list: the palette’s New labeling job', () => {
       }
     });
   }
+
+  it('suppresses ?new=1, closes the dialog, and blocks JobDialog submission while connecting', () => {
+    const prevMode = hub.mode;
+    const createSpy = vi.spyOn(hub.api, 'createLabelJob');
+    try {
+      history.replaceState(null, '', '#/datasets/label');
+      router.route = parse('#/datasets/label');
+      open(LabelJobs, {});
+      router.go('/datasets/label?new=1');
+      flushSync();
+      expect(dialogOpen()).toBe(true);
+
+      // Switching servers leaves hub.mode === 'connecting' while hub.api still holds the prior client: close at once.
+      hub.mode = 'connecting';
+      flushSync();
+      expect(dialogOpen()).toBe(false);
+
+      // Opening via the command palette (?new=1) while connecting must not reopen the dialog or write to the prior server.
+      router.go('/datasets/label?new=1');
+      flushSync();
+      expect(dialogOpen()).toBe(false);
+      expect(location.hash).toBe('#/datasets/label');
+
+      // Direct JobDialog submit must also refuse to call createLabelJob while hub.mode === 'connecting'.
+      open(JobDialog, { open: true } as JobDialogProps);
+      const inputs = document.querySelectorAll<HTMLInputElement>('dialog[open] input');
+      inputs[0]!.value = 'street-scenes';
+      inputs[0]!.dispatchEvent(new Event('input', { bubbles: true }));
+      inputs[1]!.value = 'car';
+      inputs[1]!.dispatchEvent(new Event('input', { bubbles: true }));
+      flushSync();
+      const submitBtn = document.querySelector<HTMLButtonElement>('dialog[open] button[type="submit"]')!;
+      expect(submitBtn.disabled).toBe(true);
+      document.querySelector<HTMLFormElement>('dialog[open] form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      flushSync();
+      expect(createSpy).not.toHaveBeenCalled();
+    } finally {
+      createSpy.mockRestore();
+      hub.mode = prevMode;
+    }
+  });
 });

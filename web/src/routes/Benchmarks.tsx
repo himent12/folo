@@ -88,7 +88,7 @@ export default function Benchmarks() {
   effect(() => {
     if (router.route.name !== 'benchmarks' || router.route.query.get('new') !== '1') return;
     untrack(() => {
-      if (!unavailable.peek()) creating.set(true);
+      if (!unavailable.peek() && hub.mode !== 'connecting') creating.set(true);
       const q = new URLSearchParams(router.route.query);
       q.delete('new');
       const s = q.toString();
@@ -96,7 +96,7 @@ export default function Benchmarks() {
     });
   });
   effect(() => {
-    if (unavailable.get() && creating.peek()) creating.set(false);
+    if ((unavailable.get() || hub.mode === 'connecting') && creating.peek()) creating.set(false);
   });
 
   // Filter, sort and search live in the URL query (./bench/listState), replaced as they change so typing never

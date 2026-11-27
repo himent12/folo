@@ -168,7 +168,9 @@ export default function NewBenchDialog(props: { open?: boolean }) {
   );
   const missing = computed(() => (!name.get().trim() ? 'Enter a name' : sourceWhy.get()));
   const shownError = computed(() => (touched.get() ? Object.entries(errs.get()).find(([, e]) => e)?.[0] : maxError.get() ? 'max' : undefined));
+  const connecting = computed(() => hub.mode === 'connecting');
   const reason = computed(() => {
+    if (connecting.get()) return 'Connecting to server';
     const se = shownError.get();
     return missing.get() ?? (se ? FIX[se] : null);
   });
@@ -196,7 +198,7 @@ export default function NewBenchDialog(props: { open?: boolean }) {
     e.preventDefault();
     touched.set(true);
     error.set(undefined);
-    if (Object.values(errs.peek()).some((x) => x) || reason.peek() || busy.peek()) return;
+    if (Object.values(errs.peek()).some((x) => x) || reason.peek() || busy.peek() || connecting.peek()) return;
     const seq = ++submitSeq;
     const epoch = hub.epoch;
     const startPath = router.location.path;
@@ -208,7 +210,7 @@ export default function NewBenchDialog(props: { open?: boolean }) {
         source: kind.peek() === 'dataset' ? { kind: 'dataset', dataset_id: datasetId.peek(), split: split.peek() } : { kind: 'label_job', job_id: jobId.peek() },
         max_images: max.peek(),
       });
-      if (hub.epoch !== epoch) return;
+      if (hub.epoch !== epoch || connecting.peek()) return;
       // The dialog closes first: what was made is said over the benchmark's page it opens.
       if (alive && seq === submitSeq) open.set(false);
       toast.success('Benchmark created', `${created.name} · ${imagesText(created.images)} · the default plan`);
