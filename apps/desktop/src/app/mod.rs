@@ -39,6 +39,9 @@ mod page;
 mod playground;
 #[cfg(test)]
 mod playground_ab_tests;
+mod playground_batch;
+#[cfg(test)]
+mod playground_batch_tests;
 mod playground_compare;
 #[cfg(test)]
 mod playground_tests;
@@ -247,6 +250,9 @@ pub struct PlayImage {
     pub image: Arc<folo_ui::RenderImage>,
     pub width: u32,
     pub height: u32,
+    /// When loaded from a Playground batch, identifies `(batch_id, item_index)` so predictions and
+    /// cached results never cross-contaminate same-basename files or failed stage loads.
+    pub batch_ref: Option<(u64, usize)>,
 }
 
 pub struct Palette {
@@ -477,6 +483,8 @@ pub struct FoloApp {
     /// Short windows fold the validation-image picker to one line; this opens it.
     pub play_picker_open: bool,
     pub play_iou: f32,
+    /// Last committed NMS IoU value; used so a no-op slider click doesn't invalidate completed batch work.
+    pub(crate) play_iou_committed: f32,
     /// Where Playground runs the model: on the server (`None`), or in this process.
     pub play_target: Option<crate::local::Target>,
     /// The Playground's line of predictions ([`crate::local::Ticket`]): a newer one skips the
@@ -514,6 +522,8 @@ pub struct FoloApp {
     play_pred_for: Option<(u64, String)>,
     /// Playground Model A/B comparison state (Model B selection, prediction, hover, and tabs).
     pub play_compare: crate::screens::playground::PlayCompareState,
+    /// Playground multi-image / folder batch queue, filmstrip navigation, and Run All state.
+    pub play_batch: crate::screens::playground::PlayBatchState,
 
     // Settings
     pub server_mode: ServerMode,
@@ -835,6 +845,7 @@ impl FoloApp {
             play_class: None,
             play_picker_open: false,
             play_iou: 0.7,
+            play_iou_committed: 0.7,
             play_target: None,
             play_line: Default::default(),
             local_gpu: Load::Idle,
@@ -855,6 +866,7 @@ impl FoloApp {
             play_pred_dim: false,
             play_pred_for: None,
             play_compare: Default::default(),
+            play_batch: Default::default(),
             server_mode: ServerMode::Mock,
             server_url,
             saved_server_url: None,

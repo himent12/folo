@@ -92,7 +92,8 @@ pub fn rank(q: &str, items: Vec<PaletteItem>) -> Vec<PaletteItem> {
         // Stable: within a group the order by (primary, score) stays.
         scored.sort_by_key(|(_, _, _, it)| groups.iter().position(|g| *g == it.group));
     }
-    scored.into_iter().map(|(_, _, _, it)| it).take(40).collect()
+    let limit = if q.is_empty() { 48 } else { 40 };
+    scored.into_iter().map(|(_, _, _, it)| it).take(limit).collect()
 }
 
 /// Rows skipped by PageUp / PageDown inside the palette result list.
@@ -157,11 +158,33 @@ impl FoloApp {
         items.push(PaletteItem {
             group: "Actions",
             icon: "icons/image-up.svg",
-            title: "Open image in Playground".into(),
-            detail: String::new(),
+            title: "Open images in Playground".into(),
+            detail: "Single image or multi-file batch".into(),
             keys: &["Ctrl", "O"],
             action: act(|this, w, cx| this.pick_image(w, cx)),
         });
+        items.push(PaletteItem {
+            group: "Actions",
+            icon: "icons/folder-open.svg",
+            title: "Open folder in Playground".into(),
+            detail: "Run a model across a folder of images".into(),
+            keys: &[],
+            action: act(|this, w, cx| this.pick_play_folder(w, cx)),
+        });
+        if self.play_sample_dataset().is_some() {
+            items.push(PaletteItem {
+                group: "Actions",
+                icon: "icons/images.svg",
+                title: if self.server_mode == crate::app::ServerMode::Mock {
+                    "Load demo batch in Playground".into()
+                } else {
+                    "Load validation batch in Playground".into()
+                },
+                detail: "Sample images for batch filmstrip & export".into(),
+                keys: &[],
+                action: act(|this, w, cx| this.load_play_demo_batch(w, cx)),
+            });
+        }
         let dark = self.mode == crate::theme::Mode::Dark;
         items.push(PaletteItem {
             group: "Actions",

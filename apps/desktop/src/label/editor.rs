@@ -7,10 +7,11 @@
 use crate::api::{BBox, LabelImage, label_box_revision};
 use crate::app::Route;
 
+use super::editor_geom::{BoxTransform, ResizeHandle, TransformKind};
 use super::state::LabelImageFilter;
 
 /// Maximum undo snapshots kept per open image.
-const MAX_HISTORY: usize = 100;
+pub const MAX_HISTORY: usize = 100;
 
 /// Minimum width and height (in image pixels) for a drawn bounding box to be committed.
 pub const MIN_BOX_PX: f32 = 4.0;
@@ -126,6 +127,9 @@ pub struct LabelEditor {
     pub expect_rev: String,
     /// Working boxes currently rendered and edited.
     pub draft: Vec<BBox>,
+    /// Monotonic counter bumped whenever `draft` changes; transforms verify this at commit so a
+    /// concurrent Delete, Reclassify, Undo, or clean SSE sync can never be clobbered on mouse-up.
+    pub draft_gen: u64,
     /// Past snapshots for `Ctrl+Z` (most recent last).
     pub undo: Vec<Vec<BBox>>,
     /// Future snapshots for `Ctrl+Shift+Z` / `Ctrl+Y` (most recent last).
@@ -135,6 +139,12 @@ pub struct LabelEditor {
     pub draw_class: u32,
     /// In-progress click-drag rectangle on the stage.
     pub drawing: Option<BoxDraft>,
+    /// In-progress click-drag Move or Resize gesture on an existing box.
+    pub transforming: Option<BoxTransform>,
+    /// Resize handle currently hovered on the selected box (for cursor feedback).
+    pub hover_handle: Option<ResizeHandle>,
+    /// True when the pointer hovers inside the selected box away from resize handles.
+    pub hover_move: bool,
     /// True if an SSE update or reload changed the image's server boxes while `draft` was dirty.
     pub changed_elsewhere: bool,
     /// Deferred image/filter switch waiting for the user to Save, Discard, or Stay.
@@ -149,10 +159,14 @@ impl LabelEditor {
         self.base.clear();
         self.expect_rev.clear();
         self.draft.clear();
+        self.draft_gen += 1;
         self.undo.clear();
         self.redo.clear();
         self.tool = EditTool::Select;
         self.drawing = None;
+        self.transforming = None;
+        self.hover_handle = None;
+        self.hover_move = false;
         self.changed_elsewhere = false;
         self.pending_switch = None;
     }
@@ -213,9 +227,13 @@ impl LabelEditor {
             self.base = image.boxes.clone();
             self.expect_rev = label_box_revision(&image.boxes);
             self.draft = image.boxes.clone();
+            self.draft_gen += 1;
             self.undo.clear();
             self.redo.clear();
             self.drawing = None;
+            self.transforming = None;
+            self.hover_handle = None;
+            self.hover_move = false;
             self.changed_elsewhere = false;
             self.pending_switch = None;
             return;
@@ -224,12 +242,17 @@ impl LabelEditor {
             return;
         }
         if same_boxes(&self.draft, &self.base) {
-            // Clean draft: adopt the fresh server boxes transparently.
+            // Clean draft: adopt the fresh server boxes transparently and drop any stale drag.
             self.base = image.boxes.clone();
             self.expect_rev = label_box_revision(&image.boxes);
             self.draft = image.boxes.clone();
+            self.draft_gen += 1;
             self.undo.clear();
             self.redo.clear();
+            self.drawing = None;
+            self.transforming = None;
+            self.hover_handle = None;
+            self.hover_move = false;
             self.changed_elsewhere = false;
         } else if !saving {
             // Dirty draft changed elsewhere (another tab, CLI, or agent): keep user's edits safe
@@ -249,7 +272,12 @@ impl LabelEditor {
         if same_boxes(&self.draft, &next) {
             return false;
         }
+        self.drawing = None;
+        self.transforming = None;
+        self.hover_handle = None;
+        self.hover_move = false;
         self.undo.push(std::mem::replace(&mut self.draft, next));
+        self.draft_gen += 1;
         if self.undo.len() > MAX_HISTORY {
             self.undo.remove(0);
         }
@@ -284,6 +312,16 @@ impl LabelEditor {
         self.push_edit(next)
     }
 
+    /// Replaces `draft[index]` with `next_box` (used by Move and Resize), pushing one undo step.
+    pub fn update_box(&mut self, index: usize, next_box: BBox) -> bool {
+        if index >= self.draft.len() {
+            return false;
+        }
+        let mut next = self.draft.clone();
+        next[index] = next_box;
+        self.push_edit(next)
+    }
+
     /// Deletes `draft[index]`. Returns `true` if a box was removed.
     pub fn delete_box(&mut self, index: usize) -> bool {
         if index >= self.draft.len() {
@@ -296,10 +334,15 @@ impl LabelEditor {
 
     /// Steps back one edit (`Ctrl+Z`).
     pub fn undo(&mut self) -> bool {
+        self.drawing = None;
+        self.transforming = None;
+        self.hover_handle = None;
+        self.hover_move = false;
         let Some(prev) = self.undo.pop() else {
             return false;
         };
         self.redo.push(std::mem::replace(&mut self.draft, prev));
+        self.draft_gen += 1;
         if self.redo.len() > MAX_HISTORY {
             self.redo.remove(0);
         }
@@ -313,10 +356,15 @@ impl LabelEditor {
 
     /// Steps forward one edit (`Ctrl+Shift+Z` / `Ctrl+Y`).
     pub fn redo(&mut self) -> bool {
+        self.drawing = None;
+        self.transforming = None;
+        self.hover_handle = None;
+        self.hover_move = false;
         let Some(next) = self.redo.pop() else {
             return false;
         };
         self.undo.push(std::mem::replace(&mut self.draft, next));
+        self.draft_gen += 1;
         if self.undo.len() > MAX_HISTORY {
             self.undo.remove(0);
         }
@@ -336,6 +384,9 @@ impl LabelEditor {
     /// revision and bypass the conflict safeguard.
     pub fn discard(&mut self) -> bool {
         self.drawing = None;
+        self.transforming = None;
+        self.hover_handle = None;
+        self.hover_move = false;
         self.pending_switch = None;
         let was_conflict = self.changed_elsewhere;
         self.changed_elsewhere = false;
@@ -344,6 +395,7 @@ impl LabelEditor {
         if was_conflict {
             let changed = !same_boxes(&self.draft, &base);
             self.draft = base;
+            self.draft_gen += 1;
             self.undo.clear();
             self.redo.clear();
             changed
@@ -358,9 +410,69 @@ impl LabelEditor {
         self.expect_rev = label_box_revision(&saved_boxes);
         self.base = saved_boxes.clone();
         self.draft = saved_boxes;
+        self.draft_gen += 1;
         self.changed_elsewhere = false;
         self.pending_switch = None;
         self.drawing = None;
+        self.transforming = None;
+        self.hover_handle = None;
+        self.hover_move = false;
+    }
+
+    /// Begins a Move or Resize drag on `draft[index]`.
+    pub fn begin_transform(
+        &mut self,
+        index: usize,
+        start_img: (f32, f32),
+        start_px: (f32, f32),
+        kind: TransformKind,
+    ) -> bool {
+        let Some(&orig) = self.draft.get(index) else {
+            return false;
+        };
+        self.drawing = None;
+        self.transforming = Some(BoxTransform::new(index, orig, start_img, start_px, kind, self.draft_gen));
+        true
+    }
+
+    /// Updates an active Move or Resize drag; returns `true` when active.
+    pub fn update_transform(&mut self, cur_img: (f32, f32), cur_px: (f32, f32)) -> bool {
+        let Some(t) = self.transforming.as_mut() else {
+            return false;
+        };
+        if t.start_draft_gen != self.draft_gen {
+            self.transforming = None;
+            return false;
+        }
+        t.update(cur_img, cur_px);
+        true
+    }
+
+    /// Live preview `(index, transformed_box)` while moving or resizing past threshold.
+    pub fn preview_transform(&self, img_w: f32, img_h: f32) -> Option<(usize, BBox)> {
+        let t = self.transforming.as_ref()?;
+        if !t.moved || t.start_draft_gen != self.draft_gen || t.index >= self.draft.len() {
+            return None;
+        }
+        Some((t.index, t.apply(img_w, img_h)))
+    }
+
+    /// Commits an active Move or Resize drag as a single undoable edit. Returns `Some(index)` if
+    /// the box actually changed.
+    pub fn finish_transform(&mut self, img_w: f32, img_h: f32) -> Option<usize> {
+        let t = self.transforming.take()?;
+        if !t.moved || t.start_draft_gen != self.draft_gen || t.index >= self.draft.len() {
+            return None;
+        }
+        let next = t.apply(img_w, img_h);
+        self.update_box(t.index, next).then_some(t.index)
+    }
+
+    /// Cancels an active Move or Resize drag without modifying `draft` or undo history.
+    pub fn cancel_transform(&mut self) -> bool {
+        self.hover_handle = None;
+        self.hover_move = false;
+        self.transforming.take().is_some()
     }
 
     /// Begins a click-drag box gesture on the canvas.
@@ -545,5 +657,64 @@ mod tests {
         assert_eq!(ed.draft.len(), 2);
         assert_eq!(ed.draft[1].class, 1, "user draft box stays intact");
         assert_eq!(ed.base_revision(), label_box_revision(&remote_v2));
+    }
+
+    #[test]
+    fn move_resize_undo_redo_cancel_and_bounded_history_cap() {
+        let mut ed = LabelEditor::default();
+        let b0 = BBox { class: 0, x1: 40.0, y1: 50.0, x2: 140.0, y2: 130.0 };
+        ed.sync_image("lb_1", &sample_image("li_1", vec![b0]), 4, false);
+
+        // Move drag produces a live preview and commits as one undoable edit.
+        assert!(ed.begin_transform(0, (80.0, 80.0), (80.0, 80.0), TransformKind::Move));
+        ed.update_transform((110.0, 100.0), (110.0, 100.0));
+        let (idx, prev) = ed.preview_transform(640.0, 480.0).expect("move preview");
+        assert_eq!(idx, 0);
+        assert_eq!(prev, BBox { class: 0, x1: 70.0, y1: 70.0, x2: 170.0, y2: 150.0 });
+        assert_eq!(ed.finish_transform(640.0, 480.0), Some(0));
+        assert_eq!(ed.draft[0], prev);
+        assert!(ed.is_dirty());
+        assert_eq!(ed.undo.len(), 1);
+
+        // Resize drag from SE handle commits as a second single undoable edit.
+        assert!(ed.begin_transform(
+            0,
+            (170.0, 150.0),
+            (170.0, 150.0),
+            TransformKind::Resize(ResizeHandle::Se)
+        ));
+        ed.update_transform((220.0, 210.0), (220.0, 210.0));
+        assert_eq!(ed.finish_transform(640.0, 480.0), Some(0));
+        assert_eq!(ed.draft[0], BBox { class: 0, x1: 70.0, y1: 70.0, x2: 220.0, y2: 210.0 });
+        assert_eq!(ed.undo.len(), 2);
+
+        // Cancelling a transform leaves draft and undo untouched.
+        assert!(ed.begin_transform(0, (70.0, 70.0), (70.0, 70.0), TransformKind::Resize(ResizeHandle::Nw)));
+        ed.update_transform((10.0, 10.0), (10.0, 10.0));
+        assert!(ed.cancel_transform());
+        assert_eq!(ed.draft[0].x1, 70.0);
+        assert_eq!(ed.undo.len(), 2);
+
+        // Undo resize -> undo move -> clean again!
+        assert!(ed.undo());
+        assert_eq!(ed.draft[0], prev);
+        assert!(ed.undo());
+        assert_eq!(ed.draft[0], b0);
+        assert!(!ed.is_dirty());
+        assert!(ed.redo());
+        assert_eq!(ed.draft[0], prev);
+
+        // Bounded history cap: pushing > MAX_HISTORY edits caps undo at MAX_HISTORY.
+        for step in 1..=(MAX_HISTORY + 25) {
+            let x1 = (step % 200) as f32;
+            assert!(ed.update_box(0, BBox { class: 0, x1, y1: 50.0, x2: x1 + 80.0, y2: 130.0 }));
+        }
+        assert_eq!(ed.undo.len(), MAX_HISTORY);
+
+        // Switching to another image clears undo & redo cleanly.
+        ed.sync_image("lb_1", &sample_image("li_2", vec![b0]), 4, false);
+        assert!(!ed.can_undo());
+        assert!(!ed.can_redo());
+        assert!(!ed.is_dirty());
     }
 }

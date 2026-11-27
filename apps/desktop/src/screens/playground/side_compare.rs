@@ -118,7 +118,12 @@ impl FoloApp {
     }
 
     /// Export action bar (Export PNG, Export JSON, Copy JSON) shared between Single and Compare modes.
-    pub(super) fn play_export_bar(&self, t: &Theme, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn play_export_bar(
+        &self,
+        t: &Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let has_image = self.play_image.is_some();
         let has_json = self.has_play_export_json();
         let png_btn = if has_image {
@@ -194,18 +199,97 @@ impl FoloApp {
             .into_any_element()
         };
 
+        let batch_exports = self.play_batch.is_active().then(|| self.play_batch_export_row(window, cx));
+
         div()
             .px(px(12.))
             .py(px(8.))
             .border_b_1()
             .border_color(t.line_subtle)
             .flex()
+            .flex_col()
+            .gap(px(6.))
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(6.))
+                    .child(png_btn)
+                    .child(json_btn)
+                    .child(copy_btn),
+            )
+            .children(batch_exports)
+            .into_any_element()
+    }
+
+    /// Renders the **Batch JSON** and **Batch CSV** export buttons with focus continuity across
+    /// disabled/enabled state transitions.
+    pub(super) fn play_batch_export_row(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let has_batch = self.has_play_batch_export();
+        for key in ["play-export-batch-json", "play-export-batch-csv"] {
+            let dis = format!("{key}-disabled");
+            if !has_batch && self.fh(key, cx).is_focused(window) {
+                window.focus(&self.fh(dis, cx));
+            } else if has_batch && self.fh(&dis, cx).is_focused(window) {
+                window.focus(&self.fh(key, cx));
+            }
+        }
+        let batch_json_btn = if has_batch {
+            self.button(
+                "play-export-batch-json",
+                "Batch JSON",
+                Btn::Secondary,
+                Some("icons/file-text.svg"),
+                window,
+                cx,
+                act(|this, _, cx| this.export_play_batch_json(cx)),
+            )
+            .tooltip(crate::controls::tip("Save completed batch detections as JSON", None))
+            .into_any_element()
+        } else {
+            self.button_disabled(
+                "play-export-batch-json",
+                "Batch JSON",
+                Btn::Secondary,
+                Some("icons/file-text.svg"),
+                "Run at least one batch image first",
+                window,
+                cx,
+            )
+            .into_any_element()
+        };
+        let batch_csv_btn = if has_batch {
+            self.button(
+                "play-export-batch-csv",
+                "Batch CSV",
+                Btn::Secondary,
+                Some("icons/download.svg"),
+                window,
+                cx,
+                act(|this, _, cx| this.export_play_batch_csv(cx)),
+            )
+            .tooltip(crate::controls::tip("Save completed batch detections as CSV", None))
+            .into_any_element()
+        } else {
+            self.button_disabled(
+                "play-export-batch-csv",
+                "Batch CSV",
+                Btn::Secondary,
+                Some("icons/download.svg"),
+                "Run at least one batch image first",
+                window,
+                cx,
+            )
+            .into_any_element()
+        };
+        div()
+            .flex()
             .flex_wrap()
             .items_center()
             .gap(px(6.))
-            .child(png_btn)
-            .child(json_btn)
-            .child(copy_btn)
+            .child(batch_json_btn)
+            .child(batch_csv_btn)
             .into_any_element()
     }
 
@@ -219,6 +303,15 @@ impl FoloApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         if self.play_image.is_none() {
+            if self.play_batch.is_active() {
+                return div()
+                    .px(px(12.))
+                    .py(px(8.))
+                    .border_b_1()
+                    .border_color(t.line_subtle)
+                    .child(self.play_batch_export_row(window, cx))
+                    .into_any_element();
+            }
             return div().into_any_element();
         }
         let boxes_chip = self.chip(

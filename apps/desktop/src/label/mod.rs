@@ -4,6 +4,7 @@
 mod actions;
 mod editor;
 mod editor_actions;
+mod editor_geom;
 mod forms;
 mod load;
 mod state;
@@ -13,6 +14,9 @@ mod stream;
 pub use actions::validate_new_job;
 pub use actions::{LABEL_VAL_FRACTIONS, filter_label_images, filter_label_jobs, parse_class_list};
 pub use editor::{EditTool, PendingImageSwitch, PendingRouteNav};
+#[cfg(test)]
+pub use editor_geom::ResizeHandle;
+pub use editor_geom::{TransformKind, handle_points, hit_resize_handle};
 #[cfg(test)]
 pub(crate) use load::merge_log_lines;
 #[cfg(test)]

@@ -210,6 +210,9 @@ impl FoloApp {
             cx,
         );
 
+        let batch_strip =
+            self.play_batch.is_active().then(|| self.play_batch_filmstrip(&t, stage_w, window, cx));
+
         div()
             .id("stage")
             .flex_1()
@@ -230,6 +233,7 @@ impl FoloApp {
                     .child(div().w(px(1.)).h_full().bg(t.line_default).flex_none())
                     .child(pane_b),
             )
+            .children(batch_strip)
             .into_any_element()
     }
 

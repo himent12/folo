@@ -70,6 +70,64 @@ impl FoloApp {
         }))
     }
 
+    /// True when any `TextInput` in the app currently holds keyboard focus, so single-key
+    /// page shortcuts (Playground batch `[`/`]`/arrows, Labeling `1`–`9`/review keys) stay silent.
+    pub(crate) fn any_text_input_focused(&self, window: &Window, cx: &App) -> bool {
+        let check = |input: &folo_ui::Entity<crate::input::TextInput>| {
+            input.read(cx).focus_handle(cx).is_focused(window)
+        };
+        if [
+            &self.server_url,
+            &self.ds_search,
+            &self.ds_img_search,
+            &self.run_search,
+            &self.model_search,
+            &self.bench_search,
+            &self.label_search,
+            &self.log_search,
+        ]
+        .into_iter()
+        .any(check)
+        {
+            return true;
+        }
+        if self.palette.as_ref().is_some_and(|p| check(&p.input)) {
+            return true;
+        }
+        if let Some(f) = &self.new_run
+            && [&f.name, &f.epochs_input, &f.lr_input, &f.close_input, &f.hours_input].into_iter().any(check)
+        {
+            return true;
+        }
+        if let Some(f) = &self.synth
+            && [&f.name, &f.images].into_iter().any(check)
+        {
+            return true;
+        }
+        if let Some(f) = &self.cloud.connect
+            && f.fields.iter().chain([&f.name]).any(check)
+        {
+            return true;
+        }
+        if let Some(f) = &self.label.new_job
+            && [&f.name, &f.classes, &f.path, &f.instructions].into_iter().any(check)
+        {
+            return true;
+        }
+        if self.label.add_folder.as_ref().is_some_and(|f| check(&f.path))
+            || self.label.export_ds.as_ref().is_some_and(|f| check(&f.name))
+        {
+            return true;
+        }
+        if self.bench.new_bench.as_ref().is_some_and(|f| check(&f.name))
+            || self.bench.design.as_ref().is_some_and(|f| check(&f.note))
+            || self.bench.external.as_ref().is_some_and(|f| check(&f.name) || check(&f.file_path))
+        {
+            return true;
+        }
+        false
+    }
+
     /// Whether the focused element belongs to the topmost overlay (always true without one).
     fn focus_in_scope(&self, window: &Window, cx: &App) -> bool {
         let has_prefix = |prefixes: &[&str]| {

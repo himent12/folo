@@ -254,7 +254,7 @@ impl Render for FoloApp {
                     cx.notify();
                 }
             }))
-            .on_key_down(cx.listener(|this, ev: &folo_ui::KeyDownEvent, _, cx| {
+            .on_key_down(cx.listener(|this, ev: &folo_ui::KeyDownEvent, window, cx| {
                 // Enter and Space only when nothing took them (typed into a field they're text).
                 if matches!(ev.keystroke.key.as_str(), "enter" | "space") && !this.kb {
                     this.kb = true;
@@ -291,15 +291,20 @@ impl Render for FoloApp {
                     }
                     return;
                 }
+                if this.any_text_input_focused(window, cx) {
+                    return;
+                }
                 if this.route == Route::Playground
-                    && this.play_image.is_some()
+                    && (this.play_image.is_some() || this.play_batch.is_active())
                     && !this.modal_open()
                     && this.palette.is_none()
                     && this.menu_open.is_none()
                     && !(m.control || m.alt || m.platform)
                 {
                     let d = if m.shift { 128. } else { 32. };
-                    let zoomed = this.play_zoom > 1.0;
+                    let has_img = this.play_image.is_some();
+                    let zoomed = has_img && this.play_zoom > 1.0;
+                    let has_batch = this.play_batch.is_active();
                     let clamp_play_pan = |this: &mut Self| {
                         this.play_drag = None;
                         if let (Some(b), Some(img)) = (this.play_view.get(), this.play_image.as_ref()) {
@@ -314,7 +319,8 @@ impl Render for FoloApp {
                         }
                     };
                     match ev.keystroke.key.as_str() {
-                        // Arrows reach here only when no focused control used them.
+                        // Arrows reach here only when no focused control used them: pan when zoomed,
+                        // otherwise step across the active Playground batch filmstrip.
                         "left" if zoomed => {
                             this.play_pan.0 += d;
                             clamp_play_pan(this);
@@ -322,6 +328,18 @@ impl Render for FoloApp {
                         "right" if zoomed => {
                             this.play_pan.0 -= d;
                             clamp_play_pan(this);
+                        }
+                        "left" if has_batch => {
+                            this.step_play_batch(-1, cx);
+                        }
+                        "right" if has_batch => {
+                            this.step_play_batch(1, cx);
+                        }
+                        "[" if has_batch => {
+                            this.step_play_batch(-1, cx);
+                        }
+                        "]" if has_batch => {
+                            this.step_play_batch(1, cx);
                         }
                         "up" if zoomed => {
                             this.play_pan.1 += d;
@@ -331,9 +349,9 @@ impl Render for FoloApp {
                             this.play_pan.1 -= d;
                             clamp_play_pan(this);
                         }
-                        "+" | "=" => this.play_zoom_by(1.4, cx),
-                        "-" => this.play_zoom_by(1.0 / 1.4, cx),
-                        "0" => {
+                        "+" | "=" if has_img => this.play_zoom_by(1.4, cx),
+                        "-" if has_img => this.play_zoom_by(1.0 / 1.4, cx),
+                        "0" if has_img => {
                             this.play_zoom = 1.0;
                             this.play_pan = (0., 0.);
                             this.play_drag = None;
@@ -383,9 +401,9 @@ impl Render for FoloApp {
                     this.toast(Tone::Neutral, "Can't open an image yet", Some(why.into()), cx);
                     return;
                 }
-                if let Some(p) = paths.paths().first().cloned() {
+                if !paths.paths().is_empty() {
                     let req = this.open_request();
-                    this.open_play_file(p, req, w, cx);
+                    this.open_play_paths(paths.paths().to_vec(), req, w, cx);
                 }
             }))
             .child(Self::press_tracker(cx))

@@ -64,6 +64,14 @@ impl FoloApp {
             }
             return;
         }
+        if self.label.editor.transforming.is_some() {
+            if ev.pressed_button != Some(MouseButton::Left) {
+                self.finish_label_box_transform(cx);
+            } else {
+                self.update_label_box_transform(ev.position, cx);
+            }
+            return;
+        }
         if self.label.editor.drawing.is_some() {
             if ev.pressed_button != Some(MouseButton::Left) {
                 self.finish_label_box_draw(cx);
@@ -76,10 +84,7 @@ impl FoloApp {
         if ev.pressed_button != Some(MouseButton::Left) {
             if let Some(d) = self.drag.take() {
                 if d.id == "play-iou" {
-                    self.run_predict(cx);
-                    if self.play_compare.enabled {
-                        self.run_predict_b(cx);
-                    }
+                    self.on_play_iou_changed(cx);
                 }
                 cx.notify();
             }
@@ -107,16 +112,17 @@ impl FoloApp {
         {
             cx.notify();
         }
+        if self.label.editor.transforming.is_some() {
+            self.update_label_box_transform(ev.position, cx);
+            self.finish_label_box_transform(cx);
+        }
         if self.label.editor.drawing.is_some() {
             self.update_label_box_draw(ev.position, cx);
             self.finish_label_box_draw(cx);
         }
         if let Some(d) = self.drag.take() {
             if d.id == "play-iou" {
-                self.run_predict(cx);
-                if self.play_compare.enabled {
-                    self.run_predict_b(cx);
-                }
+                self.on_play_iou_changed(cx);
             }
             cx.notify();
         }

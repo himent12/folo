@@ -103,7 +103,7 @@ impl FoloApp {
         let open = if let Some(why) = self.open_image_blocked() {
             self.button_disabled(
                 "play-open",
-                "Open image",
+                "Open images",
                 Btn::Secondary,
                 Some("icons/image-up.svg"),
                 why,
@@ -114,14 +114,38 @@ impl FoloApp {
         } else {
             self.button(
                 "play-open",
-                "Open image",
+                "Open images",
                 Btn::Secondary,
                 Some("icons/image-up.svg"),
                 window,
                 cx,
                 act(|this, w, cx| this.pick_image(w, cx)),
             )
-            .tooltip(crate::controls::tip("Open an image", Some("Ctrl O")))
+            .tooltip(crate::controls::tip("Open one or more images", Some("Ctrl O")))
+            .into_any_element()
+        };
+        let folder = if let Some(why) = self.open_image_blocked() {
+            self.button_disabled(
+                "play-open-folder",
+                "Folder",
+                Btn::Secondary,
+                Some("icons/folder-open.svg"),
+                why,
+                window,
+                cx,
+            )
+            .into_any_element()
+        } else {
+            self.button(
+                "play-open-folder",
+                "Folder",
+                Btn::Secondary,
+                Some("icons/folder-open.svg"),
+                window,
+                cx,
+                act(|this, w, cx| this.pick_play_folder(w, cx)),
+            )
+            .tooltip(crate::controls::tip("Open a folder of images as a batch", None))
             .into_any_element()
         };
         let header = page_header(
@@ -130,12 +154,12 @@ impl FoloApp {
             if no_models_hdr {
                 "Run a model on any image."
             } else if self.play_compare.enabled {
-                "Compare two models side-by-side on any image. Drop a file anywhere in the window."
+                "Compare two models side-by-side on any image. Drop files or a folder anywhere in the window."
             } else {
-                "Run a model on any image. Drop a file anywhere in the window."
+                "Run a model on any image or folder batch. Drop files or a folder anywhere in the window."
             },
             // No models: the body's call to action is the only one (no inert button beside it).
-            if no_models_hdr { Vec::new() } else { vec![compare_toggle, open] },
+            if no_models_hdr { Vec::new() } else { vec![compare_toggle, open, folder] },
         );
         let stage = self.stage(window, cx);
         self.probe_local_gpu(cx);

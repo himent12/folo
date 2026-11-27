@@ -124,6 +124,7 @@ impl FoloApp {
             "a" | "A" => self.approve_label_image(job_id, &active_id, true, cx),
             "d" | "D" => {
                 self.label.editor.cancel_draw();
+                self.label.editor.cancel_transform();
                 self.label.editor.tool = match self.label.editor.tool {
                     EditTool::Select => EditTool::Draw,
                     EditTool::Draw => EditTool::Select,
@@ -134,6 +135,9 @@ impl FoloApp {
             }
             "b" | "B" => {
                 self.label.show_boxes = !self.label.show_boxes;
+                if !self.label.show_boxes {
+                    self.label.editor.cancel_transform();
+                }
             }
             "l" | "L" => {
                 self.label.show_labels = !self.label.show_labels;
@@ -541,6 +545,81 @@ impl FoloApp {
                 cx.notify();
             }
         } else {
+            cx.notify();
+        }
+    }
+
+    /// Updates an in-progress click-drag box Move or Resize from a window-level pointer move event.
+    pub(crate) fn update_label_box_transform(
+        &mut self,
+        pos: folo_ui::Point<folo_ui::Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(b) = self.label.stage_view.get() else {
+            return;
+        };
+        let (Some(job_id), Some(image_id)) =
+            (self.label.editor.job_id.as_deref(), self.label.editor.image_id.as_deref())
+        else {
+            return;
+        };
+        let Some(dims) = self
+            .label
+            .images
+            .get(job_id)
+            .and_then(|l| l.ready())
+            .and_then(|list| list.iter().find(|i| i.id == image_id))
+            .map(|im| (im.width.max(1) as f32, im.height.max(1) as f32))
+        else {
+            return;
+        };
+        let img_pt =
+            crate::viz::to_image(b, dims, crate::viz::Fit::Contain, self.label.zoom, self.label.pan, pos);
+        if self.label.editor.update_transform(img_pt, (f32::from(pos.x), f32::from(pos.y))) {
+            cx.notify();
+        }
+    }
+
+    /// Commits an in-progress box Move or Resize as one undoable edit and updates box selection rev.
+    pub(crate) fn finish_label_box_transform(&mut self, cx: &mut Context<Self>) {
+        let Some(job_id) = self.label.editor.job_id.clone() else {
+            self.label.editor.cancel_transform();
+            return;
+        };
+        let Some(image_id) = self.label.editor.image_id.clone() else {
+            self.label.editor.cancel_transform();
+            return;
+        };
+        let Some((w, h, locked)) = self
+            .label
+            .images
+            .get(&job_id)
+            .and_then(|l| l.ready())
+            .and_then(|list| list.iter().find(|i| i.id == image_id))
+            .map(|im| {
+                (im.width.max(1) as f32, im.height.max(1) as f32, im.status == LabelImageStatus::Labeling)
+            })
+        else {
+            self.label.editor.cancel_transform();
+            return;
+        };
+        let was_moved = self.label.editor.transforming.as_ref().is_some_and(|t| t.moved);
+        if self.label.mutating || locked {
+            self.label.editor.cancel_transform();
+            if locked && was_moved {
+                self.label.review_error =
+                    Some(ApiError::new("label_job_active", "The agent is labeling this image right now."));
+            }
+            cx.notify();
+            return;
+        }
+        if let Some(idx) = self.label.editor.finish_transform(w, h) {
+            let rev = self.label.editor.draft_revision();
+            self.label.selected_box = Some(SelectedBox { image_id, index: idx, revision: rev });
+            self.label.hover_box = None;
+            self.label.review_error = None;
+            cx.notify();
+        } else if was_moved {
             cx.notify();
         }
     }

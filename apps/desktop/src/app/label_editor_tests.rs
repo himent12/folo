@@ -659,3 +659,298 @@ fn playtest_r11_wheel_scroll_stage_stability_and_conflict_banner() {
         });
     }
 }
+
+#[test]
+fn labeling_box_move_resize_undo_redo_and_hotkey_input_guard() {
+    use crate::label::{ResizeHandle, TransformKind};
+    use folo_ui::Focusable;
+
+    let api = Arc::new(MockBackend::new(4200, true));
+    let (mut app, window) = open_with(api, 1280., 800., Mode::Dark);
+
+    drive(&mut app, window, |this, w, cx| this.navigate(Route::LabelJob("lb_4f10".into()), w, cx));
+    settle(&mut app, window);
+
+    let (img_id, orig_box) = drive(&mut app, window, |this, _, cx| {
+        let all = this.label.images.get("lb_4f10").and_then(|l| l.ready()).unwrap();
+        let im = all
+            .iter()
+            .find(|i| i.status == LabelImageStatus::Labeled && !i.boxes.is_empty())
+            .expect("labeled image with boxes")
+            .clone();
+        this.select_label_image(im.id.clone(), cx);
+        (im.id, im.boxes[0])
+    });
+    settle(&mut app, window);
+
+    // 1. Move box 0 via stage transform helper -> marks dirty, updates selection revision, undoable!
+    let moved_box = drive(&mut app, window, |this, _, cx| {
+        let b = this.label.stage_view.get().expect("stage bounds");
+        let im = this.ensure_label_editor_synced("lb_4f10", &img_id).unwrap();
+        let dims = (im.width.max(1) as f32, im.height.max(1) as f32);
+        let p0 = point(b.origin.x + px(100.), b.origin.y + px(100.));
+        let p1 = point(b.origin.x + px(130.), b.origin.y + px(120.));
+        let img_p0 =
+            crate::viz::to_image(b, dims, crate::viz::Fit::Contain, this.label.zoom, this.label.pan, p0);
+        assert!(this.label.editor.begin_transform(
+            0,
+            img_p0,
+            (f32::from(p0.x), f32::from(p0.y)),
+            TransformKind::Move
+        ));
+        this.update_label_box_transform(p1, cx);
+        assert!(this.label.editor.preview_transform(dims.0, dims.1).is_some());
+        this.finish_label_box_transform(cx);
+        assert!(this.label.editor.is_dirty_for("lb_4f10", &img_id));
+        let sel = this.label.selected_box.as_ref().expect("moved box stays selected");
+        assert_eq!(sel.revision, this.label.editor.draft_revision());
+        this.label.editor.draft[0]
+    });
+    assert_ne!(moved_box, orig_box);
+
+    // 2. Resize box 0 from SE handle -> second undo entry; Ctrl+Z x2 returns to clean base!
+    let resized_box = drive(&mut app, window, |this, _, cx| {
+        let b = this.label.stage_view.get().expect("stage bounds");
+        let im = this.ensure_label_editor_synced("lb_4f10", &img_id).unwrap();
+        let dims = (im.width.max(1) as f32, im.height.max(1) as f32);
+        let p0 = point(b.origin.x + px(130.), b.origin.y + px(120.));
+        let p1 = point(b.origin.x + px(180.), b.origin.y + px(170.));
+        let img_p0 =
+            crate::viz::to_image(b, dims, crate::viz::Fit::Contain, this.label.zoom, this.label.pan, p0);
+        assert!(this.label.editor.begin_transform(
+            0,
+            img_p0,
+            (f32::from(p0.x), f32::from(p0.y)),
+            TransformKind::Resize(ResizeHandle::Se),
+        ));
+        this.update_label_box_transform(p1, cx);
+        this.finish_label_box_transform(cx);
+        this.label.editor.draft[0]
+    });
+    assert_ne!(resized_box, moved_box);
+
+    press(&mut app, window, "ctrl-z");
+    assert_eq!(drive(&mut app, window, |this, _, _| this.label.editor.draft[0]), moved_box);
+    press(&mut app, window, "ctrl-z");
+    drive(&mut app, window, |this, _, _| {
+        assert_eq!(this.label.editor.draft[0], orig_box);
+        assert!(!this.label.editor.is_dirty());
+    });
+    press(&mut app, window, "ctrl-y");
+    assert_eq!(drive(&mut app, window, |this, _, _| this.label.editor.draft[0]), moved_box);
+
+    // 3. When a TextInput is focused (e.g. inline Export form name input), numeric '1'-'9' hotkeys
+    //    do NOT change draw_class or reclassify boxes.
+    drive(&mut app, window, |this, w, cx| {
+        this.label.editor.draw_class = 0;
+        let job = this.label_job_by_id("lb_4f10").unwrap().clone();
+        this.open_export_label_dataset(&job, w, cx);
+        let fh = this.label.export_ds.as_ref().unwrap().name.read(cx).focus_handle(cx);
+        w.focus(&fh);
+    });
+    settle(&mut app, window);
+    press(&mut app, window, "2");
+    drive(&mut app, window, |this, w, cx| {
+        assert_eq!(this.label.editor.draw_class, 0, "1-9 hotkeys ignored while TextInput is focused");
+        this.close_export_label_dataset(w, cx);
+    });
+    settle(&mut app, window);
+    press(&mut app, window, "2");
+    assert_eq!(
+        drive(&mut app, window, |this, _, _| this.label.editor.draw_class),
+        1,
+        "1-9 hotkeys work once TextInput is closed"
+    );
+}
+
+#[test]
+fn labeling_pointer_drag_delete_mid_drag_and_hidden_boxes_guard() {
+    use folo_ui::{MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent};
+
+    let api = Arc::new(MockBackend::new(4200, true));
+    let (mut app, window) = open_with(api, 1280., 800., Mode::Dark);
+    app.update(|cx| {
+        crate::app::bind_keys(cx);
+        crate::input::bind_keys(cx);
+    });
+
+    drive(&mut app, window, |this, w, cx| this.navigate(Route::LabelJob("lb_4f10".into()), w, cx));
+    settle(&mut app, window);
+
+    // Pick a labeled image and seed it with 2 distinct boxes for mid-drag Delete verification.
+    let (img_id, box_a, box_b) = drive(&mut app, window, |this, _, cx| {
+        let ba = BBox { class: 0, x1: 60.0, y1: 60.0, x2: 180.0, y2: 180.0 };
+        let bb = BBox { class: 1, x1: 300.0, y1: 120.0, x2: 440.0, y2: 260.0 };
+        let im_id = match this.label.images.get_mut("lb_4f10") {
+            Some(crate::store::Load::Ready(all)) => {
+                let im =
+                    all.iter_mut().find(|i| i.status == LabelImageStatus::Labeled).expect("labeled image");
+                im.boxes = vec![ba, bb];
+                im.id.clone()
+            }
+            _ => panic!("label images not loaded"),
+        };
+        this.select_label_image(im_id.clone(), cx);
+        this.ensure_label_editor_synced("lb_4f10", &im_id);
+        this.label.selected_box = None;
+        cx.notify();
+        (im_id, ba, bb)
+    });
+    settle(&mut app, window);
+
+    // Compute screen-space center of box_a and SE handle of box_b inside label-stage.
+    let (stage_b, pt_a, pt_a_drag, pt_b_se) = drive(&mut app, window, |this, _, _| {
+        let b = this.label.stage_view.get().expect("stage bounds");
+        let im = this
+            .label
+            .images
+            .get("lb_4f10")
+            .and_then(|l| l.ready())
+            .unwrap()
+            .iter()
+            .find(|i| i.id == img_id)
+            .unwrap();
+        let dims = (im.width.max(1) as f32, im.height.max(1) as f32);
+        let rect = crate::viz::image_rect(
+            b,
+            dims.0,
+            dims.1,
+            crate::viz::Fit::Contain,
+            this.label.zoom,
+            this.label.pan,
+        );
+        let sx = f32::from(rect.size.width) / dims.0;
+        let sy = f32::from(rect.size.height) / dims.1;
+        let a_center = point(
+            rect.left() + px(((box_a.x1 + box_a.x2) * 0.5) * sx),
+            rect.top() + px(((box_a.y1 + box_a.y2) * 0.5) * sy),
+        );
+        let a_drag = point(a_center.x + px(40.), a_center.y + px(30.));
+        let b_se = point(rect.left() + px(box_b.x2 * sx), rect.top() + px(box_b.y2 * sy));
+        (b, a_center, a_drag, b_se)
+    });
+    assert!(stage_b.contains(&pt_a));
+
+    // 1. Real pointer sequence: MouseDown on box 0 -> MouseMove past drag threshold -> Delete -> MouseUp.
+    app.simulate_input(
+        window.into(),
+        PlatformInput::MouseDown(MouseDownEvent {
+            button: MouseButton::Left,
+            position: pt_a,
+            modifiers: folo_ui::Modifiers::default(),
+            click_count: 1,
+            first_mouse: false,
+        }),
+    );
+    app.run_until_idle();
+    app.frame(window.into());
+    app.simulate_input(
+        window.into(),
+        PlatformInput::MouseMove(MouseMoveEvent {
+            position: pt_a_drag,
+            pressed_button: Some(MouseButton::Left),
+            modifiers: folo_ui::Modifiers::default(),
+        }),
+    );
+    app.run_until_idle();
+    app.frame(window.into());
+    assert!(
+        drive(&mut app, window, |this, _, _| this.label.editor.transforming.is_some()),
+        "dragging box 0 starts Move transform"
+    );
+
+    // Press Delete while mouse is still held: deletes box 0, cancels transform, shifts box_b to index 0.
+    press(&mut app, window, "delete");
+    app.simulate_input(
+        window.into(),
+        PlatformInput::MouseUp(MouseUpEvent {
+            button: MouseButton::Left,
+            position: pt_a_drag,
+            modifiers: folo_ui::Modifiers::default(),
+            click_count: 1,
+        }),
+    );
+    app.run_until_idle();
+    app.frame(window.into());
+
+    drive(&mut app, window, |this, _, _| {
+        assert_eq!(this.label.editor.draft.len(), 1, "only box_b survives");
+        assert_eq!(
+            this.label.editor.draft[0], box_b,
+            "mouse-up after mid-drag Delete must NOT overwrite surviving box_b"
+        );
+        assert!(this.label.editor.transforming.is_none());
+    });
+
+    // 2. Hidden boxes (show_boxes == false via 'B') must not expose resize handles or mutate invisible boxes.
+    drive(&mut app, window, |this, _, cx| {
+        this.label.selected_box = Some(crate::label::SelectedBox {
+            image_id: img_id.clone(),
+            index: 0,
+            revision: this.label.editor.draft_revision(),
+        });
+        cx.notify();
+    });
+    settle(&mut app, window);
+    press(&mut app, window, "b");
+    assert!(!drive(&mut app, window, |this, _, _| this.label.show_boxes));
+
+    app.simulate_input(
+        window.into(),
+        PlatformInput::MouseDown(MouseDownEvent {
+            button: MouseButton::Left,
+            position: pt_b_se,
+            modifiers: folo_ui::Modifiers::default(),
+            click_count: 1,
+            first_mouse: false,
+        }),
+    );
+    app.run_until_idle();
+    app.frame(window.into());
+    assert!(
+        drive(&mut app, window, |this, _, _| this.label.editor.transforming.is_none()),
+        "clicking where a hidden handle was must not start Resize while show_boxes is false"
+    );
+    app.simulate_input(
+        window.into(),
+        PlatformInput::MouseUp(MouseUpEvent {
+            button: MouseButton::Left,
+            position: point(pt_b_se.x + px(30.), pt_b_se.y + px(30.)),
+            modifiers: folo_ui::Modifiers::default(),
+            click_count: 1,
+        }),
+    );
+    app.run_until_idle();
+    app.frame(window.into());
+    assert_eq!(
+        drive(&mut app, window, |this, _, _| this.label.editor.draft[0]),
+        box_b,
+        "hidden box must remain unchanged"
+    );
+
+    // 3. Clean SSE sync_image cancels any in-flight transform.
+    drive(&mut app, window, |this, _, _| {
+        this.label.editor.base = vec![box_b];
+        this.label.editor.draft = vec![box_b];
+        assert!(this.label.editor.begin_transform(
+            0,
+            (350., 180.),
+            (350., 180.),
+            crate::label::TransformKind::Move
+        ));
+        let mut sse_img = this
+            .label
+            .images
+            .get("lb_4f10")
+            .and_then(|l| l.ready())
+            .unwrap()
+            .iter()
+            .find(|i| i.id == img_id)
+            .unwrap()
+            .clone();
+        sse_img.boxes = vec![box_a];
+        this.label.editor.sync_image("lb_4f10", &sse_img, 3, false);
+        assert!(this.label.editor.transforming.is_none(), "clean SSE sync cancels active transform");
+        assert_eq!(this.label.editor.draft, vec![box_a]);
+    });
+}

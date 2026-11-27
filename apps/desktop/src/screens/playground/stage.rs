@@ -95,7 +95,7 @@ impl FoloApp {
             } else {
                 self.button(
                     "play-pick",
-                    "Choose an image",
+                    "Choose images",
                     Btn::Primary,
                     Some("icons/image-up.svg"),
                     window,
@@ -103,6 +103,20 @@ impl FoloApp {
                     act(|this, w, cx| this.pick_image(w, cx)),
                 )
             };
+            let demo_batch_btn = (!no_models && !models_failed && samples).then(|| {
+                let label =
+                    if self.server_mode == crate::app::ServerMode::Mock { "Demo batch" } else { "Val batch" };
+                self.button(
+                    "play-empty-batch",
+                    label,
+                    Btn::Secondary,
+                    Some("icons/images.svg"),
+                    window,
+                    cx,
+                    act(|this, w, cx| this.load_play_demo_batch(w, cx)),
+                )
+                .tooltip(crate::controls::tip("Load sample validation images into the batch filmstrip", None))
+            });
             let drop_hover = self.play_drop_hover;
             // Capped at 420 px and centred: an empty state, not a 970 px hole.
             let zone = div()
@@ -163,19 +177,45 @@ impl FoloApp {
                                     IMAGE_FORMATS.to_string()
                                 })),
                         )
-                        .child(div().flex().items_center().gap(px(12.)).child(pick).when(!no_models && !models_failed, |d| {
-                            d.child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(6.))
-                                    .child(text(ty::SM, t.text_tertiary).child("or press"))
-                                    .child(shortcut(&t, &["Ctrl", "O"])),
-                            )
-                        })),
+                        .child(
+                            div()
+                                .flex()
+                                .flex_wrap()
+                                .justify_center()
+                                .items_center()
+                                .gap(px(10.))
+                                .child(pick)
+                                .children(demo_batch_btn)
+                                .when(!no_models && !models_failed, |d| {
+                                    d.child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap(px(6.))
+                                            .child(text(ty::SM, t.text_tertiary).child("or press"))
+                                            .child(shortcut(&t, &["Ctrl", "O"])),
+                                    )
+                                }),
+                        ),
                 )
                 .max_h(px(420.));
-            return div().flex_1().min_w_0().flex().flex_col().child(zone).into_any_element();
+            let stage_w = {
+                let rail = if window.viewport_size().width < px(1100.) { 280. } else { 320. };
+                (self.content_width(window) - rail - 16. - 2.).max(0.)
+            };
+            let batch_strip =
+                self.play_batch.is_active().then(|| self.play_batch_filmstrip(&t, stage_w, window, cx));
+            let err_banner = self.play_batch_failed_banner(&t, window, cx);
+            return div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(px(10.))
+                .children(batch_strip)
+                .children(err_banner)
+                .child(zone)
+                .into_any_element();
         }
         if self.play_compare.enabled && !no_models {
             return self.compare_stage(window, cx);
@@ -346,6 +386,8 @@ impl FoloApp {
         let hover_boxes = draw_boxes.clone();
         let paint_boxes = draw_boxes;
         let show_labels = self.play_labels;
+        let batch_strip =
+            self.play_batch.is_active().then(|| self.play_batch_filmstrip(&t, stage_w, window, cx));
         let tt = t;
         div()
             .id("stage")
@@ -583,13 +625,21 @@ impl FoloApp {
                     })
                     .when(canvas_ring, |d| {
                         self.hint_keys(if zoom > 1.0 {
-                            "Arrows pan · Shift ×4 · + − zoom · 0 fits"
+                            if self.play_batch.is_active() {
+                                "Arrows pan · Shift ×4 · [ ] batch · + − zoom · 0 fits"
+                            } else {
+                                "Arrows pan · Shift ×4 · + − zoom · 0 fits"
+                            }
+                        } else if self.play_batch.is_active() {
+                            "← → or [ ] batch · + − zoom · arrows pan when zoomed · 0 fits"
                         } else {
                             "+ − zoom · arrows pan when zoomed · 0 fits"
                         });
                         d
                     }),
             )
+            .children(self.play_batch_failed_banner(&t, window, cx))
+            .children(batch_strip)
             .into_any_element()
     }
 }

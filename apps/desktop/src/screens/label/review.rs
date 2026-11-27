@@ -193,7 +193,7 @@ impl FoloApp {
                     .child(status_seg)
                     .child(
                         text(ty::XS, t.text_tertiary).whitespace_normal().child(
-                            "Keys: ←/→ step · D draw · 1–9 class · Del box · Ctrl+Z/⇧Z undo/redo · Ctrl+S save · A approve",
+                            "Keys: ←/→ step · D draw · drag box/handles · 1–9 class · Del box · Ctrl+Z/⇧Z undo/redo · Ctrl+S save · A approve",
                         ),
                     ),
             )
@@ -324,6 +324,7 @@ impl FoloApp {
                 cx,
                 Rc::new(|this, idx, _, cx| {
                     this.label.editor.cancel_draw();
+                    this.label.editor.cancel_transform();
                     this.label.editor.tool = if idx == 1 { EditTool::Draw } else { EditTool::Select };
                     cx.notify();
                 }),
@@ -333,7 +334,26 @@ impl FoloApp {
                 None,
             ));
 
-        let undo_btn = if !can_undo || locked || busy {
+        let undo_disabled = !can_undo || locked || busy;
+        let redo_disabled = !can_redo || locked || busy;
+        let discard_disabled = !dirty || busy;
+        let save_disabled = !dirty || locked || busy;
+        for (key, disabled) in [
+            ("label-undo", undo_disabled),
+            ("label-redo", redo_disabled),
+            ("label-discard", discard_disabled),
+            ("label-save", save_disabled),
+        ] {
+            let dis_key = format!("{key}-disabled");
+            if disabled && self.fh(key, cx).is_focused(window) {
+                window.focus(&self.fh(dis_key, cx));
+            } else if !disabled && self.fh(&dis_key, cx).is_focused(window) {
+                window.focus(&self.fh(key, cx));
+            }
+        }
+        let undo_depth = self.label.editor.undo.len();
+        let redo_depth = self.label.editor.redo.len();
+        let undo_btn = if undo_disabled {
             self.button_disabled(
                 "label-undo",
                 "Undo",
@@ -354,10 +374,10 @@ impl FoloApp {
                 cx,
                 act(move |this, _, cx| this.undo_label_edit(&j, &im_id, cx)),
             )
-            .tooltip(crate::controls::tip("Undo last box edit", Some("Ctrl Z")))
+            .tooltip(crate::controls::tip(format!("Undo ({undo_depth} available)"), Some("Ctrl Z")))
         };
 
-        let redo_btn = if !can_redo || locked || busy {
+        let redo_btn = if redo_disabled {
             self.button_disabled(
                 "label-redo",
                 "Redo",
@@ -378,19 +398,8 @@ impl FoloApp {
                 cx,
                 act(move |this, _, cx| this.redo_label_edit(&j, &im_id, cx)),
             )
-            .tooltip(crate::controls::tip("Redo box edit", Some("Ctrl Shift Z")))
+            .tooltip(crate::controls::tip(format!("Redo ({redo_depth} available)"), Some("Ctrl Shift Z")))
         };
-
-        let discard_disabled = !dirty || busy;
-        let save_disabled = !dirty || locked || busy;
-        for (key, disabled) in [("label-discard", discard_disabled), ("label-save", save_disabled)] {
-            let dis_key = format!("{key}-disabled");
-            if disabled && self.fh(key, cx).is_focused(window) {
-                window.focus(&self.fh(dis_key, cx));
-            } else if !disabled && self.fh(&dis_key, cx).is_focused(window) {
-                window.focus(&self.fh(key, cx));
-            }
-        }
 
         let discard_btn = if discard_disabled {
             self.button_disabled(
@@ -502,6 +511,9 @@ impl FoloApp {
             cx,
             act(|this, _, cx| {
                 this.label.show_boxes = !this.label.show_boxes;
+                if !this.label.show_boxes {
+                    this.label.editor.cancel_transform();
+                }
                 cx.notify();
             }),
         );
