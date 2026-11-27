@@ -542,7 +542,13 @@ export default function ExportDialog(props: ExportDialogProps) {
                       {dynamicAxesOk.get() && format.get() === 'onnx' ? (
                         <div class="axes-row">
                           <span class="axes-label">Dynamic axes</span>
-                          <Segmented label="Dynamic ONNX axes" size="sm" bind:value={axesBind} options={AXES_SEG} />
+                          <Segmented
+                            label="Dynamic ONNX axes"
+                            size="sm"
+                            disabled={phase.get() === 'running'}
+                            bind:value={axesBind}
+                            options={AXES_SEG}
+                          />
                           {splitAxesActive.get() && onnxDirect.get() && !demo.get() ? (
                             <span class="opt-desc">Exports to the server exports folder (direct download supports Static or Full).</span>
                           ) : null}

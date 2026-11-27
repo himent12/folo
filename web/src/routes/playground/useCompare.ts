@@ -191,6 +191,8 @@ export function createCompareController(input: CompareControllerInput) {
     resetZoomState(zoom, false);
   }
 
+  const effectiveInfB = computed(() => infOf(runOnB.get()));
+
   // Model B prediction effect: strictly skipped when Compare mode is OFF (zero extra network calls).
   effect(() => {
     const onCompare = compare.get();
@@ -198,7 +200,7 @@ export function createCompareController(input: CompareControllerInput) {
     const s = input.source.get();
     const on = runOnB.get();
     const file = activeFileB.get();
-    const inf = infOf(on);
+    const inf = effectiveInfB.get();
     const infKey = inferenceConfigKey(inf);
     void retryTickB.get();
     if (!onCompare || !id || !s) {

@@ -121,7 +121,7 @@ export function useInferenceOptions(input: UseInferenceOptionsInput) {
       note = a.note ?? b.note;
     } else if (a.sahi !== b.sahi || a.tta !== b.tta) {
       const limited = !a.sahi || !a.tta ? 'Model A' : 'Model B';
-      note = `${limited}'s backend does not support this mode and will run Standard.`;
+      note = `${limited}'s backend does not support SAHI or TTA and will run Standard.`;
     }
     return { sahi, tta, sahiReason, ttaReason, note };
   });

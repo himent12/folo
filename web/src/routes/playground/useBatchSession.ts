@@ -13,7 +13,7 @@ import {
 } from '$lib/inference/browser';
 import { isOom } from '$lib/oom';
 import { toast } from '$lib/ui/toast';
-import { isPredictionCutAt, markCompletionFailed, markPredictionComplete } from './allCandidates';
+import { isPredictionCutAt, markCompletionFailed, markPredictionComplete, needsCompletionAt } from './allCandidates';
 import {
   batchItemSource,
   batchPredKey,
@@ -319,7 +319,7 @@ export function useBatchSession(o: UseBatchSessionInput) {
     inference: InferenceConfig,
     signal: AbortSignal,
   ): Promise<{ pred: Prediction; haltError?: unknown }> {
-    if (!isPredictionCutAt(p, o.conf.peek())) return { pred: p };
+    if (!needsCompletionAt(p, o.conf.peek())) return { pred: p };
     try {
       const all = await ask({
         api: hub.api,
@@ -527,7 +527,7 @@ export function useBatchSession(o: UseBatchSessionInput) {
     const confNow = o.conf.peek();
     const list = items.peek();
     const cutIndices = list
-      .map((it, idx) => (it.status === 'done' && isPredictionCutAt(it.pred, confNow) ? idx : -1))
+      .map((it, idx) => (it.status === 'done' && needsCompletionAt(it.pred, confNow) ? idx : -1))
       .filter((idx) => idx >= 0);
 
     const doExport = () => (kind === 'json' ? exportBatchJson(makeExportInput()) : exportBatchCsv(makeExportInput()));

@@ -2,19 +2,23 @@
 // Unit & integration tests for Playground Inference Options (SAHI tiled inference & TTA):
 // honest availability across demo / older server / live server `predict_options` / older WASM bundles,
 // request cancellation & re-execution on mode/option toggles, timing metadata, and single/batch JSON exports.
-import { flush as flushSync } from 'fw';
+import { flush as flushSync, signal } from 'fw';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { render } from '../../../framework/testing';
 import { hub } from '$lib/api/index';
 import { MockApi } from '$lib/api/mock';
 import type { PredictOptions, Prediction } from '$lib/api/types';
-import { resetWasmProbe } from '$lib/inference/browser';
+import { BrowserEngine, resetWasmProbe, type WasmModule } from '$lib/inference/browser';
 import { parse, router } from '$lib/router';
 import Playground from '../Playground';
+import { isPredictionCutAt, needsCompletionAt } from './allCandidates';
 import { buildBatchJson, batchPredKey, type BatchItem } from './batch';
+import { ALL, FETCH, type RunOn } from './predict';
 import { session } from './session';
-import { resolveInferenceAvailability } from './useInferenceOptions';
-import { predictionJson, whereLabel } from './viewState';
+import type { Source } from './source';
+import { createCompareController } from './useCompare';
+import { resolveInferenceAvailability, useInferenceOptions } from './useInferenceOptions';
+import { predictionJson, whereLabel, type Det } from './viewState';
 
 let target: HTMLElement | undefined;
 let mounted: ReturnType<typeof render> | undefined;
@@ -376,5 +380,167 @@ describe('Playground Inference Options UI & live server wiring', () => {
     await until(() => seen.length === 4, 're-run as standard when server lacks predict_options');
     expect(seen[3]?.tile).toBeUndefined();
     expect(seen[3]?.tta).toBeUndefined();
+  });
+
+  it('does not replay dense SAHI/TTA results (>1,000 boxes) and still reports a 30,000-box cap honestly', async () => {
+    const makeBoxes = (n: number) =>
+      Array.from({ length: n }, (_, i) => ({
+        class: 0,
+        name: 'bolt',
+        score: Math.max(0.02, 0.99 - i * 0.00001),
+        x1: 1,
+        y1: 1,
+        x2: 10,
+        y2: 10,
+      }));
+    const denseSahi: Prediction = {
+      model_id: 'm_hard_s',
+      image: { width: 640, height: 640 },
+      boxes: makeBoxes(FETCH.max_det + 200),
+      timing: { preprocess_ms: 2, inference_ms: 40, postprocess_ms: 2, total_ms: 44 },
+      device: 'gpu:0',
+      inference: { mode: 'sahi', tile_size: 640, overlap: 0.2, full_image: true },
+    };
+    const cappedSahi: Prediction = { ...denseSahi, boxes: makeBoxes(ALL.max_det) };
+
+    expect(isPredictionCutAt(denseSahi, 0.01)).toBe(false);
+    expect(needsCompletionAt(denseSahi, 0.01)).toBe(false);
+    expect(isPredictionCutAt(cappedSahi, 0.01)).toBe(true);
+    expect(needsCompletionAt(cappedSahi, 0.01)).toBe(false);
+
+    // End-to-end: a 1,200-box SAHI result at conf=0.01 must NOT trigger a duplicate second api.predict call.
+    const api = makeLiveApi(['run_cli', 'predict_options']);
+    const seen: PredictOptions[] = [];
+    const origPredict = api.predict.bind(api);
+    api.predict = vi.fn(async (input, opts) => {
+      seen.push(opts);
+      if (opts.tile) return denseSahi;
+      return origPredict(input, opts);
+    });
+    hub.api = api;
+    hub.features = ['run_cli', 'predict_options'];
+    hub.mode = 'live';
+
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    router.route = parse('#/playground?model=m_hard_s&conf=0.01');
+    mounted = render(() => <Playground />, target);
+
+    (await until(() => target!.querySelector<HTMLButtonElement>('button.sample'), 'sample')).click();
+    await until(() => seen.length === 1, 'initial standard run');
+
+    target.querySelector<HTMLButtonElement>('[data-inference-options] button.inf-toggle')!.click();
+    flushSync();
+    const modeGroup = await until(() => target!.querySelector('[role="radiogroup"][aria-label="Inference mode"]'), 'mode selector');
+    [...modeGroup.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === 'SAHI')!.click();
+    await until(() => seen.length === 2, 'single SAHI run');
+    await until(() => target!.querySelector('section[aria-labelledby="pg-timing"]')?.textContent?.includes('SAHI 640px'), 'SAHI settled');
+    await new Promise((r) => setTimeout(r, 60));
+    flushSync();
+    expect(seen).toHaveLength(2);
+    expect(seen[1]?.max_det).toBe(ALL.max_det);
+  });
+
+  it('does not loop Compare Model B browser weights downloads when ETag is absent under SAHI', async () => {
+    const api = makeLiveApi(['run_cli', 'predict_options']);
+    let downloads = 0;
+    let tiledRuns = 0;
+    api.modelWeightsTag = vi.fn(async () => null);
+    api.modelWeights = vi.fn(async () => {
+      downloads++;
+      return new ArrayBuffer(16);
+    });
+    hub.api = api;
+    hub.features = ['run_cli', 'predict_options'];
+    hub.mode = 'live';
+
+    class FakeDetector {
+      info() {
+        return { model_id: 'm_b', backend: 'cpu' as const, device: 'cpu', classes: ['bolt'], input: [640, 640] as [number, number] };
+      }
+      detect() {
+        return { model_id: 'm_b', image: { width: 10, height: 10 }, boxes: [], timing: { preprocess_ms: 0, inference_ms: 1, postprocess_ms: 0, total_ms: 1 }, device: 'cpu', backend: 'cpu' } as Prediction;
+      }
+      detectTiled() {
+        tiledRuns++;
+        return {
+          model_id: 'm_b',
+          image: { width: 10, height: 10 },
+          boxes: [{ class: 0, name: 'bolt', score: 0.9, x1: 1, y1: 1, x2: 5, y2: 5 }],
+          timing: { preprocess_ms: 0, inference_ms: 2, postprocess_ms: 0, total_ms: 2 },
+          device: 'cpu',
+          backend: 'cpu',
+        } as Prediction;
+      }
+      detectTta() {
+        return this.detect();
+      }
+      free() {}
+      static async load() {
+        return new FakeDetector();
+      }
+    }
+
+    const engine = new BrowserEngine(
+      async () => ({ FoloDetector: FakeDetector }) as unknown as WasmModule,
+      async () => ({ data: new Uint8ClampedArray(4), width: 1, height: 1 }) as ImageData,
+    );
+    const runOnA = signal<RunOn>('server');
+    let cmp!: ReturnType<typeof createCompareController>;
+    const catalog = await api.models();
+    const modelA = { ...catalog[0]!, id: 'm_a', name: 'A', classes: ['bolt'] };
+    const modelB = { ...catalog[0]!, id: 'm_b', name: 'B', classes: ['bolt'] };
+
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    mounted = render(() => {
+      const inf = useInferenceOptions({
+        runOn: runOnA,
+        compareRunOn: () => (cmp?.compare.get() ? cmp.runOnB.get() : null),
+        engine,
+        browserOff: () => null,
+        serverPredictOptions: () => true,
+      });
+      inf.setMode('sahi');
+      const source = signal<Source | null>({ kind: 'file', file: new File([new Uint8Array(4)], 'a.png', { type: 'image/png' }), name: 'a.png', url: 'blob:a', width: 10, height: 10 });
+      cmp = createCompareController({
+        ranked: () => [modelA, modelB],
+        choices: () => [],
+        modelA: () => modelA,
+        modelAId: () => 'm_a',
+        chooseModelA: () => {},
+        runOnA,
+        predA: signal<Prediction | null>(null),
+        predSourceKeyA: signal<string | null>(null),
+        hoverA: signal<Det | null>(null),
+        pickedA: signal<Det | null>(null),
+        resultA: () => null,
+        rowsA: () => [],
+        o2oA: () => false,
+        source,
+        conf: signal(0.25),
+        iou: signal(0.7),
+        maxDet: signal(300),
+        hidden: signal(new Set<number>()),
+        classesA: () => ['bolt'],
+        browserOff: () => null,
+        localWeights: signal(new Map<string, File>()),
+        dropLocalB: () => {},
+        badFileB: signal<{ name: string; why: string | null } | null>(null),
+        engine,
+        inferenceFor: inf.effectiveFor,
+      });
+      cmp.runOnB.set('cpu');
+      cmp.compare.set(true);
+      return <div />;
+    }, target);
+
+    await until(() => cmp.predB.get()?.boxes.length === 1, 'Compare Model B SAHI prediction');
+    await new Promise((r) => setTimeout(r, 60));
+    flushSync();
+    expect(downloads).toBe(1);
+    expect(tiledRuns).toBe(1);
+    expect(cmp.predB.get()?.inference?.mode).toBe('sahi');
+    engine.dispose();
   });
 });

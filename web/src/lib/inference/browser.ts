@@ -314,13 +314,15 @@ export class BrowserEngine {
     }
   }
 
-  #recordDetectorCaps(det: Detector) {
-    const tiled = typeof det.detectTiled === 'function';
-    const tta = typeof det.detectTta === 'function';
+  #setCapabilities(tiled: boolean, tta: boolean) {
     const cur = this.#capabilities.peek();
     if (cur.tiled !== tiled || cur.tta !== tta) {
       this.#capabilities.set({ tiled, tta });
     }
+  }
+
+  #recordDetectorCaps(det: Detector) {
+    this.#setCapabilities(typeof det.detectTiled === 'function', typeof det.detectTta === 'function');
   }
 
   async #pixels(req: { image: () => Promise<Blob>; imageKey?: string }, superseded: () => void): Promise<ImageData> {
@@ -373,10 +375,7 @@ export class BrowserEngine {
       this.#runtimeReady = true;
       const proto = m.FoloDetector.prototype;
       if (proto) {
-        this.#capabilities.set({
-          tiled: typeof proto.detectTiled === 'function',
-          tta: typeof proto.detectTta === 'function',
-        });
+        this.#setCapabilities(typeof proto.detectTiled === 'function', typeof proto.detectTta === 'function');
       }
       setEntryPhase('weights');
       const dl = req.file ? null : this.#acquireDownload(req);

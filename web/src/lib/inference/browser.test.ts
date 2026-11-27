@@ -469,6 +469,34 @@ describe('BrowserEngine', () => {
       }),
     ).rejects.toMatchObject({ status: 501, code: 'wasm_tta_unsupported' });
   });
+
+  it('keeps engine.capabilities reference-stable across repeated uncached detector loads', async () => {
+    class FakeDetector {
+      info() {
+        return { model_id: 'm1', backend: 'cpu' as const, device: 'cpu', classes: ['bolt'], input: [640, 640] as [number, number] };
+      }
+      detect() {
+        return { model_id: 'm1', image: { width: 1, height: 1 }, boxes: [], timing: { preprocess_ms: 0, inference_ms: 1, postprocess_ms: 0, total_ms: 1 }, device: 'cpu', backend: 'cpu' } as Prediction;
+      }
+      detectTiled() {
+        return this.detect();
+      }
+      detectTta() {
+        return this.detect();
+      }
+      free() {}
+      static async load() {
+        return new FakeDetector();
+      }
+    }
+    const e = new BrowserEngine(async () => ({ FoloDetector: FakeDetector }) as unknown as WasmModule, pixels);
+    // Repeated uncached loads (tag: null) must not churn `capabilities` object references once flags are known.
+    await e.predict({ ...req('m1', null), tag: null });
+    const firstCaps = e.capabilities;
+    expect(firstCaps).toEqual({ tiled: true, tta: true });
+    await e.predict({ ...req('m1', null), tag: null });
+    expect(e.capabilities).toBe(firstCaps);
+  });
 });
 
 describe('is the in-browser runtime in this build (DOGFOOD-3 S5)', () => {
