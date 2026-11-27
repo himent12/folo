@@ -243,6 +243,11 @@ impl Backend for HttpBackend {
         (self.run_archs.lock().unwrap().clone(), self.model_archs.lock().unwrap().clone())
     }
 
+    fn clear_arch_cache(&self) {
+        self.run_archs.lock().unwrap().clear();
+        self.model_archs.lock().unwrap().clear();
+    }
+
     fn create_run(&self, config: TrainConfig) -> ApiResult<Run> {
         self.post("/runs", &config)
     }

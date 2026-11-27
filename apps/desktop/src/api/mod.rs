@@ -168,6 +168,8 @@ pub trait Backend: Send + Sync + 'static {
     ) -> (std::collections::HashMap<String, String>, std::collections::HashMap<String, String>) {
         Default::default()
     }
+    /// Clears any backend-local architecture header cache (called on Retry / reconnect).
+    fn clear_arch_cache(&self) {}
     fn export_model(&self, id: &str, format: &str) -> ApiResult<ExportResult>;
     /// Exports a model with optional ONNX switches (`decode`, `dynamic_batch`, `dynamic_hw`, `half`).
     fn export_model_with_options(&self, id: &str, opts: ModelExportOptions) -> ApiResult<ExportResult> {

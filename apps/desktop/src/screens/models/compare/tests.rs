@@ -135,17 +135,19 @@ fn markdown_export_escapes_markup_and_renders_summary_and_per_class_tables() {
 
 #[test]
 fn compare_uses_loaded_eval_provenance_for_split_labels_and_mixed_caveat() {
-    use crate::api::Split;
+    use crate::api::{ModelSource, Split};
     use crate::screens::models::groups::eval_set_with_report;
     use crate::store::Store;
 
     let api = std::sync::Arc::new(crate::api::mock::MockBackend::new(4200, true));
     let store = Store::new(api);
 
-    // Two imported models (`run_id: None`) where the server's loaded ModelEval supplies concrete
-    // dataset_id + split provenance: one on train, one on val -> must NOT claim same_eval_set!
-    let a = sample_model("m_imp_a", "imported-a", Arch::N, 0.70, 0.90);
-    let b = sample_model("m_imp_b", "imported-b", Arch::N, 0.75, 0.92);
+    // 1. Run-produced models use loaded ModelEval provenance (dataset_id + split): one on train,
+    // one on val -> must NOT claim same_eval_set!
+    let mut a = sample_model("m_run_a", "run-a", Arch::N, 0.70, 0.90);
+    a.run_id = Some("run_a".into());
+    let mut b = sample_model("m_run_b", "run-b", Arch::N, 0.75, 0.92);
+    b.run_id = Some("run_b".into());
 
     let mut ea = sample_eval(&[(0, 0.70, 0.90)]);
     ea.dataset_id = Some("ds_8f2c".into());
@@ -161,9 +163,19 @@ fn compare_uses_loaded_eval_provenance_for_split_labels_and_mixed_caveat() {
     assert_eq!(eval_set_with_report(&store, &b, Some(&eb)).label, "Validation split of shapes");
     assert!(!same_eval_set_with_evals(&store, &[&a, &b], &[Some(&ea), Some(&eb)]));
 
-    // When both eval reports share dataset_id + split, they ARE directly comparable even if imported.
+    // When both run models share dataset_id + split, they ARE directly comparable.
     ea.split = Some(Split::Val);
     assert!(same_eval_set_with_evals(&store, &[&a, &b], &[Some(&ea), Some(&eb)]));
+
+    // 2. Imported and published files NEVER attribute `/eval`'s local dataset to their stored
+    // header metrics (`m.metrics`), so the mixed-dataset caveat stays active.
+    let imp = sample_model("m_imp", "imported", Arch::N, 0.80, 0.95);
+    let mut pub_m = sample_model("m_pub", "folo-n-coco", Arch::N, 0.82, 0.96);
+    pub_m.source = Some(ModelSource::Published);
+    assert_eq!(eval_set_with_report(&store, &imp, Some(&eb)).label, "Imported · split unknown");
+    assert!(!eval_set_with_report(&store, &imp, Some(&eb)).ranked);
+    assert_eq!(eval_set_with_report(&store, &pub_m, Some(&eb)).label, "Published weights · split unknown");
+    assert!(!same_eval_set_with_evals(&store, &[&b, &imp], &[Some(&eb), Some(&eb)]));
 }
 
 #[test]

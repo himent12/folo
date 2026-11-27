@@ -248,7 +248,16 @@ impl FoloApp {
             && self.store.dataset_summary(&draft.dataset).is_some()
         {
             let fh = draft.name.read(cx).focus_handle(cx);
+            let draft_run = draft.source_run_id.clone();
+            let draft_weights = draft.weights.clone();
             self.new_run = Some(draft);
+            self.sync_new_run_arch_after_probe(cx);
+            if let Some(rid) = draft_run.as_deref() {
+                self.probe_run_arch(rid, cx);
+            }
+            if let Some(wid) = draft_weights.as_deref() {
+                self.probe_model_arch(wid, cx);
+            }
             self.nr_recheck_dataset(cx);
             window.focus(&fh);
             cx.notify();
@@ -455,15 +464,16 @@ impl FoloApp {
     pub(super) fn sync_new_run_arch_after_probe(&mut self, cx: &mut Context<Self>) {
         let desired = {
             let Some(f) = self.new_run.as_ref() else { return };
-            if let Some(wid) = f.weights.as_deref() {
-                self.store.model_archs.get(wid).copied()
-            } else if !f.arch_touched
-                && let Some(rid) = f.source_run_id.as_deref()
-            {
-                self.store.run(rid).map(|r| self.store.run_arch(r))
-            } else {
-                None
-            }
+            f.weights.as_deref().and_then(|wid| self.store.model_archs.get(wid).copied()).or_else(|| {
+                (!f.arch_touched)
+                    .then(|| {
+                        f.source_run_id
+                            .as_deref()
+                            .and_then(|rid| self.store.run(rid))
+                            .map(|r| self.store.run_arch(r))
+                    })
+                    .flatten()
+            })
         };
         let mut changed = false;
         if let Some(arch) = desired
@@ -483,7 +493,7 @@ impl FoloApp {
 
     /// Whether an async HTTP architecture probe is still in flight for the form's chosen weights
     /// or cloned/retried source run.
-    fn nr_arch_probe_pending(&self) -> bool {
+    pub fn nr_arch_probe_pending(&self) -> bool {
         let Some(f) = self.new_run.as_ref() else { return false };
         if let Some(wid) = f.weights.as_deref()
             && self.store.probing_model_archs.contains(wid)
@@ -513,14 +523,11 @@ impl FoloApp {
         false
     }
 
-    /// Why a FOLO v2 selection cannot start on the current target, if it cannot: either an arch
-    /// probe is still resolving for the selected weights/source run, the server does not advertise
-    /// `folo2_arch`, or Cloud compute is selected (`folo-server` restricts v2 runs to local training).
+    /// Why a FOLO v2 selection cannot start on the current target, if it cannot: either the server
+    /// does not advertise `folo2_arch`, or Cloud compute is selected (`folo-server` restricts v2
+    /// runs to local training).
     pub fn nr_folo2_blocked(&self) -> Option<&'static str> {
         let f = self.new_run.as_ref()?;
-        if self.nr_arch_probe_pending() {
-            return Some("Checking model architecture…");
-        }
         if !f.arch_family.is_v2() {
             return None;
         }
@@ -660,6 +667,7 @@ impl FoloApp {
                 || (f.lr_invalid && f.optimizer != 0)
                 || f.optimizer_blocks().is_some()
         }) || self.compute_blocked().is_some()
+            || self.nr_arch_probe_pending()
             || self.nr_folo2_blocked().is_some()
             || self.nr_device_local_gone().is_some()
         {
@@ -726,6 +734,7 @@ impl FoloApp {
         let dataset_blocked = self.dataset_blocked().is_some();
         let weights_gone = self.nr_weights_gone().is_some();
         let device_gone = self.nr_device_gone(cx).is_some();
+        let arch_probe_pending = self.nr_arch_probe_pending();
         let folo2_blocked = self.nr_folo2_blocked().is_some();
         let Some(form) = self.new_run.as_mut() else { return };
         let model_arch = form.model_arch();
@@ -740,6 +749,7 @@ impl FoloApp {
             || dataset_blocked
             || weights_gone
             || device_gone
+            || arch_probe_pending
             || folo2_blocked
         {
             return;

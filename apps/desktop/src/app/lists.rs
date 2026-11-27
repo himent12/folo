@@ -421,10 +421,38 @@ impl FoloApp {
         self.reconcile_play_model(cx);
     }
 
+    /// Whether `id` looks like a registered model id rather than a raw `.folo` filesystem path.
+    fn is_model_id_probeable(id: &str) -> bool {
+        let trimmed = id.trim();
+        !trimmed.is_empty()
+            && !trimmed.contains('/')
+            && !trimmed.contains('\\')
+            && !trimmed.ends_with(".folo")
+    }
+
+    /// Permanent client-side probe errors that should not be retried on every 2 s `/system` refresh.
+    fn is_permanent_probe_error(err: &ApiError) -> bool {
+        matches!(
+            err.code.as_str(),
+            "not_found"
+                | "model_not_found"
+                | "run_not_found"
+                | "invalid_config"
+                | "bad_request"
+                | "not_supported"
+                | "method_not_allowed"
+                | "gone"
+        )
+    }
+
     /// Lazily resolves `x-folo-arch` (`folo2-*`) headers for one model id on HTTP backends when
     /// `folo2_arch` is supported. Transient errors leave the id unprobed so a later pass can retry.
     pub(super) fn probe_model_arch(&mut self, id: &str, cx: &mut Context<Self>) {
-        if self.server_mode == super::ServerMode::Mock || !self.store.supports_folo2() {
+        if self.hold_loading
+            || self.server_mode == super::ServerMode::Mock
+            || !self.store.supports_folo2()
+            || !Self::is_model_id_probeable(id)
+        {
             return;
         }
         if self.store.model_archs.contains_key(id)
@@ -433,12 +461,16 @@ impl FoloApp {
         {
             return;
         }
+        let probe_gen = self.store.arch_probe_gen;
         let id = id.to_string();
         let mid = id.clone();
         self.fetch(
             cx,
             move |api| api.model_arch(&mid),
             move |this, r, cx| {
+                if this.store.arch_probe_gen != probe_gen {
+                    return;
+                }
                 this.store.probing_model_archs.remove(&id);
                 match r {
                     Ok(Some(raw)) => {
@@ -452,8 +484,10 @@ impl FoloApp {
                         this.store.probed_model_archs.insert(id.clone());
                         this.sync_new_run_arch_after_probe(cx);
                     }
-                    Err(_) => {
-                        // Transient error: leave unprobed so a retry or reopen can ask again.
+                    Err(e) => {
+                        if Self::is_permanent_probe_error(&e) {
+                            this.store.probed_model_archs.insert(id.clone());
+                        }
                         cx.notify();
                     }
                 }
@@ -465,7 +499,7 @@ impl FoloApp {
     /// when `folo2_arch` is supported (no-op once cached or in mock mode where `known_archs` already
     /// populates every v2 model).
     pub(super) fn probe_missing_model_archs(&mut self, cx: &mut Context<Self>) {
-        if self.server_mode == super::ServerMode::Mock || !self.store.supports_folo2() {
+        if self.hold_loading || self.server_mode == super::ServerMode::Mock || !self.store.supports_folo2() {
             return;
         }
         let ids: Vec<String> = self
@@ -491,7 +525,7 @@ impl FoloApp {
     /// - If the run trained from scratch (no weights) and `run_cli` is supported, probes
     ///   `GET /api/runs/{id}/cli` to parse `--model folo2-*` even before a checkpoint exists.
     pub(super) fn probe_run_arch(&mut self, id: &str, cx: &mut Context<Self>) {
-        if self.server_mode == super::ServerMode::Mock || !self.store.supports_folo2() {
+        if self.hold_loading || self.server_mode == super::ServerMode::Mock || !self.store.supports_folo2() {
             return;
         }
         let Some(run) = self.store.run(id).cloned() else { return };
@@ -518,12 +552,16 @@ impl FoloApp {
         {
             return;
         }
+        let probe_gen = self.store.arch_probe_gen;
         let rid = run.id.clone();
         let key = run.id;
         self.fetch(
             cx,
             move |api| api.run_cli(&rid),
             move |this, r, cx| {
+                if this.store.arch_probe_gen != probe_gen {
+                    return;
+                }
                 this.store.probing_run_archs.remove(&key);
                 match r {
                     Ok(c) => {
@@ -533,7 +571,10 @@ impl FoloApp {
                         }
                         this.sync_new_run_arch_after_probe(cx);
                     }
-                    Err(_) => {
+                    Err(e) => {
+                        if Self::is_permanent_probe_error(&e) {
+                            this.store.probed_run_archs.insert(key.clone());
+                        }
                         cx.notify();
                     }
                 }

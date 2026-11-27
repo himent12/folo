@@ -130,6 +130,8 @@ pub struct Store {
     pub probing_model_archs: std::collections::HashSet<String>,
     /// Run ids whose `/cli` arch probe is currently in flight.
     pub probing_run_archs: std::collections::HashSet<String>,
+    /// Generation counter bumped on cache clear so pre-retry probe callbacks are ignored.
+    pub arch_probe_gen: u64,
 }
 
 impl Store {
@@ -169,6 +171,7 @@ impl Store {
             probed_run_archs: Default::default(),
             probing_model_archs: Default::default(),
             probing_run_archs: Default::default(),
+            arch_probe_gen: 0,
         };
         store.sync_known_archs();
         store
@@ -176,6 +179,8 @@ impl Store {
 
     /// Clears cached/probed canonical architectures when swapping backends or retrying all data.
     pub fn clear_arch_caches(&mut self) {
+        self.arch_probe_gen = self.arch_probe_gen.wrapping_add(1);
+        self.api.clear_arch_cache();
         self.run_archs.clear();
         self.model_archs.clear();
         self.probed_model_archs.clear();

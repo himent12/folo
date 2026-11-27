@@ -203,6 +203,7 @@ impl FoloApp {
             }),
         );
         let folo2_supported = self.store.system.ready().is_none() || self.store.supports_folo2();
+        let arch_probe_pending = self.nr_arch_probe_pending();
         let folo2_blocked = self.nr_folo2_blocked();
         let fam_off = [
             None,
@@ -237,7 +238,12 @@ impl FoloApp {
                     this.nr_set_arch(i, cx);
                 }),
             )))
-            .when_some(folo2_blocked, |d, why| d.child(text(ty::SM, t.danger_text).child(why)))
+            .when(arch_probe_pending, |d| {
+                d.child(text(ty::SM, t.text_tertiary).child("Checking model architecture…"))
+            })
+            .when_some(folo2_blocked.filter(|_| !arch_probe_pending), |d, why| {
+                d.child(text(ty::SM, t.danger_text).child(why))
+            })
             .into_any_element();
         let (start_select, start_hint) = (self.start_from_select(window, cx), self.nr_start_hint());
         let weights_gone = self.nr_weights_gone();

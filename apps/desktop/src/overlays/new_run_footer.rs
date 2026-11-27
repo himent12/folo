@@ -207,10 +207,13 @@ impl FoloApp {
         let same_kind = |e: &crate::api::RunEstimate| {
             (e.device == "cpu") == cpu && (e.device == "cloud") == cloud.is_some()
         };
+        let arch_probe_pending = self.nr_arch_probe_pending();
         let est = if ds.is_none() {
             Est::NoDataset
         } else if device_gone.is_some() {
             Est::NoDevice
+        } else if arch_probe_pending {
+            Est::Pending
         } else if let Some(why) = folo2_blocked {
             Est::Rejected(why.into())
         } else if epochs_bad
@@ -477,6 +480,16 @@ impl FoloApp {
                 Btn::Primary,
                 Some(go_icon),
                 "Pick an optimizer first",
+                window,
+                cx,
+            )
+        } else if arch_probe_pending {
+            self.button_disabled(
+                "nr-start",
+                go,
+                Btn::Primary,
+                Some(go_icon),
+                "Checking model architecture…",
                 window,
                 cx,
             )

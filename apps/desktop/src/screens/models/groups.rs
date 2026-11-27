@@ -71,8 +71,13 @@ pub fn eval_set(store: &Store, m: &Model) -> EvalSet {
 }
 
 /// What `m`'s evaluation report actually scored on when a loaded [`ModelEval`] carries concrete
-/// `dataset_id` / `split` provenance, falling back to [`eval_set`] otherwise.
+/// `dataset_id` / `split` provenance for a run-produced model, falling back to [`eval_set`]
+/// otherwise. Published and imported files (`run_id: None`) never inherit `/eval`'s local dataset
+/// for their stored file header metrics (`m.metrics`), matching Model Detail's rule.
 pub fn eval_set_with_report(store: &Store, m: &Model, eval: Option<&ModelEval>) -> EvalSet {
+    if m.source == Some(ModelSource::Published) || m.run_id.is_none() {
+        return eval_set(store, m);
+    }
     let Some(ev) = eval else {
         return eval_set(store, m);
     };

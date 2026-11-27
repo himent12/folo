@@ -181,7 +181,9 @@ fn review_fixes_arch_caches_probe_sync_and_finetune_resolution() {
         "fine-tune from v2 weights records folo2-n: {run_archs:?}"
     );
 
-    // 3. In-flight probe blocks Start and late probe completion promotes open New Run form to v2.
+    // 3. In-flight probe sets nr_arch_probe_pending (neutral pending, not error), late probe
+    // promotes an open form AND falls through to source_run_id when weights is a file path, and
+    // reopening a dismissed draft also reconciles the newly resolved v2 arch.
     drive(&mut app, window, |this, w, cx| {
         this.open_new_run(Some("ds_8f2c"), w, cx);
         let f = this.new_run.as_mut().unwrap();
@@ -189,25 +191,55 @@ fn review_fixes_arch_caches_probe_sync_and_finetune_resolution() {
         f.arch = 0;
         f.weights = Some("m_late_v2".into());
         this.store.probing_model_archs.insert("m_late_v2".into());
-        assert_eq!(this.nr_folo2_blocked(), Some("Checking model architecture…"));
+        assert!(this.nr_arch_probe_pending());
+        assert!(this.nr_folo2_blocked().is_none(), "pending probe is not an error");
 
         // Probe completes with folo2-l -> unblocks & promotes the open form.
         this.store.probing_model_archs.remove("m_late_v2");
         this.store.probed_model_archs.insert("m_late_v2".into());
         this.store.note_model_arch("m_late_v2", ModelArch::v2(Arch::L));
         this.sync_new_run_arch_after_probe(cx);
-        assert!(this.nr_folo2_blocked().is_none());
+        assert!(!this.nr_arch_probe_pending());
         assert_eq!(this.new_run.as_ref().unwrap().model_arch(), ModelArch::v2(Arch::L));
+
+        // Cloned fine-tune run with raw `.folo` weights path falls through to source_run_id
+        // and also reconciles when restored from a dismissed draft.
+        let run_v2 = this.store.run("run_d204").unwrap().clone();
+        let f = this.new_run.as_mut().unwrap();
+        f.arch_family = ArchFamily::Folo;
+        f.arch = 0;
+        f.weights = Some("runs/prev/weights/best.folo".into());
+        f.source_run_id = Some(run_v2.id.clone());
+        f.arch_touched = false;
+        this.close_new_run(w, cx);
+        // Reopen draft: must reconcile from provisional v1 to run_d204's folo2-n.
+        this.open_new_run(None, w, cx);
+        assert_eq!(this.new_run.as_ref().unwrap().model_arch(), ModelArch::v2(Arch::N));
         this.close_new_run(w, cx);
     });
 
-    // 4. set_backend clears stale arch caches and new_run_last; open_model_compare preserves seed before models load.
+    // 4. hold_loading never strands probing_*_archs.
+    drive(&mut app, window, |this, _, cx| {
+        this.hold_loading = true;
+        this.server_mode = ServerMode::Local;
+        this.probe_model_arch("m_hold_test", cx);
+        this.probe_run_arch("run_d204", cx);
+        assert!(!this.store.probing_model_archs.contains("m_hold_test"));
+        assert!(!this.store.probing_run_archs.contains("run_d204"));
+        this.hold_loading = false;
+        this.server_mode = ServerMode::Mock;
+    });
+
+    // 5. set_backend clears stale arch caches, bumps arch_probe_gen, and clears new_run_last;
+    // open_model_compare preserves seed before models load.
     drive(&mut app, window, |this, w, cx| {
+        let gen_before = this.store.arch_probe_gen;
         this.store.probed_model_archs.insert("stale_m".into());
         this.store.probed_run_archs.insert("stale_r".into());
         this.store.run_archs.insert("stale_r".into(), ModelArch::v2(Arch::X));
         this.new_run_last = Some((ArchFamily::Folo2, 3, 2, 100.0));
         this.set_backend(Arc::new(MockBackend::new(4200, true)), ServerMode::Mock, cx);
+        assert_ne!(this.store.arch_probe_gen, gen_before);
         assert!(!this.store.probed_model_archs.contains("stale_m"));
         assert!(!this.store.probed_run_archs.contains("stale_r"));
         assert!(!this.store.run_archs.contains_key("stale_r"));
