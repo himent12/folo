@@ -356,7 +356,7 @@ fn fused_3x3_strip_and_multipart_1x1_match_exact_reference() {
         );
     }
 
-    // 3. Multi-part 1Ã—1 inline (`<= 8` parts) and fallback (`9` parts), plus decoupled 1Ã—1 with mismatched `xs`.
+    // 3. Multi-part 1×1 inline (`<= 8` parts) and fallback (`9` parts), plus decoupled 1×1 with mismatched `xs`.
     for &part_count in &[2usize, 4, 8, 9] {
         let (n, pc, o, h, w) = (2usize, 4usize, 8usize, 7usize, 13usize);
         let c = pc * part_count;
@@ -411,7 +411,7 @@ fn fused_3x3_strip_and_multipart_1x1_match_exact_reference() {
         );
     }
 
-    // 4. Decoupled 1Ã—1 `QConv` (`[8, 8]`) invoked with mismatched `xs` partition (`[4, 12]`) falls back cleanly.
+    // 4. Decoupled 1×1 `QConv` (`[8, 8]`) invoked with mismatched `xs` partition (`[4, 12]`) falls back cleanly.
     {
         let (n, h, w, o) = (1usize, 7usize, 11usize, 8usize);
         let hw = h * w;
@@ -458,19 +458,21 @@ fn fused_3x3_strip_and_multipart_1x1_match_exact_reference() {
 }
 
 #[test]
-fn packed_multipart_1x1_and_heavy_3x3_match_unpacked_bit_exact() {
+fn packed_multipart_1x1_matches_unpacked_bit_exact() {
     let mut rng = Rng::seed(7099);
-    // Exercises `should_pack_1x1_multi` across every `VECS âˆˆ {1, 2, 3}` tail width (`hw % 24 âˆˆ {5, 8, 16, 19}`),
-    // SiLU on/off, residual on/off, `U8PerChannel` and `F32` outputs, comparing against mismatched-partition
-    // unpacked multi-part execution (guaranteed bit-exact).
-    for &(h, w, silu, has_res) in &[
-        (32usize, 33usize, true, true), // hw=1056 (exact NR=24 multiple)
-        (29, 37, false, true),          // hw=1073 (tail 17 -> VECS=3 non-direct)
-        (32, 34, true, false),          // hw=1088 (tail 8 -> VECS=1 direct)
-        (40, 26, true, true),           // hw=1040 (tail 8 -> VECS=1 direct)
-        (40, 28, false, false),         // hw=1120 (tail 16 -> VECS=2 direct)
+    // Exercises `should_pack_1x1_multi` across every `VECS ∈ {1, 2, 3}` copied and direct tail width
+    // (`hw % 24 ∈ {0, 5, 8, 13, 16, 17}`), SiLU on/off, residual on/off, single- and multi-thread (`og_blk >= 4`),
+    // multi-image (`n > 1`), deep-K (`total_ks >= 48, hw < 1024`), and `U8PerChannel` + `F32` outputs, comparing
+    // against mismatched-partition unpacked multi-part execution (guaranteed bit-exact).
+    for &(n, h, w, c0, c1, o, threads, silu, has_res) in &[
+        (1usize, 32usize, 33usize, 16usize, 24usize, 20usize, 1usize, true, true), // hw=1056 (tail 0)
+        (1, 17, 61, 16, 24, 20, 1, true, false), // hw=1037 (tail 5 -> VECS=1 copy)
+        (1, 32, 34, 16, 24, 20, 1, false, true), // hw=1088 (tail 8 -> VECS=1 direct)
+        (1, 19, 55, 16, 24, 20, 1, true, true),  // hw=1045 (tail 13 -> VECS=2 copy)
+        (1, 40, 28, 16, 24, 20, 1, false, true), // hw=1120 (tail 16 -> VECS=2 direct)
+        (1, 29, 37, 16, 24, 64, 4, true, false), // hw=1073 (tail 17 -> VECS=3 copy, mt og_blk>=4)
+        (2, 7, 59, 96, 100, 16, 1, true, true),  // hw=413 (tail 5, n=2, total_ks=49>=48)
     ] {
-        let (n, c0, c1, o) = (1usize, 16usize, 24usize, 20usize);
         let c = c0 + c1;
         let hw = h * w;
         let g0: Vec<Grid> =
@@ -480,11 +482,11 @@ fn packed_multipart_1x1_and_heavy_3x3_match_unpacked_bit_exact() {
         let all_g: Vec<Grid> = g0.iter().chain(&g1).copied().collect();
         let out_g: Vec<Grid> = (0..o).map(|i| Grid::from_range(-0.4, 3.0 + 0.05 * i as f32)).collect();
         let res_g: Vec<Grid> = (0..o).map(|i| Grid::from_range(-0.6, 2.0 + 0.07 * i as f32)).collect();
-        let xf: Vec<f32> = (0..c * hw).map(|_| rng.uniform(-0.3, 1.1)).collect();
+        let xf: Vec<f32> = (0..n * c * hw).map(|_| rng.uniform(-0.3, 1.1)).collect();
         let mut x_all = alloc(n, c, hw);
         quantize_per_channel(&xf, n, c, hw, &all_g, &mut x_all);
         let mut r_buf = alloc(n, o, hw);
-        let rf: Vec<f32> = (0..o * hw).map(|_| rng.uniform(-0.4, 1.2)).collect();
+        let rf: Vec<f32> = (0..n * o * hw).map(|_| rng.uniform(-0.4, 1.2)).collect();
         quantize_per_channel(&rf, n, o, hw, &res_g, &mut r_buf);
         let wt: Vec<f32> = (0..o * c).map(|_| rng.uniform(-0.25, 0.25)).collect();
         let bias: Vec<f32> = (0..o).map(|_| rng.uniform(-0.2, 0.2)).collect();
@@ -499,9 +501,9 @@ fn packed_multipart_1x1_and_heavy_3x3_match_unpacked_bit_exact() {
         let res_arg = has_res.then_some((rv, res_g.as_slice()));
         let mut q_pack = alloc(n, o, hw);
         let mut q_ref = alloc(n, o, hw);
-        let mut f_pack = vec![0f32; o * hw];
-        let mut f_ref = vec![0f32; o * hw];
-        pool(4).install(|| {
+        let mut f_pack = vec![0f32; n * o * hw];
+        let mut f_ref = vec![0f32; n * o * hw];
+        pool(threads).install(|| {
             conv_per_channel(
                 &[v_p0, v_p1],
                 &[&z_all[..c0], &z_all[c0..]],
@@ -543,10 +545,14 @@ fn packed_multipart_1x1_and_heavy_3x3_match_unpacked_bit_exact() {
                 QOut::F32 { data: &mut f_ref },
             );
         });
-        assert_eq!(&q_pack[..(o / 4) * hw], &q_ref[..(o / 4) * hw], "packed multi u8 ({h}x{w})");
+        assert_eq!(
+            &q_pack[..n * (o / 4) * hw],
+            &q_ref[..n * (o / 4) * hw],
+            "packed multi u8 (n={n} {h}x{w} c={c0}+{c1} o={o})"
+        );
         assert!(
             f_pack.iter().zip(&f_ref).all(|(a, b)| a.to_bits() == b.to_bits()),
-            "packed multi f32 ({h}x{w})"
+            "packed multi f32 (n={n} {h}x{w} c={c0}+{c1} o={o})"
         );
     }
 }

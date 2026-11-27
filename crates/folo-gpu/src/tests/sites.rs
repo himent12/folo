@@ -563,58 +563,66 @@ fn gemm_sites_shader_has_no_early_return_before_barrier() {
 }
 
 /// Regression for DX12 WARP (`Microsoft Basic Render Driver`) and multi-workgroup site retirement: exercises
-/// `conv2d_sites` + `scatter_sites` across `cap > BN` (2 column workgroups) with images having `live = 0`,
+/// `conv2d_sites` + `scatter_sites` across both unsplit (`c_in = 16`, `SPLIT = false`) and split-K
+/// (`c_in = 32`, `SPLIT = true`) shaders with `cap > BN` (2 column workgroups) and images having `live = 0`,
 /// `live < BN` (retiring the second workgroup), and `live = cap` (both workgroups active).
 #[test]
 fn conv_sites_retired_workgroups_and_zero_live() {
     let ctx = gpu!();
-    let d = desc(4, 32, 16, 16, 32, Window2d::square(3, 1, 1), DType::F32);
     let mut rng = Rng::new(918);
-    let (oh, ow) = d.output().unwrap();
-    let hw = oh * ow;
-    let x = rng.vec(d.n * d.c_in * d.h * d.w, -1.0, 1.0);
-    let w = rng.vec(d.c_out * d.c_in * 9, -0.3, 0.3);
-    let b = rng.vec(d.c_out, -0.5, 0.5);
-    let (gx, gw, gb) = (upload(&ctx, &x, d.dtype), upload(&ctx, &w, d.dtype), upload(&ctx, &b, d.dtype));
-    let dense = GpuTensor::empty(&ctx, &[d.n * d.c_out * hw], d.dtype).unwrap();
-    conv::conv2d(&ctx, &d, gx.raw(), gw.raw(), Some(gb.raw()), dense.raw()).unwrap();
-    let dense = bits(&dense, d.dtype);
-
     // `cap = 96` spans 2 workgroups for `TileConfig::SMALL` (`BN = 64`), exercising both `live == 0`
     // (all workgroups retired) and `live == 11` (workgroup 1 retired while workgroup 0 stays active).
     let cap = 96;
     let counts = [0usize, 11, 64, 96];
-    let pixels: Vec<Vec<u32>> = (0..d.n)
-        .map(|i| {
-            let mut all: Vec<u32> = (0..hw as u32).collect();
-            for k in (1..all.len()).rev() {
-                all.swap(k, (rng.next_u64() % (k as u64 + 1)) as usize);
-            }
-            all.truncate(counts[i]);
-            all
-        })
-        .collect();
-    let sites = upload_u32(&ctx, &site_rows(&pixels, cap));
-    let y = GpuTensor::empty(&ctx, &[d.n * d.c_out * cap], d.dtype).unwrap();
-    let at = ConvInput { offset: 0, n_stride: d.c_in * d.h * d.w };
-    conv::conv2d_sites(&ctx, &d, (gx.raw(), at), gw.raw(), Some(gb.raw()), sites.raw(), cap, y.raw())
-        .unwrap();
-    let got = bits(&y, d.dtype);
+    for c_in in [16usize, 32] {
+        let d = desc(4, c_in, 16, 16, 32, Window2d::square(3, 1, 1), DType::F32);
+        let (oh, ow) = d.output().unwrap();
+        let hw = oh * ow;
+        let x = rng.vec(d.n * d.c_in * d.h * d.w, -1.0, 1.0);
+        let w = rng.vec(d.c_out * d.c_in * 9, -0.3, 0.3);
+        let b = rng.vec(d.c_out, -0.5, 0.5);
+        let (gx, gw, gb) = (upload(&ctx, &x, d.dtype), upload(&ctx, &w, d.dtype), upload(&ctx, &b, d.dtype));
+        let dense = GpuTensor::empty(&ctx, &[d.n * d.c_out * hw], d.dtype).unwrap();
+        conv::conv2d(&ctx, &d, gx.raw(), gw.raw(), Some(gb.raw()), dense.raw()).unwrap();
+        let dense = bits(&dense, d.dtype);
 
-    let map = GpuTensor::from_slice(&ctx, &vec![0.0f32; d.n * d.c_out * hw], &[d.n * d.c_out * hw]).unwrap();
-    detect_sites::scatter_sites(&ctx, y.raw(), sites.raw(), map.raw(), (d.n, d.c_out, cap, hw), d.dtype)
-        .unwrap();
-    let got_map = bits(&map, d.dtype);
-    for (img, p) in pixels.iter().enumerate() {
-        for (s, &px) in p.iter().enumerate() {
-            for oc in 0..d.c_out {
-                let want = dense[(img * d.c_out + oc) * hw + px as usize];
-                assert_eq!(got[(img * d.c_out + oc) * cap + s], want, "sites img={img} s={s} oc={oc}");
-                assert_eq!(
-                    got_map[(img * d.c_out + oc) * hw + px as usize],
-                    want,
-                    "scatter img={img} px={px} oc={oc}"
-                );
+        let pixels: Vec<Vec<u32>> = (0..d.n)
+            .map(|i| {
+                let mut all: Vec<u32> = (0..hw as u32).collect();
+                for k in (1..all.len()).rev() {
+                    all.swap(k, (rng.next_u64() % (k as u64 + 1)) as usize);
+                }
+                all.truncate(counts[i]);
+                all
+            })
+            .collect();
+        let sites = upload_u32(&ctx, &site_rows(&pixels, cap));
+        let y = GpuTensor::empty(&ctx, &[d.n * d.c_out * cap], d.dtype).unwrap();
+        let at = ConvInput { offset: 0, n_stride: d.c_in * d.h * d.w };
+        conv::conv2d_sites(&ctx, &d, (gx.raw(), at), gw.raw(), Some(gb.raw()), sites.raw(), cap, y.raw())
+            .unwrap();
+        let got = bits(&y, d.dtype);
+
+        let map =
+            GpuTensor::from_slice(&ctx, &vec![0.0f32; d.n * d.c_out * hw], &[d.n * d.c_out * hw]).unwrap();
+        detect_sites::scatter_sites(&ctx, y.raw(), sites.raw(), map.raw(), (d.n, d.c_out, cap, hw), d.dtype)
+            .unwrap();
+        let got_map = bits(&map, d.dtype);
+        for (img, p) in pixels.iter().enumerate() {
+            for (s, &px) in p.iter().enumerate() {
+                for oc in 0..d.c_out {
+                    let want = dense[(img * d.c_out + oc) * hw + px as usize];
+                    assert_eq!(
+                        got[(img * d.c_out + oc) * cap + s],
+                        want,
+                        "c_in={c_in} sites img={img} s={s} oc={oc}"
+                    );
+                    assert_eq!(
+                        got_map[(img * d.c_out + oc) * hw + px as usize],
+                        want,
+                        "c_in={c_in} scatter img={img} px={px} oc={oc}"
+                    );
+                }
             }
         }
     }

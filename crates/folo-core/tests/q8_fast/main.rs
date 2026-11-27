@@ -30,7 +30,7 @@ fn fast_silu_accuracy_and_extremes() {
         assert!(err <= 2e-6, "silu_q8({x}) = {got}, want {want}, rel {err:e}");
     }
     assert!(max_rel <= 2.5e-7, "max_rel {max_rel:e} exceeded 2.5e-7");
-    // Pin peak-error boundary inputs (worst hybrid error ~2.01e-7 near 0x3fc8_331e and reduced f = Â±0.5).
+    // Pin peak-error boundary inputs (worst hybrid error ~2.01e-7 near 0x3fc8_331e and reduced f = ±0.5).
     for x in [f32::from_bits(0x3fc8_331e), 0.5 / std::f32::consts::LOG2_E, -0.5 / std::f32::consts::LOG2_E] {
         let want = x as f64 / (1.0 + (-(x as f64)).exp());
         let got = silu_q8(x) as f64;
@@ -150,7 +150,7 @@ fn per_channel_c4_and_decoupled_concat_tile_f32_are_bit_exact_and_accurate() {
     let (n, h, w) = (2, 11, 13);
     let hw = h * w;
     let (c0, c1, o) = (8, 8, 12);
-    // Part 0 has 10Ã— smaller activation scale than part 1 (simulates mismatched concat branches).
+    // Part 0 has 10× smaller activation scale than part 1 (simulates mismatched concat branches).
     let g0: Vec<Grid> =
         (0..c0).map(|i| Grid { scale: 0.002 + 0.0005 * i as f32, zero: (20 + i * 7) as u8 }).collect();
     let g1: Vec<Grid> =
@@ -186,7 +186,7 @@ fn per_channel_c4_and_decoupled_concat_tile_f32_are_bit_exact_and_accurate() {
         }
     }
 
-    // Decoupled 1Ã—1 and 3Ã—3 convs: exact bit-for-bit match against scalar L1 TileF32 reference,
+    // Decoupled 1×1 and 3×3 convs: exact bit-for-bit match against scalar L1 TileF32 reference,
     // AND much lower SQNR error against f32 than coupled single-part folding!
     for &(k, pad, silu) in &[(1, 0, true), (3, 1, false)] {
         let taps = k * k;
@@ -328,7 +328,7 @@ fn per_channel_c4_and_decoupled_concat_tile_f32_are_bit_exact_and_accurate() {
         let err_cpl = rmse(&cpl_p0, &ref_p0);
         assert!(
             err_dec * 3.0 < err_cpl,
-            "k={k}: decoupled concat error ({err_dec:e}) should be >3Ã— smaller than coupled ({err_cpl:e})"
+            "k={k}: decoupled concat error ({err_dec:e}) should be >3× smaller than coupled ({err_cpl:e})"
         );
     }
 }

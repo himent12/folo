@@ -21,7 +21,8 @@ pub(crate) const SITES_BINDING: &str = "@group(0) @binding(5) var<storage, read>
 /// A `SITES` kernel's live columns: image `b1`'s count, at most `N`.
 ///
 /// Both the regular and tensor-core generators skip workgroups with `n0 >= live` by setting `nt = 0u` (skipping
-/// the K loop and its `workgroupBarrier()`s) and guarding the epilogue with `if (n0 < live)`, rather than
+/// the K loop and its `workgroupBarrier()`s; the regular GEMM generator also guards `emit_epilogue` with
+/// `if (n0 < live)`, whereas `coop/shader.rs` relies on its per-column `col < N` epilogue bounds), rather than
 /// returning early before `workgroupBarrier()`: DX12 WARP (`d3d10warp.dll`) hits `STATUS_ACCESS_VIOLATION` on a
 /// buffer-dependent early `return` before `GroupMemoryBarrierWithGroupSync()`, and naga rejects cooperative-matrix
 /// operations after one.

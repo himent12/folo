@@ -1,8 +1,8 @@
-//! Single-barrier, L1-hot rotating row-strip fused x86-64 driver for single-part `3Ã—3` (`pad = 1`)
+//! Single-barrier, L1-hot rotating row-strip fused x86-64 driver for single-part `3×3` (`pad = 1`)
 //! int8 convolutions (`q8::conv` / `q8::conv_per_channel`):
-//! - All `stride = 2, pad = 1` convs (3 rotating `(ev, od)` deinterleaved input row slots per task, `15â€“31 KiB`
+//! - All `stride = 2, pad = 1` convs (3 rotating `(ev, od)` deinterleaved input row slots per task, `15–31 KiB`
 //!   in L1D, reusing `ky = 2 -> ky = 0` across consecutive rows).
-//! - Large-input `stride = 1, pad = 1` convs (`input > 384 KiB`, e.g. `64->64 80Ã—80` and `folo-s` high-res layers),
+//! - Large-input `stride = 1, pad = 1` convs (`input > 384 KiB`, e.g. `64->64 80×80` and `folo-s` high-res layers),
 //!   where the global padded copy would otherwise spill across cores through L3 and pay a second rayon barrier.
 //!
 //! Arithmetic order is bit-for-bit identical to [`super::kernel::kernel_scalar`] + [`super::kernel::Epi::apply`].
@@ -55,7 +55,7 @@ fn with_scratch_u32<R>(len: usize, f: impl FnOnce(&mut [u32]) -> R) -> R {
     f(&mut v[..len])
 }
 
-/// Read-only parameters for one `3Ã—3` (`stride âˆˆ {1, 2}`, `pad = 1`) fused row-strip conv.
+/// Read-only parameters for one `3×3` (`stride ∈ {1, 2}`, `pad = 1`) fused row-strip conv.
 pub(super) struct Conv3x3Params<'a> {
     pub xs: &'a [C4<'a>],
     pub n: usize,
@@ -93,7 +93,7 @@ pub(super) struct RowArgs<'a> {
     pub(super) buf: &'a [u32],
 }
 
-/// Multi-row batch arguments (`rows_len <= 6` for `s = 1`, `<= 4` for `s = 2`) passed into 256-bit `compute_rows`
+/// Multi-row batch arguments (`rows_len <= 4` for both `s = 1` and `s = 2`) passed into 256-bit `compute_rows`
 /// kernels so each `g`'s weight panel is loaded once and reused across `rows_len` output rows inside L1D.
 pub(super) struct BatchRowArgs<'a> {
     pub(super) p: &'a Conv3x3Params<'a>,
@@ -120,7 +120,7 @@ struct GroupSrc {
 mod kernels;
 use kernels::{avx2_3x3, avx512vnni_3x3, vnni_3x3};
 
-/// Plan `(row_blk, og_blk)` for the single-barrier fused `3Ã—3` row-strip driver.
+/// Plan `(row_blk, og_blk)` for the single-barrier fused `3×3` row-strip driver.
 fn plan_3x3_strip(
     n: usize,
     oh: usize,
@@ -154,8 +154,8 @@ fn plan_3x3_strip(
     let rbs = oh.div_ceil(row_blk);
     let total_rbs = n * rbs;
     let og_blk = if total_rbs < want && og > 1 && macs / total_rbs >= min_macs.saturating_mul(3) {
-        // Cap duplicate row-band packing across output channel blocks at 4Ã— so small `oh` (e.g. rect 640Ã—384
-        // or 20Ã—20/40Ã—40 feature maps) never re-packs the same input rows excessively.
+        // Cap duplicate row-band packing across output channel blocks at 4× so small `oh` (e.g. rect 640×384
+        // or 20×20/40×40 feature maps) never re-packs the same input rows excessively.
         let max_obs = (max_tasks / total_rbs).clamp(1, 4);
         let want_o = ((per_img + rbs / 2) / rbs).clamp(1, max_obs).min(og);
         og.div_ceil(want_o)
@@ -233,7 +233,7 @@ fn fill_s2_row(
     }
 }
 
-/// Attempt to run a single-part `k = 3, pad = 1, stride âˆˆ {1, 2}` conv on the fused single-barrier row-strip
+/// Attempt to run a single-part `k = 3, pad = 1, stride ∈ {1, 2}` conv on the fused single-barrier row-strip
 /// x86-64 driver. Returns `false` if the shape falls outside scratch limits so the caller can fall back.
 ///
 /// # Safety
@@ -297,9 +297,10 @@ pub(super) unsafe fn try_run_3x3_strip(
     let threads = rayon::current_num_threads();
     let is_s2 = stride == 2;
 
-    // Shared packed-strip fast path for small-spatial `s = 1` (`oh <= 24`, `<= 256 KiB` per image, e.g. `20Ã—20`
-    // P5 layers): packs serially with zero extra rayon barrier and splits tasks by output channel group `og` first.
-    // Medium/large `40Ã—40` / `80Ã—80` and `s = 2` convs stay on the single-barrier L1-hot rotating strip below.
+    // Shared packed-strip fast path for small-spatial `s = 1` (`oh <= 24`, `<= 256 KiB` per image, e.g. `20×20`
+    // P5 layers): packs once per image (serially below 16K words, in parallel above) and splits compute tasks by
+    // output channel group `og` first. Medium/large `40×40` / `80×80` and `s = 2` convs stay on the single-barrier
+    // L1-hot rotating strip below.
     let shared_s1_words = (!is_s2 && p.oh <= 24)
         .then(|| p.oh.checked_add(2).and_then(|rows| rows.checked_mul(slot_words)))
         .flatten()
@@ -402,7 +403,7 @@ pub(super) unsafe fn try_run_3x3_strip(
     let rbs = p.oh.div_ceil(row_blk);
     let obs = p.og.div_ceil(og_blk);
     let tasks = p.n * rbs * obs;
-    // Choose L1-resident multi-row batch size `max_rb âˆˆ {1, 2, 3, 4}` for 256-bit ISAs when `ow <= 128` so each
+    // Choose L1-resident multi-row batch size `max_rb ∈ {1, 2, 3, 4}` for 256-bit ISAs when `ow <= 128` so each
     // weight panel `a_panel` is reused across `max_rb` output rows without spilling the strip out of L1D (48 KiB).
     let max_rb = if isa == FusedIsa::Avx512Vnni512 || p.ow > 128 {
         1
