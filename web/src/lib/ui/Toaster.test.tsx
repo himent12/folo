@@ -241,4 +241,45 @@ describe('Toast timing and announcement', () => {
     vi.advanceTimersByTime(600);
     expect(toast.items.some((t) => t.id === id)).toBe(false);
   });
+
+  it('publishes --toast-h while a toast is rendered (including during its exit outro) and clears it once removed or unmounted', async () => {
+    flyState.duration = 160;
+    setup();
+    const section = document.querySelector<HTMLElement>('.toaster')!;
+    Object.defineProperty(section, 'offsetHeight', { configurable: true, value: 70 });
+
+    const id = toast.success('JSON exported', 'Saved Model A/B comparison JSON.');
+    flushSync();
+    expect(document.documentElement.style.getPropertyValue('--toast-h')).toBe('86px');
+
+    const row = document.querySelector<HTMLLIElement>(`[data-toast="${id}"]`)!;
+    const anims: { onfinish: (() => void) | null; cancel(): void; finished: Promise<void>; currentTime: number }[] = [];
+    row.animate = (() => {
+      const a = { onfinish: null as (() => void) | null, cancel() {}, finished: Promise.resolve(), currentTime: 0 };
+      anims.push(a);
+      return a;
+    }) as unknown as typeof row.animate;
+
+    // While the 160 ms exit animation keeps the toast mounted, --toast-h stays set so bottom controls stay clear.
+    toast.dismiss(id);
+    flushSync();
+    await vi.waitFor(() => expect(anims.at(-1)?.onfinish).toBeTypeOf('function'));
+    expect(row.isConnected).toBe(true);
+    expect(document.documentElement.style.getPropertyValue('--toast-h')).toBe('86px');
+
+    // Finish both fw transition phases (delay -> main outro); once the last toast leaves the DOM, --toast-h clears.
+    anims.at(-1)!.onfinish!();
+    anims.at(-1)!.onfinish!();
+    await vi.waitFor(() => {
+      expect(row.isConnected).toBe(false);
+      expect(document.documentElement.style.getPropertyValue('--toast-h')).toBe('');
+    });
+
+    toast.info('Still open');
+    flushSync();
+    expect(document.documentElement.style.getPropertyValue('--toast-h')).toBe('86px');
+    c!.unmount();
+    c = undefined;
+    expect(document.documentElement.style.getPropertyValue('--toast-h')).toBe('');
+  });
 });

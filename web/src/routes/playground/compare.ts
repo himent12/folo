@@ -132,6 +132,14 @@ export function formatLatencyComparison(summary: Pick<CompareSummary, 'latencyA'
   return diff;
 }
 
+/** Formats the collapsed mobile Timing header in Compare mode (`A 12 ms · B 18 ms`, or whichever side is ready). */
+export function formatCompareTimingMeta(predA: Prediction | null, predB: Prediction | null): string | null {
+  const parts: string[] = [];
+  if (predA) parts.push(`A ${ms(predA.timing.total_ms)}`);
+  if (predB) parts.push(`B ${ms(predB.timing.total_ms)}`);
+  return parts.length ? parts.join(' · ') : null;
+}
+
 /** Builds a structured JSON payload for Compare A/B view and JSON export. */
 export function comparePredictionJson(opts: {
   view: CompareViewMode;

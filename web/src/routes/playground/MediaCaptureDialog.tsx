@@ -170,27 +170,30 @@ export default function MediaCaptureDialog(props: MediaCaptureDialogProps) {
       }
       stream = next;
       const targetEl = camEl;
-      if (targetEl) {
-        targetEl.srcObject = next;
-        try {
-          await targetEl.play();
-        } catch (playErr) {
-          stopTracks(next);
-          if (stream === next) stream = null;
-          if (targetEl.srcObject === next) targetEl.srcObject = null;
-          if (!alive || seq !== camSeq) return;
-          throw playErr;
-        }
+      if (!targetEl) {
+        stopTracks(next);
+        if (stream === next) stream = null;
+        return;
+      }
+      targetEl.srcObject = next;
+      try {
+        await targetEl.play();
+      } catch (playErr) {
+        stopTracks(next);
+        if (stream === next) stream = null;
+        if (targetEl.srcObject === next) targetEl.srcObject = null;
+        if (!alive || seq !== camSeq || !open.peek() || mode.peek() !== 'camera') return;
+        throw playErr;
       }
       if (!alive || seq !== camSeq || !open.peek() || mode.peek() !== 'camera') {
         stopTracks(next);
         if (stream === next) stream = null;
-        if (targetEl && targetEl.srcObject === next) targetEl.srcObject = null;
+        if (targetEl.srcObject === next) targetEl.srcObject = null;
         return;
       }
       camActive.set(true);
     } catch (e) {
-      if (!alive || seq !== camSeq) return;
+      if (!alive || seq !== camSeq || !open.peek() || mode.peek() !== 'camera') return;
       const msg = e instanceof Error && e.message ? e.message : 'Camera permission was denied or no camera was found.';
       camErr.set(msg);
     } finally {

@@ -24,7 +24,7 @@ import DatasetPicker from './playground/DatasetPicker';
 import MediaCaptureDialog from './playground/MediaCaptureDialog';
 import PlaygroundActions from './playground/PlaygroundActions';
 import PlaygroundTiming from './playground/PlaygroundTiming';
-import { formatSignedDelta } from './playground/compare';
+import { formatCompareTimingMeta, formatSignedDelta } from './playground/compare';
 import { runJsonExport, runPngExport } from './playground/exportActions';
 import { looksLikeFolo } from './playground/folo';
 import { holdNoticeFocus } from './playground/noticeFocus';
@@ -299,7 +299,12 @@ export default function Playground() {
     if (id !== null && lastModelId !== null && id !== lastModelId) {
       untrack(() => {
         hidden.set(new Set());
-        cmp.hiddenBNames.set(new Set());
+        const curB = cmp.hiddenBNames.peek();
+        if (curB.size) {
+          const nextA = new Set(classes.peek());
+          const keptB = new Set([...curB].filter((name) => !nextA.has(name)));
+          if (keptB.size !== curB.size) cmp.hiddenBNames.set(keptB);
+        }
       });
     }
     if (id !== null) lastModelId = id;
@@ -888,7 +893,8 @@ export default function Playground() {
                   counts={showingB.get() ? cmp.countsB.get() : counts.get()}
                   hidden={showingB.get() ? cmp.hiddenB.get() : hidden.get()}
                   pred={showingB.get() ? cmp.predB.get() : pred.get()}
-                  where={cmp.compare.get() ? whereLabel(showingB.get() ? cmp.predB.get() : pred.get()) : where.get()}
+                  where={cmp.compare.get() ? '' : where.get()}
+                  timingMeta={cmp.compare.get() ? formatCompareTimingMeta(pred.get(), cmp.predB.get()) : undefined}
                   showAllButton={showAllButton}
                   classList={classList}
                   timingBody={timingBody}

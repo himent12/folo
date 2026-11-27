@@ -512,18 +512,19 @@ select[aria-invalid='true'],
   --focus: var(--danger-solid);
 }
 
-/* Shell metrics shared by fixed bars (mobile tab bar and docks that sit on it). A page with a bottom dock (shell/dock.ts)
-   hides the tab bar: the bar's height drops to 0, so docks and toasts that sit on it move down to the screen's edge. */
+/* Shell metrics shared by fixed bars (mobile tab bar, bottom docks, and active toast stack). A page with a bottom
+   dock (shell/dock.ts) hides the tab bar: the bar's height drops to 0, so docks and toasts move down to the edge. */
 :root {
   --tabbar-h: 56px;
   --dock-h: 0px;
+  --toast-h: 0px;
 }
 :root[data-dock] {
   --tabbar-h: 0px;
 }
 @media (max-width: 767px) {
   html {
-    scroll-padding-bottom: calc(var(--tabbar-h) + var(--dock-h) + var(--space-4) + env(safe-area-inset-bottom));
+    scroll-padding-bottom: calc(var(--tabbar-h) + var(--dock-h) + var(--toast-h) + var(--space-4) + env(safe-area-inset-bottom));
   }
 }
 
