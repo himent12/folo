@@ -13,6 +13,9 @@ pub mod config;
 pub mod head;
 mod io;
 pub mod iou;
+mod lazy;
+
+use std::sync::Arc;
 
 use folo_core::rng::Rng;
 use folo_core::{DType, Device, Tensor, no_grad};
@@ -22,7 +25,7 @@ use rayon::prelude::*;
 use crate::boxes::Xyxy;
 use crate::decode::{Anchors, make_anchors};
 use crate::model::blocks::{Fuse, Init, Sppf};
-use crate::model::{HeadMode, HeadOutput};
+use crate::model::{HeadMode, HeadOutput, quant};
 use crate::nms::{Detection, NmsConfig, postprocess_with_inputs};
 
 pub use blocks::{
@@ -290,6 +293,8 @@ pub struct FoloV2Model {
     mode: Mode,
     fused: bool,
     head_mode: HeadMode,
+    /// The int8 plan of the backbone and neck on the CPU ([`FoloV2Model::set_int8`]; off until set).
+    int8: Option<Arc<quant::Int8Plan>>,
     /// Backbone (`backbone.*`).
     pub backbone: BackboneV2,
     /// SPD-PAN neck + relocated head-input FiLM gates (`neck.*`).
@@ -368,6 +373,7 @@ impl FoloV2Model {
             mode: Mode::new(),
             fused: false,
             head_mode,
+            int8: None,
             backbone,
             neck,
             head,
@@ -515,6 +521,9 @@ impl FoloV2Model {
                 clone.to_dtype(dtype)?;
             }
         }
+        clone.int8 = self
+            .active_int8()
+            .map(|p| Arc::new(quant::Int8Plan::new_for_module(p.calibration().clone(), &clone)));
         clone.eval();
         for p in clone.parameters() {
             p.set_requires_grad(false);
@@ -565,6 +574,9 @@ impl FoloV2Model {
         if !self.fused {
             clone.fuse()?;
         }
+        clone.int8 = self
+            .active_int8()
+            .map(|p| Arc::new(quant::Int8Plan::new_for_module(p.calibration().clone(), &clone)));
         clone.eval();
         for p in clone.parameters() {
             p.set_requires_grad(false);
@@ -587,9 +599,77 @@ impl FoloV2Model {
         Module::to_device(self, device)
     }
 
-    /// Cast all floating weights and buffers to `dtype` in place.
+    /// Cast all floating weights and buffers to `dtype` in place. Converting away from `F32` (lossy) clears any
+    /// attached int8 calibration plan so a subsequent `F16 → F32` round-trip cannot reuse stale ranges.
     pub fn to_dtype(&mut self, dtype: DType) -> Result<()> {
-        Module::to_dtype(self, dtype)
+        Module::to_dtype(self, dtype)?;
+        if dtype != DType::F32 {
+            self.int8 = None;
+        }
+        Ok(())
+    }
+
+    /// Run the backbone and SPD-PAN neck in int8 on the CPU with the ranges of `cal` (docs/MODEL.md §9.6), or
+    /// in `f32` again with `None`. Needs a fused `f32` model on the CPU (matching [`quant::fingerprint_v2`] when
+    /// recorded); the head and relocated `FullPadGate`s stay `f32`. Applies to eval-mode CPU forwards and
+    /// candidate-first prediction; GPU forwards and training are unchanged.
+    pub fn set_int8(&mut self, cal: Option<quant::Calibration>) -> Result<()> {
+        if cal.is_some() && (!self.fused || self.dtype() != DType::F32) {
+            return Err(Error::Invalid("int8 needs a fused F32 model (FoloV2Model::fuse)".into()));
+        }
+        if cal.is_some() && !self.device().is_cpu() {
+            return Err(Error::Invalid("int8 runs on the CPU: move the model there first".into()));
+        }
+        if let Some(want) = cal.as_ref().and_then(|c| c.weights.as_deref())
+            && want != quant::fingerprint_v2(self)?
+        {
+            return Err(Error::Invalid(
+                "the int8 calibration was measured on other weights: re-calibrate on these".into(),
+            ));
+        }
+        if let Some(c) = &cal {
+            let x = Tensor::zeros([1, self.config.in_channels, 64, 64]);
+            let _g = no_grad();
+            quant::FakeQuant::new(c).features_v2(self, &x).map_err(|e| Error::Invalid(e.to_string()))?;
+        }
+        self.int8 = cal.map(|c| Arc::new(quant::Int8Plan::new_for_module(c, self)));
+        Ok(())
+    }
+
+    /// Active, non-invalidated int8 plan (requires `F32` weights and matching recorded fingerprint if any).
+    pub(crate) fn active_int8(&self) -> Option<&Arc<quant::Int8Plan>> {
+        (self.dtype() == DType::F32)
+            .then(|| self.int8.as_ref().filter(|p| p.check_module(self, || quant::fingerprint_v2(self))))
+            .flatten()
+    }
+
+    /// The calibration of the int8 plan, if [`FoloV2Model::set_int8`] turned it on and it has not been
+    /// invalidated by weight replacement or dtype conversion.
+    pub fn int8(&self) -> Option<&quant::Calibration> {
+        self.active_int8().map(|p| p.calibration())
+    }
+
+    /// Whether CPU int8 inference with the direct `u8` stem (`SPD(2×2) + 1×1` or `3×3 s=2`) is active.
+    pub(crate) fn int8_u8_stem_active(&self) -> bool {
+        self.device().is_cpu()
+            && !self.is_training()
+            && self.config.in_channels == 3
+            && self
+                .active_int8()
+                .is_some_and(|p| p.calibration().u8_stem && !p.calibration().is_f32("backbone.stem.conv"))
+    }
+
+    /// Forward pass reading a pre-packed `[b, h, w]` `u32` `[R, G, B, 0]` canvas straight into the direct `u8`
+    /// int8 stem (skipping `f32` canvas materialisation).
+    pub(crate) fn forward_rgb0_u8(&self, rgb0: &[u32], b: usize, h: usize, w: usize) -> Result<HeadOutputV2> {
+        self.check_hw(b, h, w)?;
+        let plan = self
+            .active_int8()
+            .ok_or_else(|| Error::Invalid("forward_rgb0_u8 requires an int8 plan".into()))?;
+        folo_core::cpu::in_pool(|| {
+            let feats = quant::exec::features_v2_rgb0_u8(self, plan, rgb0, b, h, w)?;
+            self.head_from_features(feats, h, w, self.head_mode)
+        })
     }
 
     /// Compute the three head-input feature maps `[P3_head, P4_head, P5_head]`.
@@ -599,6 +679,12 @@ impl FoloV2Model {
     /// float barriers in CPU int8 mode.
     pub fn forward_features(&self, x: &Tensor) -> Result<[Tensor; 3]> {
         self.check_input(x)?;
+        if x.device().is_cpu()
+            && !self.is_training()
+            && let Some(plan) = self.active_int8()
+        {
+            return quant::exec::features_v2(self, plan, x);
+        }
         let b = &self.backbone;
         let n = &self.neck;
 
@@ -655,8 +741,26 @@ impl FoloV2Model {
         if mode == HeadMode::O2o && !self.has_o2o() {
             return Err(Error::Invalid(format!("{} has no one-to-one head branch", self.arch())));
         }
-        let (h, w) = self.check_input(x)?;
-        let [p3, p4, p5] = self.forward_features(x)?;
+        if x.device().is_cpu() {
+            folo_core::cpu::in_pool(|| {
+                let (h, w) = self.check_input(x)?;
+                let feats = self.forward_features(x)?;
+                self.head_from_features(feats, h, w, mode)
+            })
+        } else {
+            let (h, w) = self.check_input(x)?;
+            let feats = self.forward_features(x)?;
+            self.head_from_features(feats, h, w, mode)
+        }
+    }
+
+    fn head_from_features(
+        &self,
+        [p3, p4, p5]: [Tensor; 3],
+        h: usize,
+        w: usize,
+        mode: HeadMode,
+    ) -> Result<HeadOutputV2> {
         let feats = [&p3, &p4, &p5];
         let (active_mode, box_raw, cls_raw, iou_raw, o2o) = if self.is_training() {
             let (b_raw, c_raw, i_raw) = self.head.forward(feats)?;
@@ -682,16 +786,24 @@ impl FoloV2Model {
         })
     }
 
+    fn check_hw(&self, b: usize, h: usize, w: usize) -> Result<()> {
+        let s = self.config.strides[2] as usize;
+        if b == 0 || h == 0 || w == 0 || !h.is_multiple_of(s) || !w.is_multiple_of(s) {
+            return Err(Error::Invalid(format!(
+                "FoloV2Model::forward: input [{b}, {}, {h}, {w}] must be non-empty with H and W multiples of {s}",
+                self.config.in_channels
+            )));
+        }
+        Ok(())
+    }
+
     fn check_input(&self, x: &Tensor) -> Result<(usize, usize)> {
         let bad = |why: &str| Error::Invalid(format!("FoloV2Model::forward: input {:?} {why}", x.dims()));
         let (b, c, h, w) = x.dims4().map_err(|_| bad("must be [B, C, H, W]"))?;
         if c != self.config.in_channels {
             return Err(bad(&format!("must have {} channels", self.config.in_channels)));
         }
-        let s = self.config.strides[2] as usize;
-        if b == 0 || h == 0 || w == 0 || !h.is_multiple_of(s) || !w.is_multiple_of(s) {
-            return Err(bad(&format!("must be non-empty with H and W multiples of {s}")));
-        }
+        self.check_hw(b, h, w)?;
         Ok((h, w))
     }
 }

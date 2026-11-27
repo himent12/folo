@@ -139,7 +139,21 @@ pub(super) fn single_label_block(
             *m = m.max(v);
         }
     }
+    // Precompute a conservative logit lower bound for `0 < conf < 1` so we skip `sigmoid(m)` (`exp`) for almost
+    // all 8,400 anchors while leaving out-of-range thresholds (including `conf < 0` with `-inf` logits) to the
+    // exact sigmoid test below (100% bit-identical).
+    let logit_bound = if conf > 0.0 && conf < 1.0 {
+        let c = f64::from(conf);
+        Some(((c / (1.0 - c)).ln() as f32) - 1e-3)
+    } else {
+        None
+    };
     for (j, &m) in (j0..j1).zip(best.iter()) {
+        if let Some(bound) = logit_bound
+            && (m <= bound || m.is_nan())
+        {
+            continue;
+        }
         // A margin of a few ulp, so even a libm `exp` that is not monotonic cannot skip a candidate; the exact
         // test follows.
         let may_pass = sigmoid(m) * (1.0 + 1e-6) + 1e-30 > conf;

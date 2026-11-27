@@ -9,11 +9,13 @@
 
 use std::sync::RwLock;
 
+use folo_core::cpu::gemm::{Strided, gemm};
 use folo_core::{Conv2dParams, DType, Device, Tensor, is_grad_enabled, no_grad};
 use folo_nn::{
     Activation, BatchNorm2d, Conv2d, Conv2dConfig, ConvBnAct, Error, Forward, Linear, Module, ModuleList,
     Result, TensorKind, fuse_conv_bn, init,
 };
+use rayon::prelude::*;
 
 use crate::model::blocks::{Fuse, Init};
 
@@ -24,11 +26,59 @@ const CONV3X3_S1_P1: Conv2dParams =
 /// maps `[B, C, H, W]` (with even `H, W`) to `[B, 4·C, H/2, W/2]` by concatenating the four sub-pixel
 /// phases `(0,0), (0,1), (1,0), (1,1)` along the channel axis.
 pub fn space_to_depth_2x2(x: &Tensor) -> Result<Tensor> {
-    let (_, _, h, w) = x
+    let (b, c, h, w) = x
         .dims4()
         .map_err(|_| Error::Invalid(format!("space_to_depth_2x2: expected NCHW, got {:?}", x.dims())))?;
     if !h.is_multiple_of(2) || !w.is_multiple_of(2) {
         return Err(Error::Invalid(format!("space_to_depth_2x2: spatial dims ({h}, {w}) must be even")));
+    }
+    // Single-pass contiguous CPU fast path under `no_grad` (avoids 4 strided slice views + `Tensor::cat`).
+    if !is_grad_enabled()
+        && x.device().is_cpu()
+        && x.dtype() == DType::F32
+        && b > 0
+        && c > 0
+        && h > 0
+        && w > 0
+    {
+        let (oh, ow) = (h / 2, w / 2);
+        let (hw, ohw) = (h * w, oh * ow);
+        let mut out = folo_core::cpu::take_buffer(b * 4 * c * ohw);
+        x.with_f32_slice(|src| {
+            let run_img = |(bi, dst_img): (usize, &mut [f32])| {
+                let src_img = &src[bi * c * hw..(bi + 1) * c * hw];
+                let (p0, rest) = dst_img.split_at_mut(c * ohw);
+                let (p1, rest) = rest.split_at_mut(c * ohw);
+                let (p2, p3) = rest.split_at_mut(c * ohw);
+                for ch in 0..c {
+                    let sp = &src_img[ch * hw..(ch + 1) * hw];
+                    let d0 = &mut p0[ch * ohw..(ch + 1) * ohw];
+                    let d1 = &mut p1[ch * ohw..(ch + 1) * ohw];
+                    let d2 = &mut p2[ch * ohw..(ch + 1) * ohw];
+                    let d3 = &mut p3[ch * ohw..(ch + 1) * ohw];
+                    for oy in 0..oh {
+                        let r_even = &sp[(2 * oy) * w..(2 * oy + 1) * w];
+                        let r_odd = &sp[(2 * oy + 1) * w..(2 * oy + 2) * w];
+                        let o0 = &mut d0[oy * ow..(oy + 1) * ow];
+                        let o1 = &mut d1[oy * ow..(oy + 1) * ow];
+                        let o2 = &mut d2[oy * ow..(oy + 1) * ow];
+                        let o3 = &mut d3[oy * ow..(oy + 1) * ow];
+                        for ox in 0..ow {
+                            o0[ox] = r_even[2 * ox];
+                            o1[ox] = r_even[2 * ox + 1];
+                            o2[ox] = r_odd[2 * ox];
+                            o3[ox] = r_odd[2 * ox + 1];
+                        }
+                    }
+                }
+            };
+            if b > 1 && b * c * hw >= 32_768 {
+                out.par_chunks_exact_mut(4 * c * ohw).enumerate().for_each(run_img);
+            } else {
+                out.chunks_exact_mut(4 * c * ohw).enumerate().for_each(run_img);
+            }
+        })?;
+        return Ok(Tensor::from_vec(out, [b, 4 * c, oh, ow])?);
     }
     let tl = x.slice(2, 0, h, 2)?.slice(3, 0, w, 2)?;
     let tr = x.slice(2, 0, h, 2)?.slice(3, 1, w, 2)?;
@@ -395,18 +445,24 @@ impl HyperContext {
         HyperContext { av_proj, ffn1, ffn2, out_proj, m_edges, c_g }
     }
 
-    /// Run P5 hypergraph context; returns `(y_p5 [B, C5, H, W], g_scene [B, C_g])`.
+    /// Run the hypergraph gather, hyperedge FFN, scene pooling, and broadcast from `av = av_proj(x)`
+    /// (`[b, m_edges + c_g, h, w]`), returning `(y_ctx [b, c_g, h, w], g_scene [b, c_g])`.
     ///
-    /// Softmax attention weights, FFN `silu`, hyperedge residual addition, and global scene pooling (`g_scene`)
-    /// always execute in `F32` (both under AMP `autocast()` and in explicit `F16` inference) so high-magnitude
-    /// logits and reductions over `M` hyperedges never overflow or quantize in `F16`.
-    pub fn forward_with_scene(&self, x: &Tensor) -> Result<(Tensor, Tensor)> {
-        let (b, _, h, w) = x.dims4()?;
+    /// Shared by [`HyperContext::forward_with_scene`] and the quantised graph walk (`model::quant::walk`).
+    pub(crate) fn attend_and_scene(
+        &self,
+        av: &Tensor,
+        b: usize,
+        h: usize,
+        w: usize,
+    ) -> Result<(Tensor, Tensor)> {
+        if let Some(pair) = self.attend_and_scene_cpu_fast(av, b, h, w)? {
+            return Ok(pair);
+        }
         let n = h * w;
         let to_f32 = |t: Tensor| -> folo_core::Result<Tensor> {
             if t.dtype() == folo_core::DType::F32 { Ok(t) } else { t.to_dtype(folo_core::DType::F32) }
         };
-        let av = self.av_proj.forward(x)?;
         let a_logits = to_f32(av.narrow(1, 0, self.m_edges)?.reshape([b, self.m_edges, n])?)?;
         let v = to_f32(av.narrow(1, self.m_edges, self.c_g)?.reshape([b, self.c_g, n])?)?;
         let a_gather = a_logits.softmax(-1)?; // [B, M, N] in F32: gather over spatial tokens
@@ -429,6 +485,221 @@ impl HyperContext {
         let g_scene = e_prime_t.mean(1, false)?; // [B, C_g] in F32
         let e_prime = e_prime_t.transpose(1, 2)?; // [B, C_g, M] in F32
         let y_ctx = e_prime.matmul(&a_bcast)?.reshape([b, self.c_g, h, w])?;
+        Ok((y_ctx, g_scene))
+    }
+
+    fn attend_and_scene_cpu_fast(
+        &self,
+        av: &Tensor,
+        b: usize,
+        h: usize,
+        w: usize,
+    ) -> Result<Option<(Tensor, Tensor)>> {
+        let (m, cg) = (self.m_edges, self.c_g);
+        let Some(n) = h.checked_mul(w) else { return Ok(None) };
+        let eligible = !is_grad_enabled()
+            && b > 0
+            && m > 0
+            && cg > 0
+            && n > 0
+            && av.device().is_cpu()
+            && av.dtype() == DType::F32
+            && av.dims() == [b, m + cg, h, w]
+            && self.ffn1.weight.device().is_cpu()
+            && self.ffn1.weight.dtype() == DType::F32
+            && self.ffn1.weight.dims() == [cg, cg]
+            && self.ffn2.weight.device().is_cpu()
+            && self.ffn2.weight.dtype() == DType::F32
+            && self.ffn2.weight.dims() == [cg, cg]
+            && self
+                .ffn1
+                .bias
+                .as_ref()
+                .is_none_or(|t| t.device().is_cpu() && t.dtype() == DType::F32 && t.dims() == [cg])
+            && self
+                .ffn2
+                .bias
+                .as_ref()
+                .is_none_or(|t| t.device().is_cpu() && t.dtype() == DType::F32 && t.dims() == [cg]);
+        if !eligible {
+            return Ok(None);
+        }
+        // Snapshot small FFN weights/biases once before locking `av` if any storage aliases.
+        let w1 = self.ffn1.weight.to_vec::<f32>()?;
+        let b1 = self.ffn1.bias.as_ref().map(|t| t.to_vec::<f32>()).transpose()?;
+        let w2 = self.ffn2.weight.to_vec::<f32>()?;
+        let b2 = self.ffn2.bias.as_ref().map(|t| t.to_vec::<f32>()).transpose()?;
+
+        let mut y_ctx = folo_core::cpu::take_buffer(b * cg * n);
+        let mut g_scene = folo_core::cpu::take_buffer(b * cg);
+        let mut a_gather = vec![0.0f32; m * n];
+        let mut a_bcast = vec![0.0f32; m * n];
+        let mut e_t = vec![0.0f32; m * cg];
+        let mut h1 = vec![0.0f32; m * cg];
+        let mut e_ffn = vec![0.0f32; m * cg];
+        let av_stride = (m + cg) * n;
+        let inv_m = 1.0 / m as f32;
+
+        av.with_f32_slice(|av_s| {
+            for bi in 0..b {
+                let a_off = bi * av_stride;
+                let v_off = a_off + m * n;
+                let a_slice = &av_s[a_off..a_off + m * n];
+
+                // 1. a_gather = softmax(a_logits, dim=-1) over n for each hyperedge row.
+                for r in 0..m {
+                    let src = &a_slice[r * n..(r + 1) * n];
+                    let dst = &mut a_gather[r * n..(r + 1) * n];
+                    let mut mx = f32::NEG_INFINITY;
+                    let mut non_finite = false;
+                    for &v in src {
+                        if !v.is_finite() {
+                            non_finite = true;
+                        }
+                        if v > mx {
+                            mx = v;
+                        }
+                    }
+                    if non_finite {
+                        let mx = src.iter().copied().fold(f32::NEG_INFINITY, |a, b| {
+                            if a.is_nan() || b.is_nan() { f32::NAN } else { a.max(b) }
+                        });
+                        let mut sum = 0.0f32;
+                        for (d, &v) in dst.iter_mut().zip(src) {
+                            let e = (v - mx).exp();
+                            *d = e;
+                            sum += e;
+                        }
+                        for d in dst.iter_mut() {
+                            *d /= sum;
+                        }
+                    } else {
+                        let mut sum = 0.0f32;
+                        for (d, &v) in dst.iter_mut().zip(src) {
+                            let e = folo_core::cpu::fast_exp(v - mx);
+                            *d = e;
+                            sum += e;
+                        }
+                        let inv = 1.0 / sum;
+                        for d in dst.iter_mut() {
+                            *d *= inv;
+                        }
+                    }
+                }
+
+                // 2. a_bcast = softmax(a_logits, dim=1) over m for each spatial token column.
+                for j in 0..n {
+                    let mut mx = f32::NEG_INFINITY;
+                    let mut non_finite = false;
+                    for r in 0..m {
+                        let v = a_slice[r * n + j];
+                        if !v.is_finite() {
+                            non_finite = true;
+                        }
+                        if v > mx {
+                            mx = v;
+                        }
+                    }
+                    if non_finite {
+                        let mut mx = f32::NEG_INFINITY;
+                        for r in 0..m {
+                            let v = a_slice[r * n + j];
+                            mx = if mx.is_nan() || v.is_nan() { f32::NAN } else { mx.max(v) };
+                        }
+                        let mut sum = 0.0f32;
+                        for r in 0..m {
+                            let e = (a_slice[r * n + j] - mx).exp();
+                            a_bcast[r * n + j] = e;
+                            sum += e;
+                        }
+                        for r in 0..m {
+                            a_bcast[r * n + j] /= sum;
+                        }
+                    } else {
+                        let mut sum = 0.0f32;
+                        for r in 0..m {
+                            let e = folo_core::cpu::fast_exp(a_slice[r * n + j] - mx);
+                            a_bcast[r * n + j] = e;
+                            sum += e;
+                        }
+                        let inv = 1.0 / sum;
+                        for r in 0..m {
+                            a_bcast[r * n + j] *= inv;
+                        }
+                    }
+                }
+
+                // 3. e_t[m, cg] = a_gather[m, n] @ v[cg, n]^T (direct without transpose copy!).
+                let ga = Strided::lhs(&a_gather, 0, n, 1);
+                let vb = Strided::rhs(av_s, v_off, 1, n);
+                gemm(m, cg, n, &ga, &vb, &mut e_t, cg, false, true);
+
+                // 4. h1[m, cg] = silu(e_t @ w1^T + b1)
+                let et_a = Strided::lhs(&e_t, 0, cg, 1);
+                let w1_b = Strided::rhs(&w1, 0, 1, cg);
+                gemm(m, cg, cg, &et_a, &w1_b, &mut h1, cg, false, true);
+                if let Some(bs) = b1.as_deref() {
+                    for row in h1.chunks_exact_mut(cg) {
+                        for (x, &bv) in row.iter_mut().zip(bs) {
+                            *x = folo_core::cpu::silu(*x + bv);
+                        }
+                    }
+                } else {
+                    for x in &mut h1 {
+                        *x = folo_core::cpu::silu(*x);
+                    }
+                }
+
+                // 5. e_ffn[m, cg] = h1 @ w2^T + b2; e_prime_t = e_t + e_ffn; g_scene = mean_m(e_prime_t)
+                let h1_a = Strided::lhs(&h1, 0, cg, 1);
+                let w2_b = Strided::rhs(&w2, 0, 1, cg);
+                gemm(m, cg, cg, &h1_a, &w2_b, &mut e_ffn, cg, false, true);
+                let gs_out = &mut g_scene[bi * cg..(bi + 1) * cg];
+                gs_out.fill(0.0);
+                for r in 0..m {
+                    let row_et = &mut e_t[r * cg..(r + 1) * cg];
+                    let row_ffn = &e_ffn[r * cg..(r + 1) * cg];
+                    match b2.as_deref() {
+                        Some(bs) => {
+                            for c in 0..cg {
+                                let ep = row_et[c] + (row_ffn[c] + bs[c]);
+                                row_et[c] = ep;
+                                gs_out[c] += ep;
+                            }
+                        }
+                        None => {
+                            for c in 0..cg {
+                                let ep = row_et[c] + row_ffn[c];
+                                row_et[c] = ep;
+                                gs_out[c] += ep;
+                            }
+                        }
+                    }
+                }
+                for g in gs_out.iter_mut() {
+                    *g *= inv_m;
+                }
+
+                // 6. y_ctx[cg, n] = e_prime_t^T[cg, m] @ a_bcast[m, n]
+                let ep_a = Strided::lhs(&e_t, 0, 1, cg);
+                let ab_b = Strided::rhs(&a_bcast, 0, n, 1);
+                let dst_y = &mut y_ctx[bi * cg * n..(bi + 1) * cg * n];
+                gemm(cg, n, m, &ep_a, &ab_b, dst_y, n, false, true);
+            }
+        })?;
+
+        Ok(Some((Tensor::from_vec(y_ctx, [b, cg, h, w])?, Tensor::from_vec(g_scene, [b, cg])?)))
+    }
+
+    /// Run P5 hypergraph context; returns `(y_p5 [B, C5, H, W], g_scene [B, C_g])`.
+    ///
+    /// Softmax attention weights, FFN `silu`, hyperedge residual addition, and global scene pooling (`g_scene`)
+    /// always execute in `F32` (both under AMP `autocast()` and in explicit `F16` inference) so high-magnitude
+    /// logits and reductions over `M` hyperedges never overflow or quantize in `F16`.
+    pub fn forward_with_scene(&self, x: &Tensor) -> Result<(Tensor, Tensor)> {
+        let (b, _, h, w) = x.dims4()?;
+        let av = self.av_proj.forward(x)?;
+        let (y_ctx, g_scene) = self.attend_and_scene(&av, b, h, w)?;
         let y_ctx =
             if y_ctx.dtype() != self.out_proj.conv.weight.dtype() && folo_core::autocast_dtype().is_none() {
                 y_ctx.to_dtype(self.out_proj.conv.weight.dtype())?
@@ -492,7 +763,49 @@ impl FullPadGate {
     /// `feat.dtype()`, so small gate updates near zero initialisation are not rounded away before multiplication
     /// under `F16` AMP or half-precision inference.
     pub fn forward(&self, feat: &Tensor, g_scene: &Tensor) -> Result<Tensor> {
-        let (b, c, _, _) = feat.dims4()?;
+        let (b, c, h, w) = feat.dims4()?;
+        // Fused single-pass CPU F32 path under `no_grad` (avoids tanh/add_scalar/reshape tensor allocs).
+        if !is_grad_enabled()
+            && b > 0
+            && c > 0
+            && h > 0
+            && w > 0
+            && feat.device().is_cpu()
+            && feat.dtype() == DType::F32
+            && g_scene.device().is_cpu()
+            && g_scene.dtype() == DType::F32
+            && g_scene.dims().len() == 2
+            && g_scene.dims()[0] == b
+            && self.proj.weight.device().is_cpu()
+            && self.proj.weight.dtype() == DType::F32
+            && self.proj.weight.dims().len() == 2
+            && self.proj.weight.dims()[0] == c
+            && self
+                .proj
+                .bias
+                .as_ref()
+                .is_none_or(|bias| bias.device().is_cpu() && bias.dtype() == DType::F32 && bias.dims() == [c])
+        {
+            let raw = self.proj.forward(g_scene)?;
+            let hw = h * w;
+            let mut out = folo_core::cpu::take_buffer(b * c * hw);
+            let gate_vals: Vec<f32> = raw.to_vec::<f32>()?.into_iter().map(|v| 1.0 + v.tanh()).collect();
+            feat.with_f32_slice(|fs| {
+                let scale_plane = |(idx, dst): (usize, &mut [f32])| {
+                    let g = gate_vals[idx];
+                    let src = &fs[idx * hw..(idx + 1) * hw];
+                    for (d, &s) in dst.iter_mut().zip(src) {
+                        *d = s * g;
+                    }
+                };
+                if out.len() >= 32_768 {
+                    out.par_chunks_exact_mut(hw).enumerate().for_each(scale_plane);
+                } else {
+                    out.chunks_exact_mut(hw).enumerate().for_each(scale_plane);
+                }
+            })?;
+            return Ok(Tensor::from_vec(out, [b, c, h, w])?);
+        }
         let g_in = if g_scene.dtype() != self.proj.weight.dtype() && folo_core::autocast_dtype().is_none() {
             g_scene.to_dtype(self.proj.weight.dtype())?
         } else {

@@ -8,14 +8,23 @@ use folo_nn::io::{
 };
 use folo_nn::{Error, Module, Result};
 
-use super::FoloModel;
+use super::{FoloModel, quant};
 
 impl FoloModel {
     /// The metadata of a weights file of this model: `folo.arch`, `folo.config`, `folo.classes`,
-    /// `folo.imgsz`, and `folo.fused` when fused.
+    /// `folo.imgsz`, `folo.fused` when fused, and `folo.quant` when an int8 calibration plan is active.
     pub fn metadata(&self) -> Result<Metadata> {
         let mut m = Metadata::new(FileKind::Weights, self.config.clone(), self.classes.clone(), self.imgsz)?;
         m.fused = self.fused;
+        if let Some(cal) = self.int8() {
+            let matches_weights = match cal.weights.as_deref() {
+                Some(want) => quant::fingerprint(self)? == want,
+                None => true,
+            };
+            if matches_weights {
+                cal.store(&mut m)?;
+            }
+        }
         Ok(m)
     }
 
@@ -27,7 +36,11 @@ impl FoloModel {
     /// `folo export` from memory: fuse Conv+BN in `F32` (unless already fused), cast to `dtype` and write a
     /// fused `weights` file. The model itself is not modified.
     pub fn export(&self, path: impl AsRef<Path>, dtype: FloatDType) -> Result<()> {
-        export_module(path, &self.metadata()?, self, dtype)
+        let mut meta = self.metadata()?;
+        if dtype != FloatDType::F32 {
+            meta.extra.remove(quant::META_KEY);
+        }
+        export_module(path, &meta, self, dtype)
     }
 
     /// Build the model a file describes (`folo.config`, `folo.classes`, `folo.imgsz`) and load it strictly.
@@ -97,6 +110,21 @@ impl FoloModel {
         Ok(model)
     }
 
+    /// Load a fused CPU `F32` model from `file` and attach its stored `folo.quant` int8 calibration plan.
+    pub fn from_file_int8(file: &ModelFile) -> Result<Self> {
+        let cal = quant::Calibration::from_metadata(file.metadata())?.ok_or_else(|| {
+            Error::Metadata(format!("`.folo` file has no `{}` int8 calibration metadata", quant::META_KEY))
+        })?;
+        let mut model = Self::from_file_for_inference(file, Device::Cpu, DType::F32)?;
+        model.set_int8(Some(cal))?;
+        Ok(model)
+    }
+
+    /// Open a quantized `.folo` file for CPU int8 inference ([`FoloModel::from_file_int8`]).
+    pub fn open_int8(path: impl AsRef<Path>) -> Result<Self> {
+        Self::from_file_int8(&ModelFile::open(path)?)
+    }
+
     /// Load `file` into this model with `opts` (FORMAT.md loading rules). When `opts.classes` is unset it is
     /// filled with this model's class list, so strict loading requires identical classes and partial loading
     /// skips the class-output layers (`head.cls.*.out.*`) when they differ. A fused model can only be loaded
@@ -112,7 +140,10 @@ impl FoloModel {
         if opts.classes.is_none() {
             opts.classes = Some(self.classes.clone());
         }
-        file.load(self, &opts)
+        let report = file.load(self, &opts)?;
+        // Eagerly check/invalidate a fingerprinted int8 plan against the newly loaded weights.
+        let _ = self.active_int8();
+        Ok(report)
     }
 
     /// Transfer learning: partial loading for training. Every tensor whose name, shape and dtype match is

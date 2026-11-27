@@ -265,3 +265,26 @@ fn fused_conv_matches_unfused_eval() {
         assert!(worst <= 1e-5, "k{k} s{s} g{g}: max diff {worst}");
     }
 }
+
+#[test]
+fn linear_cpu_no_grad_fast_path_matches_grad_path() {
+    let mut rng = Rng::seed(9);
+    for (has_bias, shape) in
+        [(true, vec![5, 16]), (false, vec![5, 16]), (true, vec![2, 4, 16]), (false, vec![2, 3, 16])]
+    {
+        let lin = Linear::new(16, 12, has_bias, &mut rng);
+        let x = Tensor::randn(shape, 0.0, 1.0, &mut rng);
+        let grad_out = lin.forward(&x).unwrap().to_vec::<f32>().unwrap();
+        let fast_out = no_grad_fwd(&lin, &x).to_vec::<f32>().unwrap();
+        let worst = grad_out.iter().zip(&fast_out).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
+        assert!(worst <= 1e-5, "has_bias={has_bias}: max diff {worst}");
+    }
+
+    // Aliased storage between weight and input (e.g. narrow view into same buffer) must not deadlock.
+    let lin = Linear::new(8, 8, true, &mut rng);
+    let aliased_x = lin.weight.clone();
+    let grad_out = lin.forward(&aliased_x).unwrap().to_vec::<f32>().unwrap();
+    let fast_out = no_grad_fwd(&lin, &aliased_x).to_vec::<f32>().unwrap();
+    let worst = grad_out.iter().zip(&fast_out).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
+    assert!(worst <= 1e-5, "aliased linear max diff {worst}");
+}
