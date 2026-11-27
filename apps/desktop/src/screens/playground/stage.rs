@@ -217,6 +217,41 @@ impl FoloApp {
                 .child(zone)
                 .into_any_element();
         }
+        if self.play_batch_qa_zero_match() {
+            let stage_w = {
+                let rail = if window.viewport_size().width < px(1100.) { 280. } else { 320. };
+                (self.content_width(window) - rail - 16. - 2.).max(0.)
+            };
+            let batch_strip = self.play_batch_filmstrip(&t, stage_w, window, cx);
+            return div()
+                .id("stage")
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .rounded(px(radius::LG))
+                .border_1()
+                .border_color(t.line_default)
+                .overflow_hidden()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .bg(t.bg_panel)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(empty_state(
+                            &t,
+                            "icons/list-filter.svg",
+                            "No batch images match this QA filter",
+                            "Lower confidence, switch QA filter chips, or click Show all below to inspect images.",
+                            Tone::Neutral,
+                        )),
+                )
+                .child(batch_strip)
+                .into_any_element();
+        }
         if self.play_compare.enabled && !no_models {
             return self.compare_stage(window, cx);
         }

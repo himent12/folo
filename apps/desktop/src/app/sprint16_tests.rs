@@ -237,6 +237,7 @@ fn dataset_health_report_export_and_curate_cli_builder_render_and_copy() {
     let copied = drive(&mut app, window, |_, _, cx| cx.read_from_clipboard().and_then(|c| c.text()));
     let cmd = copied.expect("copied dataset CLI command");
     assert!(cmd.starts_with("folo dataset convert "), "unexpected CLI command: {cmd}");
+    assert!(cmd.contains(" --from coco "), "expected registered source format --from coco in: {cmd}");
     assert!(cmd.ends_with(" --to voc"), "expected --to voc in: {cmd}");
 }
 
@@ -415,5 +416,281 @@ fn playground_batch_qa_filter_stepping_and_summary_csv_respect_active_filter() {
         let keys: Vec<String> = this.focus.borrow().keys().map(|k| k.to_string()).collect();
         assert!(keys.iter().any(|k| k == "play-batch-qa-empty"));
         assert!(keys.iter().any(|k| k == "play-batch-qa-cls-0"));
+    });
+}
+
+#[test]
+fn playtest_r16_playground_byclass_syncs_stage_rail_compare_confidence_and_focus() {
+    let api = Arc::new(MockBackend::new(4200, true));
+    let (mut app, window) = open_with(api, 960., 620., Mode::Light);
+
+    drive(&mut app, window, |this, w, cx| this.navigate(Route::Playground, w, cx));
+    settle(&mut app, window);
+
+    let model_id = drive(&mut app, window, |this, _, _| this.play_model.clone().expect("default model"));
+    let mk_pred = |mid: &str, boxes: Vec<ScoredBox>| PredictResponse {
+        model_id: mid.into(),
+        image: ImageSize { width: 640, height: 480 },
+        boxes,
+        timing: Timing { preprocess_ms: 1.0, inference_ms: 5.0, postprocess_ms: 0.5, total_ms: 6.5 },
+        device: "cpu".into(),
+        cold: false,
+    };
+    let mk_res = |boxes: Vec<ScoredBox>| {
+        BatchItemStatus::Done(BatchItemResult {
+            pred: mk_pred(&model_id, boxes),
+            width: 640,
+            height: 480,
+            model_id: model_id.clone(),
+            iou_bits: 0.7_f32.to_bits(),
+            target: None,
+            floor: 0.05,
+            content_hash: None,
+        })
+    };
+
+    // Batch with 2 images:
+    // [0] weak circle (0.50) + strong square (0.92)
+    // [1] strong circle (0.90) + square (0.85) + star (0.88)
+    let boxes_0 = vec![
+        ScoredBox { class: 0, name: "circle".into(), score: 0.50, x1: 10., y1: 10., x2: 50., y2: 50. },
+        ScoredBox { class: 1, name: "square".into(), score: 0.92, x1: 60., y1: 10., x2: 110., y2: 60. },
+    ];
+    let boxes_1 = vec![
+        ScoredBox { class: 0, name: "circle".into(), score: 0.90, x1: 15., y1: 15., x2: 65., y2: 65. },
+        ScoredBox { class: 1, name: "square".into(), score: 0.85, x1: 70., y1: 15., x2: 120., y2: 65. },
+        ScoredBox { class: 2, name: "star".into(), score: 0.88, x1: 130., y1: 15., x2: 180., y2: 65. },
+    ];
+    drive(&mut app, window, |this, _, cx| {
+        this.play_conf = 0.35;
+        this.play_batch.clear();
+        this.play_batch.items = vec![
+            PlayBatchItem {
+                name: "shapes / img_0.jpg".into(),
+                source: PlayBatchSource::Dataset {
+                    dataset_id: "ds_3b91".into(),
+                    image_id: "img_00801".into(),
+                },
+                status: mk_res(boxes_0.clone()),
+            },
+            PlayBatchItem {
+                name: "shapes / img_1.jpg".into(),
+                source: PlayBatchSource::Dataset {
+                    dataset_id: "ds_3b91".into(),
+                    image_id: "img_00802".into(),
+                },
+                status: mk_res(boxes_1.clone()),
+            },
+        ];
+        this.play_batch.active = 0;
+        this.select_play_batch_item(0, cx);
+    });
+    settle(&mut app, window);
+
+    // 1. Select ByClass(0 = circle) and step to img_1: stage visible_boxes, hover ceiling,
+    //    and JSON export all show ONLY circle (1 box), never square or star!
+    drive(&mut app, window, |this, _, cx| {
+        this.set_play_batch_qa_filter(BatchQaFilter::ByClass(0), cx);
+        this.step_play_batch(1, cx);
+    });
+    settle(&mut app, window);
+    drive(&mut app, window, |this, _, _| {
+        assert_eq!(this.play_batch.active, 1);
+        let p = this.play_pred.ready().expect("pred_a ready");
+        let vis = this.visible_boxes(p, None);
+        assert_eq!(vis.len(), 1, "stage overlay must match ByClass(circle) filter");
+        assert_eq!(vis[0].class, 0);
+        let (json, _, _) = this.build_play_export_json().expect("single json").unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["detections"].as_array().unwrap().len(), 1);
+        assert_eq!(v["detections"][0]["name"], "circle");
+    });
+
+    // 2. Compare A/B mode with ByClass(circle) filters Model A by class ID and Model B by name
+    //    (even when Model B uses a different numeric class index for "circle").
+    drive(&mut app, window, |this, _, cx| {
+        this.set_play_compare(true, cx);
+        this.play_compare.pred_b = crate::store::Load::Ready(mk_pred(
+            this.play_compare.model_b.as_deref().unwrap_or("m_b"),
+            vec![
+                ScoredBox {
+                    class: 7,
+                    name: "circle".into(),
+                    score: 0.87,
+                    x1: 20.,
+                    y1: 20.,
+                    x2: 70.,
+                    y2: 70.,
+                },
+                ScoredBox {
+                    class: 0,
+                    name: "square".into(),
+                    score: 0.91,
+                    x1: 80.,
+                    y1: 20.,
+                    x2: 130.,
+                    y2: 70.,
+                },
+            ],
+        ));
+        cx.notify();
+    });
+    settle(&mut app, window);
+    drive(&mut app, window, |this, _, _| {
+        let pb = this.play_compare.pred_b.ready().expect("pred_b ready");
+        let vis_b = this.visible_boxes_b(pb, None);
+        assert_eq!(vis_b.len(), 1, "Model B must filter by matched class name");
+        assert_eq!(vis_b[0].label.as_deref(), Some("circle"));
+        let keys: Vec<String> = this.focus.borrow().keys().map(|k| k.to_string()).collect();
+        assert!(keys.iter().any(|k| k == "play-cmp-class-clear"), "Compare scope bar mounts Clear action");
+    });
+
+    // 3. Raising confidence when staged img_0 drops out of ByClass(circle) reconciles to img_1;
+    //    raising past all matches (0.95) enters zero-match state cleanly without staging excluded boxes.
+    drive(&mut app, window, |this, _, cx| {
+        this.set_play_compare(false, cx);
+        this.select_play_batch_item(0, cx);
+    });
+    settle(&mut app, window);
+    drive(&mut app, window, |this, _, cx| {
+        assert_eq!(this.play_batch.active, 0);
+        this.set_play_conf(0.82, cx);
+    });
+    settle(&mut app, window);
+    drive(&mut app, window, |this, _, cx| {
+        assert_eq!(this.play_batch.active, 1, "raising conf must reconcile off excluded img_0 onto img_1");
+        assert!(!this.play_batch_qa_zero_match());
+        this.set_play_conf(0.95, cx);
+    });
+    settle(&mut app, window);
+    drive(&mut app, window, |this, _, _| {
+        assert!(this.play_batch_qa_zero_match(), "0 matches at 0.95 enters zero-match state");
+        assert!(!this.has_play_export_json(), "excluded stage frame is not exported during zero-match");
+    });
+
+    // 4. Focus continuity when a focused inactive class chip drops out of the top-8 during live Run All.
+    drive(&mut app, window, |this, _, cx| {
+        this.set_play_conf(0.25, cx);
+        this.set_play_batch_qa_filter(BatchQaFilter::All, cx);
+        // Item 0 has class 9 (initially visible since only 1 class exists).
+        this.play_batch.items[0].status = mk_res(vec![ScoredBox {
+            class: 9,
+            name: "rare".into(),
+            score: 0.9,
+            x1: 10.,
+            y1: 10.,
+            x2: 40.,
+            y2: 40.,
+        }]);
+        this.play_batch.items[1].status = BatchItemStatus::Pending;
+        cx.notify();
+    });
+    settle(&mut app, window);
+    drive(&mut app, window, |this, w, cx| {
+        this.focus_key("play-batch-qa-cls-9", w, cx);
+        assert!(this.fh("play-batch-qa-cls-9", cx).is_focused(w));
+        // Now 8 higher-priority classes (0..8) appear in item 0 + item 1 (count=2 each), pushing
+        // inactive class 9 (count=1) out of the top 8!
+        let top8 = |extra: Option<ScoredBox>| {
+            let mut v: Vec<ScoredBox> = (0..8u32)
+                .map(|c| ScoredBox {
+                    class: c,
+                    name: format!("c{c}"),
+                    score: 0.9,
+                    x1: 10.,
+                    y1: 10.,
+                    x2: 40.,
+                    y2: 40.,
+                })
+                .collect();
+            if let Some(b) = extra {
+                v.push(b);
+            }
+            v
+        };
+        this.play_batch.items[0].status = mk_res(top8(Some(ScoredBox {
+            class: 9,
+            name: "rare".into(),
+            score: 0.9,
+            x1: 10.,
+            y1: 10.,
+            x2: 40.,
+            y2: 40.,
+        })));
+        this.play_batch.items[1].status = mk_res(top8(None));
+        cx.notify();
+    });
+    settle(&mut app, window);
+    drive(&mut app, window, |this, w, cx| {
+        assert!(
+            this.fh("play-batch-qa-all", cx).is_focused(w),
+            "focus must transfer to All chip when an inactive class chip drops out of the top 8"
+        );
+    });
+}
+
+#[test]
+fn playtest_r16_labeling_next_unlabeled_disabled_and_guarded_during_save() {
+    let api = Arc::new(MockBackend::new(4200, true));
+    let (mut app, window) = open_with(api, 960., 620., Mode::Light);
+
+    drive(&mut app, window, |this, w, cx| this.navigate(Route::LabelJob("lb_4f10".into()), w, cx));
+    settle(&mut app, window);
+
+    let (id1, id2) = drive(&mut app, window, |this, _, cx| {
+        let list = this.label.images.get_mut("lb_4f10").and_then(|l| l.ready_mut()).unwrap();
+        list[0].status = LabelImageStatus::Labeled;
+        list[0].boxes = vec![BBox { class: 0, x1: 20., y1: 20., x2: 120., y2: 120. }];
+        list[1].status = LabelImageStatus::Pending;
+        list[1].boxes.clear();
+        list[2].status = LabelImageStatus::Pending;
+        list[2].boxes.clear();
+        let ids = (list[1].id.clone(), list[2].id.clone());
+        this.select_label_image(ids.0.clone(), cx);
+        ids
+    });
+    settle(&mut app, window);
+
+    // Dirty frame 1 via P, simulate an in-flight save (`label.mutating = true`), and focus Next unlabeled.
+    press(&mut app, window, "p");
+    drive(&mut app, window, |this, w, cx| {
+        assert!(this.label.editor.is_dirty_for("lb_4f10", &id1));
+        this.focus_key("label-next-unlabeled", w, cx);
+        assert!(this.fh("label-next-unlabeled", cx).is_focused(w));
+        this.label.mutating = true;
+        cx.notify();
+    });
+    settle(&mut app, window);
+
+    // Toolbar button swaps to disabled with focus continuity, and pressing 'U' is ignored cleanly
+    // (no stuck unsaved-edits PendingImageSwitch banner).
+    drive(&mut app, window, |this, w, cx| {
+        assert!(
+            this.fh("label-next-unlabeled-disabled", cx).is_focused(w),
+            "Next unlabeled must disable during save while preserving keyboard focus"
+        );
+    });
+    press(&mut app, window, "u");
+    drive(&mut app, window, |this, _, _| {
+        assert_eq!(this.label.selected_image.as_deref(), Some(id1.as_str()));
+        assert!(
+            this.label.editor.pending_switch.is_none(),
+            "U during save must not open an unsaved-edits confirmation banner"
+        );
+    });
+
+    // Once save completes (`mutating = false` and draft clean), focus restores and 'U' jumps to id2.
+    drive(&mut app, window, |this, _, cx| {
+        this.label.mutating = false;
+        this.label.editor.discard();
+        cx.notify();
+    });
+    settle(&mut app, window);
+    drive(&mut app, window, |this, w, cx| {
+        assert!(this.fh("label-next-unlabeled", cx).is_focused(w));
+    });
+    press(&mut app, window, "u");
+    drive(&mut app, window, |this, _, _| {
+        assert_eq!(this.label.selected_image.as_deref(), Some(id2.as_str()));
     });
 }

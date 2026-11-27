@@ -421,6 +421,24 @@ impl FoloApp {
         cx.notify();
     }
 
+    /// Keeps the staged batch item inside the active QA filter: preserves `play_batch.active`
+    /// when it still matches, otherwise selects the next matching item (wrapping to the first).
+    /// Returns `true` when it switched to a different batch item.
+    pub(crate) fn reconcile_play_batch_active(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.play_batch.is_active()
+            || self.play_batch.qa_filter == crate::screens::playground::BatchQaFilter::All
+        {
+            return false;
+        }
+        let filtered = self.play_batch_filtered_indices();
+        if filtered.is_empty() || filtered.contains(&self.play_batch.active) {
+            return false;
+        }
+        let next = filtered.iter().copied().find(|&i| i > self.play_batch.active).unwrap_or(filtered[0]);
+        self.select_play_batch_item(next, cx);
+        true
+    }
+
     /// Sets the active Batch QA filter, clears any conflicting Single-mode class filter when
     /// selecting `ByClass`, and jumps to the first matching image when the active item falls
     /// outside the filtered set.
@@ -434,14 +452,12 @@ impl FoloApp {
             && self.play_class.is_some_and(|p| p != cid)
         {
             self.play_class = None;
-            self.clear_play_hover();
         }
-        let filtered = self.play_batch_filtered_indices();
-        if !filtered.is_empty() && !filtered.contains(&self.play_batch.active) {
-            self.select_play_batch_item(filtered[0], cx);
-            return;
+        self.clear_play_hover();
+        self.play_compare.clear_hover();
+        if !self.reconcile_play_batch_active(cx) {
+            cx.notify();
         }
-        cx.notify();
     }
 
     /// Steps backward (`delta = -1`) or forward (`delta = +1`) through the filtered batch filmstrip
@@ -823,6 +839,7 @@ impl FoloApp {
                     self.clear_play_hover();
                 }
                 self.play_batch.items[idx].status = BatchItemStatus::Done(res);
+                self.reconcile_play_batch_active(cx);
             }
             Err(e) => {
                 if e.code == "server_unreachable" {

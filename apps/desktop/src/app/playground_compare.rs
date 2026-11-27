@@ -65,7 +65,7 @@ impl FoloApp {
 
     /// Cheap predicate for render frames: true when at least one fresh prediction can be exported as JSON.
     pub(crate) fn has_play_export_json(&self) -> bool {
-        if self.play_image.is_none() {
+        if self.play_image.is_none() || self.play_batch_qa_zero_match() {
             return false;
         }
         if !self.play_compare.enabled {
@@ -362,26 +362,30 @@ impl FoloApp {
     /// Builds the current Playground JSON export payload (Single or Compare mode) using only fresh
     /// predictions whose completed parameters match the active image/model/device/IoU/floor.
     pub(crate) fn build_play_export_json(&self) -> Option<anyhow::Result<(String, String, String)>> {
+        if self.play_batch_qa_zero_match() {
+            return None;
+        }
         let img = self.play_image.as_ref()?;
         let image_name = img.name.as_ref();
         let shown_a = self.play_shown_model();
         let model_a_name =
             shown_a.map(|m| m.name.as_str()).or(self.play_model.as_deref()).unwrap_or("model-a");
         let e2e_a = shown_a.is_some_and(|m| self.model_e2e(m));
+        let eff_class = self.play_effective_class();
 
         if !self.play_compare.enabled {
             if !self.pred_a_is_fresh() {
                 return None;
             }
             let pred_a = self.play_pred.ready()?;
-            let vis = filter_detections(&pred_a.boxes, self.play_conf, self.play_class);
+            let vis = filter_detections(&pred_a.boxes, self.play_conf, eff_class);
             let iou = (!e2e_a).then_some(self.play_iou);
             let json = crate::screens::playground::detections_json(
                 model_a_name,
                 image_name,
                 self.play_conf,
                 iou,
-                self.play_class,
+                eff_class,
                 &vis,
             );
             let fname = export_filename(image_name, model_a_name, None, "json");
@@ -398,7 +402,7 @@ impl FoloApp {
         let model_b_name =
             shown_b.map(|m| m.name.as_str()).or(self.play_compare.model_b.as_deref()).unwrap_or("model-b");
         let e2e_b = shown_b.is_some_and(|m| self.model_e2e(m));
-        let vis_a = pred_a.map(|p| filter_detections(&p.boxes, self.play_conf, self.play_class));
+        let vis_a = pred_a.map(|p| filter_detections(&p.boxes, self.play_conf, eff_class));
         let vis_b = pred_b.map(|p| self.filter_detections_b(&p.boxes));
         let cmp = summarize_comparison(vis_a.as_deref(), vis_b.as_deref(), pred_a, pred_b);
         let side_a = pred_a.zip(vis_a.as_ref()).map(|(p, v)| CompareSideExport {
@@ -421,7 +425,7 @@ impl FoloApp {
             (img.width, img.height),
             self.play_conf,
             top_iou,
-            self.play_class,
+            eff_class,
             &cmp,
             side_a.as_ref(),
             side_b.as_ref(),
@@ -446,25 +450,18 @@ impl FoloApp {
         Some(json.map(|s| (s, fname, summary)))
     }
 
-    /// Filters Model B detections by confidence and active class filter (matching by class name
-    /// when Model A and Model B have different class index mappings).
+    /// Filters Model B detections by confidence and active effective class filter (matching by
+    /// class name when Model A and Model B have different class index mappings).
     pub(crate) fn filter_detections_b<'a>(&self, boxes: &'a [ScoredBox]) -> Vec<&'a ScoredBox> {
-        let Some(cid) = self.play_class else {
+        let Some(cid) = self.play_effective_class() else {
             return boxes.iter().filter(|b| b.score >= self.play_conf).collect();
         };
-        let target_name = self
-            .play_shown_model()
-            .and_then(|m| m.classes.get(cid as usize).map(String::as_str))
-            .or_else(|| {
-                self.play_pred
-                    .ready()
-                    .and_then(|p| p.boxes.iter().find(|b| b.class == cid).map(|b| b.name.as_str()))
-            });
+        let target_name = self.play_class_name(cid);
         boxes
             .iter()
             .filter(|b| {
                 b.score >= self.play_conf
-                    && match target_name {
+                    && match target_name.as_deref() {
                         Some(name) => b.name == name,
                         None => b.class == cid,
                     }
@@ -525,6 +522,15 @@ impl FoloApp {
     /// Prompts for a save path and renders + writes an annotated PNG (Single or Compare A/B) off
     /// the UI thread using only fresh predictions.
     pub fn export_play_png(&mut self, cx: &mut Context<Self>) {
+        if self.play_batch_qa_zero_match() {
+            self.toast(
+                Tone::Neutral,
+                "Nothing to export",
+                Some("No batch images match the active QA filter.".into()),
+                cx,
+            );
+            return;
+        }
         let Some(img) = self.play_image.as_ref() else {
             self.toast(Tone::Neutral, "Nothing to export yet", Some("Open an image first.".into()), cx);
             return;
@@ -544,14 +550,12 @@ impl FoloApp {
         let compare = self.play_compare.enabled;
         let text_system = cx.text_system().clone();
         let fresh_a = self.pred_a_is_fresh().then(|| self.play_pred.ready()).flatten();
+        let eff_class = self.play_effective_class();
 
         let (suggested, job): (String, PngExportJob) = if !compare {
             let boxes_a: Vec<ScoredBox> = fresh_a
                 .map(|p| {
-                    filter_detections(&p.boxes, self.play_conf, self.play_class)
-                        .into_iter()
-                        .cloned()
-                        .collect()
+                    filter_detections(&p.boxes, self.play_conf, eff_class).into_iter().cloned().collect()
                 })
                 .unwrap_or_default();
             let fname = export_filename(&image_name, &model_a_name, None, "png");
@@ -575,10 +579,7 @@ impl FoloApp {
                 .unwrap_or_else(|| "model-b".to_string());
             let boxes_a: Vec<ScoredBox> = fresh_a
                 .map(|p| {
-                    filter_detections(&p.boxes, self.play_conf, self.play_class)
-                        .into_iter()
-                        .cloned()
-                        .collect()
+                    filter_detections(&p.boxes, self.play_conf, eff_class).into_iter().cloned().collect()
                 })
                 .unwrap_or_default();
             let boxes_b: Vec<ScoredBox> = fresh_b

@@ -265,16 +265,20 @@ impl FoloApp {
 
         let active = self.play_active(window, cx);
         let mut timing: Option<AnyElement> = None;
-        let detections = if compare_on {
+        let detections = if self.play_batch_qa_zero_match() {
+            let title = if compare_on { "Compare A/B" } else { "Detections" };
+            self.play_batch_qa_zero_match_rail(&t, title, window, cx)
+        } else if compare_on {
             self.play_compare_results(&t, window, cx)
         } else {
             match &self.play_pred {
                 Load::Ready(p) => {
+                    let eff_class = self.play_effective_class();
                     let above_conf: Vec<crate::api::ScoredBox> =
                         p.boxes.iter().filter(|b| b.score >= self.play_conf).cloned().collect();
                     let below_conf = p.boxes.len() - above_conf.len();
                     let vis: Vec<crate::api::ScoredBox> =
-                        super::page::filter_detections(&p.boxes, self.play_conf, self.play_class)
+                        super::page::filter_detections(&p.boxes, self.play_conf, eff_class)
                             .into_iter()
                             .cloned()
                             .collect();
@@ -287,17 +291,13 @@ impl FoloApp {
                             .or_insert_with(|| (b.name.clone(), 1));
                     }
                     let distinct_above = class_counts.len();
-                    if let Some(cid) = self.play_class
+                    if let Some(cid) = eff_class
                         && !class_counts.contains_key(&cid)
                     {
-                        let name = self
-                            .play_shown_model()
-                            .and_then(|m| m.classes.get(cid as usize).cloned())
-                            .or_else(|| p.boxes.iter().find(|b| b.class == cid).map(|b| b.name.clone()))
-                            .unwrap_or_else(|| format!("class {cid}"));
+                        let name = self.play_class_name(cid).unwrap_or_else(|| format!("class {cid}"));
                         class_counts.insert(cid, (name, 0));
                     }
-                    let show_class_chips = distinct_above >= 2 || self.play_class.is_some();
+                    let show_class_chips = distinct_above >= 2 || eff_class.is_some();
                     let boxes_chip = self.chip(
                         "play-boxes",
                         "Boxes",
@@ -350,24 +350,22 @@ impl FoloApp {
                             self.chip(
                                 "play-class-all",
                                 "All",
-                                self.play_class.is_none(),
+                                eff_class.is_none(),
                                 None,
                                 Some(above_conf.len() as u64),
                                 window,
                                 cx,
                                 act(move |this, w, cx| {
-                                    this.play_class = None;
-                                    this.clear_play_hover();
+                                    this.set_play_single_class(None, cx);
                                     if distinct_above < 2 {
                                         this.focus_key("play-boxes", w, cx);
                                     }
-                                    cx.notify();
                                 }),
                             )
                             .into_any_element(),
                         );
                         for (cid, (cname, cnt)) in class_counts {
-                            let on = self.play_class == Some(cid);
+                            let on = eff_class == Some(cid);
                             chips.push(
                                 self.chip(
                                     &format!("play-class-{cid}"),
@@ -378,23 +376,13 @@ impl FoloApp {
                                     window,
                                     cx,
                                     act(move |this, w, cx| {
-                                        let clearing = this.play_class == Some(cid);
-                                        this.play_class = if clearing { None } else { Some(cid) };
-                                        if !clearing
-                                            && matches!(
-                                                this.play_batch.qa_filter,
-                                                super::batch_qa::BatchQaFilter::ByClass(q) if q != cid
-                                            )
-                                        {
-                                            this.play_batch.qa_filter = super::batch_qa::BatchQaFilter::All;
-                                        }
-                                        this.clear_play_hover();
+                                        let clearing = this.play_effective_class() == Some(cid);
+                                        this.set_play_single_class((!clearing).then_some(cid), cx);
                                         if clearing && distinct_above < 2 {
                                             this.focus_key("play-boxes", w, cx);
                                         } else if clearing && cnt == 0 {
                                             this.focus_key("play-class-all", w, cx);
                                         }
-                                        cx.notify();
                                     }),
                                 )
                                 .into_any_element(),
@@ -411,7 +399,7 @@ impl FoloApp {
                             .gap(px(6.))
                             .children(chips)
                     });
-                    let clear_class = (self.play_class.is_some() && vis.is_empty()).then(|| {
+                    let clear_class = (eff_class.is_some() && vis.is_empty()).then(|| {
                         self.button(
                             "play-class-clear",
                             "Show all classes",
@@ -420,12 +408,10 @@ impl FoloApp {
                             window,
                             cx,
                             act(move |this, w, cx| {
-                                this.play_class = None;
-                                this.clear_play_hover();
+                                this.set_play_single_class(None, cx);
                                 let target =
                                     if distinct_above >= 2 { "play-class-all" } else { "play-boxes" };
                                 this.focus_key(target, w, cx);
-                                cx.notify();
                             }),
                         )
                     });
@@ -664,7 +650,7 @@ impl FoloApp {
                         text(ty::SM, t.text_tertiary).tnum().child(if self.play_pred_pending {
                             "Updating…".to_string()
                         // The total latency reads in the toolbar at every size; the count stays a count.
-                        } else if self.play_class.is_some() {
+                        } else if eff_class.is_some() {
                             if below_conf > 0 {
                                 format!("{} of {} · {below_conf} below threshold", vis.len(), above_conf.len())
                             } else {
@@ -704,7 +690,7 @@ impl FoloApp {
                             })
                             .children(rows)
                             .when(vis.is_empty(), |d| {
-                                let msg = if self.play_class.is_some() {
+                                let msg = if eff_class.is_some() {
                                     "No detections of this class above the threshold."
                                 } else {
                                     "Nothing above the threshold. Lower the confidence to see weaker detections."

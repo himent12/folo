@@ -222,21 +222,43 @@ impl FoloApp {
                     cx.notify();
                 }),
             );
+            let busy = self.label.mutating;
+            if pending_n + failed_n > 0 {
+                if busy && self.fh("label-next-unlabeled", cx).is_focused(window) {
+                    window.focus(&self.fh("label-next-unlabeled-disabled", cx));
+                } else if !busy && self.fh("label-next-unlabeled-disabled", cx).is_focused(window) {
+                    window.focus(&self.fh("label-next-unlabeled", cx));
+                }
+            }
             let jump_unlabeled = (pending_n + failed_n > 0).then(|| {
-                let jid_u = jid.clone();
-                self.button(
-                    "label-next-unlabeled",
-                    "Next unlabeled",
-                    Btn::Primary,
-                    Some("icons/target.svg"),
-                    window,
-                    cx,
-                    act(move |this, _, cx| this.request_jump_next_unlabeled(&jid_u, cx)),
-                )
-                .tooltip(crate::controls::tip(
-                    "Jump to the next pending or failed image in sequence",
-                    Some("U"),
-                ))
+                if busy {
+                    self.button_disabled(
+                        "label-next-unlabeled",
+                        "Next unlabeled",
+                        Btn::Primary,
+                        Some("icons/target.svg"),
+                        "Saving…",
+                        window,
+                        cx,
+                    )
+                    .into_any_element()
+                } else {
+                    let jid_u = jid.clone();
+                    self.button(
+                        "label-next-unlabeled",
+                        "Next unlabeled",
+                        Btn::Primary,
+                        Some("icons/target.svg"),
+                        window,
+                        cx,
+                        act(move |this, _, cx| this.request_jump_next_unlabeled(&jid_u, cx)),
+                    )
+                    .tooltip(crate::controls::tip(
+                        "Jump to the next pending or failed image in sequence",
+                        Some("U"),
+                    ))
+                    .into_any_element()
+                }
             });
             return div()
                 .flex()
@@ -344,6 +366,7 @@ impl FoloApp {
 
         let undo_disabled = !can_undo || locked || busy;
         let redo_disabled = !can_redo || locked || busy;
+        let next_unlabeled_disabled = busy;
         let dup_disabled = sel_box.is_none() || locked || busy;
         let prev_labeled = previous_labeled_frame(&all_images, &active.id);
         let copy_prev_disabled = prev_labeled.is_none() || locked || busy;
@@ -352,6 +375,7 @@ impl FoloApp {
         for (key, disabled) in [
             ("label-undo", undo_disabled),
             ("label-redo", redo_disabled),
+            ("label-next-unlabeled", next_unlabeled_disabled),
             ("label-dup-box", dup_disabled),
             ("label-copy-prev", copy_prev_disabled),
             ("label-discard", discard_disabled),
@@ -506,9 +530,20 @@ impl FoloApp {
             ))
         };
 
-        let jid_unlabeled = jid.clone();
-        let next_unlabeled_btn = self
-            .button(
+        let next_unlabeled_btn = if next_unlabeled_disabled {
+            self.button_disabled(
+                "label-next-unlabeled",
+                "Next unlabeled",
+                Btn::Secondary,
+                Some("icons/target.svg"),
+                "Saving…",
+                window,
+                cx,
+            )
+            .into_any_element()
+        } else {
+            let jid_unlabeled = jid.clone();
+            self.button(
                 "label-next-unlabeled",
                 "Next unlabeled",
                 Btn::Secondary,
@@ -517,7 +552,9 @@ impl FoloApp {
                 cx,
                 act(move |this, _, cx| this.request_jump_next_unlabeled(&jid_unlabeled, cx)),
             )
-            .tooltip(crate::controls::tip("Jump to the next pending or failed image in sequence", Some("U")));
+            .tooltip(crate::controls::tip("Jump to the next pending or failed image in sequence", Some("U")))
+            .into_any_element()
+        };
         let jid_skip = jid.clone();
         let skip_btn = self.button(
             "label-skip",

@@ -225,6 +225,7 @@ impl FoloApp {
         let shown = self.play_shown_model();
         let model_name = shown.map(|m| m.name.as_str()).unwrap_or(model_id);
         let e2e = shown.is_some_and(|m| self.model_e2e(m));
+        let eff_class = self.play_batch.effective_class(self.play_class);
         let mut owned = Vec::new();
         for (i, item) in self.play_batch.items.iter().enumerate() {
             if let Some(res) = self.play_batch.fresh_result(
@@ -235,7 +236,7 @@ impl FoloApp {
                 self.play_conf,
                 e2e,
             ) {
-                let boxes = filter_detections(&res.pred.boxes, self.play_conf, self.play_class);
+                let boxes = filter_detections(&res.pred.boxes, self.play_conf, eff_class);
                 owned.push((batch_tile_label(item.name.as_ref()).to_string(), res, boxes));
             }
         }
@@ -262,7 +263,7 @@ impl FoloApp {
             model_id,
             self.play_conf,
             iou,
-            self.play_class,
+            self.play_batch.effective_class(self.play_class),
             self.play_batch.items.len(),
             &entries,
         );

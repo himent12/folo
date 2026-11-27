@@ -152,9 +152,13 @@ impl FoloApp {
 
     fn play_det_sig(&self, idx: usize) -> Option<DetSig> {
         let pred = self.play_pred.ready()?;
-        let b = crate::screens::playground::filter_detections(&pred.boxes, self.play_conf, self.play_class)
-            .get(idx)
-            .copied()?;
+        let b = crate::screens::playground::filter_detections(
+            &pred.boxes,
+            self.play_conf,
+            self.play_effective_class(),
+        )
+        .get(idx)
+        .copied()?;
         Some(DetSig {
             class: b.class,
             name: b.name.clone(),
