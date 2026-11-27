@@ -227,7 +227,7 @@ impl FoloApp {
     /// disabled/enabled state transitions. In Compare A/B mode labels explicitly denote Model A.
     pub(super) fn play_batch_export_row(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let has_batch = self.has_play_batch_export();
-        let compare_on = self.play_compare.enabled;
+        let compare_on = self.play_compare.enabled && self.store.models.ready().is_none_or(|m| !m.is_empty());
         let (_, json_label, csv_label) = super::batch::batch_action_labels(compare_on, false);
         let json_tip = if compare_on {
             "Save completed Model A batch detections as JSON"
@@ -238,6 +238,11 @@ impl FoloApp {
             "Save completed Model A batch detections as CSV"
         } else {
             "Save completed batch detections as CSV"
+        };
+        let disabled_tip = if compare_on {
+            "Run Model A on at least one batch image first"
+        } else {
+            "Run at least one batch image first"
         };
         for key in ["play-export-batch-json", "play-export-batch-csv"] {
             let dis = format!("{key}-disabled");
@@ -265,7 +270,7 @@ impl FoloApp {
                 json_label,
                 Btn::Secondary,
                 Some("icons/file-text.svg"),
-                "Run at least one batch image first",
+                disabled_tip,
                 window,
                 cx,
             )
@@ -289,7 +294,7 @@ impl FoloApp {
                 csv_label,
                 Btn::Secondary,
                 Some("icons/download.svg"),
-                "Run at least one batch image first",
+                disabled_tip,
                 window,
                 cx,
             )

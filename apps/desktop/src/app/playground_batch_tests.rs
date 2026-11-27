@@ -534,7 +534,7 @@ fn playtest_r13_compare_failed_banner_model_a_labels_inline_completion_and_mid_l
     });
     settle(&mut app, window);
 
-    drive(&mut app, window, |this, _, _| {
+    drive(&mut app, window, |this, _, cx| {
         assert_eq!(this.play_batch.active, 1);
         assert!(matches!(this.play_batch.items[1].status, BatchItemStatus::Failed(_)));
         assert!(
@@ -545,10 +545,26 @@ fn playtest_r13_compare_failed_banner_model_a_labels_inline_completion_and_mid_l
             this.focus.borrow().contains_key("play-batch-skip-next"),
             "Compare A/B stage must render Next image action on failed batch item"
         );
+        // Switching Model A while the corrupt item is selected must preserve its load-failure
+        // status so the persistent banner does not disappear while the previous image stays shown.
+        let cur = this.play_model.clone().unwrap();
+        let other = this.store.models.ready().unwrap().iter().find(|m| m.id != cur).unwrap().id.clone();
+        this.pick_play_model(other, cx);
+    });
+    settle(&mut app, window);
+    drive(&mut app, window, |this, _, _| {
+        assert!(
+            matches!(this.play_batch.items[1].status, BatchItemStatus::Failed(_)),
+            "switching Model A must preserve active unstaged load failure"
+        );
+        assert!(
+            this.focus.borrow().contains_key("play-batch-retry-active"),
+            "persistent failure banner remains rendered after switching Model A"
+        );
     });
 
-    // 3. Clean Run All completion does NOT emit a toast over the bottom-right export row at 1024x680;
-    //    partial failure DOES emit a Warning toast.
+    // 3. Clean Run All completion updates inline filmstrip summary with ZERO toasts (never
+    //    occluding the bottom-right export row); partial failure DOES emit a Warning toast.
     drive(&mut app, window, |this, w, cx| {
         this.set_play_compare(false, cx);
         this.load_play_demo_batch(w, cx);
@@ -561,13 +577,24 @@ fn playtest_r13_compare_failed_banner_model_a_labels_inline_completion_and_mid_l
     settle(&mut app, window);
     drive(&mut app, window, |this, _, cx| {
         assert!(!this.play_batch.running);
+        let model_id = this.play_model.clone().unwrap();
+        let e2e = this.play_shown_model().is_some_and(|m| this.model_e2e(m));
+        let summary = this.play_batch.summary(
+            Some(&model_id),
+            this.play_iou,
+            this.play_target,
+            this.play_conf,
+            this.play_class,
+            e2e,
+        );
+        assert_eq!(summary.done, summary.total, "inline filmstrip summary reports all items completed");
+        assert_eq!(summary.failed, 0);
         assert!(
             this.toasts.is_empty(),
             "clean batch completion stays inline in the filmstrip instead of blocking export buttons: {:?}",
             this.toasts.iter().map(|t| t.title.as_ref()).collect::<Vec<_>>()
         );
         // Simulate a partial-failure completion -> warning toast is still shown.
-        let model_id = this.play_model.clone().unwrap();
         let last = this.play_batch.items.len() - 1;
         this.play_batch.running = true;
         this.play_batch.run_gen += 1;
@@ -585,7 +612,8 @@ fn playtest_r13_compare_failed_banner_model_a_labels_inline_completion_and_mid_l
         );
     });
 
-    // 4. Closing the batch strip while a batch item load is in flight clears play_loading cleanly.
+    // 4. Closing the batch strip while a batch item load is in flight clears play_loading cleanly
+    //    for both Dataset and File batch sources.
     drive(&mut app, window, |this, _, cx| {
         this.select_play_batch_item(2, cx);
         assert!(this.play_loading.is_some());
@@ -594,18 +622,43 @@ fn playtest_r13_compare_failed_banner_model_a_labels_inline_completion_and_mid_l
     settle(&mut app, window);
     assert!(
         drive(&mut app, window, |this, _, _| this.play_loading.is_none()),
-        "closing batch strip mid-load must clear play_loading once the in-flight read settles"
+        "closing dataset batch strip mid-load must clear play_loading once settled"
     );
 
-    // 5. Blocked multi-file intake checks open_image_blocked() BEFORE emitting skipped-file info toasts.
+    app.platform().answer_prompts(Some(vec![good_a.clone(), good_b.clone()]));
+    drive(&mut app, window, |this, w, cx| this.pick_image(w, cx));
+    settle(&mut app, window);
+    drive(&mut app, window, |this, _, cx| {
+        this.select_play_batch_item(1, cx);
+        assert!(this.play_loading.is_some());
+        this.clear_play_batch();
+    });
+    settle(&mut app, window);
+    assert!(
+        drive(&mut app, window, |this, _, _| this.play_loading.is_none()),
+        "closing file batch strip mid-load must clear play_loading once settled"
+    );
+
+    // 5. Blocked intake checks open_image_blocked() BEFORE emitting skipped-file info toasts
+    //    for both multi-file batches and mixed 1-supported + unsupported selections.
     let txt = dir.path().join("notes.txt");
     std::fs::write(&txt, b"hello").unwrap();
     drive(&mut app, window, |this, w, cx| {
         this.toasts.clear();
         this.store.models = crate::store::Load::Ready(Vec::new());
         let req = super::playground::OpenRequest { ticket: this.play_open_seq, model: None };
-        this.open_play_paths(vec![good_a, good_b, txt], req, w, cx);
-        assert_eq!(this.toasts.len(), 1, "blocked open must emit only the blocked toast");
+        this.open_play_paths(vec![good_a.clone(), good_b, txt.clone()], req, w, cx);
+        assert_eq!(this.toasts.len(), 1, "blocked batch open must emit only the blocked toast");
         assert_eq!(this.toasts[0].title.as_ref(), "Can't open images yet");
+
+        this.toasts.clear();
+        let req2 = super::playground::OpenRequest { ticket: this.play_open_seq, model: None };
+        this.open_play_paths(vec![good_a, txt], req2, w, cx);
+        assert_eq!(
+            this.toasts.len(),
+            1,
+            "blocked 1-supported + unsupported open must emit only the blocked toast"
+        );
+        assert_eq!(this.toasts[0].title.as_ref(), "Can't open an image yet");
     });
 }

@@ -380,6 +380,7 @@ impl FoloApp {
         );
         Some(
             div()
+                .flex_none()
                 .px(px(12.))
                 .py(px(8.))
                 .rounded(px(radius::MD))
@@ -469,7 +470,7 @@ impl FoloApp {
             window.focus(&self.fh("play-batch-run-all", cx));
         }
 
-        let compare_on = self.play_compare.enabled;
+        let compare_on = self.play_compare.enabled && self.store.models.ready().is_none_or(|m| !m.is_empty());
         let run_action: AnyElement = if running {
             self.button(
                 "play-batch-cancel",
