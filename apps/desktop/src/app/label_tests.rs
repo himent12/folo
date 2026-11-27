@@ -484,3 +484,171 @@ fn review_round1_regressions_revision_binding_ctrl_enter_filmstrip_and_monotonic
     });
     assert_eq!(g1, g0 + 1);
 }
+
+#[test]
+fn labeling_focus_restoration_sse_cleanup_cross_job_reset_locked_guard_and_viewports() {
+    use std::sync::atomic::Ordering;
+    use std::sync::mpsc::channel;
+
+    use crate::api::{LabelEvent, LabelSubscription};
+
+    let api = Arc::new(MockBackend::new(4200, true));
+    let (mut app, window) = open_with(api.clone(), 1280., 800., Mode::Dark);
+
+    // 1. Focus restoration for New labeling job form (Cancel and Esc -> `label-new`).
+    drive(&mut app, window, |this, w, cx| this.navigate(Route::LabelJobs, w, cx));
+    settle(&mut app, window);
+    drive(&mut app, window, |this, w, cx| {
+        this.open_new_label_job(w, cx);
+        this.close_new_label_job(w, cx);
+    });
+    app.frame(window.into());
+    assert!(
+        drive(&mut app, window, |this, w, cx| this.fh("label-new", cx).is_focused(w)),
+        "Cancel on New labeling job restores focus to label-new"
+    );
+    drive(&mut app, window, |this, w, cx| this.open_new_label_job(w, cx));
+    app.frame(window.into());
+    press(&mut app, window, "escape");
+    assert!(
+        drive(&mut app, window, |this, w, cx| this.fh("label-new", cx).is_focused(w)),
+        "Esc on New labeling job restores focus to label-new"
+    );
+
+    // 2. Focus restoration on Job detail forms & delete confirmations.
+    drive(&mut app, window, |this, w, cx| this.navigate(Route::LabelJob("lb_4f10".into()), w, cx));
+    settle(&mut app, window);
+
+    drive(&mut app, window, |this, w, cx| {
+        this.open_add_label_folder("lb_4f10", w, cx);
+        this.close_add_label_folder(w, cx);
+    });
+    app.frame(window.into());
+    assert!(
+        drive(&mut app, window, |this, w, cx| this.fh("label-add-folder", cx).is_focused(w)),
+        "Cancel on Add folder restores focus to label-add-folder"
+    );
+    drive(&mut app, window, |this, w, cx| this.open_add_label_folder("lb_4f10", w, cx));
+    app.frame(window.into());
+    press(&mut app, window, "escape");
+    assert!(
+        drive(&mut app, window, |this, w, cx| this.fh("label-add-folder", cx).is_focused(w)),
+        "Esc on Add folder restores focus to label-add-folder"
+    );
+
+    drive(&mut app, window, |this, w, cx| {
+        let job = this.label_job_by_id("lb_4f10").unwrap().clone();
+        this.open_export_label_dataset(&job, w, cx);
+        this.close_export_label_dataset(w, cx);
+    });
+    app.frame(window.into());
+    assert!(
+        drive(&mut app, window, |this, w, cx| this.fh("label-export-open", cx).is_focused(w)),
+        "Cancel on Export dataset restores focus to label-export-open"
+    );
+
+    drive(&mut app, window, |this, _, cx| {
+        this.label.confirm_delete_job = Some("lb_4f10".into());
+        cx.notify();
+    });
+    app.frame(window.into());
+    press(&mut app, window, "escape");
+    assert!(
+        drive(&mut app, window, |this, w, cx| this.fh("label-del-job", cx).is_focused(w)),
+        "Esc on job delete confirmation restores focus to label-del-job"
+    );
+
+    drive(&mut app, window, |this, _, cx| {
+        let img_id = this.label.selected_image.clone().unwrap();
+        this.label.confirm_delete_image = Some(("lb_4f10".into(), img_id));
+        cx.notify();
+    });
+    app.frame(window.into());
+    press(&mut app, window, "escape");
+    assert!(
+        drive(&mut app, window, |this, w, cx| this.fh("label-rm-img", cx).is_focused(w)),
+        "Esc on image remove confirmation restores focus to label-rm-img"
+    );
+
+    // 3. Locked (`LabelImageStatus::Labeling`) image blocks Delete and 1-9 reclassification keys.
+    let (locked_id, locked_boxes) = drive(&mut app, window, |this, _, cx| {
+        let list = this.label.images.get_mut("lb_4f10").and_then(|l| l.ready_mut()).unwrap();
+        let im = list.iter_mut().find(|i| !i.boxes.is_empty()).unwrap();
+        im.status = LabelImageStatus::Labeling;
+        let id = im.id.clone();
+        let boxes = im.boxes.clone();
+        let rev = label_box_revision(&boxes);
+        this.label.selected_image = Some(id.clone());
+        this.label.selected_box = Some(SelectedBox { image_id: id.clone(), index: 0, revision: rev });
+        this.label.review_error = None;
+        cx.notify();
+        (id, boxes)
+    });
+    app.frame(window.into());
+    press(&mut app, window, "delete");
+    let (len_after_del, err_del, mutating_del) = drive(&mut app, window, |this, _, _| {
+        let im = this
+            .label
+            .images
+            .get("lb_4f10")
+            .and_then(|l| l.ready())
+            .unwrap()
+            .iter()
+            .find(|i| i.id == locked_id)
+            .unwrap();
+        (im.boxes.len(), this.label.review_error.as_ref().map(|e| e.code.clone()), this.label.mutating)
+    });
+    assert_eq!(len_after_del, locked_boxes.len(), "Delete on Labeling image must not remove box");
+    assert_eq!(err_del.as_deref(), Some("label_job_active"));
+    assert!(!mutating_del);
+
+    let next_cls = if locked_boxes[0].class == 1 { 0u32 } else { 1u32 };
+    let recls_key = (next_cls + 1).to_string();
+    drive(&mut app, window, |this, _, _| {
+        this.label.review_error = None;
+    });
+    press(&mut app, window, &recls_key);
+    let (cls_after, err_recls) = drive(&mut app, window, |this, _, _| {
+        let im = this
+            .label
+            .images
+            .get("lb_4f10")
+            .and_then(|l| l.ready())
+            .unwrap()
+            .iter()
+            .find(|i| i.id == locked_id)
+            .unwrap();
+        (im.boxes[0].class, this.label.review_error.as_ref().map(|e| e.code.clone()))
+    });
+    assert_eq!(cls_after, locked_boxes[0].class, "1-9 on Labeling image must not reclassify box");
+    assert_eq!(err_recls.as_deref(), Some("label_job_active"));
+
+    // 4. Navigating away immediately drops the active SSE stream and clears selected_image / pending_advance.
+    let (_tx, rx) = channel::<LabelEvent>();
+    let (sub, cancel) = LabelSubscription::new(rx);
+    drive(&mut app, window, |this, w, cx| {
+        this.label.events = Some(("lb_4f10".into(), sub));
+        this.label.sub_for = Some("lb_4f10".into());
+        this.label.pending_advance = Some(("lb_4f10".into(), locked_id.clone(), "next".into()));
+        this.navigate(Route::Overview, w, cx);
+    });
+    assert!(
+        drive(&mut app, window, |this, _, _| {
+            this.label.events.is_none()
+                && this.label.sub_for.is_none()
+                && this.label.selected_image.is_none()
+                && this.label.pending_advance.is_none()
+        }),
+        "leaving LabelJob immediately drops SSE stream and resets selection state"
+    );
+    assert!(cancel.load(Ordering::Relaxed), "SSE cancel flag is triggered on route exit");
+
+    // 5. Render LabelJobs and LabelJob cleanly at narrow (780px), medium (1120px), and wide (1440px).
+    for (w, h) in [(780.0_f32, 700.0_f32), (1120.0, 760.0), (1440.0, 900.0)] {
+        let (mut a, win) = open_with(Arc::new(MockBackend::new(4200, true)), w, h, Mode::Light);
+        drive(&mut a, win, |this, w, cx| this.navigate(Route::LabelJobs, w, cx));
+        settle(&mut a, win);
+        drive(&mut a, win, |this, w, cx| this.navigate(Route::LabelJob("lb_4f10".into()), w, cx));
+        settle(&mut a, win);
+    }
+}

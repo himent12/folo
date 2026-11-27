@@ -14,6 +14,11 @@ impl FoloApp {
     /// Called from the app's 100 ms pump: applies the open benchmark's events, keeps its stream open
     /// while a benchmark page shows and closes it when none does.
     pub fn bench_pump(&mut self, tick: u64, cx: &mut Context<Self>) -> bool {
+        if !self.bench_on() {
+            self.bench.events = None;
+            self.bench.sub_for = None;
+            return false;
+        }
         let open = route_bench(&self.route).map(str::to_string);
         if self.bench.events.as_ref().is_some_and(|(id, _)| Some(id) != open.as_ref()) {
             self.bench.events = None;
@@ -22,9 +27,6 @@ impl FoloApp {
             self.bench.sub_for = None;
             return false;
         };
-        if !self.bench_on() {
-            return false;
-        }
         let mut changed = false;
         let mut ended = false;
         let mut reload = false;

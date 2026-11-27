@@ -250,10 +250,10 @@ pub fn partial_why(e: &BenchEntry, b: &Bench) -> String {
     format!("Partial: {}. It compares only loosely with complete entries.", partial_reasons(e, b).join(", "))
 }
 
-/// Why an entry has no calibration, in a few words (the Calibration tile and panel header): it gave no confidences
-/// (an agent), was added as a model that gives none (an external entry: confidences in its file were not used), or
-/// none of its detections reached the calibration floor, 0.1 (docs/BENCH.md, Calibration). Short enough for the
-/// tile at 1280 px; [`calibration_why_not`] says it in full.
+/// Why an entry has no calibration, in a few words (the Calibration tile and panel header): it reported no
+/// confidences (an agent entry without confidences), was added as a model that gives none (an external entry:
+/// confidences in its file were not used), or none of its detections reached the calibration floor, 0.1
+/// (docs/BENCH.md, Calibration). Short enough for the tile at 1280 px; [`calibration_why_not`] says it in full.
 pub fn calibration_none(e: &BenchEntry) -> String {
     match (&e.contestant, e.scored) {
         (_, true) => format!("none reached {CALIBRATION_FLOOR}"),
@@ -268,11 +268,13 @@ pub fn calibration_why_not(e: &BenchEntry) -> String {
     match (&e.contestant, e.scored) {
         (_, true) => format!("No detection on the unchanged images reached confidence {CALIBRATION_FLOOR}."),
         (BenchContestant::Agent { .. }, false) => {
-            "Agents give no confidences: an agent answers with the boxes it is sure of, so there is nothing to calibrate."
+            "This agent entry did not report confidences on its detections, so there is nothing to calibrate."
                 .into()
         }
         // Added with "The model gives confidences" off: its file may have had scores, which were not used.
-        (_, false) => "It was added as giving no confidences, so any scores in its predictions were not used.".into(),
+        (_, false) => {
+            "It was added as giving no confidences, so any scores in its predictions were not used.".into()
+        }
     }
 }
 
@@ -396,8 +398,15 @@ mod tests {
         );
         let effort = crate::api::LabelEffort::Medium;
         e.contestant = BenchContestant::Agent { agent: LabelAgentId::Claude, model: None, effort };
-        assert!(calibration_why_not(&e).starts_with("Agents give no confidences"));
+        assert_eq!(
+            calibration_why_not(&e),
+            "This agent entry did not report confidences on its detections, so there is nothing to calibrate."
+        );
         assert_eq!(calibration_none(&e), "no confidences");
+        // A scored agent entry whose detections stayed below the floor explains the floor, not missing confidences.
+        e.scored = true;
+        assert_eq!(calibration_none(&e), "none reached 0.1");
+        assert_eq!(calibration_why_not(&e), "No detection on the unchanged images reached confidence 0.1.");
         assert_eq!(agent_name(LabelAgentId::Antigravity), "Antigravity");
         e.contestant = BenchContestant::Agent {
             agent: LabelAgentId::Antigravity,

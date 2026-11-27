@@ -364,11 +364,13 @@ impl FoloApp {
                     .child(kv(
                         &t,
                         "Threshold",
-                        text(ty::SM, t.text_primary).tnum().child(
+                        text(ty::SM, t.text_primary).tnum().child(if !e.scored {
+                            "none (no confidences)".into()
+                        } else {
                             sl.threshold.map_or("never reaches the target".into(), |c| {
                                 format!("confidence {}", fmt_conf(c))
-                            }),
-                        ),
+                            })
+                        }),
                     ))
                     .child(kv(
                         &t,
@@ -479,8 +481,8 @@ impl FoloApp {
                     if bin.confidence.is_some_and(|c| (c - p).abs() <= 0.1) { t.success_solid } else { t.warning_solid },
                 )
             })))
-            .child(div().px(px(16.)).pb(px(10.)).child(text(ty::SM, t.text_tertiary).child("Share right per confidence band: a trustworthy model is right about as often as it is sure."))),
-            None => calib.child(div().px(px(16.)).py(px(12.)).child(text(ty::SM, t.text_tertiary).child(format!("{} Calibration is left out of the score.", calibration_why_not(e))))),
+            .child(div().px(px(16.)).pb(px(10.)).child(text(ty::SM, t.text_tertiary).whitespace_normal().child("Share right per confidence band: a trustworthy model is right about as often as it is sure."))),
+            None => calib.child(div().px(px(16.)).py(px(12.)).child(text(ty::SM, t.text_tertiary).whitespace_normal().child(format!("{} Calibration is left out of the score.", calibration_why_not(e))))),
         };
         let loc = &r.localization;
         let peak = loc.histogram.iter().copied().max().unwrap_or(0).max(1);

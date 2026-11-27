@@ -61,14 +61,14 @@ are the order the project was built in; what is open is marked `[ ]` or `[~]`, m
 - [x] `Model.head` / `trained_with` (#117); [x] `Model.precision` / `fused` (#123); [x] operating-point conf, resolved optimizer/LR, queue control, ONNX download (#129); [x] measured throughput, run estimates, benchmark probe (#130)
 
 - [x] agent labeling: unlabeled images → boxes by Claude Code, Codex or Antigravity (one tool-free model request per
-  batch) → review in Studio, `folo label` or MCP tools → a registered YOLO dataset (`/api/label`, `folo label`, 10 MCP
-  tools, docs/LABELING.md; #165, #423). Next: the same screen in FOLO Desktop
+  batch) → review in Studio, FOLO Desktop, `folo label` or MCP tools → a registered YOLO dataset (`/api/label`,
+  `folo label`, 10 MCP tools, docs/LABELING.md; #165, #423, #740)
 
 - [x] vision benchmarks: a frozen set of labeled images plus a plan of stress conditions, any vision model as a
   contestant (FOLO models, Claude Code / Codex / Antigravity with calibrated confidences, external predictions), a
   five-axis score with exact definitions, agent-designed plans, and self-improvement loops (`crates/folo-bench`,
-  `/api/bench`, Benchmarks in Studio and FOLO Desktop, `folo bench`, MCP tools; docs/BENCH.md). Next: external
-  predictions and Compare in FOLO Desktop; generated images as a benchmark source; masks and keypoints
+  `/api/bench`, Benchmarks, Compare and external predictions in Studio and FOLO Desktop, `folo bench`, MCP tools;
+  docs/BENCH.md; #739, #746). Next: generated images as a benchmark source; masks and keypoints
 
 - [x] cloud compute: training runs on a rented GPU (RunPod) or on another FOLO server, as ordinary runs of this
   server (`TrainConfig.compute`, `/api/cloud`, `folo cloud`, Settings → Cloud and Run on in Studio and Desktop;

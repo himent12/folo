@@ -379,10 +379,19 @@ impl FoloApp {
 
     /// Resets transient per-job UI state when navigating between routes.
     pub fn after_label_navigate(&mut self) {
+        let open_job = route_label(&self.route).map(str::to_string);
+        if self.label.events.as_ref().is_some_and(|(id, _)| Some(id) != open_job.as_ref()) {
+            self.label.events = None;
+        }
+        if open_job.is_none() {
+            self.label.sub_for = None;
+        }
         self.label.confirm_delete_job = None;
         self.label.confirm_delete_image = None;
         self.label.review_error = None;
         self.label.start_error = None;
+        self.label.selected_image = None;
+        self.label.pending_advance = None;
         self.label.selected_box = None;
         self.label.hover_box = None;
         self.label.zoom = 1.0;

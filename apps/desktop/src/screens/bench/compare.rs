@@ -316,13 +316,14 @@ impl FoloApp {
     ) -> AnyElement {
         let t = *t;
         let compact = self.content_width(window) < 880.;
-        let lead_w = if compact { 128. } else { 164. };
+        let lead_w = if compact { 116. } else { 164. };
+        let col_gap = if compact { 8. } else { 12. };
 
         // Header row: Measure + each entry with Baseline / Make baseline control.
         let mut head = div()
             .flex()
             .items_end()
-            .gap(px(12.))
+            .gap(px(col_gap))
             .px(px(16.))
             .py(px(10.))
             .border_b_1()
@@ -386,7 +387,7 @@ impl FoloApp {
             let mut row = div()
                 .flex()
                 .items_center()
-                .gap(px(12.))
+                .gap(px(col_gap))
                 .px(px(16.))
                 .py(px(10.))
                 .border_b_1()
@@ -785,7 +786,7 @@ impl FoloApp {
         }
         let cal_panel = panel(&t)
             .flex_1()
-            .min_w(px(320.))
+            .min_w(px(400.))
             .child(
                 panel_header(&t, "Calibration")
                     .child(text(ty::SM, t.text_tertiary).child("lower ECE is better")),
@@ -834,7 +835,7 @@ impl FoloApp {
         }
         let sl_panel = panel(&t)
             .flex_1()
-            .min_w(px(320.))
+            .min_w(px(400.))
             .child(
                 panel_header(&t, "Self-labeling")
                     .child(text(ty::SM, t.text_tertiary).child("objects labeled at 90% precision")),

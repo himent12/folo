@@ -350,8 +350,11 @@ the server's benchmarks and makes new ones (from a dataset split, or the labeled
 default plan). A benchmark's page has three underline tabs, each with its count:
 
 - **Leaderboard**: the entries ranked by score, with the five axes on the score's 0–100 scale, running entries with
-  their progress (live over the benchmark's event stream), and Run: a model of the server that knows the
-  benchmark's classes (the others are listed, off), or a coding agent (servers with `agent_labeling`).
+  their progress (live over the benchmark's event stream), **Compare** (2 to 4 finished entries side by side with a
+  selectable baseline, 95% confidence intervals, robustness, calibration, self-labeling and per-class AP50-95),
+  **Import predictions** (JSON/JSONL external predictions validated against the benchmark and uploaded in bounded
+  parts), and Run: a model of the server that knows the benchmark's classes (the others are listed, off), or a coding
+  agent (servers with `agent_labeling`, reporting confidences for calibration when available).
 - **Plan**: each condition with the benchmark's first image under it, its severities and its share of robustness;
   **Design with an agent** proposes a plan beside the current one while no entry has run.
 - **Loops**: the self-improvement loops with their verdicts, and **New loop** (a teacher with the benchmark's

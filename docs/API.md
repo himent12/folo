@@ -78,7 +78,10 @@ CLI's exit code; a test keeps the sources in line with it). Messages that wrap a
   "gpus": [{ "ordinal", "name", "backend": "vulkan|dx12|metal", "memory_bytes", "util" | null }],
   "data_dir"?: "/home/me/.folo", "features": ["export_onnx_switches", "queue_control", "weights_onnx"],
   "capabilities"?: Capabilities, "gpu_pool"?: { "device", "live_bytes", "cached_bytes", "peak_live_bytes" } }`
-  (`util` in `0..1`; CPU utilisation is measured since the previous reading, over at least 200 ms (sysinfo's minimum interval): a call sooner than 200 ms after the last reading returns that reading's CPU numbers again, the first reading after the server started is measured over that interval, and memory is read fresh on every call. `data_dir` is the real server's
+  (`util` in `0..1`; CPU utilisation is measured since the previous reading, over at least sysinfo's minimum interval
+  (200 ms on Windows, Linux and macOS; 100 ms on FreeBSD): a call sooner than that interval after the last reading
+  returns that reading's CPU numbers again, the first reading after the server started is measured over that interval,
+  and memory is read fresh on every call. `data_dir` is the real server's
   `--data-dir`, with `/` separators, where its runs, models and exports live; the mock server leaves it out. `features` lists optional API features
   the server implements, so a client can check before relying on one: `export_onnx_switches` (the export switches
   below; older servers accept and ignore them), `queue_control` (`POST /api/runs/{id}/queue`, `Run.queue_position`

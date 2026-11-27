@@ -200,6 +200,7 @@ impl FoloApp {
                     .child(status_seg)
                     .child(
                         text(ty::XS, t.text_tertiary)
+                            .whitespace_normal()
                             .child("Keys: ←/→ step · A approve · S skip · Del box · B/L toggles"),
                     ),
             )
@@ -410,16 +411,20 @@ impl FoloApp {
                     .gap(px(6.))
                     .min_w_0()
                     .child(prev_btn)
-                    .child(text(ty::SM, t.text_secondary).tnum().child(counter))
+                    .child(
+                        text(ty::SM, t.text_secondary).tnum().whitespace_nowrap().flex_none().child(counter),
+                    )
                     .child(next_btn)
                     .child(
                         text(ty::SM, t.text_primary)
                             .font_weight(FontWeight::MEDIUM)
+                            .min_w_0()
+                            .flex_shrink()
                             .ellipsis()
                             .max_w(px(220.))
                             .child(active.file.clone()),
                     )
-                    .child(img_status_badge),
+                    .child(div().flex_none().child(img_status_badge)),
             )
             .child(
                 div()

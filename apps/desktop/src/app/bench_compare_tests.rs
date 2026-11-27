@@ -558,3 +558,145 @@ fn pr746_r1_deleted_compare_slot_and_confidence_recheck_regressions() {
         "direct Bench(A) -> Bench(B) navigation cancels in-flight upload via Drop"
     );
 }
+
+#[test]
+fn agent_calibration_parity_narrow_compare_viewports_and_immediate_sse_cleanup() {
+    use std::sync::Arc;
+    use std::sync::atomic::Ordering;
+    use std::sync::mpsc::channel;
+
+    use folo_ui::{
+        AppContext, Bounds, HeadlessApp, HeadlessOptions, WindowBounds, WindowOptions, point, px, size,
+    };
+
+    // 1. Mock agent entry creation sets `scored: true` to match #739 real-server behavior, and
+    //    scored agent entries get no "No confidences" caveat in Compare.
+    let api = MockBackend::new(4200, true);
+    let started_agent = api
+        .start_bench_entry(
+            "bn_3c90",
+            &StartBenchEntry {
+                contestant: BenchContestantSpec::Agent {
+                    agent: LabelAgentId::Claude,
+                    model: Some("sonnet".into()),
+                    effort: Some(LabelEffort::Medium),
+                },
+                name: Some("Claude Code calibrated".into()),
+                max_images: Some(16),
+                conditions: Some(false),
+            },
+        )
+        .unwrap();
+    assert!(started_agent.scored, "new agent entries default to scored=true (#739)");
+
+    let bench = api.benches().unwrap().into_iter().find(|b| b.id == "bn_3c90").unwrap();
+    let entries = api.bench_entries("bn_3c90").unwrap();
+    let lead = entries.iter().find(|e| e.id == "be_3c01").unwrap().clone();
+    let unscored_agent = entries.iter().find(|e| e.id == "be_3c05").unwrap().clone();
+    assert!(!unscored_agent.scored);
+    assert!(
+        compare_caveats(&[lead.clone(), unscored_agent.clone()], &bench)
+            .iter()
+            .any(|c| c.contains("No confidences"))
+    );
+
+    // Promote the agent entry to scored with real calibration (like #739) and verify no unscored caveat.
+    let model_res = api.bench_result("bn_3c90", "be_3c01").unwrap();
+    let mut scored_agent = unscored_agent.clone();
+    scored_agent.id = "be_agent_cal".into();
+    scored_agent.name = "Claude Code (calibrated)".into();
+    scored_agent.scored = true;
+    let mut scored_score = model_res.entry.score.clone().unwrap();
+    scored_score.total = 61.5;
+    scored_score.partial = true;
+    for a in &mut scored_score.axes {
+        if a.axis == BenchAxis::Robustness {
+            a.value = None;
+        }
+    }
+    scored_agent.score = Some(scored_score);
+    assert!(
+        !compare_caveats(&[lead.clone(), scored_agent.clone()], &bench)
+            .iter()
+            .any(|c| c.contains("No confidences")),
+        "scored agent entry must not emit a No confidences caveat"
+    );
+
+    // 2. Render both scored and unscored agent entry pages + Compare across 780px, 1120px, and 1440px.
+    for (w, h) in [(780.0_f32, 700.0_f32), (1120.0, 760.0), (1440.0, 900.0)] {
+        let mut app = HeadlessApp::new(HeadlessOptions { size: size(px(w), px(h)), ..Default::default() });
+        let backend: Arc<dyn Backend> = Arc::new(MockBackend::new(4200, true));
+        let win = app.update(|cx| {
+            cx.set_global(crate::theme::Theme::new(crate::theme::Mode::Dark));
+            let bounds = Bounds::new(point(px(0.), px(0.)), size(px(w), px(h)));
+            let options =
+                WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), ..Default::default() };
+            cx.open_window(options, |win, cx| cx.new(|cx| crate::app::FoloApp::new(backend, true, win, cx)))
+                .expect("open window")
+        });
+        for _ in 0..3 {
+            app.frame(win.into());
+            app.run_until_idle();
+        }
+        let scored_res = BenchResult {
+            entry: scored_agent.clone(),
+            accuracy: model_res.accuracy.clone(),
+            robustness: None,
+            calibration: model_res.calibration.clone(),
+            localization: model_res.localization.clone(),
+            self_labeling: model_res.self_labeling.clone(),
+        };
+        drive(&mut app, win, |this, w, cx| {
+            this.navigate(Route::Bench("bn_3c90".into()), w, cx);
+        });
+        for _ in 0..3 {
+            app.frame(win.into());
+            app.run_until_idle();
+        }
+        drive(&mut app, win, |this, w, cx| {
+            if let Some(list) = this.bench.entries.get_mut("bn_3c90").and_then(|l| l.ready_mut()) {
+                list.push(scored_agent.clone());
+            }
+            this.bench
+                .results
+                .insert(("bn_3c90".into(), scored_agent.id.clone()), crate::store::Load::Ready(scored_res));
+            this.navigate(Route::BenchEntry("bn_3c90".into(), scored_agent.id.clone()), w, cx);
+        });
+        app.frame(win.into());
+        drive(&mut app, win, |this, w, cx| {
+            this.navigate(Route::BenchEntry("bn_3c90".into(), "be_3c05".into()), w, cx);
+        });
+        app.frame(win.into());
+        app.run_until_idle();
+        app.frame(win.into());
+        drive(&mut app, win, |this, w, cx| {
+            this.open_bench_compare("bn_3c90", Some(&scored_agent.id), w, cx);
+        });
+        for _ in 0..3 {
+            app.frame(win.into());
+            app.run_until_idle();
+        }
+    }
+
+    // 3. Navigating away from BenchCompare immediately drops the active benchmark SSE stream.
+    let (mut app, window) = open();
+    drive(&mut app, window, |this, w, cx| {
+        this.navigate(Route::BenchCompare("bn_3c90".into()), w, cx);
+    });
+    app.frame(window.into());
+    let (_tx, rx) = channel::<BenchEvent>();
+    let (sub, cancel) = BenchSubscription::new(rx);
+    drive(&mut app, window, |this, w, cx| {
+        this.bench.events = Some(("bn_3c90".into(), sub));
+        this.bench.sub_for = Some("bn_3c90".into());
+        this.navigate(Route::Overview, w, cx);
+    });
+    assert!(
+        drive(&mut app, window, |this, _, _| this.bench.events.is_none() && this.bench.sub_for.is_none()),
+        "leaving BenchCompare immediately clears bench.events and sub_for"
+    );
+    assert!(
+        cancel.load(Ordering::Relaxed),
+        "dropping bench.events on route exit cancels the SSE reader immediately"
+    );
+}

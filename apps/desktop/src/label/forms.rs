@@ -38,8 +38,24 @@ impl FoloApp {
         cx.notify();
     }
 
-    pub fn close_new_label_job(&mut self, cx: &mut Context<Self>) {
+    pub fn close_new_label_job(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.label.new_job = None;
+        let opener = self.fh("label-new", cx);
+        window.focus(&opener);
+        cx.notify();
+    }
+
+    pub fn close_add_label_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.label.add_folder = None;
+        let opener = self.fh("label-add-folder", cx);
+        window.focus(&opener);
+        cx.notify();
+    }
+
+    pub fn close_export_label_dataset(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.label.export_ds = None;
+        let opener = self.fh("label-export-open", cx);
+        window.focus(&opener);
         cx.notify();
     }
 
@@ -333,15 +349,26 @@ impl FoloApp {
         );
     }
 
-    /// Closes an inline labeling form or delete confirmation on `Esc`.
+    /// Closes an inline labeling form or delete confirmation on `Esc`, restoring focus to the
+    /// triggering control.
     pub fn dismiss_label_form(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if self.label.new_job.take().is_some()
-            || self.label.add_folder.take().is_some()
-            || self.label.export_ds.take().is_some()
-            || self.label.confirm_delete_job.take().is_some()
-            || self.label.confirm_delete_image.take().is_some()
-        {
-            window.focus(&self.root_focus);
+        if self.label.new_job.is_some() {
+            self.close_new_label_job(window, cx);
+            true
+        } else if self.label.add_folder.is_some() {
+            self.close_add_label_folder(window, cx);
+            true
+        } else if self.label.export_ds.is_some() {
+            self.close_export_label_dataset(window, cx);
+            true
+        } else if self.label.confirm_delete_job.take().is_some() {
+            let opener = self.fh("label-del-job", cx);
+            window.focus(&opener);
+            cx.notify();
+            true
+        } else if self.label.confirm_delete_image.take().is_some() {
+            let opener = self.fh("label-rm-img", cx);
+            window.focus(&opener);
             cx.notify();
             true
         } else if self.label.selected_box.take().is_some() {
