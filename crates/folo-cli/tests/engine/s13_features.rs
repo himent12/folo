@@ -326,7 +326,8 @@ fn quantize_selective_f32_policies_and_validation() {
         lines[0]["f32_convs"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
     assert!(p5_convs.len() >= 3 && p5_convs.iter().all(|c| c.starts_with("neck.out5.")), "{p5_convs:?}");
 
-    // 5. Unknown `--f32-conv` fails with exit 2 (`usage`) and lists eligible conv examples in hint.
+    // 5. Unknown `--f32-conv` fails with exit 2 (`usage`) BEFORE opening the dataset or running calibration,
+    // and lists eligible conv examples in hint.
     let out_bad = root.join("bad.folo");
     let (code, lines, _) = folo(&[
         "quantize",
@@ -334,7 +335,7 @@ fn quantize_selective_f32_policies_and_validation() {
         "--model",
         s(&best),
         "--data",
-        s(&tiny.data),
+        s(&root.join("nonexistent-dataset")),
         "--images",
         "2",
         "--batch",

@@ -163,13 +163,8 @@ impl Benches {
     /// bounded parallel chunks via `folo-bench::GeneratedSource` (backed by `folo-data::synthetic`) without
     /// registering a dataset or buffering all encoded JPEGs in RAM.
     pub fn create_generated(&self, req: CreateGeneratedBench) -> Result<Bench> {
-        let (name, description, _max, plan) = check_create(
-            &req.name,
-            &req.description,
-            Some(req.source.images),
-            req.source.seed,
-            req.plan.as_ref(),
-        )?;
+        let (name, description, _max, plan) =
+            check_create(&req.name, &req.description, None, req.source.seed, req.plan.as_ref())?;
         let generated = folo_bench::GeneratedSource::new(&req.source).map_err(invalid)?;
         if generated.classes().len() > MAX_CLASSES {
             return Err(source::empty(
@@ -705,11 +700,24 @@ mod tests {
             .create_generated(CreateGeneratedBench {
                 name: "gen-c".into(),
                 description: String::new(),
-                source: GeneratedSourceSpec { seed: 18, ..spec },
+                source: GeneratedSourceSpec { seed: 18, ..spec.clone() },
                 plan,
             })
             .unwrap();
         assert_ne!(b1.fingerprint, b3.fingerprint);
+
+        // `images: 0` blames `images`, not `max_images`.
+        let err = benches
+            .create_generated(CreateGeneratedBench {
+                name: "gen-zero".into(),
+                description: String::new(),
+                source: GeneratedSourceSpec { images: 0, ..spec },
+                plan: None,
+            })
+            .unwrap_err();
+        assert_eq!(err.body.code, "invalid_body");
+        assert!(err.body.message.contains("images"), "{}", err.body.message);
+        assert!(!err.body.message.contains("max_images"), "{}", err.body.message);
         benches.shutdown();
 
         // Reloading from disk preserves the generated benchmark cleanly.

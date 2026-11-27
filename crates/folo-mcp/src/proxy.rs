@@ -564,6 +564,14 @@ impl Store for HttpStore {
             .hint("update folo serve, or omit auto-batch fields when resuming"));
         }
         let mut body = fields.clone();
+        // Strip explicit `null` auto-batch keys so older servers without `train_auto_batch` do not reject them
+        // as unknown fields when resuming a run without changing auto-batch settings.
+        if body.get("auto_batch").is_some_and(serde_json::Value::is_null) {
+            body.remove("auto_batch");
+        }
+        if body.get("auto_batch_target").is_some_and(serde_json::Value::is_null) {
+            body.remove("auto_batch_target");
+        }
         body.insert("resume_run_id".into(), id.into());
         self.post("/runs", &serde_json::Value::Object(body))
     }

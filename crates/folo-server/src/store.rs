@@ -627,6 +627,22 @@ pub trait Store: Send + Sync + 'static {
         let _ = config;
         Err(crate::error::Error::not_implemented("run estimates"))
     }
+    /// Like [`Store::estimate_run`], with optional GPU VRAM-budget auto-batch sizing (`auto_batch`).
+    fn estimate_run_with_auto_batch(
+        &self,
+        config: TrainConfig,
+        auto_batch: AutoBatchOptions,
+    ) -> Result<RunEstimate> {
+        check_auto_batch_options(&auto_batch)?;
+        if auto_batch.enabled && config.compute.is_some() {
+            return Err(crate::error::Error::new(
+                axum::http::StatusCode::BAD_REQUEST,
+                "invalid_config",
+                "auto_batch is not supported for cloud runs yet (pass an explicit integer `batch` for cloud compute)",
+            ));
+        }
+        self.estimate_run(config)
+    }
     /// A few-second probe of training and inference speed (`POST /api/system/benchmark`); `409 run_active` while
     /// a run is queued or training.
     fn benchmark(&self, req: BenchmarkRequest) -> Result<BenchmarkReport> {

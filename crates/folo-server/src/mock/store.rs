@@ -66,7 +66,23 @@ impl Store for MockStore {
         Ok(self.throughput.table(&throughput::gpu(), &[throughput::gpu(), throughput::cpu()]))
     }
 
-    fn estimate_run(&self, mut config: TrainConfig) -> Result<RunEstimate> {
+    fn estimate_run(&self, config: TrainConfig) -> Result<RunEstimate> {
+        self.estimate_run_with_auto_batch(config, crate::store::AutoBatchOptions::default())
+    }
+
+    fn estimate_run_with_auto_batch(
+        &self,
+        mut config: TrainConfig,
+        auto_batch: crate::store::AutoBatchOptions,
+    ) -> Result<RunEstimate> {
+        crate::store::check_auto_batch_options(&auto_batch)?;
+        if auto_batch.enabled && config.compute.is_some() {
+            return Err(Error::new(
+                StatusCode::BAD_REQUEST,
+                "invalid_config",
+                "auto_batch is not supported for cloud runs yet (pass an explicit integer `batch` for cloud compute)",
+            ));
+        }
         let ds = self.dataset(&config.dataset_id)?;
         self.validate(&config)?;
         if let Some(w) = &config.weights {
@@ -101,6 +117,7 @@ impl Store for MockStore {
             ds.meta().format,
             config.weights.as_deref().map(mock_weights).as_deref(),
         );
+        let cli = crate::cli::with_auto_batch(cli, &config, auto_batch.enabled.then_some(auto_batch));
         let mut estimate = self.throughput.estimate(&crate::throughput::EstimateInput {
             device,
             arch: config.arch,

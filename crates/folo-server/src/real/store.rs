@@ -78,7 +78,24 @@ impl Store for RealStore {
         Ok(self.throughput.table(&auto, &devices))
     }
 
-    fn estimate_run(&self, mut config: TrainConfig) -> Result<RunEstimate> {
+    fn estimate_run(&self, config: TrainConfig) -> Result<RunEstimate> {
+        self.estimate_run_with_auto_batch(config, crate::store::AutoBatchOptions::default())
+    }
+
+    fn estimate_run_with_auto_batch(
+        &self,
+        mut config: TrainConfig,
+        auto_batch: crate::store::AutoBatchOptions,
+    ) -> Result<RunEstimate> {
+        crate::store::check_auto_batch_options(&auto_batch)?;
+        if auto_batch.enabled && config.compute.is_some() {
+            return Err(Error::new(
+                StatusCode::BAD_REQUEST,
+                "invalid_config",
+                "auto_batch is not supported for cloud runs yet (pass an explicit integer `batch` for cloud compute)",
+            )
+            .hint("pick an integer `batch` for cloud runs, or omit `compute` to use auto-batch locally"));
+        }
         let e = self.entry(&config.dataset_id)?;
         let idx = self.fresh_index(&e)?;
         // POST /api/runs' own checks, except the name's length: Studio's New run asks with the name as it is being
@@ -101,6 +118,7 @@ impl Store for RealStore {
             e.reg().format,
             weights.as_ref().map(cli_weights).as_deref(),
         );
+        let cli = crate::cli::with_auto_batch(cli, &config, auto_batch.enabled.then_some(auto_batch));
         let mut estimate = self.throughput.estimate(&EstimateInput {
             device,
             arch: config.arch,
@@ -465,7 +483,15 @@ impl Store for RealStore {
             epochs: u32::try_from(total).ok().filter(|&e| e > 0),
             best,
         };
-        self.start_run(config, Some(snapshot))
+        let ckpt_auto = ckpt_cfg
+            .as_ref()
+            .filter(|c| c.auto_batch)
+            .map(|c| crate::store::AutoBatchOptions {
+                enabled: true,
+                target_utilization: Some(c.auto_batch_target),
+            })
+            .unwrap_or_default();
+        self.start_run_with_auto_batch(config, Some(snapshot), ckpt_auto)
     }
 
     fn resume_run(&self, id: &str, fields: &serde_json::Map<String, serde_json::Value>) -> Result<Run> {

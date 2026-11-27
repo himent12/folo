@@ -66,7 +66,9 @@ const TRAIN_CONFIG_FIELDS: &[&str] = &[
     "head",
     "compute",
 ];
-/// Extra top-level control keys accepted only by `POST /api/runs` (not `/api/runs/estimate`).
+/// Extra top-level control keys accepted by `POST /api/runs/estimate`.
+const ESTIMATE_EXTRA_FIELDS: &[&str] = &["auto_batch", "auto_batch_target"];
+/// Extra top-level control keys accepted by `POST /api/runs`.
 const RUN_CONTROL_FIELDS: &[&str] = &["checkpoint", "resume_run_id", "auto_batch", "auto_batch_target"];
 /// Allowed keys of [`folo_api::Augment`].
 const AUGMENT_FIELDS: &[&str] = &["mosaic", "mixup", "hsv", "fliplr", "scale", "translate", "close_mosaic"];
@@ -112,7 +114,7 @@ fn run_fields(
         )
         .hint("train with a teacher from the CLI: folo train --teacher <weights> (docs/CLI.md)"));
     }
-    let extra = if allow_run_controls { RUN_CONTROL_FIELDS } else { &[] };
+    let extra = if allow_run_controls { RUN_CONTROL_FIELDS } else { ESTIMATE_EXTRA_FIELDS };
     check_known_keys("", &fields, TRAIN_CONFIG_FIELDS, extra)?;
     if let Some(serde_json::Value::Object(aug)) = fields.get("augment") {
         check_known_keys("augment", aug, AUGMENT_FIELDS, &[])?;
@@ -219,10 +221,11 @@ pub(super) async fn estimate_run(
     State(st): State<AppState>,
     ApiJson(body): ApiJson<serde_json::Value>,
 ) -> Result<Json<RunEstimate>> {
-    let fields = run_fields(body, false)?;
+    let mut fields = run_fields(body, false)?;
+    let auto_batch = extract_auto_batch(&mut fields)?;
     let config: TrainConfig =
         serde_json::from_value(serde_json::Value::Object(fields)).map_err(body_error)?;
-    Ok(Json(blocking(&st, move |s| s.estimate_run(config)).await?))
+    Ok(Json(blocking(&st, move |s| s.estimate_run_with_auto_batch(config, auto_batch)).await?))
 }
 
 pub(super) async fn get_run(State(st): State<AppState>, ApiPath(id): ApiPath<String>) -> Result<Response> {
@@ -597,5 +600,31 @@ mod tests {
                 .unwrap()
                 .clone();
         assert_eq!(extract_auto_batch(&mut oob).unwrap_err().body.code, "invalid_config");
+
+        // `/api/runs/estimate` (`allow_run_controls = false`) accepts `auto_batch` and `auto_batch_target`
+        // (and `batch: "auto"`) while still rejecting `resume_run_id`, `checkpoint`, and unknown typos.
+        let mut est_ok = run_fields(
+            serde_json::json!({
+                "dataset_id": "ds_1",
+                "batch": 24,
+                "auto_batch": true,
+                "auto_batch_target": 0.75
+            }),
+            false,
+        )
+        .unwrap();
+        let est_ab = extract_auto_batch(&mut est_ok).unwrap();
+        assert!(est_ab.enabled);
+        assert_eq!(est_ab.target_utilization, Some(0.75));
+        assert_eq!(est_ok.get("batch"), Some(&serde_json::json!(24)));
+
+        let mut est_auto =
+            run_fields(serde_json::json!({ "dataset_id": "ds_1", "batch": "auto" }), false).unwrap();
+        assert!(extract_auto_batch(&mut est_auto).unwrap().enabled);
+
+        let typo = run_fields(serde_json::json!({ "dataset_id": "ds_1", "auto_batch_targte": 0.75 }), false)
+            .unwrap_err();
+        assert_eq!(typo.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(typo.body.code, "invalid_body");
     }
 }
