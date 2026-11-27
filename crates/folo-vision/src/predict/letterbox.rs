@@ -72,26 +72,66 @@ pub(super) fn letterbox_on_device_as_refs(
     device: Device,
     dtype: DType,
 ) -> Result<Option<Tensor>> {
+    let _ = check_letterbox(imgs, boxes)?;
+    let dev_imgs = upload_images(imgs, device)?;
+    letterbox_uploaded_on_device(&dev_imgs, imgs, boxes, device, dtype)
+}
+
+/// Upload `imgs` as `[H, W, 3]` `u8` tensors on `device` once so callers (such as multi-scale GPU TTA) can
+/// letterbox the same resident source images across multiple inference sizes without repeating PCIe transfers.
+pub(crate) fn upload_images_on_device(imgs: &[&Image], device: Device) -> Result<Vec<Tensor>> {
+    upload_images(imgs, device)
+}
+
+/// Letterbox already-uploaded `[H, W, 3]` `u8` device tensors `dev_imgs` (parallel to `imgs` and `boxes`) into
+/// a `[B, 3, H_out, W_out]` tensor of `dtype` on `device`. Reuses resize taps for images sharing identical
+/// `(src_w, src_h, resized_w, resized_h)` geometry.
+pub(crate) fn letterbox_uploaded_on_device(
+    dev_imgs: &[Tensor],
+    imgs: &[&Image],
+    boxes: &[Letterbox],
+    device: Device,
+    dtype: DType,
+) -> Result<Option<Tensor>> {
     let [w, h] = check_letterbox(imgs, boxes)?;
+    if dev_imgs.len() != imgs.len() {
+        return Err(Error::Config(format!(
+            "letterbox: {} device images but {} host images",
+            dev_imgs.len(),
+            imgs.len()
+        )));
+    }
     let mut taps: Vec<u32> = Vec::new();
     let mut geoms = Vec::with_capacity(imgs.len());
+    // Deduplicate resize tap tables across images sharing `(src_w, src_h, resized_w, resized_h)` (e.g. uniform
+    // batches, SAHI tile chunks, and TTA original+flipped pairs).
+    let mut plan_cache: Vec<([u32; 4], [usize; 2], usize)> = Vec::new();
     for (&img, lb) in imgs.iter().zip(boxes) {
         let [rw, rh] = lb.resized;
-        let plan = folo_data::resize::resize_plan(img.width, img.height, rw, rh);
+        let key = [img.width, img.height, rw, rh];
+        let (prefilter, taps_off) =
+            if let Some(&(_, pf, off)) = plan_cache.iter().find(|&&(k, _, _)| k == key) {
+                (pf, off)
+            } else {
+                let plan = folo_data::resize::resize_plan(img.width, img.height, rw, rh);
+                let pf = [plan.prefilter[0] as usize, plan.prefilter[1] as usize];
+                let off = taps.len();
+                for t in [&plan.x0, &plan.x1, &plan.wx, &plan.y0, &plan.y1, &plan.wy] {
+                    taps.extend_from_slice(t);
+                }
+                plan_cache.push((key, pf, off));
+                (pf, off)
+            };
         geoms.push(LetterboxImage {
             src: [img.width as usize, img.height as usize],
             resized: [rw as usize, rh as usize],
             pad: [lb.pad[0] as usize, lb.pad[1] as usize],
-            prefilter: [plan.prefilter[0] as usize, plan.prefilter[1] as usize],
-            taps: taps.len(),
+            prefilter,
+            taps: taps_off,
         });
-        for t in [&plan.x0, &plan.x1, &plan.wx, &plan.y0, &plan.y1, &plan.wy] {
-            taps.extend_from_slice(t);
-        }
     }
     let n = taps.len();
     let taps = Tensor::from_vec(taps, [n])?.to_device(device)?;
-    let dev_imgs = upload_images(imgs, device)?;
     let refs: Vec<&Tensor> = dev_imgs.iter().collect();
     let out = [h as usize, w as usize];
     Ok(Tensor::letterbox_rgb8(&refs, &taps, &geoms, out, folo_data::PAD_VALUE, INV_255, dtype)?)

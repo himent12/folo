@@ -160,12 +160,16 @@ pub(super) fn single_label_block(
         if !may_pass {
             continue;
         }
-        // Exactly the extraction of `non_max_suppression`.
-        let (mut bc, mut bs) = (0usize, sigmoid(cl[j]));
+        // Skip `sigmoid` (`exp`) whenever `v <= bl - 1e-3` (monotonicity guarantees `sigmoid(v) <= bs`).
+        let mut bl = cl[j];
+        let (mut bc, mut bs) = (0usize, sigmoid(bl));
         for c in 1..nc {
-            let s = sigmoid(cl[c * a + j]);
-            if s > bs {
-                (bc, bs) = (c, s);
+            let v = cl[c * a + j];
+            if v.total_cmp(&(bl - 1e-3)).is_gt() || bl.is_nan() {
+                let s = sigmoid(v);
+                if s > bs {
+                    (bc, bl, bs) = (c, v, s);
+                }
             }
         }
         if bs > conf {

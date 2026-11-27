@@ -39,6 +39,7 @@ use rayon::prelude::*;
 pub use config::{Precision, PredictConfig, Prediction, Timing, f16_unavailable};
 pub use letterbox::{letterbox_on_device, letterbox_on_device_as, letterbox_on_host};
 use letterbox::{letterbox_on_device_as_refs, letterbox_on_host_refs, letterbox_on_host_rgb0};
+pub(crate) use letterbox::{letterbox_uploaded_on_device, upload_images_on_device};
 
 use crate::boxes::Xyxy;
 use crate::error::{Error, Result};
@@ -46,7 +47,6 @@ use crate::eval::{ThresholdCalibration, validate_per_class_conf};
 use crate::model::v2::{DEFAULT_IOU_FUSION_ALPHA, FoloV2Model};
 use crate::model::{Detector, DetectorOutput, FoloModel, HeadOutput};
 use crate::nms::{Detection, NmsConfig, postprocess};
-use crate::tile::{TileConfig, check_image, compute_tiles, crop_tile, merge_tiled_detections};
 
 /// Per-call confidence override passed internally by [`Predictor::predict_sequence`] so ByteTrack can lower
 /// fallback and per-class thresholds independently without mutating `Predictor`.
@@ -297,94 +297,9 @@ impl Predictor {
         Ok(p)
     }
 
-    /// Decode an image file and predict it with SAHI tiled inference ([`Predictor::predict_tiled`]).
-    pub fn predict_file_tiled(&self, path: impl AsRef<Path>, tile_cfg: &TileConfig) -> Result<Prediction> {
-        tile_cfg.validate()?;
-        let t = Instant::now();
-        let img = folo_data::read_image(path.as_ref())?;
-        let decode_ms = ms(t);
-        let mut p = self.predict_tiled(&img, tile_cfg)?;
-        p.timing =
-            Timing::new(p.timing.preprocess_ms + decode_ms, p.timing.inference_ms, p.timing.postprocess_ms);
-        Ok(p)
-    }
-
     /// One image, letterboxed `rect` (or square when [`PredictConfig::rect`] is off).
     pub fn predict(&self, img: &Image) -> Result<Prediction> {
         Ok(self.run(std::slice::from_ref(img), self.cfg.rect)?.pop().expect("one image in, one out"))
-    }
-
-    /// Predict one image with Slicing Aided Hyper Inference (SAHI): slices the image into uniform overlapping
-    /// tiles ([`compute_tiles`]), runs them in bounded batches of [`TileConfig::tile_batch`] through
-    /// [`Predictor::predict_batch`] (inheriting CPU/int8/GPU/f16/o2o/candidate-first fast paths), optionally runs
-    /// one full-image pass ([`TileConfig::full_image`]), and merges all detections in original-image coordinates.
-    ///
-    /// When the image fits inside a single tile (`width <= tile_width && height <= tile_height`), this degrades
-    /// cleanly to [`Predictor::predict`] (with `tile_cfg.max_det` applied) so small images incur zero slicing
-    /// overhead.
-    pub fn predict_tiled(&self, img: &Image, tile_cfg: &TileConfig) -> Result<Prediction> {
-        tile_cfg.validate()?;
-        check_image(img)?;
-        let tiles = compute_tiles(img.width, img.height, tile_cfg)?;
-        if tiles.len() == 1 {
-            let mut p = self.predict(img)?;
-            p.detections.truncate(tile_cfg.max_det);
-            return Ok(p);
-        }
-
-        let mut pre_ms = 0.0f64;
-        let mut inf_ms = 0.0f64;
-        let mut post_ms = 0.0f64;
-        let mut all_dets: Vec<Detection> = Vec::new();
-
-        for chunk in tiles.chunks(tile_cfg.tile_batch) {
-            let t_crop = Instant::now();
-            let crops: Vec<Image> = chunk.par_iter().map(|&r| crop_tile(img, r)).collect::<Result<_>>()?;
-            pre_ms += ms(t_crop);
-            let t_batch = Instant::now();
-            let preds = self.predict_batch(&crops)?;
-            let batch_wall = ms(t_batch);
-            let (mut b_pre, mut b_inf, mut b_post) = (0.0f64, 0.0f64, 0.0f64);
-            for (pred, tile) in preds.into_iter().zip(chunk) {
-                b_pre += pred.timing.preprocess_ms;
-                b_inf += pred.timing.inference_ms;
-                b_post += pred.timing.postprocess_ms;
-                let (ox, oy) = (tile.x as f32, tile.y as f32);
-                all_dets.extend(pred.detections.into_iter().map(|d| Detection {
-                    bbox: Xyxy::new(d.bbox.x1 + ox, d.bbox.y1 + oy, d.bbox.x2 + ox, d.bbox.y2 + oy),
-                    ..d
-                }));
-            }
-            add_scaled_timing(&mut pre_ms, &mut inf_ms, &mut post_ms, b_pre, b_inf, b_post, batch_wall);
-        }
-
-        if tile_cfg.full_image {
-            let full = self.predict(img)?;
-            pre_ms += full.timing.preprocess_ms;
-            inf_ms += full.timing.inference_ms;
-            post_ms += full.timing.postprocess_ms;
-            all_dets.extend(full.detections);
-        }
-
-        let t_merge = Instant::now();
-        let detections = merge_tiled_detections(all_dets, img.width, img.height, tile_cfg)?;
-        post_ms += ms(t_merge);
-
-        Ok(Prediction {
-            width: img.width,
-            height: img.height,
-            detections,
-            timing: Timing::new(pre_ms, inf_ms, post_ms),
-        })
-    }
-
-    /// Predict a batch of images with SAHI tiled inference ([`Predictor::predict_tiled`]), in input order.
-    pub fn predict_batch_tiled(&self, imgs: &[Image], tile_cfg: &TileConfig) -> Result<Vec<Prediction>> {
-        tile_cfg.validate()?;
-        if imgs.is_empty() {
-            return Ok(Vec::new());
-        }
-        imgs.iter().map(|img| self.predict_tiled(img, tile_cfg)).collect()
     }
 
     /// A batch, in input order. With [`PredictConfig::rect`] (the default) a batch whose images all get the same
@@ -450,15 +365,70 @@ impl Predictor {
         imgsz: u32,
         conf_override: Option<&ConfOverride>,
     ) -> Result<Vec<Prediction>> {
-        if self.model.int8_u8_stem_active() {
+        if self.model.has_int8_u8_stem() {
             return self.run_here_rgb0_u8_with_imgsz(imgs, rect, imgsz, conf_override);
         }
         let t0 = Instant::now();
         let batch = self.prepare_with_imgsz(imgs, rect, imgsz)?;
         self.wait_for_device()?;
         let pre = ms(t0);
-        let nms = self.nms_config(conf_override);
+        self.run_prepared(batch, pre, conf_override)
+    }
 
+    /// Predict already-uploaded `[H, W, 3]` `u8` device images `dev_imgs` (parallel to `imgs`) at `imgsz`,
+    /// reusing the resident GPU pixels instead of re-uploading them across scales (multi-scale GPU TTA).
+    pub(crate) fn run_uploaded_with_imgsz(
+        &self,
+        dev_imgs: &[Tensor],
+        imgs: &[&Image],
+        rect: bool,
+        imgsz: u32,
+    ) -> Result<Vec<Prediction>> {
+        if imgs.is_empty() {
+            return Err(Error::Config("cannot predict an empty batch".into()));
+        }
+        if dev_imgs.len() != imgs.len() {
+            return Err(Error::Config(format!(
+                "run_uploaded_with_imgsz: {} device images for {} host images",
+                dev_imgs.len(),
+                imgs.len()
+            )));
+        }
+        let t0 = Instant::now();
+        let rect = rect && one_canvas_refs(imgs, imgsz);
+        let opts = LetterboxOptions { stride: rect.then_some(32), ..LetterboxOptions::default() };
+        for img in imgs {
+            if img.width == 0 || img.height == 0 {
+                return Err(Error::Config("cannot predict an empty image".into()));
+            }
+        }
+        let letterboxes: Vec<Letterbox> =
+            imgs.iter().map(|i| Letterbox::compute(i.width, i.height, imgsz, imgsz, &opts)).collect();
+        let (device, dtype) = (self.model.device(), self.model.dtype());
+        let input = match letterbox_uploaded_on_device(dev_imgs, imgs, &letterboxes, device, dtype)? {
+            Some(x) => x,
+            None => {
+                // On-device letterbox was unavailable for these shapes/device; letterbox on host and upload
+                // once instead of recursing into `run_here_with_imgsz` (which would re-upload raw images).
+                let x = letterbox_on_host_refs(imgs, &letterboxes)?;
+                let x = if device.is_cpu() { x } else { x.to_device(device)? };
+                x.to_dtype(dtype)?
+            }
+        };
+        self.wait_for_device()?;
+        let pre = ms(t0);
+        let sizes = imgs.iter().map(|i| [i.width, i.height]).collect();
+        self.run_prepared(PreparedBatch { input, letterboxes, sizes }, pre, None)
+    }
+
+    fn run_prepared(
+        &self,
+        batch: PreparedBatch,
+        pre: f64,
+        conf_override: Option<&ConfOverride>,
+    ) -> Result<Vec<Prediction>> {
+        let nms = self.nms_config(conf_override);
+        let n = batch.len() as f64;
         let (dets, inf, post) = if let Some(m) = self.model.as_v1()
             && m.candidates_first_applies(batch.input.device(), &nms)
         {
@@ -489,13 +459,13 @@ impl Predictor {
             let dets = self.finish_detections(&batch, out.detections(&nms, DEFAULT_IOU_FUSION_ALPHA)?);
             (dets, inf, ms(t2))
         };
-        let n = imgs.len() as f64;
         Ok(batch.predictions(dets, Timing::new(pre / n, inf / n, post / n)))
     }
 
     /// Direct `u8` RGB0 path for CPU int8 models (`folo-*` and `folo2-*`): letterboxes directly into packed
     /// `[R, G, B, 0]` `u32` words (zero `f32` canvas materialisation, bit-exact with `apply_planar_f32` +
-    /// `pack_f32_to_rgb0_u8`).
+    /// `pack_f32_to_rgb0_u8`). Validates the int8 plan immediately before execution so any concurrent weight
+    /// write that invalidates calibration during letterboxing falls back cleanly to float inference.
     fn run_here_rgb0_u8_with_imgsz(
         &self,
         imgs: &[&Image],
@@ -517,6 +487,12 @@ impl Predictor {
         let letterboxes: Vec<Letterbox> =
             imgs.iter().map(|i| Letterbox::compute(i.width, i.height, s, s, &opts)).collect();
         let (rgb0, h, w) = letterbox_on_host_rgb0(imgs, &letterboxes)?;
+        let Some(plan) = self.model.int8_u8_stem_plan() else {
+            folo_core::cpu::q8::recycle(rgb0);
+            let batch = self.prepare_with_imgsz(imgs, rect, s)?;
+            self.wait_for_device()?;
+            return self.run_prepared(batch, ms(t0), conf_override);
+        };
         let pre = ms(t0);
         let nms = self.nms_config(conf_override);
         let b = imgs.len();
@@ -524,7 +500,7 @@ impl Predictor {
             Detector::V1(model) => {
                 if model.candidates_first_applies(Device::Cpu, &nms) {
                     let t1 = Instant::now();
-                    let cands = model.predict_candidates_rgb0_u8(&rgb0, b, h, w, &nms)?;
+                    let cands = model.predict_candidates_rgb0_u8_with_plan(&plan, &rgb0, b, h, w, &nms)?;
                     let inf = ms(t1);
                     let t2 = Instant::now();
                     let dets = cands.into_par_iter().map(|c| model.finish_candidates(&c, &nms)).collect();
@@ -533,7 +509,7 @@ impl Predictor {
                     let t1 = Instant::now();
                     let out = {
                         let _g = no_grad();
-                        model.forward_rgb0_u8(&rgb0, b, h, w)?
+                        model.forward_rgb0_u8_with_plan(&plan, &rgb0, b, h, w)?
                     };
                     let inf = ms(t1);
                     let t2 = Instant::now();
@@ -544,7 +520,7 @@ impl Predictor {
             Detector::V2(model) => {
                 if model.candidates_first_applies(Device::Cpu, &nms) {
                     let t1 = Instant::now();
-                    let cands = model.predict_candidates_rgb0_u8(&rgb0, b, h, w, &nms)?;
+                    let cands = model.predict_candidates_rgb0_u8_with_plan(&plan, &rgb0, b, h, w, &nms)?;
                     let inf = ms(t1);
                     let t2 = Instant::now();
                     let dets = cands.into_par_iter().map(|c| model.finish_candidates(&c, &nms)).collect();
@@ -553,7 +529,7 @@ impl Predictor {
                     let t1 = Instant::now();
                     let out = {
                         let _g = no_grad();
-                        model.forward_rgb0_u8(&rgb0, b, h, w)?
+                        model.forward_rgb0_u8_with_plan(&plan, &rgb0, b, h, w)?
                     };
                     let inf = ms(t1);
                     let t2 = Instant::now();
@@ -714,6 +690,19 @@ impl PreparedBatch {
             .zip(dets)
             .map(|(&[width, height], detections)| Prediction { width, height, detections, timing })
             .collect()
+    }
+}
+
+/// Letterbox canvas `[width, height]` that an image of size `w × h` receives for target `s` and `rect` mode.
+/// Used by batched SAHI to group tiles and full-image passes that share one `rect` canvas without changing
+/// any image's letterbox geometry.
+#[inline]
+pub(crate) fn rect_canvas(w: u32, h: u32, s: u32, rect: bool) -> [u32; 2] {
+    if rect {
+        let opts = LetterboxOptions { stride: Some(32), ..LetterboxOptions::default() };
+        Letterbox::compute(w, h, s, s, &opts).out
+    } else {
+        [s, s]
     }
 }
 

@@ -97,12 +97,15 @@ A shared zero-allocation graph walk (`walk.rs`) drives calibration, sensitivity 
   under a 5% MAC budget with atomic residual-bottleneck pairing and head-facing `neck.out5.cv2` (`with_p5_tail_f32` /
   `default_sensitivity_f32_convs` remain available for explicit P5-tail selection). `Calibration::store` serializes
   `folo.quant` (used by `folo quantize`), and loading remains backward-compatible with `VERSION_V1` per-tensor files.
-- **Execution (`exec.rs`, `pool.rs`, `cache.rs`):** `Int8Plan` executes on `folo_core::cpu::q8` C4 buffers and `QConv`
+- **Execution (`exec/{mod.rs, act.rs, plan.rs, v2.rs}`, `pool.rs`, `cache.rs`):** `Int8Plan` executes on `folo_core::cpu::q8` C4 buffers and `QConv`
   kernels (AVX-VNNI when available, else portable scalar fallback; with per-part concat scale decoupling, packed weights
   cached on each weight tensor via `Tensor::derived_f32`, bias fingerprints cached on each bias tensor, a single FNV-1a
   boundary table with precomputed half-split hashes and per-part max scales, and cached uniform grids for `VERSION_V1`
-  checkpoints). Each forward checks out a warm `ScratchPool` from `Int8Plan` and reuses C4 `Vec<u32>` activation
-  buffers across layers and calls with zero per-layer `Arc` allocations (`Int8Plan::scratch_stats`).
+  checkpoints). Each forward checks out a warm `ScratchPool` from `Int8Plan` that reuses C4 `Vec<u32>` activation
+  buffers across layers and calls with zero per-layer `Arc` allocations (`Int8Plan::scratch_stats`) and caches per-step
+  packed `QConv`/`QStem` handles and boundary slots keyed by tensor `(id, storage_version)` to skip repeated `derived_f32`
+  mutex locks and boundary-name hashes on steady-state forwards. On `folo2-*`, AVX2 `pack_rgb0_to_spd12_c4` and
+  `space_to_depth2_c4` pack the direct `u8` `SPD(2×2)` stem and `P2 → P3` C4 phases directly without scalar byte shifts.
   Activations produced by `f32` convs, an `f32` stem, or deferred `quantize` boundaries stay in unquantised `f32` until
   an int8 conv consumes them; int8 producers whose downstream consumers all run in `f32` (such as `neck.out5.cv2` into
   the head, `neck.down4` into an `f32` `neck.out5.cv1`, or a conv feeding an `f32` bottleneck `cv2`) write `QOut::F32`
@@ -303,9 +306,12 @@ and `HeadOutput::detections`, which reads the head outputs in place and extracts
 `folo_vision::tile` wires Slicing Aided Hyper Inference into `Predictor::predict_tiled`,
 `Predictor::predict_batch_tiled`, and `Predictor::predict_file_tiled` (`TileConfig`):
 - High-resolution images are sliced into uniform overlapping `TileRect` windows (`compute_tiles`, clamped back on the
-  trailing edges so every tile shares the same `(width, height)` and `rect` letterbox canvas), cropped with row-slice
-  copies (`crop_tile`), and run through `Predictor::predict_batch` in bounded chunks (`tile_batch`), automatically
-  inheriting CPU/int8/GPU/f16/`o2o`/candidate-first fast paths.
+  trailing edges so every tile shares the same `(width, height)` and `rect` letterbox canvas), cropped into reusable
+  scratch buffers (`crop_tile` / `crop_tile_into`), and run in bounded chunks (`tile_batch`, with automatic GPU OOM
+  chunk splitting), automatically inheriting CPU/int8/GPU/f16/`o2o`/candidate-first fast paths.
+- `predict_batch_tiled` groups tiles and optional full-image passes across images sharing the same letterbox canvas
+  (eliminating per-image remainder batches and sequential batch-1 full-image passes while preserving exact CPU parity
+  with `predict_tiled`) and merges per-image tile detections in parallel.
 - Images already fitting within a single tile degrade directly to `Predictor::predict` with zero slicing overhead.
 - An optional full-image pass (`full_image`, on by default) preserves large objects spanning tile boundaries.
 - `merge_tiled_detections` maps and clips boxes to original-image coordinates, sorts deterministically independent of
@@ -322,7 +328,9 @@ and `HeadOutput::detections`, which reads the head outputs in place and extracts
   inference size in `32..=8192` (`TtaConfig::resolve_imgszs`), and deduplicated in first-seen order.
 - At each resolved scale, original and horizontally flipped views (`Image::oriented(2)`) share identical dimensions
   and letterbox canvas, so they execute together in a single batched `Predictor` pass (inheriting CPU, int8
-  `u8_stem`, GPU, `f16`, `o2o`, and candidate-first fast paths). A single unflipped view degrades directly to one
+  `u8_stem`, GPU, `f16`, `o2o`, and candidate-first fast paths). On a GPU with multiple scales, source views are
+  uploaded once and letterboxed directly on device at every scale (with deduplicated resize tap tables and paired
+  OOM chunk splitting) instead of repeating PCIe transfers per scale. A single unflipped view degrades directly to one
   pass with exact parity to `Predictor::predict` at native `imgsz`.
 - Mirrored boxes map back to original pixels via exact horizontal un-flip (`unflip_xyxy_h`: `x1' = width - x2`,
   `x2' = width - x1`, clamped cleanly to `[0, width]`), and `merge_tta_detections` merges cross-view candidates

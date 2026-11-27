@@ -344,3 +344,102 @@ fn batch_file_options_and_error_paths() {
     let truncated = Image { width: 64, height: 64, data: vec![0u8; 10] };
     assert!(pred.predict_tta(&truncated, &tta_cfg).is_err());
 }
+
+fn gpu() -> Option<folo_core::Device> {
+    let ctx = match folo_gpu::GpuContext::shared() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("note: skipping GPU TTA test, no adapter: {e}");
+            return None;
+        }
+    };
+    if ctx.summary().device_type == "Cpu" && std::env::var("FOLO_GPU_TEST_SOFTWARE").is_err() {
+        eprintln!("note: skipping GPU TTA test on software adapter {}", ctx.summary().name);
+        return None;
+    }
+    folo_gpu::init().ok()
+}
+
+/// GPU multi-scale + horizontal-flip TTA (uploading source images once across scales with deduplicated resize
+/// taps) matches independent single-scale GPU `Predictor` runs for both `predict_tta` and `predict_batch_tta`.
+#[test]
+fn gpu_multiscale_tta_zero_reupload_matches_independent_scales() {
+    let Some(dev) = gpu() else { return };
+    let img1 = patterned_image(128, 96);
+    let mut img2 = patterned_image(128, 96);
+    img2.fill_rect(24, 18, 72, 62, [70, 195, 240]);
+
+    let base = fused_model(2, HeadMode::O2m, 71);
+    let mut m64 = base.fused_eval_clone().unwrap();
+    let mut m32 = base.fused_eval_clone().unwrap();
+    let mut m96 = base.fused_eval_clone().unwrap();
+    m64.to_device(dev).unwrap();
+    m32.to_device(dev).unwrap();
+    m96.to_device(dev).unwrap();
+
+    let pred64 = Predictor::new(
+        m64,
+        PredictConfig { imgsz: 64, conf: 0.0, iou: 0.6, max_det: 15, ..Default::default() },
+    )
+    .unwrap();
+    let pred32 = Predictor::new(
+        m32,
+        PredictConfig { imgsz: 32, conf: 0.0, iou: 0.6, max_det: 15, ..Default::default() },
+    )
+    .unwrap();
+    let pred96 = Predictor::new(
+        m96,
+        PredictConfig { imgsz: 96, conf: 0.0, iou: 0.6, max_det: 15, ..Default::default() },
+    )
+    .unwrap();
+
+    let tta_cfg = TtaConfig {
+        hflip: true,
+        scales: vec![0.5, 1.5], // resolves to [32, 96] -> triggers multi-scale zero-reupload GPU path
+        merge_iou: Some(0.55),
+        merge_fusion: BoxFusion::Vote,
+        class_agnostic: false,
+        max_det: Some(12),
+    };
+
+    // Reference: manual per-scale GPU prediction + unflip + merge on `img1`.
+    let fl1 = img1.oriented(2);
+    let mut manual = Vec::new();
+    for p in [&pred32, &pred96] {
+        let pair = p.predict_batch(&[img1.clone(), fl1.clone()]).unwrap();
+        manual.extend(pair[0].detections.iter().copied());
+        manual.extend(pair[1].detections.iter().map(|d| folo_vision::Detection {
+            bbox: folo_vision::tta::unflip_xyxy_h(d.bbox, img1.width),
+            ..*d
+        }));
+    }
+    let expected =
+        folo_vision::tta::merge_tta_detections(manual, img1.width, img1.height, &tta_cfg, 0.6, 15).unwrap();
+
+    let single = pred64.predict_tta(&img1, &tta_cfg).unwrap();
+    assert_eq!(
+        single.detections, expected,
+        "GPU zero-reupload predict_tta must match manual scales bit-for-bit"
+    );
+
+    let batch = pred64.predict_batch_tta(&[img1.clone(), img2.clone()], &tta_cfg).unwrap();
+    assert_eq!(batch.len(), 2);
+    let single2 = pred64.predict_tta(&img2, &tta_cfg).unwrap();
+    for (got, want) in [
+        (batch[0].detections.as_slice(), single.detections.as_slice()),
+        (batch[1].detections.as_slice(), single2.detections.as_slice()),
+    ] {
+        assert_eq!(got.len(), want.len());
+        for (a, b) in got.iter().zip(want) {
+            assert_eq!(a.class, b.class);
+            assert!(
+                (a.score - b.score).abs() < 1e-3,
+                "GPU batch TTA score mismatch: {} vs {}",
+                a.score,
+                b.score
+            );
+            assert!((a.bbox.x1 - b.bbox.x1).abs() < 0.25 && (a.bbox.y1 - b.bbox.y1).abs() < 0.25);
+            assert!((a.bbox.x2 - b.bbox.x2).abs() < 0.25 && (a.bbox.y2 - b.bbox.y2).abs() < 0.25);
+        }
+    }
+}
