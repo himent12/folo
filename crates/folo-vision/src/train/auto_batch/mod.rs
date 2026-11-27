@@ -17,9 +17,7 @@ use folo_gpu::{AllocationKind, HeadroomBlocker, HeadroomEstimate, MemoryBudget};
 use folo_nn::optim::{OptimKind, accumulate_steps};
 use serde::{Deserialize, Serialize};
 
-use footprint::{
-    FIXED_WORKSPACE_BYTES, MAX_WGRAD_SCRATCH_BYTES, estimate_footprint_details, max_wgrad_scratch_bytes,
-};
+use footprint::{FIXED_WORKSPACE_BYTES, estimate_footprint_details, max_wgrad_scratch_bytes};
 pub use footprint::{MemoryFootprint, estimate_training_footprint};
 
 use super::TrainConfig;
@@ -92,7 +90,8 @@ impl AutoBatchRequest {
         teacher_params: Option<usize>,
     ) -> Result<Self> {
         let resolved = cfg.resolve_optimizer(n_train, num_classes);
-        let cap = cfg.batch.max(cfg.nbs).min(n_train.max(1)).min(MAX_AUTO_BATCH);
+        let orig_eff = cfg.batch.saturating_mul(cfg.accumulate());
+        let cap = orig_eff.min(n_train.max(1));
         let req = AutoBatchRequest {
             arch: cfg.arch.clone(),
             imgsz: cfg.imgsz,
@@ -238,8 +237,12 @@ impl HeadroomSummary {
 pub struct AutoBatchPlan {
     /// Originally requested micro-batch size.
     pub requested_batch: usize,
-    /// Chosen safe physical micro-batch size (`0` when `!fits`), rounded down to a divisor of `nominal_batch`
-    /// when hardware-limited so effective batch size and optimizer steps per epoch stay consistent.
+    /// Original resolved effective batch (`requested_batch * accumulate_steps(nominal_batch, requested_batch)`)
+    /// targeted for schedule preservation.
+    pub target_effective_batch: usize,
+    /// Chosen safe physical micro-batch size (`0` when `!fits`), rounded down to a divisor of
+    /// `target_effective_batch` when hardware-limited so effective batch size and optimizer steps per epoch stay
+    /// consistent.
     pub chosen_batch: usize,
     /// Chosen safe epoch-validation batch size (`0` when `!fits`), clamped against `F32` eval buffer and VRAM
     /// limits so epoch-end validation does not overflow after training succeeds.
@@ -315,9 +318,14 @@ impl AutoBatchPlan {
         } else {
             String::new()
         };
+        let drift = if self.effective_batch != self.target_effective_batch {
+            format!(" [target effective {}]", self.target_effective_batch)
+        } else {
+            String::new()
+        };
         format!(
-            "auto-batch: batch {} × grad_accum {} = {} effective, val_batch {} (requested {}, limited by {}; est. \
-             {} fixed + {}/sample = {} peak, buffer limit {}{vram}{reclaim})",
+            "auto-batch: batch {} × grad_accum {} = {} effective{drift}, val_batch {} (requested {}, limited by \
+             {}; est. {} fixed + {}/sample = {} peak, buffer limit {}{vram}{reclaim})",
             self.chosen_batch,
             self.grad_accum,
             self.effective_batch,
@@ -358,9 +366,13 @@ pub fn auto_batch_plan(req: &AutoBatchRequest, budget: &MemoryBudget) -> Result<
     let budgeted = budget.with_reserve_fraction(1.0 - req.target_utilization);
     let storage_limit = budgeted.limits.single_buffer_limit(AllocationKind::Storage);
 
-    let wgrad_for = |b: usize| max_wgrad_scratch_bytes(&details.convs, b);
-    let single_req_for =
-        |b: usize| (b as u64).saturating_mul(fp.max_single_tensor_per_sample).max(wgrad_for(b));
+    let wgrad_for = |b: usize| max_wgrad_scratch_bytes(&details.convs, b, req.amp);
+    let single_req_for = |b: usize| {
+        (b as u64)
+            .saturating_mul(fp.max_single_tensor_per_sample)
+            .max(wgrad_for(b))
+            .max(details.max_fixed_tensor_bytes)
+    };
     let peak_for = |b: usize| {
         let wgrad_extra = wgrad_for(b).saturating_sub(FIXED_WORKSPACE_BYTES);
         fp.fixed_bytes
@@ -370,106 +382,89 @@ pub fn auto_batch_plan(req: &AutoBatchRequest, budget: &MemoryBudget) -> Result<
     let fits_single_buf =
         |b: usize| budgeted.aligned_bytes(single_req_for(b), AllocationKind::Storage).is_some();
     let fits_vram = |b: usize| budgeted.free_vram_bytes().is_none_or(|free| peak_for(b) <= free);
+    let fits_both = |b: usize| fits_vram(b) && fits_single_buf(b);
 
-    // Base bounds from `MemoryBudget::estimate_max_batch`, refined by conv weight-gradient split-K scratch when
-    // the device's storage limit is below `MAX_WGRAD_SCRATCH_BYTES` (64 MiB) or VRAM is tight.
+    // Original resolved effective batch targeted for schedule & LR preservation (e.g. `batch=24, nbs=64` ->
+    // `acc=3`, `target_effective=72`).
+    let orig_acc = accumulate_steps(req.nominal_batch, req.requested_batch);
+    let target_effective_batch = req.requested_batch.saturating_mul(orig_acc);
+    let default_target = target_effective_batch.min(MAX_AUTO_BATCH);
+    let cap = match req.max_batch {
+        Some(m) => m.min(MAX_AUTO_BATCH),
+        None => default_target,
+    };
+
+    // Base analytic ceilings from `MemoryBudget::estimate_max_batch`, then check the exact combined predicate
+    // (`fits_both`) at `target_cap` and downward so non-monotonic conv weight-gradient split-K scratch or large
+    // fixed weight tensors can never sneak past a higher fitting batch.
     let raw_by_vram = budgeted.estimate_max_batch(fp.fixed_bytes, fp.per_sample_bytes, 0);
     let raw_by_buf = budgeted.estimate_max_batch(0, 0, fp.max_single_tensor_per_sample);
-    let max_by_vram = raw_by_vram.map(|v| {
-        let mut b = v;
-        while b > 0 && !fits_vram(b) {
-            b -= 1;
-        }
-        b
-    });
-    let wgrad_can_bind_limit =
-        budgeted.aligned_bytes(MAX_WGRAD_SCRATCH_BYTES, AllocationKind::Storage).is_none();
-    let max_by_buf = if wgrad_can_bind_limit {
-        let upper = raw_by_buf.unwrap_or(MAX_AUTO_BATCH).min(MAX_AUTO_BATCH);
-        let mut b = upper;
-        while b > 0 && !fits_single_buf(b) {
-            b -= 1;
-        }
-        Some(b)
-    } else {
-        raw_by_buf
-    };
-    let max_fit = match (max_by_vram, max_by_buf) {
+    let raw_hw_cap = match (raw_by_vram, raw_by_buf) {
         (Some(v), Some(b)) => Some(v.min(b)),
         (Some(v), None) => Some(v),
         (None, Some(b)) => Some(b),
         (None, None) => None,
     };
 
-    let default_target = req.requested_batch.max(req.nominal_batch).min(MAX_AUTO_BATCH);
-    let cap = match req.max_batch {
-        Some(m) => m.min(MAX_AUTO_BATCH),
-        None => default_target,
-    };
+    let target_cap =
+        if budgeted.limits.dedicated_bytes.is_none() { req.requested_batch.min(cap) } else { cap };
+    let search_upper = raw_hw_cap.map_or(target_cap, |hw| hw.min(target_cap));
+    let mut best_in_target = search_upper;
+    while best_in_target > 0 && !fits_both(best_in_target) {
+        best_in_target -= 1;
+    }
 
-    let classify_hardware_limit = |vram_cap: Option<usize>, buf_cap: Option<usize>| -> BatchLimitFactor {
-        match (vram_cap, buf_cap) {
-            (Some(v), Some(b)) if b < v => buffer_limit_factor(budgeted, single_req_for(b.saturating_add(1))),
-            (Some(_), _) => BatchLimitFactor::VramBudget,
-            (None, Some(b)) => buffer_limit_factor(budgeted, single_req_for(b.saturating_add(1))),
-            (None, None) => BatchLimitFactor::DeviceUnbounded,
-        }
-    };
-
-    let (raw_chosen, limiting_factor, fits, hardware_limited) = if budgeted.limits.dedicated_bytes.is_none() {
-        // Without dedicated VRAM totals (e.g. DX12/Metal/WebGPU), never scale up past `requested_batch`,
-        // but still clamp down cleanly if a single storage buffer exceeds device buffer limits.
-        let target = req.requested_batch.min(cap);
-        match max_by_buf {
-            Some(0) => (0, buffer_limit_factor(budgeted, single_req_for(1)), false, true),
-            Some(b) if b < target => {
-                (b, buffer_limit_factor(budgeted, single_req_for(b.saturating_add(1))), true, true)
-            }
-            _ => {
-                let factor = if target < req.requested_batch {
-                    BatchLimitFactor::MaxBatchCap
-                } else {
-                    BatchLimitFactor::DeviceUnbounded
-                };
-                (target, factor, true, false)
-            }
-        }
-    } else {
-        match max_fit {
-            Some(0) => (0, classify_hardware_limit(max_by_vram, max_by_buf), false, true),
-            Some(fit) if fit < cap => (fit, classify_hardware_limit(max_by_vram, max_by_buf), true, true),
-            Some(_) => {
-                let factor = if req.max_batch.is_some_and(|m| m != default_target && m <= MAX_AUTO_BATCH) {
-                    BatchLimitFactor::MaxBatchCap
-                } else if req.max_batch.unwrap_or(req.requested_batch.max(req.nominal_batch)) > MAX_AUTO_BATCH
-                {
-                    BatchLimitFactor::ConfigMaxBatch
-                } else {
-                    BatchLimitFactor::RequestedBatch
-                };
-                (cap, factor, true, false)
-            }
-            None => {
-                let chosen = req.requested_batch.min(cap);
-                (chosen, BatchLimitFactor::DeviceUnbounded, true, false)
-            }
-        }
-    };
-
-    // Determine target effective batch and, when hardware-limited below `nominal`, round `chosen_batch` down to a
-    // compatible micro-batch (exact divisor when within 2× of `raw_chosen`) so `chosen_batch * grad_accum` and
-    // optimizer steps/epoch stay faithful to the configured schedule.
-    let (chosen_batch, nominal_batch, grad_accum, effective_batch) = if fits {
-        let nominal = if raw_chosen < req.requested_batch {
-            req.nominal_batch.max(req.requested_batch)
+    let classify_fail = |fail_b: usize| -> BatchLimitFactor {
+        if !fits_single_buf(fail_b) {
+            buffer_limit_factor(budgeted, single_req_for(fail_b))
         } else {
-            req.nominal_batch
+            BatchLimitFactor::VramBudget
+        }
+    };
+
+    let (raw_chosen, mut limiting_factor, mut fits, hardware_limited) = if best_in_target == 0 {
+        (0, classify_fail(1), false, true)
+    } else if best_in_target < target_cap {
+        let fail_b = best_in_target.saturating_add(1).min(target_cap);
+        (best_in_target, classify_fail(fail_b), true, true)
+    } else if budgeted.limits.dedicated_bytes.is_none() {
+        let factor = if target_cap < req.requested_batch {
+            BatchLimitFactor::MaxBatchCap
+        } else {
+            BatchLimitFactor::DeviceUnbounded
         };
-        let chosen = if hardware_limited && raw_chosen < nominal {
-            compatible_micro_batch(raw_chosen, nominal, |b| fits_vram(b) && fits_single_buf(b))
+        (target_cap, factor, true, false)
+    } else {
+        let factor = if req.max_batch.unwrap_or(target_effective_batch) > MAX_AUTO_BATCH {
+            BatchLimitFactor::ConfigMaxBatch
+        } else if req.max_batch.is_some_and(|m| m != default_target && m <= MAX_AUTO_BATCH) {
+            BatchLimitFactor::MaxBatchCap
+        } else {
+            BatchLimitFactor::RequestedBatch
+        };
+        (target_cap, factor, true, false)
+    };
+
+    let mut max_fit_batch = if !fits {
+        Some(0)
+    } else if hardware_limited {
+        Some(raw_chosen)
+    } else {
+        raw_hw_cap.map(|hw| hw.max(raw_chosen))
+    };
+
+    // When hardware-limited below `target_effective_batch`, round `chosen_batch` down to a compatible micro-batch
+    // (exact divisor when within 2× of `raw_chosen`) so `chosen_batch * grad_accum` and optimizer steps/epoch stay
+    // faithful to the configured schedule.
+    let (mut chosen_batch, mut nominal_batch, mut grad_accum, mut effective_batch) = if fits {
+        let chosen = if hardware_limited && raw_chosen < target_effective_batch {
+            compatible_micro_batch(raw_chosen, target_effective_batch, fits_both)
         } else {
             raw_chosen
         };
+        let keep_orig_nbs =
+            chosen.saturating_mul(accumulate_steps(req.nominal_batch, chosen)) == target_effective_batch;
+        let nominal = if keep_orig_nbs { req.nominal_batch } else { target_effective_batch };
         let acc = accumulate_steps(nominal, chosen);
         (chosen, nominal, acc, chosen.saturating_mul(acc))
     } else {
@@ -477,21 +472,47 @@ pub fn auto_batch_plan(req: &AutoBatchRequest, budget: &MemoryBudget) -> Result<
     };
 
     // Plan epoch-validation batch size against `F32` eval buffer & VRAM limits (the default `val_batch = 0` runs
-    // `2 * batch` in `F32`, which would otherwise exceed a buffer limit that just clamped training).
+    // `2 * batch` in `F32`). If even validation batch 1 cannot fit (e.g. AMP training fit F16 under a binding
+    // limit that F32 validation exceeds), report `!fits` up front rather than failing after epoch 1.
+    let eval_single_1 = details.eval_max_single_tensor.max(details.max_fixed_tensor_bytes);
+    let max_val_by_buf = if budgeted.aligned_bytes(eval_single_1, AllocationKind::Storage).is_none() {
+        Some(0)
+    } else {
+        budgeted.estimate_max_batch(0, 0, details.eval_max_single_tensor)
+    };
+    let max_val_by_vram = if budgeted.limits.dedicated_bytes.is_some() {
+        budgeted.estimate_max_batch(details.eval_fixed_bytes, details.eval_per_sample_bytes, 0)
+    } else {
+        None
+    };
+    let max_val_fit = match (max_val_by_vram, max_val_by_buf) {
+        (Some(v), Some(b)) => Some(v.min(b)),
+        (Some(v), None) => Some(v),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    };
+
+    let mut val_blocked = false;
     let chosen_val_batch = if fits {
         let desired_val =
             if req.val_batch > 0 { req.val_batch } else { chosen_batch.saturating_mul(2) }.min(MAX_VAL_BATCH);
-        let max_val_fit = if budgeted.limits.dedicated_bytes.is_some() {
-            budgeted.estimate_max_batch(
-                details.eval_fixed_bytes,
-                details.eval_per_sample_bytes,
-                details.eval_max_single_tensor,
-            )
-        } else {
-            budgeted.estimate_max_batch(0, 0, details.eval_max_single_tensor)
-        };
         match max_val_fit {
-            Some(m) => desired_val.min(m.max(1)),
+            Some(0) => {
+                fits = false;
+                val_blocked = true;
+                chosen_batch = 0;
+                grad_accum = 0;
+                effective_batch = 0;
+                nominal_batch = req.nominal_batch;
+                max_fit_batch = Some(0);
+                limiting_factor = if max_val_by_buf == Some(0) {
+                    buffer_limit_factor(budgeted, eval_single_1)
+                } else {
+                    BatchLimitFactor::VramBudget
+                };
+                0
+            }
+            Some(m) => desired_val.min(m),
             None => desired_val,
         }
     } else {
@@ -499,8 +520,13 @@ pub fn auto_batch_plan(req: &AutoBatchRequest, budget: &MemoryBudget) -> Result<
     };
 
     let probe_b = chosen_batch.max(1);
-    let estimated_peak_bytes = peak_for(probe_b);
-    let single_req_bytes = single_req_for(probe_b);
+    let estimated_peak_bytes = if val_blocked {
+        peak_for(1).max(details.eval_fixed_bytes.saturating_add(details.eval_per_sample_bytes))
+    } else {
+        peak_for(probe_b)
+    };
+    let single_req_bytes =
+        if val_blocked { single_req_for(1).max(eval_single_1) } else { single_req_for(probe_b) };
     let single_est = budgeted.estimate_headroom(single_req_bytes, AllocationKind::Storage);
 
     let reclaimable_bytes = budgeted.usage.reclaimable_bytes();
@@ -511,12 +537,13 @@ pub fn auto_batch_plan(req: &AutoBatchRequest, budget: &MemoryBudget) -> Result<
 
     Ok(AutoBatchPlan {
         requested_batch: req.requested_batch,
+        target_effective_batch,
         chosen_batch,
         chosen_val_batch,
         grad_accum,
         nominal_batch,
         effective_batch,
-        max_fit_batch: max_fit,
+        max_fit_batch,
         limiting_factor,
         target_utilization: req.target_utilization,
         dedicated_vram_bytes: budgeted.limits.dedicated_bytes,

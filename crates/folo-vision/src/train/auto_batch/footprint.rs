@@ -21,8 +21,6 @@ const POOL_OVERHEAD_DEN: u64 = 4;
 pub(super) const FIXED_WORKSPACE_BYTES: u64 = 16 * 1024 * 1024;
 /// Upper bound on split-K partial weight-gradient slabs in `folo-gpu` (`16 Mi` `f32` elems = 64 MiB).
 const MAX_PARTIAL_ELEMS: usize = 16 << 20;
-/// Maximum byte size of a single `folo-gpu` split-K weight-gradient scratch buffer (`64 MiB`).
-pub(super) const MAX_WGRAD_SCRATCH_BYTES: u64 = (MAX_PARTIAL_ELEMS as u64) * 4;
 /// Largest `KH * KW` handled by `folo-gpu`'s direct depthwise weight-gradient kernel.
 const MAX_DEPTHWISE_TAPS: usize = 49;
 
@@ -43,9 +41,10 @@ pub struct MemoryFootprint {
 }
 
 /// Internal footprint breakdown used by [`super::auto_batch_plan`] for both training (including batch-dependent
-/// conv backward scratch) and epoch-end `F32` validation batch sizing.
+/// conv backward scratch and fixed weight buffers) and epoch-end `F32` validation batch sizing.
 pub(super) struct FootprintDetails {
     pub fp: MemoryFootprint,
+    pub max_fixed_tensor_bytes: u64,
     pub eval_fixed_bytes: u64,
     pub eval_per_sample_bytes: u64,
     pub eval_max_single_tensor: u64,
@@ -99,6 +98,7 @@ pub(super) fn estimate_footprint_details(req: &AutoBatchRequest) -> Result<Footp
 
     let mut per_sample = student.per_sample_bytes;
     let mut max_single = student.max_single_tensor;
+    let mut max_fixed_tensor = student.max_weight_elems.saturating_mul(4);
 
     if req.teacher_arch.is_some() || req.teacher_params.is_some() {
         let teacher_elem: u64 = if req.amp { 2 } else { 4 };
@@ -131,6 +131,7 @@ pub(super) fn estimate_footprint_details(req: &AutoBatchRequest) -> Result<Footp
             let t_eval_peak = (ts.eval_forward_bytes / 2).max(ts.max_single_tensor);
             per_sample = per_sample.saturating_add(t_eval_peak);
             max_single = max_single.max(ts.max_single_tensor);
+            max_fixed_tensor = max_fixed_tensor.max(ts.max_weight_elems.saturating_mul(teacher_elem));
         }
     }
 
@@ -157,6 +158,7 @@ pub(super) fn estimate_footprint_details(req: &AutoBatchRequest) -> Result<Footp
 
     Ok(FootprintDetails {
         fp,
+        max_fixed_tensor_bytes: max_fixed_tensor,
         eval_fixed_bytes,
         eval_per_sample_bytes,
         eval_max_single_tensor,
@@ -166,15 +168,18 @@ pub(super) fn estimate_footprint_details(req: &AutoBatchRequest) -> Result<Footp
 
 /// Worst-case single `F32` split-K partial-slab scratch buffer (`ctx.alloc(F32.bytes(slabs * wn))`) allocated by
 /// `folo-gpu`'s `conv2d_backward_weight_as` across all model conv layers for physical micro-batch `batch`.
-pub(super) fn max_wgrad_scratch_bytes(convs: &[ConvWgradShape], batch: usize) -> u64 {
+///
+/// Under `amp`, takes the maximum of both the regular and cooperative-matrix (tensor-core) tile routes because
+/// tensor cores may be enabled or fall back to regular kernels at runtime.
+pub(super) fn max_wgrad_scratch_bytes(convs: &[ConvWgradShape], batch: usize, amp: bool) -> u64 {
     let mut max_bytes = 0u64;
     for c in convs {
-        max_bytes = max_bytes.max(conv_wgrad_scratch_bytes(*c, batch));
+        max_bytes = max_bytes.max(conv_wgrad_scratch_bytes(*c, batch, amp));
     }
     max_bytes
 }
 
-fn conv_wgrad_scratch_bytes(c: ConvWgradShape, batch: usize) -> u64 {
+fn conv_wgrad_scratch_bytes(c: ConvWgradShape, batch: usize, amp: bool) -> u64 {
     if batch == 0 || c.groups == 0 {
         return 0;
     }
@@ -206,9 +211,52 @@ fn conv_wgrad_scratch_bytes(c: ConvWgradShape, batch: usize) -> u64 {
         return if chunks > 1 { (chunks as u64).saturating_mul(wn as u64).saturating_mul(4) } else { 0 };
     }
 
+    let reg = gemm_wgrad_scratch_bytes(
+        c,
+        batch,
+        cin_g,
+        cout_g,
+        khkw,
+        wn,
+        ohow,
+        np,
+        pick_pointwise_wgrad_tile(cout_g, cin_g),
+        pick_weight_grad_tile(cout_g, cin_g.saturating_mul(khkw)),
+    );
+    if !amp {
+        return reg;
+    }
+    let coop = gemm_wgrad_scratch_bytes(
+        c,
+        batch,
+        cin_g,
+        cout_g,
+        khkw,
+        wn,
+        ohow,
+        np,
+        pick_coop_pointwise_wgrad_tile(cout_g, cin_g),
+        pick_coop_weight_grad_tile(cout_g, cin_g.saturating_mul(khkw)),
+    );
+    reg.max(coop)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn gemm_wgrad_scratch_bytes(
+    c: ConvWgradShape,
+    batch: usize,
+    cin_g: usize,
+    cout_g: usize,
+    khkw: usize,
+    wn: usize,
+    ohow: usize,
+    np: usize,
+    pw_tile: (usize, usize, usize, usize),
+    win_tile: (usize, usize, usize, usize),
+) -> u64 {
     // 2. Pointwise 1×1 stride-1 unpadded per-image split-K GEMM (`weight_grad.rs:530-559`).
     if c.k == 1 && c.groups == 1 {
-        let (bm, bn, bk, threads) = pick_pointwise_wgrad_tile(cout_g, cin_g);
+        let (bm, bn, bk, threads) = pw_tile;
         if ohow >= bk && batch <= 65_535 && batch.saturating_mul(wn) <= MAX_PARTIAL_ELEMS {
             let tiles = cout_g.div_ceil(bm).saturating_mul(cin_g.div_ceil(bn));
             let sp = plan_wgrad_per_img_sp(batch, c.groups, ohow, tiles, bk, threads, wn, 8);
@@ -223,7 +271,7 @@ fn conv_wgrad_scratch_bytes(c: ConvWgradShape, batch: usize) -> u64 {
 
     // 3. General implicit-GEMM weight gradient (`weight_grad.rs:591-627` & global split-K fallback).
     let ncols = cin_g.saturating_mul(khkw);
-    let (bm, bn, bk, threads) = pick_weight_grad_tile(cout_g, ncols);
+    let (bm, bn, bk, threads) = win_tile;
     let tiles = cout_g.div_ceil(bm).saturating_mul(ncols.div_ceil(bn)).saturating_mul(c.groups);
     let target = (512 * 256 / threads).min(1024);
     let want = target
@@ -243,6 +291,52 @@ fn conv_wgrad_scratch_bytes(c: ConvWgradShape, batch: usize) -> u64 {
         want
     };
     if total_slabs > 1 { (total_slabs as u64).saturating_mul(wn as u64).saturating_mul(4) } else { 0 }
+}
+
+/// Mirrors `folo-gpu::kernels::coop::convolution::pick_config_pointwise_wgrad` (`(bm, bn, bk, threads)`).
+fn pick_coop_pointwise_wgrad_tile(m: usize, n: usize) -> (usize, usize, usize, usize) {
+    const MAX_WG: usize = 65_535;
+    if m.div_ceil(64) > MAX_WG {
+        (128, 128, 32, 256)
+    } else if m <= 16 && n <= 32 {
+        (16, 32, 32, 64)
+    } else if m <= 16 && n.div_ceil(64) <= MAX_WG {
+        (16, 64, 32, 128)
+    } else if m <= 16 {
+        (16, 256, 32, 256)
+    } else if (n <= 32 || (m <= 32 && n <= 64)) && m.div_ceil(32) <= MAX_WG && n.div_ceil(32) <= MAX_WG {
+        (32, 32, 32, 128)
+    } else if m <= 32 && n <= 192 && n.div_ceil(64) <= MAX_WG {
+        (32, 64, 32, 128)
+    } else if m <= 32 {
+        (32, 128, 32, 128)
+    } else if n >= 128 || n.div_ceil(64) > MAX_WG {
+        (64, 128, 32, 256)
+    } else {
+        (64, 64, 32, 128)
+    }
+}
+
+/// Mirrors `folo-gpu::kernels::coop::convolution::pick_config_weight_grad` (`(bm, bn, bk, threads)`).
+fn pick_coop_weight_grad_tile(m: usize, n: usize) -> (usize, usize, usize, usize) {
+    const MAX_WG: usize = 65_535;
+    if m <= 16 && n <= 32 && m.div_ceil(16) <= MAX_WG && n.div_ceil(32) <= MAX_WG {
+        return (16, 32, 32, 64);
+    }
+    if (n <= 32 || (m <= 32 && n <= 64 && m > 16)) && m.div_ceil(32) <= MAX_WG && n.div_ceil(32) <= MAX_WG {
+        return (32, 32, 32, 128);
+    }
+    if m.div_ceil(64) > MAX_WG {
+        return (128, 128, 32, 256);
+    }
+    match m {
+        0..=16 if n.div_ceil(64) <= MAX_WG => (16, 64, 32, 128),
+        0..=16 => (16, 256, 32, 256),
+        17..=32 if n <= 192 && n.div_ceil(64) <= MAX_WG => (32, 64, 32, 128),
+        17..=32 => (32, 128, 32, 128),
+        _ if n >= 128 || n.div_ceil(64) > MAX_WG => (64, 128, 32, 256),
+        _ => (64, 64, 32, 128),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -301,6 +395,7 @@ struct ModelStats {
     record_convs: bool,
     params: u64,
     conv_weight_params: u64,
+    max_weight_elems: u64,
     bn_buffers: u64,
     per_sample_bytes: u64,
     eval_forward_bytes: u64,
@@ -315,6 +410,7 @@ impl ModelStats {
             record_convs,
             params: 0,
             conv_weight_params: 0,
+            max_weight_elems: 0,
             bn_buffers: 0,
             per_sample_bytes: 0,
             eval_forward_bytes: 0,
@@ -339,6 +435,7 @@ impl ModelStats {
             .saturating_mul(k as u64);
         let bn_p = (cout as u64).saturating_mul(2);
         self.conv_weight_params = self.conv_weight_params.saturating_add(w_params);
+        self.max_weight_elems = self.max_weight_elems.max(w_params).max(cout as u64);
         self.params = self.params.saturating_add(w_params).saturating_add(bn_p);
         self.bn_buffers = self.bn_buffers.saturating_add(bn_p);
         let elems = (cout as u64).saturating_mul(h as u64).saturating_mul(w as u64);
@@ -359,6 +456,7 @@ impl ModelStats {
         let w_params =
             (cout as u64).saturating_mul(cin as u64).saturating_mul(k as u64).saturating_mul(k as u64);
         self.conv_weight_params = self.conv_weight_params.saturating_add(w_params);
+        self.max_weight_elems = self.max_weight_elems.max(w_params).max(cout as u64);
         self.params = self.params.saturating_add(w_params).saturating_add(cout as u64);
         let elems = (cout as u64).saturating_mul(h as u64).saturating_mul(w as u64);
         let elem = self.elem_bytes();

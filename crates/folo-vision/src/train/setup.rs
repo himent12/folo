@@ -293,7 +293,6 @@ impl Trainer {
                     }
                     None => (None, None),
                 };
-                let orig_nbs = cfg.nbs;
                 let orig_eff_wd = cfg.effective_wd(cfg.accumulate());
                 let req = super::AutoBatchRequest::from_train_config(
                     &cfg,
@@ -317,9 +316,9 @@ impl Trainer {
                 cfg.batch = plan.chosen_batch;
                 cfg.nbs = plan.nominal_batch;
                 cfg.val_batch = plan.chosen_val_batch;
-                // When clamping a `requested_batch > nbs` run raises `cfg.nbs` to preserve effective batch, pin
-                // `wd_eff` to the original effective weight decay so regularization strength stays invariant too.
-                if cfg.wd_eff.is_none() && plan.nominal_batch != orig_nbs {
+                // Preserve the original effective weight decay whenever auto-batch alters `(batch, nbs, accumulate)`
+                // so regularization strength stays invariant alongside the effective batch size.
+                if cfg.wd_eff.is_none() && (cfg.effective_wd(plan.grad_accum) - orig_eff_wd).abs() > 1e-12 {
                     cfg.wd_eff = Some(orig_eff_wd);
                 }
                 pending_logs.push((LogLevel::Info, plan.summary_line()));

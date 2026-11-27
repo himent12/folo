@@ -357,6 +357,106 @@ fn amp_attention_softmax_wgrad_scratch_and_val_batch_respect_binding_limits() {
         "val_batch ({}) must be capped at <= 20 for 128 MiB binding limit",
         plan.chosen_val_batch
     );
+
+    // 4. AMP training fits a 128 MiB binding limit (`folo-x` at 1536px: F16 stem = 108 MiB), while F32 epoch
+    //    validation stem needs 216 MiB (> 128 MiB): planner must reject up front rather than setting val_batch=1.
+    let amp_val_oom = AutoBatchRequest {
+        arch: "folo-x".into(),
+        imgsz: 1536,
+        amp: true,
+        requested_batch: 1,
+        nominal_batch: 1,
+        ..base_req("folo-x")
+    };
+    let plan = auto_batch_plan(&amp_val_oom, &budget_128m).unwrap();
+    assert!(!plan.fits, "AMP run whose F32 validation batch 1 exceeds 128 MiB must report fits=false");
+    assert_eq!(plan.chosen_batch, 0);
+    assert_eq!(plan.chosen_val_batch, 0);
+    assert_eq!(plan.limiting_factor, BatchLimitFactor::StorageBindingLimit);
+    assert!(!plan.headroom.fits);
+
+    // 5. Non-monotonic split-K scratch: `folo-x` at 128px FP32, batch=nbs=12 on a 45 MiB binding limit
+    //    (at batch 30 wide 1x1 convs fall out of pointwise split-K so 30 fits, while 12 needs a 54 MiB slab):
+    //    planner must recheck the actual candidate and never return `fits=true` with `headroom.fits=false`.
+    let non_mono_x = AutoBatchRequest {
+        arch: "folo-x".into(),
+        imgsz: 128,
+        amp: false,
+        requested_batch: 12,
+        nominal_batch: 12,
+        ..base_req("folo-x")
+    };
+    let budget_45m =
+        MemoryBudget::new(MemoryLimits::new(Some(24 * GIB), 128 * MIB, 45 * MIB), MemoryUsage::default());
+    let plan = auto_batch_plan(&non_mono_x, &budget_45m).unwrap();
+    assert!(plan.fits);
+    assert!(plan.headroom.fits, "plan.fits=true must always guarantee plan.headroom.fits=true");
+    assert!(plan.chosen_batch < 12, "batch 12 needs 54 MiB > 45 MiB (got {})", plan.chosen_batch);
+    assert_eq!(plan.limiting_factor, BatchLimitFactor::StorageBindingLimit);
+
+    // 6. Non-monotonic split-K scratch: `folo-n` at 192px FP32, batch=nbs=56 on a 48 MiB binding limit
+    //    (`backbone.down4` needs 63 MiB at batch 56 vs ~32 MiB at batch 57).
+    let non_mono_n = AutoBatchRequest {
+        arch: "folo-n".into(),
+        imgsz: 192,
+        amp: false,
+        requested_batch: 56,
+        nominal_batch: 56,
+        ..base_req("folo-n")
+    };
+    let budget_48m =
+        MemoryBudget::new(MemoryLimits::new(Some(24 * GIB), 128 * MIB, 48 * MIB), MemoryUsage::default());
+    let plan = auto_batch_plan(&non_mono_n, &budget_48m).unwrap();
+    assert!(plan.fits);
+    assert!(plan.headroom.fits);
+    assert!(plan.chosen_batch < 56, "batch 56 needs 63 MiB > 48 MiB (got {})", plan.chosen_batch);
+    assert_eq!(plan.limiting_factor, BatchLimitFactor::StorageBindingLimit);
+
+    // 7. Fixed model weight tensor exceeding storage binding limit (`folo-x` at 64px with 100,000 classes has a
+    //    ~146.5 MiB `[100000, 384, 1, 1]` classifier weight > 128 MiB limit) must fail cleanly.
+    let huge_cls_weight = AutoBatchRequest {
+        arch: "folo-x".into(),
+        imgsz: 64,
+        num_classes: 100_000,
+        amp: false,
+        requested_batch: 1,
+        nominal_batch: 1,
+        ..base_req("folo-x")
+    };
+    let plan = auto_batch_plan(&huge_cls_weight, &budget_128m).unwrap();
+    assert!(!plan.fits, "146.5 MiB fixed classifier weight must fail a 128 MiB binding limit");
+    assert_eq!(plan.limiting_factor, BatchLimitFactor::StorageBindingLimit);
+    assert!(!plan.headroom.fits);
+
+    // 8. Original resolved effective batch preservation: `batch=24, nbs=64` resolves to `acc=3, effective=72`.
+    //    With ample VRAM (48 GiB), planner targets 72 (`batch=72, acc=1, effective=72`), and under 24 GiB VRAM
+    //    (fits ~65 < 72) it rounds down to exact divisor 36 (`batch=36, acc=2, effective=72`).
+    let non_div_req = AutoBatchRequest { requested_batch: 24, nominal_batch: 64, ..base_req("folo-n") };
+    let abundant_48g =
+        MemoryBudget::new(MemoryLimits::new(Some(48 * GIB), 4 * GIB, 2 * GIB), MemoryUsage::default());
+    let plan = auto_batch_plan(&non_div_req, &abundant_48g).unwrap();
+    assert!(plan.fits);
+    assert_eq!(plan.target_effective_batch, 72);
+    assert_eq!(plan.chosen_batch, 72);
+    assert_eq!(plan.grad_accum, 1);
+    assert_eq!(plan.effective_batch, 72);
+    let mid_24g =
+        MemoryBudget::new(MemoryLimits::new(Some(24 * GIB), 4 * GIB, 2 * GIB), MemoryUsage::default());
+    let plan = auto_batch_plan(&non_div_req, &mid_24g).unwrap();
+    assert!(plan.fits);
+    assert_eq!(plan.chosen_batch, 36);
+    assert_eq!(plan.grad_accum, 2);
+    assert_eq!(plan.effective_batch, 72);
+
+    // 9. `from_train_config` preserves `ConfigMaxBatch` classification when `nbs > 1024` on a large dataset.
+    let big_nbs_cfg = TrainConfig { arch: "folo-n".into(), batch: 16, nbs: 2048, ..TrainConfig::default() };
+    let big_nbs_req = AutoBatchRequest::from_train_config(&big_nbs_cfg, 80, 5000, None, None, None).unwrap();
+    let huge_gpu =
+        MemoryBudget::new(MemoryLimits::new(Some(1024 * GIB), 16 * GIB, 16 * GIB), MemoryUsage::default());
+    let plan = auto_batch_plan(&big_nbs_req, &huge_gpu).unwrap();
+    assert!(plan.fits);
+    assert_eq!(plan.chosen_batch, 1024);
+    assert_eq!(plan.limiting_factor, BatchLimitFactor::ConfigMaxBatch);
 }
 
 #[test]
