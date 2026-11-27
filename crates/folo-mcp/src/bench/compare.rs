@@ -107,6 +107,7 @@ fn score_of<'a>(role: &str, entry: &'a BenchEntry, res: &'a BenchResult) -> Resu
             "bench_entry_not_done",
             format!("{role} entry '{}' ({}) has no score to compare", entry.id, entry.name),
         )
+        .hint(super::hints::COMPARE_TERMINAL_HINT)
     })
 }
 
