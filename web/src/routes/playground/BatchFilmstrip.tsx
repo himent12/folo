@@ -28,6 +28,7 @@ export interface BatchFilmstripProps {
 
 export default function BatchFilmstrip(props: BatchFilmstripProps) {
   const b = props.batch;
+  const barEl = signal<HTMLDivElement | undefined>(undefined);
   const stripEl = signal<HTMLDivElement | undefined>(undefined);
   const actionsEl = signal<HTMLDivElement | undefined>(undefined);
   let runBtnFocused = false;
@@ -128,6 +129,16 @@ export default function BatchFilmstrip(props: BatchFilmstripProps) {
   }
 
   function exportTooltip(kind: 'JSON' | 'CSV' | 'summary CSV') {
+    if (kind === 'summary CSV') {
+      const ready = b.summaryExportableCount.get();
+      if (ready === 0) {
+        return isFiltered.get() ? 'No matching images to summarize' : 'Run inference on at least one image first';
+      }
+      const scope = isFiltered.get() ? `matching (${ready})` : 'batch';
+      return props.compare
+        ? `Export ${scope} Model A per-image summary as CSV`
+        : `Export ${scope} per-image summary as CSV`;
+    }
     const ready = b.exportableCount.get();
     if (ready === 0) {
       return isFiltered.get() ? 'No matching completed images to export' : 'Run inference on at least one image first';
@@ -136,6 +147,13 @@ export default function BatchFilmstrip(props: BatchFilmstripProps) {
     return props.compare
       ? `Export ${scope} Model A batch detections as ${kind}`
       : `Export ${scope} batch detections as ${kind}`;
+  }
+
+  function resetFilterAndFocus() {
+    b.setQaFilter({ kind: 'all' });
+    queueMicrotask(() => {
+      barEl.peek()?.querySelector<HTMLButtonElement>('button[data-qa-filter="all"]')?.focus({ preventScroll: true });
+    });
   }
 
   function onStripKey(e: KeyboardEvent) {
@@ -157,7 +175,7 @@ export default function BatchFilmstrip(props: BatchFilmstripProps) {
   }
 
   return (
-    <div class="batch-bar" data-batch-bar>
+    <div class="batch-bar" data-batch-bar ref={barEl}>
       <div class="batch-row">
         <div class="nav">
           <Button
@@ -274,7 +292,7 @@ export default function BatchFilmstrip(props: BatchFilmstripProps) {
               icon={Download}
               data-batch-export="summary-csv"
               aria-label={props.compare ? 'A Summary CSV — export Model A per-image summary' : 'Export batch summary CSV'}
-              disabled={b.runningAll.get() || b.exportableCount.get() === 0}
+              disabled={b.runningAll.get() || b.summaryExportableCount.get() === 0}
               onclick={() => b.onExportSummaryCsv()}
             >
               {props.compare ? 'A Summary' : 'Summary CSV'}
@@ -342,7 +360,7 @@ export default function BatchFilmstrip(props: BatchFilmstripProps) {
       {b.visibleEntries.get().length === 0 ? (
         <div class="qa-empty" data-batch-empty>
           <span>No images match this filter.</span>
-          <Button size="sm" variant="ghost" onclick={() => b.setQaFilter({ kind: 'all' })}>
+          <Button size="sm" variant="ghost" onclick={resetFilterAndFocus}>
             Show all
           </Button>
         </div>

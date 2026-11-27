@@ -125,7 +125,7 @@ export default function EditorBoxesPanel(props: EditorBoxesPanelProps) {
             />
           </Field>
           <div class="sel-actions">
-            <span use:tooltip={{ text: 'Duplicate box', keys: 'D' }}>
+            <span class="seq-wrap" class:off={props.locked} use:tooltip={{ text: 'Duplicate box', keys: 'D' }}>
               <Button size="sm" icon={Copy} disabled={props.locked} data-duplicate-box onclick={props.onDuplicateBox}>
                 Duplicate
               </Button>

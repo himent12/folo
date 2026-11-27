@@ -77,10 +77,10 @@ export function buildDatasetCurateCli(
 ): CurateCliCommand {
   const pathUnsafe = !!dataset.path && UNSAFE_PS_NATIVE_ARG.test(dataset.path);
   const hasRealPath = !!dataset.path && !pathUnsafe;
-  const path = hasRealPath ? dataset.path : `<path to ${dataset.name}>`;
+  const path = hasRealPath ? dataset.path : '<dataset_path>';
   const quoted = (p: string) => (hasRealPath ? quote(p) : p);
   const pathWarning = pathUnsafe
-    ? 'Dataset path contains a quote or newline that Windows PowerShell cannot pass verbatim; replace the placeholder with your shell-quoted path.'
+    ? `Dataset "${dataset.name}" has a path with a quote or newline that Windows PowerShell cannot pass verbatim; replace <dataset_path> with your shell-quoted path.`
     : null;
 
   if (mode === 'check') {

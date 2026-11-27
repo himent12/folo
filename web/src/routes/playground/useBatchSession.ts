@@ -99,6 +99,11 @@ export function useBatchSession(o: UseBatchSessionInput) {
   const exportableCount = computed(() =>
     visibleEntries.get().reduce((n, entry) => n + (entry.item.status === 'done' && entry.item.pred ? 1 : 0), 0),
   );
+  const summaryExportableCount = computed(() =>
+    visibleEntries
+      .get()
+      .reduce((n, entry) => n + ((entry.item.status === 'done' && entry.item.pred) || entry.item.status === 'error' ? 1 : 0), 0),
+  );
 
   const activeLocalFile = computed(() => {
     const on = o.runOn.get();
@@ -196,6 +201,8 @@ export function useBatchSession(o: UseBatchSessionInput) {
   }
 
   function setQaFilter(next: BatchQaFilter) {
+    exportCtrl?.abort();
+    exportCtrl = null;
     qaFilter.set(next);
     if (next.kind === 'all') return;
     const vis = visibleEntries.peek();
@@ -540,53 +547,69 @@ export function useBatchSession(o: UseBatchSessionInput) {
     };
   }
 
-  function makeExportInput() {
-    const inf = untrack(currentInference);
-    const qa = qaFilter.peek();
-    const exportItems = qa.kind === 'all' ? items.peek() : visibleEntries.peek().map((e) => e.item);
-    return {
-      items: exportItems,
-      modelId: o.modelId(),
-      modelName: o.model()?.name ?? null,
-      runOn: o.runOn.peek(),
-      inference: inferenceMetaOf(inf),
-      filter: filter.peek(),
-      hidden: o.hidden.peek(),
-      classes: untrack(o.classes),
-      qaFilter: qa,
-    };
-  }
-
-  /** Completes any cut batch predictions before exporting; runs synchronously when no item is cut at current conf. */
+  /**
+   * Completes any capped batch predictions before exporting; captures click-time QA filter, thresholds, and hidden
+   * classes so mid-flight changes never silently export a different subset. When a QA filter is active, every completed
+   * capped item is completed first so newly revealed matches are never omitted.
+   */
   function runExport(kind: 'json' | 'csv' | 'summary-csv') {
     exportCtrl?.abort();
     exportCtrl = null;
-    const confNow = o.conf.peek();
-    const qa = qaFilter.peek();
-    const scope = qa.kind === 'all'
-      ? items.peek().map((item, index) => ({ item, index }))
-      : visibleEntries.peek();
-    const cutIndices = scope
-      .filter(({ item }) => item.status === 'done' && needsCompletionAt(item.pred, confNow))
-      .map(({ index }) => index);
+    const snap = {
+      modelId: o.modelId(),
+      modelName: o.model()?.name ?? null,
+      runOn: o.runOn.peek(),
+      inf: untrack(currentInference),
+      filter: { ...filter.peek() },
+      hidden: new Set(o.hidden.peek()),
+      classes: [...untrack(o.classes)],
+      qaFilter: qaFilter.peek(),
+    };
+    const key = snap.modelId ? batchPredKey(snap.modelId, snap.runOn, inferenceConfigKey(snap.inf)) : null;
+
+    const buildInput = () => {
+      const all = items.peek();
+      const exportItems =
+        snap.qaFilter.kind === 'all'
+          ? all
+          : filterBatchItems(all, snap.qaFilter, snap.filter, snap.hidden).map((e) => e.item);
+      const provisionalFilter =
+        snap.qaFilter.kind !== 'all' &&
+        all.some((it) => it.status === 'done' && isPredictionCutAt(it.pred, snap.filter.conf));
+      return {
+        items: exportItems,
+        modelId: snap.modelId,
+        modelName: snap.modelName,
+        runOn: snap.runOn,
+        inference: inferenceMetaOf(snap.inf),
+        filter: snap.filter,
+        hidden: snap.hidden,
+        classes: snap.classes,
+        qaFilter: snap.qaFilter,
+        ...(provisionalFilter ? { provisionalFilter: true } : {}),
+      };
+    };
 
     const doExport = () => {
-      const input = makeExportInput();
+      const input = buildInput();
       if (kind === 'json') return exportBatchJson(input);
       if (kind === 'summary-csv') return exportBatchSummaryCsv(input);
       return exportBatchCsv(input);
     };
+
+    // Complete every eligible capped item in the batch so filtered exports never miss boxes hidden past FETCH.max_det.
+    const cutIndices = items
+      .peek()
+      .map((item, index) => (item.status === 'done' && needsCompletionAt(item.pred, snap.filter.conf) ? index : -1))
+      .filter((index) => index >= 0);
+
     if (cutIndices.length === 0) {
       doExport();
       return;
     }
 
-    const id = o.modelId();
-    const on = o.runOn.peek();
-    const inf = untrack(currentInference);
-    const key = id ? batchPredKey(id, on, inferenceConfigKey(inf)) : null;
-    const localFile = id && on !== 'server' ? (o.localWeights.peek().get(id) ?? null) : null;
-    if (!id || !key) {
+    const localFile = snap.modelId && snap.runOn !== 'server' ? (o.localWeights.peek().get(snap.modelId) ?? null) : null;
+    if (!snap.modelId || !key) {
       doExport();
       return;
     }
@@ -598,7 +621,7 @@ export function useBatchSession(o: UseBatchSessionInput) {
         const item = items.peek()[idx];
         if (!item?.pred || item.predKey !== key) continue;
         const itemSource = batchItemSource(item);
-        const { pred: next } = await completeIfCut(itemSource, item.pred, id, on, localFile, inf, ctrl.signal);
+        const { pred: next } = await completeIfCut(itemSource, item.pred, snap.modelId!, snap.runOn, localFile, snap.inf, ctrl.signal);
         if (destroyed || ctrl.signal.aborted) return;
         if (next !== item.pred) {
           updateItem(idx, { pred: next });
@@ -697,6 +720,7 @@ export function useBatchSession(o: UseBatchSessionInput) {
     qaCounts,
     visibleEntries,
     exportableCount,
+    summaryExportableCount,
     classes: o.classes,
     loadFiles,
     selectIndex,

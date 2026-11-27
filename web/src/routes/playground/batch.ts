@@ -244,14 +244,17 @@ export interface BatchExportInput {
   hidden: ReadonlySet<number>;
   classes: readonly string[];
   qaFilter?: BatchQaFilter;
+  /** True when a QA filter was applied while one or more completed batch items remained capped at the candidate limit. */
+  provisionalFilter?: boolean;
 }
 
-function qaFilterMeta(qa: BatchQaFilter | undefined, classes: readonly string[]) {
+function qaFilterMeta(qa: BatchQaFilter | undefined, classes: readonly string[], provisional?: boolean) {
   if (!qa || qa.kind === 'all') return undefined;
-  if (qa.kind === 'class') {
-    return { kind: 'class' as const, class: qa.classId, name: classes[qa.classId] ?? `class ${qa.classId}` };
-  }
-  return { kind: qa.kind };
+  const base =
+    qa.kind === 'class'
+      ? { kind: 'class' as const, class: qa.classId, name: classes[qa.classId] ?? `class ${qa.classId}` }
+      : { kind: qa.kind };
+  return provisional ? { ...base, provisional: true } : base;
 }
 
 function qaFilterSlug(qa: BatchQaFilter | undefined, classes: readonly string[]): string {
@@ -270,7 +273,7 @@ export function buildBatchJson(input: BatchExportInput) {
   const baseFilter = input.filter.o2o
     ? { conf: input.filter.conf, max_det: input.filter.maxDet }
     : { conf: input.filter.conf, iou: input.filter.iou, max_det: input.filter.maxDet };
-  const qa = qaFilterMeta(input.qaFilter, input.classes);
+  const qa = qaFilterMeta(input.qaFilter, input.classes, input.provisionalFilter);
 
   return {
     model_id: input.modelId,
@@ -426,10 +429,10 @@ export function exportBatchCsv(input: BatchExportInput): boolean {
   return ok;
 }
 
-/** Exports one-row-per-image batch QA summary (status, detection count, classes, top confidence, timing) as CSV. */
+/** Exports one-row-per-image batch QA summary (status, detection count, classes, top confidence, timing, errors) as CSV. */
 export function exportBatchSummaryCsv(input: BatchExportInput): boolean {
   const summary = summarizeBatch(input.items, input.filter, input.hidden);
-  if (summary.done === 0) return false;
+  if (summary.done === 0 && summary.failed === 0) return false;
   const rows = buildBatchSummaryCsvRows(input);
   const ok = exportTableCsv(
     batchFilenameBase(input.modelName, input.items.length, input.qaFilter, input.classes, '-summary'),
@@ -438,9 +441,12 @@ export function exportBatchSummaryCsv(input: BatchExportInput): boolean {
     'playground-export',
   );
   if (ok) {
+    const parts = [`${summary.done} completed`];
+    if (summary.failed > 0) parts.push(`${summary.failed} failed`);
+    parts.push(`${summary.totalDetections} ${summary.totalDetections === 1 ? 'detection' : 'detections'}`);
     toast.success(
       'Batch summary CSV exported',
-      `${rows.length} ${rows.length === 1 ? 'image' : 'images'} (${summary.done} completed, ${summary.totalDetections} ${summary.totalDetections === 1 ? 'detection' : 'detections'})${summary.truncated ? ` (${summary.truncated} capped at the candidate limit)` : ''}.`,
+      `${rows.length} ${rows.length === 1 ? 'image' : 'images'} (${parts.join(', ')})${summary.truncated || input.provisionalFilter ? ' (some items capped at the candidate limit)' : ''}.`,
       undefined,
       { key: 'playground-export' },
     );

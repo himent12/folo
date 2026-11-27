@@ -132,8 +132,10 @@ describe('Labeling editor: Duplicate box (D) and Copy previous frame boxes (P)',
     expect(boxCount()).toBe(2);
     expect(footer()).toContain('Unsaved changes');
 
-    // Duplicate again with D key -> 3 boxes
+    // Duplicate again with D key -> 3 boxes; held key repeat must NOT create extra copies
     expect(press('d').defaultPrevented).toBe(true);
+    expect(boxCount()).toBe(3);
+    expect(press('d', { repeat: true }).defaultPrevented).toBe(true);
     expect(boxCount()).toBe(3);
 
     // Guarded when typing in the agent note input

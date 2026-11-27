@@ -105,9 +105,10 @@ describe('buildDatasetCurateCli', () => {
     expect(backtick.command).toContain("--include-class 'back`tick'");
     expect(backtick.description).toContain('back`tick');
 
-    // Unsafe dataset path with literal double quote falls back to placeholder + warning
-    const badPath = buildDatasetCurateCli({ ...BASE_DATASET, path: '/data/bad"dir' }, 'check');
-    expect(badPath.command).toContain('<path to fasteners>');
+    // Unsafe dataset path with literal double quote falls back to fixed placeholder + warning (never interpolating name)
+    const badPath = buildDatasetCurateCli({ ...BASE_DATASET, name: 'bad; rm -rf /', path: '/data/bad"dir' }, 'convert');
+    expect(badPath.command).toContain('<dataset_path>');
+    expect(badPath.command).not.toContain('rm -rf');
     expect(badPath.warning).toContain('Windows PowerShell');
   });
 });

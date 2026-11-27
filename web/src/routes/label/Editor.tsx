@@ -293,6 +293,10 @@ export default function Editor(props: EditorProps) {
       return;
     }
     const adapted = adaptBoxesToImage(prev.boxes, prev.width, prev.height, cur.width, cur.height, props.job.classes.length);
+    if (adapted.length === 0) {
+      status.info('No boxes fit this image', `Every box from ${prev.file} was too small or out of range for this image.`);
+      return;
+    }
     const existing = draft.peek();
     const toAdd = adapted.filter((box) => !existing.some((x) => sameBox(x, box)));
     if (toAdd.length === 0) {
@@ -303,7 +307,7 @@ export default function Editor(props: EditorProps) {
     selected.set(null);
     status.info(
       `Copied ${toAdd.length} ${toAdd.length === 1 ? 'box' : 'boxes'} from ${prev.file}`,
-      'Undo with Ctrl+Z, or Save when ready.',
+      'Undo anytime, or Save when ready.',
     );
   }
   /** Arrow keys on the selected box: move it, or with Alt resize it from its bottom-right corner; Shift: ten steps. */
@@ -522,8 +526,11 @@ export default function Editor(props: EditorProps) {
     else if (k === 'j' || k === 'J') step(1);
     else if (k === 'k' || k === 'K') step(-1);
     else if (k === 'u' || k === 'U') jumpUnlabeled();
-    else if (k === 'd' || k === 'D') duplicateSelectedBox();
-    else if (k === 'p' || k === 'P') copyPreviousBoxes();
+    else if (k === 'd' || k === 'D') {
+      if (!e.repeat) duplicateSelectedBox();
+    } else if (k === 'p' || k === 'P') {
+      if (!e.repeat) copyPreviousBoxes();
+    }
     else if (/^[1-9]$/.test(k)) setClass(Number(k) - 1);
     // Enter on a control is that control's; anywhere else in the editor it is "Looks right", or with changes, Save and
     // on to the next image to review.

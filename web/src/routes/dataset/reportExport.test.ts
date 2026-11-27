@@ -63,6 +63,7 @@ describe('dataset health report export', () => {
       present_classes: 2,
       missing_classes: 1,
       imbalance_ratio: 12,
+      tiny_boxes: 100,
     });
     expect(json.splits).toEqual({
       train: 80,

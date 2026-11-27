@@ -38,7 +38,8 @@ images you may not share with them.
    shows progress, the tokens the agent reported, and the log. Stop ends the run at once and keeps what is done.
 4. **Review.** Open an image to move, resize, relabel, delete or draw boxes: press `1`–`9` (or click the quick class
    bar) to switch the active drawing class or reclassify the selected box, `D` to duplicate the selected box, `P` (or
-   **Copy prev**) to copy boxes from the previous labeled image onto the current frame, `Delete`/`Backspace` to remove
+   **Copy prev**) to copy boxes from the nearest preceding labeled image in the current filter (falling back to the
+   job's full image order when filtering to unlabeled images), `Delete`/`Backspace` to remove
    it, arrow keys to nudge or `Alt`+arrows to resize (`Shift` for 10× steps), and `Ctrl+Z`/`⌘Z` to undo or
    `Ctrl+Shift+Z`/`Ctrl+Y` (`⌘Shift+Z`/`⌘Y`) to redo across up to 200 states per image (held-arrow nudges or resizes
    group into one step until released; desktop viewports also show a compact keyboard hint strip). Saving marks it as labeled by hand

@@ -120,23 +120,41 @@ describe('Playground batch QA filter and summary export', () => {
     expect(target.querySelector('[data-batch-match-count]')?.textContent).toContain('1 of 3');
     expect(target.querySelector('[data-batch-pos]')?.textContent?.trim()).toBe('1 / 1');
 
-    // Summary CSV export works cleanly even on Empty filter
-    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+    // Summary CSV export works cleanly even on Empty filter and writes expected filename + CSV payload
+    const downloads: { filename: string; blob: Blob }[] = [];
+    vi.spyOn(URL, 'createObjectURL').mockImplementation((b) => {
+      if (b instanceof Blob) downloads.push({ filename: '', blob: b });
+      return `blob:qa-dl-${downloads.length}`;
+    });
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (this: HTMLAnchorElement) {
+      if (downloads.length) downloads[downloads.length - 1]!.filename = this.download;
+    });
     const summaryBtn = target.querySelector<HTMLButtonElement>('button[data-batch-export="summary-csv"]')!;
     expect(summaryBtn.disabled).toBe(false);
     summaryBtn.click();
-    expect(clickSpy).toHaveBeenCalledTimes(1);
+    expect(downloads).toHaveLength(1);
+    expect(downloads[0]!.filename).toContain('-empty-summary-1img.csv');
+    const emptyCsv = await downloads[0]!.blob.text();
+    expect(emptyCsv).toContain('filename,status,detections,classes,top_confidence,total_ms,image_width,image_height,error');
+    expect(emptyCsv).toContain('bb.png,done,0,,,7,320,240,');
 
-    // Filter to With detections -> shows indices 0 and 2, Next steps directly from index 0 to index 2
+    // Filter to With detections -> shows indices 0 and 2, Next and Arrow/Home/End step strictly within matching items
     target.querySelector<HTMLButtonElement>('[data-qa-filter="with-detections"]')!.click();
     flushSync();
     const thumbs = [...target.querySelectorAll<HTMLButtonElement>('[data-batch-filmstrip] [role="option"]')];
     expect(thumbs.map((el) => el.getAttribute('data-batch-idx'))).toEqual(['0', '2']);
     expect(target.querySelector('.src-name')?.textContent).toBe('a.png');
-    target.querySelector<HTMLButtonElement>('button[aria-label="Next image"]')!.click();
+    const strip = target.querySelector<HTMLElement>('[data-batch-filmstrip]')!;
+    strip.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true, cancelable: true }));
     flushSync();
     expect(target.querySelector('.src-name')?.textContent).toBe('ccc.png');
     expect(target.querySelector('[data-batch-pos]')?.textContent?.trim()).toBe('2 / 2');
+    strip.dispatchEvent(new KeyboardEvent('keydown', { key: 'Home', bubbles: true, cancelable: true }));
+    flushSync();
+    expect(target.querySelector('.src-name')?.textContent).toBe('a.png');
+    strip.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true }));
+    flushSync();
+    expect(target.querySelector('.src-name')?.textContent).toBe('ccc.png');
 
     // Filter to specific class 'square' (classId 1) via the class selector -> shows only index 2 (ccc.png)
     const classSelect = target.querySelector<HTMLSelectElement>('[data-batch-class-filter] select')!;
@@ -155,9 +173,121 @@ describe('Playground batch QA filter and summary export', () => {
     expect(target.querySelector<HTMLButtonElement>('button[data-batch-export="json"]')!.disabled).toBe(true);
     expect(target.querySelector<HTMLButtonElement>('button[data-batch-export="summary-csv"]')!.disabled).toBe(true);
 
-    // Clicking Show all resets cleanly back to all 3 thumbnails
-    target.querySelector<HTMLButtonElement>('[data-batch-empty] button')!.click();
+    // Clicking Show all resets cleanly back to all 3 thumbnails and restores focus to the persistent All pill
+    const showAllBtn = target.querySelector<HTMLButtonElement>('[data-batch-empty] button')!;
+    showAllBtn.focus();
+    showAllBtn.click();
     flushSync();
+    await Promise.resolve();
     expect(target.querySelectorAll('[data-batch-filmstrip] [role="option"]')).toHaveLength(3);
+    expect(document.activeElement).toBe(target.querySelector('[data-qa-filter="all"]'));
+  });
+
+  it('enables Summary CSV on an all-failed batch and exports failure diagnostics while keeping detection exports disabled', async () => {
+    setupPlayground(async () => {
+      throw new Error('GPU timeout');
+    });
+    await until(() => target.querySelector('.model-pick'), 'model picker');
+    selectBatchFiles([makeImageFile('fail1.png'), makeImageFile('fail22.png')]);
+    await until(() => target.querySelector('[data-batch-idx="0"] [data-batch-badge]')?.textContent === '!', 'img 0 failed');
+
+    expect(target.querySelector<HTMLButtonElement>('button[data-batch-export="json"]')!.disabled).toBe(true);
+    expect(target.querySelector<HTMLButtonElement>('button[data-batch-export="csv"]')!.disabled).toBe(true);
+    const summaryBtn = target.querySelector<HTMLButtonElement>('button[data-batch-export="summary-csv"]')!;
+    expect(summaryBtn.disabled).toBe(false);
+
+    const blobs: Blob[] = [];
+    vi.spyOn(URL, 'createObjectURL').mockImplementation((b) => {
+      if (b instanceof Blob) blobs.push(b);
+      return 'blob:fail-summary';
+    });
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+    summaryBtn.click();
+    expect(blobs).toHaveLength(1);
+    const csv = await blobs[0]!.text();
+    expect(csv).toContain('fail1.png,error,0,,,,320,240,GPU timeout');
+  });
+
+  it('completes capped non-matching items before filtered export and aborts stale export if QA filter changes mid-flight', async () => {
+    // 1000 overlapping circle candidates hit FETCH.max_det=1000 and collapse under NMS, hiding a lower-scoring square past 1000.
+    const dense1000: Prediction['boxes'] = Array.from({ length: 1000 }, (_, i) => ({
+      class: 0,
+      name: 'circle',
+      score: Number((0.99 - i * 0.0005).toFixed(4)),
+      x1: 10,
+      y1: 10,
+      x2: 40,
+      y2: 40,
+    }));
+    const fullWithSquare: Prediction['boxes'] = [
+      ...dense1000,
+      { class: 1, name: 'square', score: 0.4, x1: 5, y1: 5, x2: 15, y2: 15 },
+    ];
+    const fDense = makeImageFile('dense-cap.png');
+    const fSquare = makeImageFile('plain-square.png');
+    let allAttempts = 0;
+    let resolveDeferredAll: ((p: Prediction) => void) | undefined;
+    let deferredSignal: AbortSignal | undefined;
+
+    setupPlayground((input, opts, signal) => {
+      const sz = input.kind === 'file' ? input.file.size : 0;
+      if (sz === fSquare.size) {
+        return Promise.resolve(makePred(opts.model_id, [{ class: 1, name: 'square', score: 0.85, x1: 10, y1: 10, x2: 50, y2: 50 }]));
+      }
+      if (opts.max_det === 30_000) {
+        allAttempts++;
+        // First automatic ALL completion fails so item 0 stays capped at 1000 circles (no square yet).
+        if (allAttempts === 1) return Promise.reject(new Error('transient ALL failure'));
+        // Second ALL completion (during export) stays pending so we can test filter-change abort, then third resolves with square!
+        if (allAttempts === 2) {
+          deferredSignal = signal;
+          return new Promise<Prediction>((resolve, reject) => {
+            signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), { once: true });
+            resolveDeferredAll = resolve;
+          });
+        }
+        return Promise.resolve(makePred(opts.model_id, fullWithSquare));
+      }
+      return Promise.resolve(makePred(opts.model_id, dense1000));
+    });
+
+    await until(() => target.querySelector('.model-pick'), 'model picker');
+    selectBatchFiles([fDense, fSquare]);
+    await until(() => target.querySelector('[data-batch-idx="0"] [data-batch-badge]')?.textContent?.includes('+'), 'item 0 capped');
+    target.querySelector<HTMLButtonElement>('button[data-batch-run]')!.click();
+    await until(() => target.querySelector('[data-batch-summary]')?.textContent?.includes('2/2 run'), 'both run');
+
+    // Filter to class 'square' -> initially only item 1 matches because item 0 is capped without square
+    const classSelect = target.querySelector<HTMLSelectElement>('[data-batch-class-filter] select')!;
+    classSelect.value = '1';
+    classSelect.dispatchEvent(new Event('change', { bubbles: true }));
+    flushSync();
+    expect(target.querySelectorAll('[data-batch-filmstrip] [role="option"]')).toHaveLength(1);
+
+    const blobs: Blob[] = [];
+    vi.spyOn(URL, 'createObjectURL').mockImplementation((b) => {
+      if (b instanceof Blob) blobs.push(b);
+      return 'blob:filtered-json';
+    });
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+
+    // Click Batch JSON -> triggers async ALL completion for capped item 0; switch QA filter to Empty mid-flight -> aborts cleanly
+    const jsonBtn = target.querySelector<HTMLButtonElement>('button[data-batch-export="json"]')!;
+    jsonBtn.click();
+    await until(() => !!resolveDeferredAll, 'export ALL in flight for capped item 0');
+    target.querySelector<HTMLButtonElement>('[data-qa-filter="empty"]')!.click();
+    flushSync();
+    expect(deferredSignal?.aborted).toBe(true);
+    await Promise.resolve();
+    expect(clickSpy).toHaveBeenCalledTimes(0);
+
+    // Switch back to class 'square' and export again -> completes capped item 0 with square and includes BOTH images in JSON!
+    classSelect.value = '1';
+    classSelect.dispatchEvent(new Event('change', { bubbles: true }));
+    flushSync();
+    jsonBtn.click();
+    await until(() => clickSpy.mock.calls.length === 1, 'filtered JSON exported after ALL completion');
+    const payload = JSON.parse(await blobs.at(-1)!.text()) as { images: { filename: string }[] };
+    expect(payload.images.map((im) => im.filename)).toEqual(['dense-cap.png', 'plain-square.png']);
   });
 });

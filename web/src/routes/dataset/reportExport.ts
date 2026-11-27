@@ -6,8 +6,8 @@
 import type { Dataset, DatasetStats, IssueCounts, IssueKind, IssueSeverity } from '$lib/api/types';
 import { exportTableCsv, exportTableJson, type CsvCell } from '$lib/tableExport';
 import { toast } from '$lib/ui/toast';
-import { FEW_BOXES, healthChecks } from './health';
-import { computeDatasetInsights } from './insights';
+import { FEW_BOXES, healthChecks, TINY_SIZE } from './health';
+import { computeDatasetInsights, type DatasetInsightsData } from './insights';
 import { KIND_LABEL, KINDS } from './issues';
 
 export const DATASET_REPORT_CSV_HEADERS = [
@@ -19,19 +19,7 @@ export const DATASET_REPORT_CSV_HEADERS = [
   'detail',
 ] as const;
 
-const KIND_SEVERITY: Record<IssueKind, IssueSeverity> = {
-  broken_label: 'error',
-  class_overflow: 'error',
-  out_of_range_box: 'error',
-  corrupt_image: 'error',
-  missing_image: 'error',
-  clipped_box: 'warning',
-  zero_size_box: 'warning',
-  duplicate_label: 'warning',
-  duplicate_image: 'warning',
-  other: 'warning',
-  empty_image: 'info',
-};
+const SEVERITY_ORDER: readonly IssueSeverity[] = ['error', 'warning', 'info'];
 
 function round2(n: number): number {
   return Number(n.toFixed(2));
@@ -43,27 +31,46 @@ function classStatus(count: number): 'missing' | 'rare' | 'ok' {
   return 'ok';
 }
 
-function classListForReport(dataset: Dataset, stats: DatasetStats) {
-  const totalBoxes = Math.max(0, stats.boxes);
-  const totalClasses = Math.max(dataset.classes.length, stats.class_counts.length);
-  const out: {
-    class_id: number;
-    name: string;
-    boxes: number;
-    share_pct: number;
-    status: 'missing' | 'rare' | 'ok';
-  }[] = [];
-  for (let i = 0; i < totalClasses; i++) {
-    const boxes = Math.max(0, stats.class_counts[i] ?? 0);
-    out.push({
-      class_id: i,
-      name: dataset.classes[i] ?? `class ${i}`,
-      boxes,
-      share_pct: totalBoxes > 0 ? round2((boxes / totalBoxes) * 100) : 0,
-      status: classStatus(boxes),
-    });
+/** Derives sorted per-class rows directly from `computeDatasetInsights` so report and UI counts never diverge. */
+function classListFromInsights(insights: DatasetInsightsData) {
+  return [
+    ...insights.presentClasses.map((c) => ({
+      class_id: c.cls,
+      name: c.name,
+      boxes: c.count,
+      share_pct: round2(c.sharePct),
+      status: classStatus(c.count),
+    })),
+    ...insights.missingClasses.map((m) => ({
+      class_id: m.cls,
+      name: m.name,
+      boxes: 0,
+      share_pct: 0,
+      status: 'missing' as const,
+    })),
+  ].sort((a, b) => b.boxes - a.boxes || a.class_id - b.class_id);
+}
+
+/** Iterates nonzero `counts.by_kind` entries ordered by `KINDS` severity without duplicating the severity mapping. */
+function checkIssueEntries(counts?: IssueCounts): { kind: IssueKind; label: string; severity: IssueSeverity; count: number }[] {
+  if (!counts) return [];
+  const out: { kind: IssueKind; label: string; severity: IssueSeverity; count: number }[] = [];
+  for (const severity of SEVERITY_ORDER) {
+    for (const kind of KINDS[severity]) {
+      const n = counts.by_kind[kind] ?? 0;
+      if (n > 0) out.push({ kind, label: KIND_LABEL[kind], severity, count: n });
+    }
   }
-  return out.sort((a, b) => b.boxes - a.boxes || a.class_id - b.class_id);
+  return out;
+}
+
+/** Raw count of boxes in bins strictly at or below `TINY_SIZE` (matching `shareBelow` in `./health`). */
+function tinyBoxCount(stats: DatasetStats): number {
+  let below = 0;
+  stats.box_size_hist.counts.forEach((c, i) => {
+    if ((stats.box_size_hist.edges[i + 1] ?? Infinity) <= TINY_SIZE + 1e-12) below += c;
+  });
+  return below;
 }
 
 /** Builds a structured JSON health, split, class-balance, and check-issues report for a dataset. */
@@ -75,18 +82,8 @@ export function buildDatasetHealthReportJson(
   const insights = computeDatasetInsights(dataset, stats, counts);
   const checks = healthChecks(dataset, stats, counts);
   const findings = checks.filter((h) => h.severity !== 'ok');
-  const classes = classListForReport(dataset, stats);
-
-  const byKindEntries = counts
-    ? ([...KINDS.error, ...KINDS.warning, ...KINDS.info] as IssueKind[])
-        .filter((k) => (counts.by_kind[k] ?? 0) > 0)
-        .map((k) => ({
-          kind: k,
-          label: KIND_LABEL[k],
-          severity: KIND_SEVERITY[k],
-          count: counts.by_kind[k]!,
-        }))
-    : [];
+  const classes = classListFromInsights(insights);
+  const byKindEntries = checkIssueEntries(counts);
 
   return {
     dataset: {
@@ -107,6 +104,7 @@ export function buildDatasetHealthReportJson(
       present_classes: insights.presentClasses.length,
       missing_classes: insights.missingClasses.length,
       imbalance_ratio: insights.imbalanceRatio,
+      tiny_boxes: tinyBoxCount(stats),
       tiny_box_pct: round2(insights.tinyBoxPct),
       finding_count: findings.length,
     },
@@ -146,7 +144,7 @@ export function buildDatasetHealthReportCsvRows(
   const insights = computeDatasetInsights(dataset, stats, counts);
   const checks = healthChecks(dataset, stats, counts);
   const findings = checks.filter((h) => h.severity !== 'ok');
-  const classes = classListForReport(dataset, stats);
+  const classes = classListFromInsights(insights);
   const rows: CsvCell[][] = [];
 
   rows.push(['summary', 'total_images', insights.totalImages, '', '', `${dataset.format} dataset`]);
@@ -188,8 +186,8 @@ export function buildDatasetHealthReportCsvRows(
   }
   rows.push([
     'summary',
-    'tiny_boxes_pct',
-    round2(insights.tinyBoxPct),
+    'tiny_boxes',
+    tinyBoxCount(stats),
     round2(insights.tinyBoxPct),
     insights.tinyWarn ? 'warning' : 'ok',
     'boxes under 5% of image side',
@@ -221,12 +219,8 @@ export function buildDatasetHealthReportCsvRows(
     }
   }
 
-  if (counts) {
-    for (const k of [...KINDS.error, ...KINDS.warning, ...KINDS.info] as IssueKind[]) {
-      const n = counts.by_kind[k] ?? 0;
-      if (n <= 0) continue;
-      rows.push(['check_issue', KIND_LABEL[k], n, '', KIND_SEVERITY[k], k]);
-    }
+  for (const entry of checkIssueEntries(counts)) {
+    rows.push(['check_issue', entry.label, entry.count, '', entry.severity, entry.kind]);
   }
 
   return rows;
