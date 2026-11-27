@@ -21,6 +21,7 @@ export interface CompareControllerInput {
   chooseModelA: (id: string) => void;
   runOnA: Signal<RunOn>;
   predA: Signal<Prediction | null>;
+  predSourceKeyA: Signal<string | null>;
   hoverA: Signal<Det | null>;
   pickedA: Signal<Det | null>;
   resultA: () => { boxes: Det[]; ms: number } | null;
@@ -37,6 +38,8 @@ export interface CompareControllerInput {
   dropLocalB: (id: string, f: File, e: unknown) => void;
   badFileB: Signal<{ name: string; why: string | null } | null>;
   engine: BrowserEngine;
+  /** True while streaming live video/webcam frames (skips secondary full-candidate re-fetches). */
+  isLiveStream?: () => boolean;
 }
 
 export function createCompareController(input: CompareControllerInput) {
@@ -47,6 +50,7 @@ export function createCompareController(input: CompareControllerInput) {
   const pickedModelB = signal<string | null>(null);
   const runOnB = signal<RunOn>('server');
   const predB = signal<Prediction | null>(null);
+  const predBSourceKey = signal<string | null>(null);
   const predictingB = signal(false);
   const errorB = signal<unknown>(null);
   const weightsMissingB = signal(false);
@@ -129,12 +133,14 @@ export function createCompareController(input: CompareControllerInput) {
     const s = input.source.peek();
     const prevPredA = input.predA.peek();
     const prevPredB = predB.peek();
+    const prevKeyA = input.predSourceKeyA.peek();
+    const prevKeyB = predBSourceKey.peek();
 
     // Reuse already-fetched predictions for the swapped sides so Swap does not fire 2 redundant requests.
-    if (s && prevPredB && prevPredB.model_id === bId && (prevPredB.backend ?? 'server') === prevRunB) {
+    if (s && prevPredB && prevPredB.model_id === bId && (prevPredB.backend ?? 'server') === prevRunB && prevKeyB === sourceImageKey(s)) {
       reuseSwapA = swapKey(bId, s, prevRunB);
     }
-    if (s && prevPredA && prevPredA.model_id === aId && (prevPredA.backend ?? 'server') === prevRunA) {
+    if (s && prevPredA && prevPredA.model_id === aId && (prevPredA.backend ?? 'server') === prevRunA && prevKeyA === sourceImageKey(s)) {
       reuseSwapB = swapKey(aId, s, prevRunA);
     }
 
@@ -143,7 +149,9 @@ export function createCompareController(input: CompareControllerInput) {
     input.runOnA.set(prevRunB);
     runOnB.set(prevRunA);
     input.predA.set(prevPredB);
+    input.predSourceKeyA.set(prevKeyB);
     predB.set(prevPredA);
+    predBSourceKey.set(prevKeyA);
     input.hoverA.set(null);
     input.pickedA.set(null);
     hoverB.set(null);
@@ -161,6 +169,7 @@ export function createCompareController(input: CompareControllerInput) {
     reuseSwapA = null;
     reuseSwapB = null;
     predB.set(null);
+    predBSourceKey.set(null);
     errorB.set(null);
     weightsMissingB.set(false);
     hoverB.set(null);
@@ -204,6 +213,7 @@ export function createCompareController(input: CompareControllerInput) {
       });
       return;
     }
+    const frameKey = sourceImageKey(s);
     const ctrl = new AbortController();
     untrack(() => {
       predictingB.set(true);
@@ -212,6 +222,7 @@ export function createCompareController(input: CompareControllerInput) {
       const p = predB.get();
       if (p && (p.model_id !== id || (p.backend ?? 'server') !== on)) {
         predB.set(null);
+        predBSourceKey.set(null);
         hoverB.set(null);
         pickedB.set(null);
       }
@@ -221,6 +232,7 @@ export function createCompareController(input: CompareControllerInput) {
         if (ctrl.signal.aborted) return;
         input.badFileB.set(null);
         predB.set(p);
+        predBSourceKey.set(frameKey);
         hoverB.set(null);
         pickedB.set(null);
         predictingB.set(false);
@@ -230,16 +242,19 @@ export function createCompareController(input: CompareControllerInput) {
         predictingB.set(false);
         if (file && on !== 'server' && isDetectorLoadError(e)) {
           predB.set(null);
+          predBSourceKey.set(null);
           input.dropLocalB(id, file, e);
           return;
         }
         if (on !== 'server' && !file && noServerWeights(e)) {
           predB.set(null);
+          predBSourceKey.set(null);
           weightsMissingB.set(true);
           return;
         }
         input.badFileB.set(null);
         predB.set(null);
+        predBSourceKey.set(null);
         errorB.set(e);
       },
     );
@@ -254,7 +269,7 @@ export function createCompareController(input: CompareControllerInput) {
     source: () => (compare.get() ? input.source.get() : null),
     runOn: () => runOnB.get(),
     file: () => activeFileB.peek(),
-    busy: () => predictingB.get(),
+    busy: () => predictingB.get() || !!input.isLiveStream?.(),
     engine: input.engine,
     weightsMissing: () => weightsMissingB.set(true),
   });
@@ -354,6 +369,7 @@ export function createCompareController(input: CompareControllerInput) {
     metaB,
     runOnB,
     predB,
+    predBSourceKey,
     predictingB,
     errorB,
     weightsMissingB,

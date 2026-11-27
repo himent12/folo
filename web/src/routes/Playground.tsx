@@ -2,12 +2,11 @@
 // folo-wasm, with the thresholds, the detections and their timing. The parts are in ./playground/.
 import Box from '$icons/box';
 import RotateCcw from '$icons/rotate-ccw';
-import { computed, css, effect, MediaQuery, onCleanup, onWindow, signal, untrack, type Signal } from 'fw';
+import { computed, css, effect, MediaQuery, onCleanup, signal, untrack, type Signal } from 'fw';
 import type { Prediction } from '$lib/api/types';
 import { media } from '$lib/design/tokens';
 import { filterDetections } from '$lib/detect/nms';
 import { BrowserEngine, type Backend } from '$lib/inference/browser';
-import { sentence } from '$lib/format';
 import { isOom } from '$lib/oom';
 import { router } from '$lib/router';
 import Page from '$lib/shell/Page';
@@ -21,12 +20,12 @@ import ComparePickers from './playground/ComparePickers';
 import CompareStage from './playground/CompareStage';
 import CompareSummaryPanel from './playground/CompareSummary';
 import DatasetPicker from './playground/DatasetPicker';
-import MediaCaptureDialog from './playground/MediaCaptureDialog';
+import LiveMediaCanvas from './playground/LiveMediaCanvas';
+import MediaBar from './playground/MediaBar';
+import MediaInputs from './playground/MediaInputs';
 import PlaygroundActions from './playground/PlaygroundActions';
 import PlaygroundTiming from './playground/PlaygroundTiming';
 import { formatCompareTimingMeta, formatSignedDelta } from './playground/compare';
-import { runJsonExport, runPngExport } from './playground/exportActions';
-import { looksLikeFolo } from './playground/folo';
 import { holdNoticeFocus } from './playground/noticeFocus';
 import ModelPickers from './playground/ModelPickers';
 import ImagePanel from './playground/ImagePanel';
@@ -38,12 +37,15 @@ import Rail from './playground/Rail';
 import DisplayToggles from './playground/DisplayToggles';
 import { MoreBody, RailThresholds, SecondarySliders } from './playground/Thresholds';
 import { DEFAULTS, type RunOn } from './playground/predict';
-import { ACCEPT } from './playground/intake';
 import { keepSession } from './playground/keepSession';
 import { sampleImages } from './playground/samples';
 import { playgroundPath } from './playground/session';
 import { createCompareController } from './playground/useCompare';
+import { usePlaygroundExport } from './playground/useExport';
+import { useLocalWeights } from './playground/useLocalWeights';
+import { useMediaSession } from './playground/useMediaSession';
 import { useModelCatalog } from './playground/useModelCatalog';
+import { usePlaygroundSelection } from './playground/useSelection';
 import { useSinglePredict } from './playground/useSinglePredict';
 import { usePlaygroundSource } from './playground/useSource';
 import { useWasmAvailability } from './playground/useWasmProbe';
@@ -51,9 +53,7 @@ import {
   areDefaultThresholds,
   classCounts,
   detectionIndex,
-  nextRowIndex,
   predictionJson,
-  scrollRowIntoView,
   smallerModelOf,
   sourceDims,
   sourceFullName,
@@ -75,23 +75,18 @@ export default function Playground() {
   const sheetEl = signal<HTMLElement>();
   const moreBtn = signal<HTMLElement>();
   const pickerOpen = signal(false);
-  const captureOpen = signal(false);
-  const captureVideo = signal<File | null>(null);
   let fileInput!: HTMLInputElement;
+  let videoInput!: HTMLInputElement;
 
   const pred = signal<Prediction | null>(null);
+  const predSourceKey = signal<string | null>(null);
   const runOn = signal<RunOn>('server');
   const engine = new BrowserEngine();
   onCleanup(() => engine.dispose());
   const { webgpu, browserOff, runOnNote } = useWasmAvailability(runOn);
 
-  const localWeights = signal(new Map<string, File>());
-  const weightsMissing = signal(false);
-  const weightsTarget = signal<'a' | 'b'>('a');
   let weightsInput!: HTMLInputElement;
   const where = computed(() => whereLabel(pred.get()));
-  const badFile = signal<{ name: string; why: string | null } | null>(null);
-  const badFileB = signal<{ name: string; why: string | null } | null>(null);
 
   const predicting = signal(false);
   const error = signal<unknown>(null);
@@ -108,10 +103,13 @@ export default function Playground() {
   const picked = signal<Det | null>(null);
   const tbody = signal<HTMLTableSectionElement>();
   const tab = signal<'detections' | 'classes' | 'json'>('detections');
-  const exportingPng = signal(false);
 
   let syncModelUrl: ((id: string) => void) | null = null;
   let clearCompare: () => void = () => {};
+  let stopMedia: () => void = () => {};
+  let loadVideoFile: (f: File) => void = () => {};
+  let startWebcamFn: () => void = () => {};
+  let isLiveStreamFn: () => boolean = () => false;
 
   const {
     models,
@@ -139,6 +137,8 @@ export default function Playground() {
     retryImage,
     choose,
     setSource,
+    prepareMediaSource,
+    setLiveFrame,
     setFile,
     clear,
     onSeg,
@@ -152,6 +152,7 @@ export default function Playground() {
     hasModels: () => ranked.peek().length > 0,
     onResetState: () => {
       pred.set(null);
+      predSourceKey.set(null);
       error.set(null);
       weightsMissing.set(false);
       hover.set(null);
@@ -160,10 +161,10 @@ export default function Playground() {
       clearCompare();
     },
     onClearExtra: () => moreOpen.set(false),
-    onDropVideo: (videoFile) => {
-      captureVideo.set(videoFile);
-      captureOpen.set(true);
-    },
+    onDropVideo: (videoFile) => loadVideoFile(videoFile),
+    onOpenVideo: () => videoInput.click(),
+    onStartWebcam: () => startWebcamFn(),
+    onSwitchAwayFromMedia: () => stopMedia(),
     openFilePicker: () => fileInput.click(),
     pickerOpen,
   });
@@ -191,40 +192,14 @@ export default function Playground() {
     moreBtn.peek()?.querySelector<HTMLElement>('button')?.focus({ preventScroll: true });
   }
 
+  let getModelBId: () => string | null = () => null;
+  const { localWeights, weightsMissing, weightsTarget, badFile, badFileB, pickWeights, dropLocal } = useLocalWeights({
+    modelAId: () => modelId.peek(),
+    modelBId: () => getModelBId(),
+    isDestroyed,
+  });
+
   const samples = sampleImages(model);
-  const weightPickSeq = new Map<string, number>();
-
-  async function pickWeights(e: Event & { currentTarget: HTMLInputElement }) {
-    const input = e.currentTarget;
-    const f = input.files?.[0];
-    input.value = '';
-    const side = weightsTarget.peek();
-    const id = side === 'b' ? cmp.modelBId.peek() : modelId.peek();
-    if (!f || !id) return;
-    const seq = (weightPickSeq.get(id) ?? 0) + 1;
-    weightPickSeq.set(id, seq);
-    if (!(await looksLikeFolo(f))) {
-      if (!isDestroyed() && weightPickSeq.get(id) === seq) {
-        if (side === 'b' && cmp.modelBId.peek() === id) badFileB.set({ name: f.name, why: null });
-        else if (side === 'a' && modelId.peek() === id) badFile.set({ name: f.name, why: null });
-      }
-      return;
-    }
-    if (isDestroyed() || weightPickSeq.get(id) !== seq) return;
-    if (side === 'b' && cmp.modelBId.peek() === id) badFileB.set(null);
-    else if (side === 'a' && modelId.peek() === id) badFile.set(null);
-    localWeights.set(new Map(localWeights.peek()).set(id, f));
-  }
-
-  function dropLocal(id: string, f: File, e: unknown, targetBad: Signal<{ name: string; why: string | null } | null> = badFile) {
-    const cur = localWeights.peek();
-    if (cur.get(id) === f) {
-      const next = new Map(cur);
-      next.delete(id);
-      localWeights.set(next);
-    }
-    targetBad.set({ name: f.name, why: e instanceof Error ? sentence(e.message) : null });
-  }
 
   const result = computed(() => {
     const p = pred.get();
@@ -250,6 +225,7 @@ export default function Playground() {
     chooseModelA: chooseModel,
     runOnA: runOn,
     predA: pred,
+    predSourceKeyA: predSourceKey,
     hoverA: hover,
     pickedA: picked,
     resultA: () => result.get(),
@@ -266,14 +242,42 @@ export default function Playground() {
     dropLocalB: (id, f, e) => dropLocal(id, f, e, badFileB),
     badFileB,
     engine,
+    isLiveStream: () => isLiveStreamFn(),
   });
   clearCompare = cmp.clearResults;
+  getModelBId = () => cmp.modelBId.peek();
+
+  const mediaSession = useMediaSession({
+    onFrame: (f) => setLiveFrame(f.blob, f.name, f.width, f.height, mediaSession.mode.peek() === 'webcam' ? 'webcam' : 'video'),
+    isPredicting: () => predicting.get() || (cmp.compare.get() && cmp.predictingB.get()),
+    isInferenceBlocked: () =>
+      !modelId.get() ||
+      !!error.get() ||
+      weightsMissing.get() ||
+      (cmp.compare.get() && (!cmp.modelBId.get() || !!cmp.errorB.get() || cmp.weightsMissingB.get())),
+    hasValidResult: () => !!pred.peek() && (!cmp.compare.peek() || !!cmp.predB.peek()),
+    lastLatencyMs: () => pred.peek()?.timing.total_ms ?? null,
+    onStopped: () => seg.set(source.peek()?.kind ?? 'file'),
+  });
+  stopMedia = () => mediaSession.stopAll(false);
+  loadVideoFile = (f) => {
+    prepareMediaSource('video');
+    mediaSession.loadVideo(f);
+  };
+  startWebcamFn = () => {
+    prepareMediaSource('webcam');
+    void mediaSession.startWebcam();
+  };
+  isLiveStreamFn = () => mediaSession.liveStreaming.get();
+
+  let predMatchesSourceFn: () => boolean = () => true;
 
   // The image, its result and the thresholds outlive the page for the tab; a dataset image and the thresholds are in
   // the URL (./playground/session).
   const restored = keepSession({
     source,
     pred,
+    predMatchesSource: () => predMatchesSourceFn(),
     runOn: runOn as Signal<string>,
     conf,
     iou,
@@ -319,6 +323,7 @@ export default function Playground() {
     restored,
     consumeReuse: cmp.consumeReuseA,
     pred,
+    predSourceKey,
     predicting,
     error,
     weightsMissing,
@@ -328,6 +333,7 @@ export default function Playground() {
     conf,
     engine,
     dropLocal: (id, f, e) => dropLocal(id, f, e, badFile),
+    isLiveStream: () => mediaSession.liveStreaming.get(),
   });
 
   // Out of GPU memory on the server (507): this browser has its own device, and a smaller model of the same classes
@@ -353,80 +359,31 @@ export default function Playground() {
 
   const selectedIdx = computed(() => detectionIndex(picked.get(), kept.get(), hidden.get()));
   const activeIdx = computed(() => detectionIndex(hover.get(), kept.get(), hidden.get()) ?? selectedIdx.get());
-  /** In Compare mode, whether Model B is currently shown in the Detections table. */
-  const showingB = computed(() => cmp.compare.get() && cmp.inspectSide.get() === 'b');
-  const tableResult = computed(() => (showingB.get() ? cmp.resultB.get() : result.get()));
-  const tableRows = computed(() => (showingB.get() ? cmp.rowsB.get() : rows.get()));
-  const tableSelectedIdx = computed(() => (showingB.get() ? cmp.selectedIdxB.get() : selectedIdx.get()));
-  const tableActiveIdx = computed(() => (showingB.get() ? cmp.activeIdxB.get() : activeIdx.get()));
-  /** The row that takes Tab focus (roving tabindex): the selected one, else the first. */
-  const tabRow = computed(() => tableSelectedIdx.get() ?? tableRows.get()[0]?.i ?? null);
+  const { showingB, tableResult, tableRows, tableSelectedIdx, tableActiveIdx, tabRow, pickFromImage, pickFromImageB, onrowkey } = usePlaygroundSelection({
+    compare: cmp.compare,
+    inspectSide: cmp.inspectSide,
+    tab,
+    tbody,
+    keptA: () => kept.peek(),
+    keptB: () => cmp.keptB.peek(),
+    pickedA: picked,
+    pickedB: cmp.pickedB,
+    rowsA: () => rows.get(),
+    rowsB: () => cmp.rowsB.get(),
+    resultA: () => result.get(),
+    resultB: () => cmp.resultB.get(),
+    selectedIdxA: () => selectedIdx.get(),
+    selectedIdxB: () => cmp.selectedIdxB.get(),
+    activeIdxA: () => activeIdx.get(),
+    activeIdxB: () => cmp.activeIdxB.get(),
+    isNarrow: () => narrow.peek(),
+    pickerOpen,
+    sheetShown: () => sheetShown.peek(),
+    closeSheet,
+    onpaste,
+  });
 
-  const rowEl = (i: number) => tbody.peek()?.querySelector<HTMLTableRowElement>(`tr[data-det="${i}"]`) ?? null;
-
-  /** A box picked on the image: bring its row into view inside the list without moving the page. */
-  function pickFromImage(i: number) {
-    const b = kept.peek()[i];
-    if (!b) return;
-    const switched = (cmp.compare.peek() && cmp.inspectSide.peek() !== 'a') || tab.peek() !== 'detections';
-    if (cmp.compare.peek() && cmp.inspectSide.peek() !== 'a') cmp.inspectSide.set('a');
-    const next = picked.peek() === b ? null : b;
-    picked.set(next);
-    if (next) {
-      if (tab.peek() !== 'detections') tab.set('detections');
-      if (switched) queueMicrotask(() => scrollRowIntoView(rowEl(i), narrow.peek()));
-      else scrollRowIntoView(rowEl(i), narrow.peek());
-    }
-  }
-
-  function pickFromImageB(i: number) {
-    const b = cmp.keptB.peek()[i];
-    if (!b) return;
-    const switched = cmp.inspectSide.peek() !== 'b' || tab.peek() !== 'detections';
-    if (cmp.inspectSide.peek() !== 'b') cmp.inspectSide.set('b');
-    const next = cmp.pickedB.peek() === b ? null : b;
-    cmp.pickedB.set(next);
-    if (next) {
-      if (tab.peek() !== 'detections') tab.set('detections');
-      if (switched) queueMicrotask(() => scrollRowIntoView(rowEl(i), narrow.peek()));
-      else scrollRowIntoView(rowEl(i), narrow.peek());
-    }
-  }
-
-  function onrowkey(e: KeyboardEvent, k: number) {
-    const list = tableRows.peek();
-    const to = nextRowIndex(e.key, k, list.length);
-    if (to === null) return;
-    e.preventDefault();
-    const r = list[to];
-    if (r) rowEl(r.i)?.focus();
-  }
-
-  function onwindowkey(e: KeyboardEvent) {
-    if (e.defaultPrevented || e.key !== 'Escape' || pickerOpen.peek() || captureOpen.peek()) return;
-    if (document.querySelector('dialog[open]')) return;
-    if (sheetShown.peek()) {
-      e.preventDefault();
-      e.stopPropagation();
-      closeSheet();
-    } else if (picked.peek() || cmp.pickedB.peek()) {
-      picked.set(null);
-      cmp.pickedB.set(null);
-    }
-  }
-
-  function onwindowdown(e: PointerEvent) {
-    if ((picked.peek() || cmp.pickedB.peek()) && !(e.target as Element | null)?.closest?.('[data-det], [data-box], .zoom-hud')) {
-      picked.set(null);
-      cmp.pickedB.set(null);
-    }
-  }
-
-  onWindow('paste', onpaste);
-  onWindow('keydown', onwindowkey);
-  onWindow('pointerdown', onwindowdown);
-
-  const dims = computed(() => sourceDims(pred.get(), source.get()));
+  const dims = computed(() => sourceDims(pred.get(), source.get()) ?? mediaSession.camDims.get() ?? mediaSession.videoDims.get());
   const sourceName = computed(() => sourceFullName(source.get()));
   const shortName = computed(() => sourceShortName(source.get()));
   const truthBoxes = computed(() => {
@@ -462,54 +419,43 @@ export default function Playground() {
     );
   });
   const activeJson = computed(() => (cmp.compare.get() ? cmp.compareJson.get() : singleJson.get()));
-  const canExport = computed(() => !!source.get() && !!dims.get() && (cmp.compare.get() ? !!result.get() || !!cmp.resultB.get() : !!result.get()));
+  const { exportingPng, predAMatches, predBMatches, canExport, onExportPng, onExportJson } = usePlaygroundExport({
+    source,
+    src,
+    dims: () => dims.get(),
+    shortName: () => shortName.peek(),
+    modelA: () => model.peek(),
+    modelB: () => cmp.modelB.peek(),
+    predA: pred,
+    predB: cmp.predB,
+    predSourceKeyA: predSourceKey,
+    predSourceKeyB: cmp.predBSourceKey,
+    resultA: () => result.get(),
+    resultB: () => cmp.resultB.get(),
+    rowsA: () => rows.peek(),
+    rowsB: () => cmp.rowsB.peek(),
+    classesA: () => classes.peek(),
+    classesB: () => cmp.classesB.peek(),
+    truthOnly: () => truthOnly.peek(),
+    truthBoxes: () => truthBoxes.peek(),
+    labels,
+    scores,
+    predictingA: predicting,
+    predictingB: cmp.predictingB,
+    errorA: error,
+    errorB: cmp.errorB,
+    weightsMissingA: weightsMissing,
+    weightsMissingB: cmp.weightsMissingB,
+    compare: cmp.compare,
+    compareView: cmp.compareView,
+    splitPct: cmp.splitPct,
+    zoom: cmp.zoom,
+    activeJson: () => activeJson.peek(),
+    isUnsyncedVideoPreview: () => mediaSession.mode.get() === 'video' && !mediaSession.frameSynced.get(),
+    isLiveStreaming: () => mediaSession.liveStreaming.get(),
+  });
+  predMatchesSourceFn = () => predAMatches.get();
   const effectiveO2o = computed(() => (cmp.compare.get() ? o2o.get() && cmp.o2oB.get() : o2o.get()));
-
-  async function onExportPng() {
-    const s = source.peek();
-    const d = dims.peek();
-    if (!s || !d || exportingPng.peek()) return;
-    exportingPng.set(true);
-    try {
-      await runPngExport({
-        compare: cmp.compare.peek(),
-        compareView: cmp.compareView.peek(),
-        splitPct: cmp.splitPct.peek(),
-        viewportW: cmp.zoom.viewportW.peek(),
-        viewportH: cmp.zoom.viewportH.peek(),
-        zoomZ: cmp.zoom.z.peek(),
-        zoomNx: cmp.zoom.nx.peek(),
-        source: s,
-        src: src.peek(),
-        dims: d,
-        shortName: shortName.peek(),
-        modelA: model.peek(),
-        modelB: cmp.modelB.peek(),
-        predA: pred.peek(),
-        predB: cmp.predB.peek(),
-        boxesA: rows.peek().map((r) => r.b),
-        boxesB: cmp.rowsB.peek().map((r) => r.b),
-        classesA: classes.peek(),
-        classesB: cmp.classesB.peek(),
-        truthOnly: truthOnly.peek(),
-        truthBoxes: truthBoxes.peek(),
-        labels: labels.peek(),
-        scores: scores.peek(),
-      });
-    } finally {
-      exportingPng.set(false);
-    }
-  }
-
-  function onExportJson() {
-    runJsonExport({
-      shortName: shortName.peek(),
-      compare: cmp.compare.peek(),
-      modelAName: model.peek()?.name,
-      modelBName: cmp.modelB.peek()?.name,
-      payload: activeJson.peek(),
-    });
-  }
 
   function toggleClass(c: number) {
     const next = new Set(hidden.peek());
@@ -576,6 +522,13 @@ export default function Playground() {
     />
   );
 
+  const zoomResetKey = computed(() => {
+    const m = mediaSession.mode.get();
+    if (m === 'video') return `video:${mediaSession.videoUrl.get() ?? ''}`;
+    if (m === 'webcam') return 'webcam';
+    return undefined;
+  });
+
   // Stable snippet reference so `<CompareStage>` never remounts when Model A's `pred` or `dims` object identity changes.
   const compareStage = () => (
     <CompareStage
@@ -587,14 +540,16 @@ export default function Playground() {
       view={cmp.compareView.get()}
       bind:splitPct={cmp.splitPct}
       zoom={cmp.zoom}
+      zoomResetKey={zoomResetKey.get()}
+      keepPrevious={mediaSession.mode.get() !== 'none'}
       labels={labels.get()}
       scores={scores.get()}
       truthBoxes={truthBoxes.get()}
       truthOnly={truthOnly.get()}
       modelA={model.get()}
-      predA={pred.get()}
-      keptA={kept.get()}
-      visibleCountA={rows.get().length}
+      predA={predAMatches.get() ? pred.get() : null}
+      keptA={predAMatches.get() ? kept.get() : []}
+      visibleCountA={predAMatches.get() ? rows.get().length : 0}
       classesA={classes.get()}
       onlyA={only.get()}
       activeIdxA={activeIdx.get()}
@@ -604,9 +559,9 @@ export default function Playground() {
       onHoverA={(b) => hover.set(b)}
       onSelectA={pickFromImage}
       modelB={cmp.modelB.get()}
-      predB={cmp.predB.get()}
-      keptB={cmp.keptB.get()}
-      visibleCountB={cmp.rowsB.get().length}
+      predB={predBMatches.get() ? cmp.predB.get() : null}
+      keptB={predBMatches.get() ? cmp.keptB.get() : []}
+      visibleCountB={predBMatches.get() ? cmp.rowsB.get().length : 0}
       classesB={cmp.classesB.get()}
       onlyB={cmp.onlyB.get()}
       activeIdxB={cmp.activeIdxB.get()}
@@ -643,7 +598,44 @@ export default function Playground() {
     />
   );
 
-  const intro = () => <span>Run a model on any image. Thresholds re-filter instantly in the browser.</span>;
+  const useLiveCanvas = computed(() => {
+    const m = mediaSession.mode.get();
+    if (m === 'webcam') return !cmp.compare.get() || !!mediaSession.camErr.get() || mediaSession.camStarting.get() || !source.get();
+    if (m === 'video') {
+      if (mediaSession.videoErr.get() || !source.get()) return true;
+      if (!mediaSession.frameSynced.get()) return true;
+      return !cmp.compare.get() && mediaSession.playing.get();
+    }
+    return false;
+  });
+  const liveStage = () => {
+    const isCam = mediaSession.mode.get() === 'webcam';
+    const isPreview = !isCam && !mediaSession.frameSynced.get() && !mediaSession.playing.get();
+    const showBoxes = isCam ? predAMatches.get() || mediaSession.camActive.get() : mediaSession.frameSynced.get();
+    return (
+      <LiveMediaCanvas
+        video={mediaSession.videoEl.get()}
+        mode={isCam ? 'webcam' : 'video'}
+        active={isCam ? mediaSession.camActive.get() : mediaSession.playing.get()}
+        starting={isCam && mediaSession.camStarting.get()}
+        paused={isCam && mediaSession.camPaused.get()}
+        preview={isPreview}
+        renderTick={mediaSession.previewTick.get()}
+        error={isCam ? mediaSession.camErr.get() : mediaSession.videoErr.get()}
+        boxes={showBoxes ? rows.get().map((r) => r.b) : []}
+        classes={classes.get()}
+        labels={labels.get()}
+        scores={scores.get()}
+        fps={mediaSession.fps.get()}
+        latencyMs={mediaSession.latencyMs.get()}
+        onRetry={() => void mediaSession.startWebcam()}
+        onDismiss={() => mediaSession.stopWebcam()}
+      />
+    );
+  };
+  const mediaBar = () => <MediaBar media={mediaSession} predicting={predicting.get() || (cmp.compare.get() && cmp.predictingB.get())} />;
+
+  const intro = () => <span>Run a model on any image, video, or live camera. Thresholds re-filter instantly in the browser.</span>;
 
   // The model and where it runs: the rail's first section from 1024 px up, a toolbar row under the title below that.
   const pickers = (inRail: boolean) =>
@@ -731,28 +723,14 @@ export default function Playground() {
 
   return (
     <>
-      <input
-        ref={(e) => (weightsInput = e)}
-        type="file"
-        accept=".folo"
-        class="sr-only"
-        tabindex={-1}
-        aria-hidden="true"
-        onchange={pickWeights}
-      />
-
-      <input
-        ref={(e) => (fileInput = e)}
-        type="file"
-        accept={ACCEPT}
-        class="sr-only"
-        tabindex={-1}
-        aria-hidden="true"
-        onchange={(e) => {
-          const f = e.currentTarget.files?.[0];
-          if (f) void setFile(f);
-          e.currentTarget.value = '';
-        }}
+      <MediaInputs
+        media={mediaSession}
+        onWeightsRef={(e) => (weightsInput = e)}
+        onFileRef={(e) => (fileInput = e)}
+        onVideoRef={(e) => (videoInput = e)}
+        onPickWeights={pickWeights}
+        onPickFile={(f) => void setFile(f)}
+        onPickVideo={loadVideoFile}
       />
 
       <Page
@@ -820,7 +798,16 @@ export default function Playground() {
                 ondrop={ondrop}
                 source={source.get()}
                 bind:seg={seg}
-                onSeg={onSeg}
+                onSeg={(v) => onSeg(v, mediaSession.mode.peek())}
+                phone={phone.current}
+                mediaActive={mediaSession.mode.get() !== 'none'}
+                mediaLabel={mediaSession.mode.get() === 'webcam' ? 'Live camera' : mediaSession.videoName.get()}
+                liveStage={useLiveCanvas.get() ? liveStage : null}
+                mediaBar={mediaSession.mode.get() !== 'none' ? mediaBar : null}
+                zoomResetKey={zoomResetKey.get()}
+                keepPrevious={mediaSession.mode.get() !== 'none'}
+                onOpenVideo={() => videoInput.click()}
+                onStartWebcam={startWebcamFn}
                 runOnNote={runOnNote.get()}
                 sourceName={sourceName.get()}
                 shortName={shortName.get()}
@@ -867,10 +854,6 @@ export default function Playground() {
                 bind:sheetEl={sheetEl}
                 resetButton={resetButton}
                 moreBody={moreBody}
-                onCapture={() => {
-                  captureVideo.set(null);
-                  captureOpen.set(true);
-                }}
                 compareFacts={
                   cmp.compare.get() && (result.get() || cmp.resultB.get())
                     ? {
@@ -937,14 +920,10 @@ export default function Playground() {
         bind:open={pickerOpen}
         prefer={classes.get()}
         onpick={(ds, img, at) => setSource({ kind: 'dataset', ds, img, at })}
-        onclose={() => seg.set(source.peek()?.kind ?? 'file')}
-      />
-
-      <MediaCaptureDialog
-        bind:open={captureOpen}
-        initialVideo={captureVideo.get()}
-        onCapture={(blob, name) => void setFile(blob, name)}
-        onClose={() => captureVideo.set(null)}
+        onclose={() => {
+          const m = mediaSession.mode.peek();
+          seg.set(m !== 'none' ? m : (source.peek()?.kind ?? 'file'));
+        }}
       />
     </>
   );

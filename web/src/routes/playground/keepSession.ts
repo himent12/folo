@@ -18,6 +18,8 @@ export const URL_DELAY_MS = 300;
 export interface Kept {
   source: Signal<Source | null>;
   pred: Signal<Prediction | null>;
+  /** Optional guard confirming `pred` was computed for the current `source` (avoids saving stale live-frame results). */
+  predMatchesSource?: () => boolean;
   runOn: Signal<string>;
   conf: Signal<number>;
   iou: Signal<number>;
@@ -204,9 +206,10 @@ export function keepSession(k: Kept): (model: string, s: Source, runOn: string) 
 
   // Kept as it changes.
   effect(() => {
+    const matches = k.predMatchesSource ? k.predMatchesSource() : true;
     const next = {
       source: keep(k.source.get()),
-      pred: k.pred.get(),
+      pred: matches ? k.pred.get() : null,
       runOn: k.runOn.get(),
       conf: k.conf.get(),
       iou: k.iou.get(),

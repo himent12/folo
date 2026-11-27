@@ -1,25 +1,29 @@
 /**
- * What it gets wrong (`GET …/entries/{id}/images`): the entry's images, the worst first by default (most missed + wrong)
- * or in the benchmark's order, each tile the image with truth and detections overlaid (./MatchView: right solid,
- * wrong solid with a cross, missed dashed) and its counts in words under it; a page of GALLERY_PAGE at a time, "Show
- * more" loading the next. A tile opens a large view with the boxes, the legend, every box with its class and
- * confidence, and previous / next (the arrow keys too), which loads the next page when it reaches the end.
+ * Per-Image Error-Analysis Explorer (`GET …/entries/{id}/images`): inspects evaluated benchmark images with
+ * client-side error-focus filters (All, Missed GT / FN, False positives / FP, Any error), diagnostic sorts
+ * (Highest errors, Benchmark order, Most FN, Most FP, Lowest IoU, Lowest score), canvas layer toggles
+ * (Ground Truth, Predicted boxes, Error highlights), TP / FP / FN badges per image, and a large-view modal
+ * showing per-box IoU and error cause (TP, class mismatch, localization, duplicate, background FP, missed GT).
  */
 import ChevronLeft from '$icons/chevron-left';
 import ChevronRight from '$icons/chevron-right';
-import { computed, css, effect, For, onWindow, signal, untrack } from 'fw';
+import Eye from '$icons/eye';
+import EyeOff from '$icons/eye-off';
+import { computed, css, effect, For, MediaQuery, onWindow, signal, untrack } from 'fw';
 import { hub } from '$lib/api/index';
 import type { Bench, BenchAccuracy, BenchEntry, BenchEntryImage } from '$lib/api/types';
-import { matchImage } from '$lib/bench/match';
+import { media } from '$lib/design/tokens';
 import { conf, num } from '$lib/format';
 import Button from '$lib/ui/Button';
 import Dialog from '$lib/ui/Dialog';
 import ErrorState from '$lib/ui/ErrorState';
 import Panel from '$lib/ui/Panel';
 import Segmented from '$lib/ui/Segmented';
+import Select from '$lib/ui/Select';
 import Skeleton from '$lib/ui/Skeleton';
 import { dominantAspect } from '$lib/ui/TileGrid';
-import MatchView, { type Outcome } from './MatchView';
+import { filterAndSortImages, summarizeGalleryErrors, type ErrorFilter, type ErrorSort, type ImageDiagnostics } from './errorAnalysis';
+import MatchView from './MatchView';
 import { bestF1Conf, imagesShownText, imagesText } from '../words';
 
 /** Images per page of the gallery: a page more each time, so 5000 images never load at once. */
@@ -33,21 +37,32 @@ export interface ImagesSectionProps {
   accuracy: BenchAccuracy;
 }
 
-/** What a tile says under its image: what it found right, missed and got wrong, in words. */
-function counts(im: BenchEntryImage) {
-  const found = im.image.boxes.length - im.missed;
-  return { found, missed: im.missed, wrong: im.wrong, boxes: im.image.boxes.length };
-}
-type Counts = ReturnType<typeof counts>;
-
-const ORDER = ['wrong', 'missed', 'right'];
-const SORTS = [
-  { value: 'worst' as const, label: 'Worst first' },
-  { value: 'order' as const, label: 'In order' },
+const SORT_OPTIONS: { value: ErrorSort; label: string }[] = [
+  { value: 'worst', label: 'Highest errors' },
+  { value: 'fn', label: 'Most missed (FN)' },
+  { value: 'fp', label: 'Most false pos (FP)' },
+  { value: 'lowest-iou', label: 'Lowest IoU' },
+  { value: 'lowest-score', label: 'Lowest score' },
+  { value: 'order', label: 'Benchmark order' },
 ];
 
+const SORT_SENTENCE: Record<ErrorSort, string> = {
+  worst: 'The most missed and wrong first.',
+  fn: 'Images with the most missed ground truth (FN) first.',
+  fp: 'Images with the most false positives (FP) first.',
+  'lowest-iou': 'Images with the lowest matched IoU first.',
+  'lowest-score': 'Images with the lowest confidence detections first.',
+  order: 'In the benchmark’s order.',
+};
+
 export default function ImagesSection(props: ImagesSectionProps) {
-  const sort = signal<'worst' | 'order'>('worst');
+  const phone = new MediaQuery(media.phone, false);
+  const errorFilter = signal<ErrorFilter>('all');
+  const errorSort = signal<ErrorSort>('worst');
+  const showTruth = signal(true);
+  const showPred = signal(true);
+  const showErrors = signal(true);
+
   const images = signal<BenchEntryImage[]>([]);
   const total = signal<number | null>(null);
   /** The confidence the detections were taken at (the page's `conf`); null until the first page is in. */
@@ -57,13 +72,16 @@ export default function ImagesSection(props: ImagesSectionProps) {
   const urls = signal<Record<string, string>>({});
   let seq = 0;
 
+  /** Only 'order' changes the server fetch order; all error-focused sorts build cleanly over the worst-first pages. */
+  const serverSort = computed<'worst' | 'order'>(() => (errorSort.get() === 'order' ? 'order' : 'worst'));
+
   async function load(reset: boolean) {
     const my = ++seq;
     loading.set(true);
     error.set(undefined);
     try {
       const page = await hub.api.benchEntryImages(props.bench.id, props.entry.id, {
-        sort: sort.peek(),
+        sort: serverSort.peek(),
         offset: reset ? 0 : images.peek().length,
         limit: GALLERY_PAGE,
       });
@@ -91,7 +109,7 @@ export default function ImagesSection(props: ImagesSectionProps) {
   const benchId = computed(() => props.bench.id);
   const entryId = computed(() => props.entry.id);
   effect(() => {
-    void sort.get();
+    void serverSort.get();
     void benchId.get();
     void entryId.get();
     if (hub.mode === 'connecting') return;
@@ -102,6 +120,19 @@ export default function ImagesSection(props: ImagesSectionProps) {
     untrack(() => void load(true));
   });
 
+  const summary = computed(() => summarizeGalleryErrors(images.get()));
+  const visible = computed(() => filterAndSortImages(images.get(), errorFilter.get(), errorSort.get(), props.bench.classes));
+  const filterOptions = computed(() => {
+    const s = summary.get();
+    const compact = phone.current;
+    return [
+      { value: 'all' as const, label: 'All', meta: s.total ? num(s.total) : undefined },
+      { value: 'fn' as const, label: compact ? 'FN' : 'Missed (FN)', meta: s.total ? num(s.withFn) : undefined },
+      { value: 'fp' as const, label: compact ? 'FP' : 'False pos (FP)', meta: s.total ? num(s.withFp) : undefined },
+      { value: 'errors' as const, label: compact ? 'Errors' : 'Any error', meta: s.total ? num(s.withErrors) : undefined },
+    ];
+  });
+
   /**
    * The tiles' shape: the commonest among the images loaded (within 3:4 to 16:9), as a dataset's gallery has it, so a
    * row of tiles lines up whatever each photo is; an image of another shape is shown whole on the tile's well, its
@@ -110,10 +141,20 @@ export default function ImagesSection(props: ImagesSectionProps) {
   const ratio = computed(() => (images.get().length ? dominantAspect(images.get().map((im) => im.image)) : 4 / 3));
 
   // ---- the large view ----
-  const open = signal<number | null>(null);
+  const openId = signal<string | null>(null);
   const fullUrl = signal<string | null>(null);
   const active = signal<string | null>(null);
-  const shown = computed(() => (open.get() === null ? null : (images.get()[open.get()!] ?? null)));
+  const openIdx = computed(() => {
+    const id = openId.get();
+    if (id === null) return -1;
+    return visible.get().findIndex((v) => v.item.image.id === id);
+  });
+  const shownEntry = computed(() => {
+    const i = openIdx.get();
+    return i >= 0 ? visible.get()[i]! : null;
+  });
+  const shown = computed(() => shownEntry.get()?.item ?? null);
+
   effect(() => {
     const im = shown.get();
     fullUrl.set(null);
@@ -126,20 +167,33 @@ export default function ImagesSection(props: ImagesSectionProps) {
     );
     return () => (gone = true);
   });
+
   async function step(d: number) {
-    const at = open.peek();
-    if (at === null) return;
+    const currentId = openId.peek();
+    if (currentId === null || loading.peek()) return;
+    const list = visible.peek();
+    const at = list.findIndex((v) => v.item.image.id === currentId);
+    if (at < 0) return;
     const next = at + d;
     if (next < 0) return;
-    if (next >= images.peek().length) {
+    if (next >= list.length) {
       const t = total.peek();
       if (t !== null && images.peek().length >= t) return;
       await load(false);
+      // Never reopen a closed modal or jump if the user switched images while loading.
+      if (openId.peek() !== currentId) return;
+      const updated = visible.peek();
+      const idxNow = updated.findIndex((v) => v.item.image.id === currentId);
+      const target = idxNow >= 0 ? updated[idxNow + d] : undefined;
+      if (target) openId.set(target.item.image.id);
+      return;
     }
-    if (next < images.peek().length) open.set(next);
+    const target = list[next];
+    if (target) openId.set(target.item.image.id);
   }
+
   function onkeydown(e: KeyboardEvent) {
-    if (open.peek() === null || e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey) return;
+    if (openId.peek() === null || e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey) return;
     if (document.querySelectorAll('dialog[open]').length > 1) return;
     const t = e.target as HTMLElement | null;
     if (t?.closest('input, select, textarea')) return;
@@ -152,24 +206,7 @@ export default function ImagesSection(props: ImagesSectionProps) {
     }
   }
   onWindow('keydown', onkeydown);
-  /** The large view's list: every detection (right or wrong) and every true box nothing found. */
-  const rows = computed(() => {
-    const s = shown.get();
-    if (!s) return [];
-    const m = matchImage(s.image.boxes, s.detections);
-    return [
-      ...m.detections.map((d) => ({
-        key: `d${d.index}`,
-        outcome: (d.truth === null ? 'wrong' : 'right') as Outcome,
-        cls: d.det.class,
-        score: d.det.score as number | null,
-        iou: d.truth === null ? null : d.iou,
-      })),
-      ...s.image.boxes.flatMap((b, i) =>
-        m.found[i] === null ? [{ key: `t${i}`, outcome: 'missed' as Outcome, cls: b.class, score: null, iou: null }] : [],
-      ),
-    ].sort((a, b) => ORDER.indexOf(a.outcome) - ORDER.indexOf(b.outcome));
-  });
+
   /** What the gallery holds, said from the confidence it was taken at and what is loaded (./words imagesShownText). */
   const shownText = () => {
     if (!props.entry.scored) return 'Every box it gave, on the unchanged images.';
@@ -179,52 +216,101 @@ export default function ImagesSection(props: ImagesSectionProps) {
     return imagesShownText(at, bestF1Conf(props.accuracy), all && images.get().every((im) => !im.detections.length));
   };
   const name = (c: number) => props.bench.classes[c] ?? `class ${c}`;
-  const shownCounts = computed(() => (shown.get() ? counts(shown.get()!) : { found: 0, missed: 0, wrong: 0, boxes: 0 }));
+
+  const layerToggles = () => (
+    <div class="layers" role="group" aria-label="Canvas box layers">
+      <Button
+        size="sm"
+        variant={showTruth.get() ? 'secondary' : 'ghost'}
+        icon={showTruth.get() ? Eye : EyeOff}
+        aria-pressed={showTruth.get()}
+        onclick={() => showTruth.set((v) => !v)}
+      >
+        GT
+      </Button>
+      <Button
+        size="sm"
+        variant={showPred.get() ? 'secondary' : 'ghost'}
+        icon={showPred.get() ? Eye : EyeOff}
+        aria-pressed={showPred.get()}
+        onclick={() => showPred.set((v) => !v)}
+      >
+        Pred
+      </Button>
+      <Button
+        size="sm"
+        variant={showErrors.get() ? 'secondary' : 'ghost'}
+        icon={showErrors.get() ? Eye : EyeOff}
+        aria-pressed={showErrors.get()}
+        onclick={() => showErrors.set((v) => !v)}
+      >
+        Errors
+      </Button>
+    </div>
+  );
 
   const legend = () => (
     <>
-      <span class="lg">
-        <i class="k right" aria-hidden="true"></i>Right
-      </span>
-      <span class="lg">
-        <i class="k wrong" aria-hidden="true">
-          <b></b>
-        </i>
-        Wrong (no true box)
-      </span>
-      <span class="lg">
-        <i class="k missed" aria-hidden="true"></i>Missed (nothing found it)
-      </span>
-    </>
-  );
-
-  const tally = (c: () => Counts) => (
-    <>
-      {!c().missed && !c().wrong ? (
-        <span class="ok">{c().boxes ? `All ${c().boxes} found` : 'Nothing to find, nothing found'}</span>
+      {showErrors.get() ? (
+        <>
+          <span class="lg">
+            <i class="k right" aria-hidden="true"></i>TP (Right)
+          </span>
+          <span class="lg">
+            <i class="k wrong" aria-hidden="true">
+              <b></b>
+            </i>
+            FP (Wrong)
+          </span>
+          <span class="lg">
+            <i class="k missed" aria-hidden="true"></i>FN (Missed GT)
+          </span>
+        </>
       ) : (
         <>
-          {c().missed ? (
-            <span class="t-item">
-              <i class="k missed" aria-hidden="true"></i>
-              {c().missed} missed
-            </span>
-          ) : null}
-          {c().wrong ? (
-            <span class="t-item">
-              <i class="k wrong" aria-hidden="true">
-                <b></b>
-              </i>
-              {c().wrong} wrong
-            </span>
-          ) : null}
-          <span class="t-item faint">
-            {c().found} of {c().boxes} found
+          <span class="lg">
+            <i class="k plain-pred" aria-hidden="true"></i>Predicted
+          </span>
+          <span class="lg">
+            <i class="k plain-truth" aria-hidden="true"></i>Ground truth
           </span>
         </>
       )}
     </>
   );
+
+  const tally = (d: () => ImageDiagnostics, showIou = false) => (
+    <>
+      {showErrors.get() ? (
+        <>
+          <span class="err-pill tp">TP {d().tp}</span>
+          {d().fp ? <span class="err-pill fp">FP {d().fp}</span> : null}
+          {d().fn ? <span class="err-pill fn">FN {d().fn}</span> : null}
+          {!d().fp && !d().fn ? <span class="ok">{d().truthCount ? 'Clean' : 'Empty'}</span> : null}
+          {showIou && d().meanIou !== null ? <span class="t-item faint">mIoU {num(d().meanIou, 2)}</span> : null}
+        </>
+      ) : (
+        <span class="t-item faint">
+          {d().truthCount} GT · {d().tp + d().fp} pred
+        </span>
+      )}
+    </>
+  );
+
+  const isFiltered = computed(() => errorFilter.get() !== 'all');
+  const posText = computed(() => {
+    const i = openIdx.get();
+    if (i < 0) return '';
+    if (isFiltered.get()) return `${num(i + 1)} of ${num(visible.get().length)} matching`;
+    return `${num(i + 1)} of ${num(total.get() ?? visible.get().length)}`;
+  });
+  const canStepNext = computed(() => {
+    const i = openIdx.get();
+    if (i < 0) return false;
+    if (i + 1 < visible.get().length) return true;
+    const t = total.get();
+    return t !== null && images.get().length < t;
+  });
 
   return (
     <>
@@ -232,68 +318,94 @@ export default function ImagesSection(props: ImagesSectionProps) {
         title="Images"
         meta={total.get() !== null ? imagesText(total.get()!) : undefined}
         id="images"
-        actions={() => <Segmented size="sm" label="Order of the images" bind:value={sort} options={SORTS} />}
+        actions={() => <Select size="sm" label="Sort evaluated images" bind:value={errorSort} options={SORT_OPTIONS} />}
       >
         <div class="head">
           <p class="what">
-            {shownText()} {sort.get() === 'worst' ? 'The most missed and wrong first.' : 'In the benchmark’s order.'}
+            {shownText()} {SORT_SENTENCE[errorSort.get()]}
           </p>
+          <div class="explorer-bar">
+            <Segmented size="sm" label="Filter images by error" bind:value={errorFilter} options={filterOptions.get()} />
+            {layerToggles()}
+          </div>
           <p class="legend">{legend()}</p>
         </div>
         {error.get() && !images.get().length ? (
           <ErrorState error={error.get()} compact title="Could not load its images" retry={() => load(true)} />
         ) : (
           <>
-            <ul class="grid" aria-label={`Images of ${props.entry.name}, ${sort.get() === 'worst' ? 'worst first' : 'in order'}`}>
-              <For each={images.get()} key={(im) => im.image.id}>
-                {(im, i) => {
-                  const c = computed(() => counts(im()));
-                  return (
-                    <li>
-                      <button
-                        type="button"
-                        class="tile"
-                        aria-label={`${im().image.file}: ${c.get().found} of ${c.get().boxes} found, ${c.get().missed} missed, ${c.get().wrong} wrong. Open`}
-                        onclick={() => open.set(i())}
-                      >
-                        <span class="img" style:aspect-ratio={ratio.get()}>
-                          <MatchView
-                            src={urls.get()[im().image.id] ?? null}
-                            width={im().image.width}
-                            height={im().image.height}
-                            truth={im().image.boxes}
-                            detections={im().detections}
-                            classes={props.bench.classes}
-                            alt=""
-                          />
-                        </span>
-                        <span class="cap num">{tally(() => c.get())}</span>
-                      </button>
-                    </li>
-                  );
-                }}
-              </For>
-              {loading.get() ? (
-                <For each={Array.from({ length: images.get().length ? 4 : 8 }, (_, k) => k)} key={(k) => k}>
-                  {() => (
-                    <li aria-hidden="true">
-                      <span class="tile sk">
-                        <span class="img" style:aspect-ratio={ratio.get()}>
-                          <Skeleton h="100%" r="0" image />
-                        </span>
-                        <span class="cap">
-                          <Skeleton w="60%" h="12px" />
-                        </span>
-                      </span>
-                    </li>
-                  )}
+            {!loading.get() && images.get().length > 0 && visible.get().length === 0 ? (
+              <div class="filter-empty" role="status">
+                <p>No loaded images match this error filter ({num(images.get().length)} inspected).</p>
+                <div class="filter-empty-actions">
+                  <Button size="sm" variant="secondary" onclick={() => errorFilter.set('all')}>
+                    Show all
+                  </Button>
+                  {total.get() !== null && images.get().length < total.get()! ? (
+                    <Button size="sm" variant="primary" loading={loading.get()} onclick={() => load(false)}>
+                      Load {Math.min(GALLERY_PAGE, total.get()! - images.get().length)} more
+                    </Button>
+                  ) : null}
+                </div>
+              </div>
+            ) : (
+              <ul class="grid" aria-label={`Images of ${props.entry.name}, ${SORT_OPTIONS.find((o) => o.value === errorSort.get())?.label.toLowerCase() ?? 'worst first'}`}>
+                <For each={visible.get()} key={(entry) => entry.item.image.id}>
+                  {(entry) => {
+                    const im = () => entry().item;
+                    const d = () => entry().diag;
+                    return (
+                      <li>
+                        <button
+                          type="button"
+                          class="tile"
+                          aria-label={`${im().image.file}: ${d().tp} of ${d().truthCount} found, ${d().fn} missed, ${d().fp} wrong. Open`}
+                          onclick={() => openId.set(im().image.id)}
+                        >
+                          <span class="img" style:aspect-ratio={ratio.get()}>
+                            <MatchView
+                              src={urls.get()[im().image.id] ?? null}
+                              width={im().image.width}
+                              height={im().image.height}
+                              truth={im().image.boxes}
+                              detections={im().detections}
+                              classes={props.bench.classes}
+                              showTruth={showTruth.get()}
+                              showPred={showPred.get()}
+                              showErrors={showErrors.get()}
+                              alt=""
+                            />
+                          </span>
+                          <span class="cap num">{tally(d)}</span>
+                        </button>
+                      </li>
+                    );
+                  }}
                 </For>
-              ) : null}
-            </ul>
+                {loading.get() ? (
+                  <For each={Array.from({ length: images.get().length ? 4 : 8 }, (_, k) => k)} key={(k) => k}>
+                    {() => (
+                      <li aria-hidden="true">
+                        <span class="tile sk">
+                          <span class="img" style:aspect-ratio={ratio.get()}>
+                            <Skeleton h="100%" r="0" image />
+                          </span>
+                          <span class="cap">
+                            <Skeleton w="60%" h="12px" />
+                          </span>
+                        </span>
+                      </li>
+                    )}
+                  </For>
+                ) : null}
+              </ul>
+            )}
             {total.get() !== null ? (
               <div class="foot">
                 <span class="count num" role="status" aria-live="polite">
-                  {num(images.get().length)} of {num(total.get()!)}
+                  {isFiltered.get()
+                    ? `${num(visible.get().length)} matching of ${num(images.get().length)} loaded (${num(total.get()!)} total)`
+                    : `${num(images.get().length)} of ${num(total.get()!)}`}
                 </span>
                 {images.get().length < total.get()! ? (
                   <Button size="sm" loading={loading.get() && images.get().length > 0} onclick={() => load(false)}>
@@ -307,30 +419,26 @@ export default function ImagesSection(props: ImagesSectionProps) {
       </Panel>
 
       <Dialog
-        open={open.get() !== null}
-        onclose={() => open.set(null)}
+        open={shown.get() !== null}
+        onclose={() => openId.set(null)}
         title={shown.get()?.image.file ?? 'Image'}
         size="lg"
         class="viewer"
         footer={() => (
           <>
             <span class="v-pos num" aria-live="polite">
-              {open.get() !== null ? `${num(open.get()! + 1)} of ${num(total.get() ?? images.get().length)}` : ''}
+              {posText.get()}
             </span>
-            <Button icon={ChevronLeft} disabled={!open.get()} onclick={() => step(-1)}>
+            <Button icon={ChevronLeft} disabled={openIdx.get() <= 0} onclick={() => step(-1)}>
               Previous
             </Button>
-            <Button
-              iconRight={ChevronRight}
-              disabled={open.get() === null || (total.get() !== null && open.get()! >= total.get()! - 1)}
-              onclick={() => step(1)}
-            >
+            <Button iconRight={ChevronRight} loading={loading.get()} disabled={!canStepNext.get()} onclick={() => step(1)}>
               Next
             </Button>
           </>
         )}
       >
-        {shown.get() ? (
+        {shownEntry.get() ? (
           <div class="v-body">
             {/* The image at its own shape, as large as the column and 64% of the viewport's height allow: a portrait photo
                 takes the width that height gives it, centred, never between bands of the well. */}
@@ -348,28 +456,46 @@ export default function ImagesSection(props: ImagesSectionProps) {
                 truth={shown.get()!.image.boxes}
                 detections={shown.get()!.detections}
                 classes={props.bench.classes}
+                showTruth={showTruth.get()}
+                showPred={showPred.get()}
+                showErrors={showErrors.get()}
                 full
                 active={active.get()}
                 alt={shown.get()!.image.file}
               />
             </div>
             <div class="v-side">
-              <p class="v-tally num">{tally(() => shownCounts.get())}</p>
+              <p class="v-tally num">{tally(() => shownEntry.get()!.diag, true)}</p>
+              {layerToggles()}
               <p class="legend">{legend()}</p>
               <ul class="v-list" aria-label={`Boxes of ${shown.get()!.image.file}`}>
-                <For each={rows.get()} key={(r) => r.key} fallback={<li class="v-none">No true box and no detection.</li>}>
-                  {(r) => (
-                    <li onpointerenter={() => active.set(r().key)} onpointerleave={() => active.set(null)}>
-                      <i class={`k ${r().outcome}`} aria-hidden="true">
-                        {r().outcome === 'wrong' ? <b></b> : null}
-                      </i>
-                      <span class="v-cls">{name(r().cls)}</span>
-                      <span class="v-what">
-                        {r().outcome === 'right' ? `right · IoU ${num(r().iou, 2)}` : r().outcome === 'wrong' ? 'wrong' : 'missed'}
-                      </span>
-                      <span class="v-sc num">{r().score !== null && props.entry.scored ? conf(r().score!) : ''}</span>
-                    </li>
-                  )}
+                <For each={shownEntry.get()!.diag.boxes} key={(r) => r.key} fallback={<li class="v-none">No true box and no detection.</li>}>
+                  {(r) => {
+                    const isPredRow = () => r().key.startsWith('d');
+                    const canHighlight = () => (isPredRow() ? showPred.get() : showTruth.get());
+                    const swatchClass = () => (showErrors.get() ? r().outcome : isPredRow() ? 'plain-pred' : 'plain-truth');
+                    return (
+                      <li
+                        tabindex={0}
+                        class:on={active.get() === r().key}
+                        onpointerenter={() => canHighlight() && active.set(r().key)}
+                        onpointerleave={() => active.set(null)}
+                        onfocus={() => canHighlight() && active.set(r().key)}
+                        onblur={() => active.set(null)}
+                      >
+                        <i class={`k ${swatchClass()}`} aria-hidden="true">
+                          {showErrors.get() && r().outcome === 'wrong' ? <b></b> : null}
+                        </i>
+                        <div class="v-info">
+                          <span class="v-cls">{name(r().cls)}</span>
+                          <span class="v-what" class:mismatch={showErrors.get() && r().cause === 'class-mismatch'}>
+                            {showErrors.get() ? r().detail : isPredRow() ? 'Predicted' : 'Ground truth'}
+                          </span>
+                        </div>
+                        <span class="v-sc num">{r().score !== null && props.entry.scored ? conf(r().score!) : ''}</span>
+                      </li>
+                    );
+                  }}
                 </For>
               </ul>
             </div>
@@ -383,13 +509,33 @@ export default function ImagesSection(props: ImagesSectionProps) {
 css`
   .head {
     display: grid;
+    grid-template-columns: minmax(0, 1fr);
     gap: var(--space-2);
     margin-bottom: var(--space-3);
   }
   .what {
+    min-width: 0;
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
     color: var(--text-secondary);
+  }
+  .explorer-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: var(--space-2) var(--space-3);
+    min-width: 0;
+    max-width: 100%;
+  }
+  .explorer-bar :global(.seg button) {
+    flex-shrink: 0;
+  }
+  .layers {
+    display: inline-flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--space-1);
   }
   .legend {
     display: flex;
@@ -405,6 +551,28 @@ css`
     align-items: center;
     gap: 6px;
     white-space: nowrap;
+  }
+  .err-pill {
+    display: inline-flex;
+    align-items: center;
+    padding: 0 6px;
+    border-radius: var(--radius-xs);
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    font-weight: var(--weight-medium);
+    white-space: nowrap;
+  }
+  .err-pill.tp {
+    background: color-mix(in srgb, var(--success-solid) 14%, transparent);
+    color: var(--success-text);
+  }
+  .err-pill.fp {
+    background: color-mix(in srgb, var(--danger-solid) 14%, transparent);
+    color: var(--danger-text);
+  }
+  .err-pill.fn {
+    background: color-mix(in srgb, var(--warning-solid) 16%, transparent);
+    color: var(--warning-text);
   }
   /* The legend's keys: the boxes as drawn, each its line style and its status ink. */
   .k {
@@ -425,6 +593,13 @@ css`
     --c: var(--warning-solid);
     border-style: dashed;
   }
+  .k.plain-pred {
+    --c: var(--accent-solid);
+  }
+  .k.plain-truth {
+    --c: var(--info-solid);
+    border-style: dashed;
+  }
   .k b {
     position: absolute;
     left: -4px;
@@ -436,6 +611,25 @@ css`
       linear-gradient(45deg, transparent 40%, var(--bg-panel) 40% 60%, transparent 60%),
       linear-gradient(-45deg, transparent 40%, var(--bg-panel) 40% 60%, transparent 60%),
       var(--danger-solid);
+  }
+  .filter-empty {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-3);
+    padding: var(--space-8) var(--space-4);
+    border-radius: var(--radius-md);
+    background: var(--bg-inset);
+    color: var(--text-secondary);
+    font-size: var(--type-sm-size);
+    text-align: center;
+  }
+  .filter-empty-actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: var(--space-2);
   }
   /* Tiles at least 200 px wide, as many as fit (an intrinsic grid: the panel's width decides). */
   .grid {
@@ -465,7 +659,8 @@ css`
   .cap {
     display: flex;
     flex-wrap: wrap;
-    gap: 2px var(--space-3);
+    align-items: center;
+    gap: var(--space-1) var(--space-2);
     min-height: 20px;
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
@@ -473,6 +668,9 @@ css`
   }
   .ok {
     color: var(--text-secondary);
+  }
+  .faint {
+    color: var(--text-tertiary);
   }
   .foot {
     display: flex;
@@ -487,7 +685,7 @@ css`
   }
   .v-body {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) 260px;
+    grid-template-columns: minmax(0, 1fr) 296px;
     gap: var(--space-4);
     align-items: start;
   }
@@ -505,27 +703,42 @@ css`
   .v-tally {
     display: flex;
     flex-wrap: wrap;
-    gap: 2px var(--space-3);
+    align-items: center;
+    gap: var(--space-1) var(--space-2);
   }
   .v-list {
     display: grid;
-    max-height: 48dvh;
+    max-height: 44dvh;
     overflow-y: auto;
   }
   .v-list li {
     display: grid;
-    grid-template-columns: 16px minmax(0, 1fr) auto 40px;
+    grid-template-columns: 16px minmax(0, 1fr) 40px;
     align-items: center;
     gap: var(--space-2);
-    min-height: 28px;
+    min-height: 36px;
+    padding: var(--space-1) var(--space-1);
     border-top: 1px solid var(--line-subtle);
     font-size: var(--type-sm-size);
+    border-radius: var(--radius-xs);
+  }
+  .v-list li.on,
+  .v-list li:focus-visible {
+    background: var(--bg-hover);
+  }
+  .v-info {
+    display: grid;
+    min-width: 0;
   }
   .v-cls {
     color: var(--text-primary);
+    font-weight: var(--weight-medium);
   }
   .v-what {
     color: var(--text-secondary);
+  }
+  .v-what.mismatch {
+    color: var(--warning-text);
   }
   .v-sc {
     text-align: right;
@@ -542,7 +755,7 @@ css`
   }
   @media (min-width: 768px) {
     :global(dialog.lg.viewer) {
-      width: min(1100px, calc(100vw - 48px));
+      width: min(1140px, calc(100vw - 48px));
     }
   }
   @media (max-width: 1023px) {

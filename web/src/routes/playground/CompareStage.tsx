@@ -29,6 +29,10 @@ export interface CompareStageProps {
   view: CompareViewMode;
   splitPct?: number;
   zoom: ZoomState;
+  /** Optional stable zoom reset key (e.g. per video file or webcam session) so live frames preserve zoom/pan. */
+  zoomResetKey?: string;
+  /** Keep previous frame opaque across rapid local frame swaps (avoids blank-frame flicker). */
+  keepPrevious?: boolean;
   labels: boolean;
   scores: boolean;
   truthBoxes: Img['boxes'];
@@ -178,7 +182,7 @@ export default function CompareStage(props: CompareStageProps) {
     </div>
   );
 
-  const resetKey = () => sourceImageKey(props.source);
+  const resetKey = () => props.zoomResetKey ?? sourceImageKey(props.source);
 
   const viewA = () => (
     <DetectionView
@@ -197,6 +201,7 @@ export default function CompareStage(props: CompareStageProps) {
       onhover={(i) => props.onHoverA(i === null ? null : (props.keptA[i] ?? null))}
       onselect={props.onSelectA}
       onload={props.onImageLoad}
+      keepPrevious={props.keepPrevious}
       alt={`${props.sourceName} — Model A (${props.modelA?.name ?? 'A'})`}
     />
   );
@@ -217,6 +222,7 @@ export default function CompareStage(props: CompareStageProps) {
       selected={props.selectedIdxB}
       onhover={(i) => props.onHoverB(i === null ? null : (props.keptB[i] ?? null))}
       onselect={props.onSelectB}
+      keepPrevious={props.keepPrevious}
       alt={`${props.sourceName} — Model B (${props.modelB?.name ?? 'B'})`}
     />
   );

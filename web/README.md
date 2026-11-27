@@ -108,8 +108,8 @@ Screens (`src/routes/`):
 | Labeling | `#/datasets/label`, `#/datasets/label/<id>` | `LabelJobs.tsx`, `LabelJob.tsx` | `label/` |
 | Runs | `#/runs`, `#/runs/new`, `#/runs/compare`, `#/runs/<id>` | `Runs.tsx`, `RunNew.tsx`, `RunCompare.tsx`, `Run.tsx` | `runs/`, `runnew/` (`state.ts`, `SummaryRail.tsx`, sections, estimation & validation), `compare/` (`config.ts`, `state.ts`, `ComparePlot.tsx`, `RunChips.tsx`, `AddRun.tsx`, `ManageSheet.tsx`, `CompareTable.tsx`), `run/` |
 | Models | `#/models`, `#/models/<id>` | `Models.tsx`, `Model.tsx` | `models/`, `model/` |
-| Benchmarks | `#/benchmarks`, `#/benchmarks/<id>`, `…/<id>/entries/<entryId>`, `…/<id>/compare`, `…/<id>/loops/<loopId>` | `Benchmarks.tsx`, `Benchmark.tsx`, `BenchEntry.tsx`, `BenchCompare.tsx`, `BenchLoop.tsx` | `bench/` |
-| Playground | `#/playground` | `Playground.tsx` | `playground/` (single & A/B visual compare with synchronized zoom/pan, annotated PNG & JSON export, video/camera frame capture) |
+| Benchmarks | `#/benchmarks`, `#/benchmarks/<id>`, `…/<id>/entries/<entryId>`, `…/<id>/compare`, `…/<id>/loops/<loopId>` | `Benchmarks.tsx`, `Benchmark.tsx`, `BenchEntry.tsx`, `BenchCompare.tsx`, `BenchLoop.tsx` | `bench/` (including `entry/` Per-Image Error-Analysis Explorer with FP/FN/IoU diagnostic filters & GT/Pred/Error layer toggles) |
+| Playground | `#/playground` | `Playground.tsx` | `playground/` (single & A/B visual compare with synchronized zoom/pan, annotated PNG & JSON export, inline local video frame scrubber, live webcam detection) |
 | Settings | `#/settings` | `Settings.tsx` | `settings/` |
 | (any other) | | `NotFound.tsx`, rendered by `App` | |
 

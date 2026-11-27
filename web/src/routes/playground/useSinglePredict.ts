@@ -5,7 +5,7 @@ import type { Prediction } from '$lib/api/types';
 import { isDetectorLoadError, type BrowserEngine } from '$lib/inference/browser';
 import { askAllWhenCut } from './allCandidates';
 import { ask, FETCH, noServerWeights, type RunOn } from './predict';
-import type { Source } from './source';
+import { sourceImageKey, type Source } from './source';
 import type { Det } from './viewState';
 
 export interface SinglePredictInput {
@@ -18,6 +18,8 @@ export interface SinglePredictInput {
   /** Optional one-shot reuse check (e.g. after swapping Model A and Model B in Compare mode). */
   consumeReuse?: (model: string, s: Source, runOn: RunOn) => boolean;
   pred: Signal<Prediction | null>;
+  /** Tracks which `sourceImageKey(source)` produced `pred` so exports never pair a frame with stale boxes. */
+  predSourceKey: Signal<string | null>;
   predicting: Signal<boolean>;
   error: Signal<unknown>;
   weightsMissing: Signal<boolean>;
@@ -27,6 +29,8 @@ export interface SinglePredictInput {
   conf: Signal<number>;
   engine: BrowserEngine;
   dropLocal: (id: string, f: File, e: unknown) => void;
+  /** True while streaming live video/webcam frames (skips secondary full-candidate re-fetches). */
+  isLiveStream?: () => boolean;
 }
 
 export function useSinglePredict(o: SinglePredictInput): () => boolean {
@@ -46,12 +50,14 @@ export function useSinglePredict(o: SinglePredictInput): () => boolean {
     void o.retryTick.get();
     if (!id || !s || untrack(() => o.restored(id, s, on) || !!o.consumeReuse?.(id, s, on))) {
       untrack(() => {
+        if (s && o.pred.peek()) o.predSourceKey.set(sourceImageKey(s));
         o.predicting.set(false);
         o.error.set(null);
         o.weightsMissing.set(false);
       });
       return;
     }
+    const frameKey = sourceImageKey(s);
     const ctrl = new AbortController();
     untrack(() => {
       o.predicting.set(true);
@@ -61,6 +67,7 @@ export function useSinglePredict(o: SinglePredictInput): () => boolean {
       const p = o.pred.get();
       if (p && (p.model_id !== id || (p.backend ?? 'server') !== on)) {
         o.pred.set(null);
+        o.predSourceKey.set(null);
         if (p.model_id !== id) o.hidden.set(new Set());
         o.hover.set(null);
         o.picked.set(null);
@@ -71,6 +78,7 @@ export function useSinglePredict(o: SinglePredictInput): () => boolean {
       (p) => {
         if (ctrl.signal.aborted) return;
         o.pred.set(p);
+        o.predSourceKey.set(frameKey);
         o.hover.set(null);
         o.picked.set(null);
         o.predicting.set(false);
@@ -80,6 +88,7 @@ export function useSinglePredict(o: SinglePredictInput): () => boolean {
         o.predicting.set(false);
         if (file && on !== 'server' && isDetectorLoadError(e)) {
           o.pred.set(null);
+          o.predSourceKey.set(null);
           o.hover.set(null);
           o.picked.set(null);
           o.dropLocal(id, file, e);
@@ -87,12 +96,14 @@ export function useSinglePredict(o: SinglePredictInput): () => boolean {
         }
         if (on !== 'server' && !file && noServerWeights(e)) {
           o.pred.set(null);
+          o.predSourceKey.set(null);
           o.hover.set(null);
           o.picked.set(null);
           o.weightsMissing.set(true);
           return;
         }
         o.pred.set(null);
+        o.predSourceKey.set(null);
         o.hover.set(null);
         o.picked.set(null);
         o.error.set(e);
@@ -108,7 +119,7 @@ export function useSinglePredict(o: SinglePredictInput): () => boolean {
     source: () => o.source.get(),
     runOn: () => o.runOn.get(),
     file: () => activeFile.peek(),
-    busy: () => o.predicting.get(),
+    busy: () => o.predicting.get() || !!o.isLiveStream?.(),
     engine: o.engine,
     weightsMissing: () => o.weightsMissing.set(true),
   });

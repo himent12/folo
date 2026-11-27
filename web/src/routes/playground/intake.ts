@@ -5,9 +5,6 @@
 /** The formats the server reads, as every message here names them. */
 export const FORMATS = 'JPEG, PNG, BMP or WebP';
 
-/** The picker's filter: every image (the rest are converted). */
-export const ACCEPT = 'image/*';
-
 export type Taken = { file: Blob; name: string; width: number; height: number; converted: boolean } | { error: string };
 
 /** True when `head` (a file's first bytes) starts a JPEG, PNG, BMP or WebP file. Exported for tests. */

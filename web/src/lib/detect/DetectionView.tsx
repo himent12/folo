@@ -53,6 +53,8 @@ export interface DetectionViewProps {
   compact?: boolean;
   /** Hint for the browser's fetch scheduler (`high` for visible viewport tiles, `low` for overscan). */
   priority?: 'high' | 'low' | 'auto';
+  /** Keep the previous frame opaque across local `src` updates (avoids blank-frame flicker during video/webcam ticks). */
+  keepPrevious?: boolean;
   alt?: string;
   /** Called once the image has loaded (or failed). */
   onload?: (ok: boolean) => void;
@@ -159,7 +161,7 @@ export default function DetectionView(props: DetectionViewProps) {
   effect.pre(() => {
     void src.get();
     loadSeq++;
-    loaded.set(false);
+    if (!p.keepPrevious) loaded.set(false);
   });
 
   function onImgLoad(e: Event) {

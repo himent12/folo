@@ -25,6 +25,12 @@ export interface MatchViewProps {
   full?: boolean;
   /** `d<i>` for detection i, `t<i>` for true box i. */
   active?: string | null;
+  /** Show ground-truth boxes (missed GT in error mode, or all GT boxes when predictions are hidden). Default true. */
+  showTruth?: boolean;
+  /** Show predicted boxes (TP and FP). Default true. */
+  showPred?: boolean;
+  /** Highlight TP/FP/FN outcomes with status colors and FP crosses; when false, draws clean GT vs Pred boxes. Default true. */
+  showErrors?: boolean;
   alt?: string;
 }
 
@@ -32,12 +38,17 @@ interface Mark {
   key: string;
   box: Box;
   outcome: Outcome;
+  /** Visual role rendered on the canvas: status outcome when `showErrors` is on, else plain truth/pred. */
+  visual: Outcome | 'plain-pred' | 'plain-truth';
   score: number | undefined;
 }
 
 export default function MatchView(props: MatchViewProps) {
   const full = () => props.full ?? false;
   const active = () => props.active ?? null;
+  const showTruth = () => props.showTruth ?? true;
+  const showPred = () => props.showPred ?? true;
+  const showErrors = () => props.showErrors ?? true;
 
   const cw = signal(0);
   const ch = signal(0);
@@ -49,13 +60,37 @@ export default function MatchView(props: MatchViewProps) {
   // The whole image in the frame, whatever either's shape (a portrait photo in a landscape tile sits between two bands
   // of the well); every box goes through the same fit, so it stays on its object ($lib/bench/frame).
   const m = computed(() => matchImage(props.truth, props.detections));
-  /** What is drawn: every detection, right or wrong, then every true box nothing found. */
+  /** What is drawn, respecting the GT / Pred / Error layer toggles while keeping default appearance identical. */
   const marks = computed<Mark[]>(() => {
     const mm = m.get();
-    return [
-      ...mm.detections.map((d) => ({ key: `d${d.index}`, box: d.det as Box, outcome: (d.truth === null ? 'wrong' : 'right') as Outcome, score: d.det.score })),
-      ...props.truth.flatMap((t, i) => (mm.found[i] === null ? [{ key: `t${i}`, box: t, outcome: 'missed' as Outcome, score: undefined }] : [])),
-    ];
+    const err = showErrors();
+    const predOn = showPred();
+    const truthOn = showTruth();
+    const out: Mark[] = [];
+    if (predOn) {
+      for (const d of mm.detections) {
+        const outcome: Outcome = d.truth === null ? 'wrong' : 'right';
+        out.push({
+          key: `d${d.index}`,
+          box: d.det as Box,
+          outcome,
+          visual: err ? outcome : 'plain-pred',
+          score: d.det.score,
+        });
+      }
+    }
+    if (truthOn) {
+      props.truth.forEach((t, i) => {
+        const missed = mm.found[i] === null;
+        if (missed) {
+          out.push({ key: `t${i}`, box: t, outcome: 'missed', visual: err ? 'missed' : 'plain-truth', score: undefined });
+        } else if (!predOn || !err) {
+          // When predictions are hidden or error highlighting is off, show matched GT boxes too so full GT is visible.
+          out.push({ key: `t${i}`, box: t, outcome: 'right', visual: 'plain-truth', score: undefined });
+        }
+      });
+    }
+    return out;
   });
   // A thumbnail's box marks reach outside it (the CSS below): its line and halo 2 px, a wrong box's cross 5 px, and half
   // a pixel more for a box drawn at the 1 px minimum about its centre (below). The
@@ -67,14 +102,18 @@ export default function MatchView(props: MatchViewProps) {
   const room = computed(() => {
     const f = plain.get();
     if (!f || full()) return 0;
-    const r = edgeRoom(f, cw.get(), ch.get(), marks.get().flatMap((k) => (on(k.box) ? [{ ...k.box, reach: k.outcome === 'wrong' ? 5.5 : 2.5 }] : [])));
+    const r = edgeRoom(f, cw.get(), ch.get(), marks.get().flatMap((k) => (on(k.box) ? [{ ...k.box, reach: k.visual === 'wrong' ? 5.5 : 2.5 }] : [])));
     // Never so much that the image is gone (a long strip in a short tile).
     return 4 * r < Math.min(cw.get(), ch.get()) ? r : 0;
   });
   const geo = computed(() => insetFit(cw.get(), ch.get(), props.width, props.height, room.get()));
   const name = (c: number) => props.classes[c] ?? `class ${c}`;
   const chipText = (k: Mark) =>
-    k.outcome === 'missed' ? `missed ${name(k.box.class)}` : `${name(k.box.class)}${k.score !== undefined && k.score < 1 ? ` ${k.score.toFixed(2)}` : ''}`;
+    k.visual === 'missed'
+      ? `missed ${name(k.box.class)}`
+      : k.visual === 'plain-truth'
+        ? `GT ${name(k.box.class)}`
+        : `${name(k.box.class)}${k.score !== undefined && k.score < 1 ? ` ${k.score.toFixed(2)}` : ''}`;
   // Full size: each box's chip placed beside its own box, never over another chip (./lib/detect/chips, as the
   // inspector's); wrong and missed first, since they are what the view is for. A chip with no free slot shows on hover.
   const order = computed(() =>
@@ -94,7 +133,7 @@ export default function MatchView(props: MatchViewProps) {
       ord.map(({ k }) => ({
         x: g.ox + k.box.x1 * g.s,
         y: g.oy + k.box.y1 * g.s,
-        w: Math.ceil(chipText(k).length * (small ? 5.8 : 6.4) + (small ? 10 : 12)) + (k.outcome === 'wrong' ? 12 : 0),
+        w: Math.ceil(chipText(k).length * (small ? 5.8 : 6.4) + (small ? 10 : 12)) + (k.visual === 'wrong' ? 12 : 0),
         bw: (k.box.x2 - k.box.x1) * g.s,
         bh: (k.box.y2 - k.box.y1) * g.s,
       })),
@@ -127,7 +166,7 @@ export default function MatchView(props: MatchViewProps) {
               const chip = () => chips.get()[n()];
               return (
                 <div
-                  class={`box ${k().outcome}`}
+                  class={`box ${k().visual}`}
                   class:on={active() === k().key}
                   class:dim={active() !== null && active() !== k().key}
                   style:left={`${at.get().left}px`}
@@ -135,11 +174,13 @@ export default function MatchView(props: MatchViewProps) {
                   style:width={`${at.get().width}px`}
                   style:height={`${at.get().height}px`}
                 >
-                  {k().outcome === 'wrong' ? <span class="x"></span> : null}
+                  {k().visual === 'wrong' ? <span class="x"></span> : null}
                   {full() && chip() && (!chip()!.hidden || active() === k().key) ? (
-                    <span class="chip" style:left={`${chip()!.dx - 2 + (k().outcome === 'wrong' ? 12 : 0)}px`} style:top={`${chip()!.dy - 2}px`}>
-                      {k().outcome === 'missed' ? (
+                    <span class="chip" style:left={`${chip()!.dx - 2 + (k().visual === 'wrong' ? 12 : 0)}px`} style:top={`${chip()!.dy - 2}px`}>
+                      {k().visual === 'missed' ? (
                         `missed ${name(k().box.class)}`
+                      ) : k().visual === 'plain-truth' ? (
+                        `GT ${name(k().box.class)}`
                       ) : (
                         <>
                           {name(k().box.class)}
@@ -200,11 +241,18 @@ css`
   .box.wrong {
     --c: var(--bad);
   }
-  .box.missed {
+  .box.missed,
+  .box.plain-truth {
     --c: var(--miss);
     border-style: dashed;
     box-shadow: none;
     filter: drop-shadow(0 0 0.75px var(--class-halo)) drop-shadow(0 0 0.75px var(--class-halo));
+  }
+  .box.plain-truth {
+    --c: var(--info-solid);
+  }
+  .box.plain-pred {
+    --c: var(--accent-solid);
   }
   /* A wrong detection's cross: a small square on its top-left corner, the cross cut in the halo's ink. */
   .x {
@@ -228,7 +276,8 @@ css`
       0 0 0 1.5px var(--class-halo),
       inset 0 0 0 1px var(--class-halo);
   }
-  .full .box.missed {
+  .full .box.missed,
+  .full .box.plain-truth {
     box-shadow: none;
   }
   .full .x {
