@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use folo_api::{Split, Splits};
 use folo_data::convert::{CocoExportOptions, CocoImageMode, export_coco};
 use folo_data::{DataError, LoadedDataset, OpenOptions, open_with};
+use folo_server::Store;
 use http::StatusCode;
 
 use super::curate::{check_unreadable_splits, data_error, slug, to_data_format, to_data_split};
@@ -48,12 +49,12 @@ fn allocate_export_dir(
 ) -> Result<PathBuf, Error> {
     let root = base.join("exports");
     if let Some(paths) = confine_policy {
-        paths.check_dir_inside(&root)?;
+        check_export_out_inside(paths, &root)?;
     }
     std::fs::create_dir_all(&root)
         .map_err(|e| Error::internal(format!("creating {}: {e}", folo_api::json::path(&root))))?;
     if let Some(paths) = confine_policy {
-        paths.check_dir_inside(&root)?;
+        check_export_out_inside(paths, &root)?;
     }
     let stem = format!("{}-coco", slug(name));
     for n in 1u32..10_000 {
@@ -72,66 +73,6 @@ fn allocate_export_dir(
     )))
 }
 
-/// Canonical path of `p`, resolving each existing prefix with filesystem semantics before applying any subsequent
-/// `..` (so Windows `\\?\` prefixes, symlinks, and junctions match `std::fs::canonicalize` on the dataset root
-/// even when the target folder does not exist yet).
-fn canonical_target(p: &Path) -> Option<PathBuf> {
-    let p = if p.as_os_str().is_empty() { Path::new(".") } else { p };
-    let abs = std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
-    let mut cur = PathBuf::new();
-    let mut missing = false;
-    for c in abs.components() {
-        match c {
-            std::path::Component::CurDir => {}
-            std::path::Component::Prefix(prefix) => {
-                cur.push(prefix.as_os_str());
-            }
-            std::path::Component::RootDir => {
-                cur.push(std::path::Component::RootDir);
-                if let Ok(canon) = std::fs::canonicalize(&cur) {
-                    cur = canon;
-                    missing = false;
-                } else {
-                    missing = true;
-                }
-            }
-            std::path::Component::ParentDir => {
-                if !missing {
-                    if let Ok(canon) = std::fs::canonicalize(cur.join("..")) {
-                        cur = canon;
-                    } else {
-                        let _ = cur.pop();
-                        missing = true;
-                    }
-                } else {
-                    let _ = cur.pop();
-                    if let Ok(canon) = std::fs::canonicalize(&cur) {
-                        cur = canon;
-                        missing = false;
-                    }
-                }
-            }
-            std::path::Component::Normal(part) => {
-                cur.push(part);
-                if !missing {
-                    if let Ok(canon) = std::fs::canonicalize(&cur) {
-                        cur = canon;
-                    } else {
-                        missing = true;
-                    }
-                }
-            }
-        }
-    }
-    if cur.as_os_str().is_empty() {
-        return None;
-    }
-    if missing && !cur.ancestors().skip(1).any(Path::exists) {
-        return None;
-    }
-    Some(cur)
-}
-
 /// Enforces `--confine` on a caller-supplied export destination with a write-specific hint.
 fn check_export_out_inside(paths: &PathPolicy, dir: &Path) -> Result<(), Error> {
     paths.check_dir_inside(dir).map_err(|err| {
@@ -146,9 +87,41 @@ fn check_export_out_inside(paths: &PathPolicy, dir: &Path) -> Result<(), Error> 
     })
 }
 
-/// Checks that `out_dir` does not overlap the input dataset or its source folders.
+/// Checks that `dir` is not equal to or inside the input dataset (used before creating `<write_root>/exports`
+/// when `out` is omitted, while still allowing disjoint sibling folders under `exports/`).
+fn check_dir_not_inside_input(dir: &Path, input: &Path, ds: &LoadedDataset) -> Result<(), Error> {
+    let Some(canon_out) =
+        std::fs::canonicalize(dir).ok().or_else(|| crate::paths::resolve_nonexistent(dir, 0))
+    else {
+        return Ok(());
+    };
+    let input_dir: PathBuf = if input.is_dir() {
+        input.to_path_buf()
+    } else {
+        let abs = folo_data::paths::normalize(input);
+        abs.parent().map_or(abs.clone(), Path::to_path_buf)
+    };
+    for p in ds.sources.iter().map(PathBuf::as_path).chain([ds.root.as_path(), input_dir.as_path()]) {
+        if let Ok(canon_in) = std::fs::canonicalize(p)
+            && canon_out.starts_with(&canon_in)
+        {
+            return Err(invalid_arguments(format!(
+                "default export folder ({}) lies inside the input dataset ({}); pass an explicit `out` outside it",
+                folo_api::json::path(dir),
+                folo_api::json::path(p)
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Checks that `out_dir` does not overlap the input dataset or its source folders, reusing `paths::resolve_nonexistent`
+/// so Windows `\\?\` prefixes, `..` traversals, case-insensitive ancestors, symlinks, and junctions all resolve
+/// identically to `std::fs::canonicalize` on the dataset paths.
 fn check_output_outside_input(out_dir: &Path, input: &Path, ds: &LoadedDataset) -> Result<(), Error> {
-    let Some(canon_out) = canonical_target(out_dir) else {
+    let Some(canon_out) =
+        std::fs::canonicalize(out_dir).ok().or_else(|| crate::paths::resolve_nonexistent(out_dir, 0))
+    else {
         return Ok(());
     };
     let input_dir: PathBuf = if input.is_dir() {
@@ -196,7 +169,7 @@ fn ensure_empty_export_target(out_dir: &Path) -> Result<(), Error> {
     }
 }
 
-fn export_error(e: DataError) -> Error {
+fn export_error(e: DataError, confined: bool) -> Error {
     match &e {
         DataError::Io { source, .. }
             if matches!(
@@ -206,12 +179,55 @@ fn export_error(e: DataError) -> Error {
         {
             Error::new(StatusCode::CONFLICT, "output_exists", e.to_string())
         }
+        DataError::Io { source, .. } if source.kind() == std::io::ErrorKind::PermissionDenied && confined => {
+            Error::new(StatusCode::FORBIDDEN, "path_outside_data_dir", e.to_string())
+        }
+        DataError::Io { .. } => Error::internal(e.to_string()),
         DataError::Config(m) => Error::new(StatusCode::BAD_REQUEST, "invalid_dataset", m.clone()),
         _ => data_error(e),
     }
 }
 
 impl Inner {
+    /// Resolves the write root `data_dir` for `dataset_export` without checking `<data_dir>/datasets` or touching
+    /// disk in `--mock` / remote proxy modes.
+    async fn export_write_root(&self) -> Result<PathBuf, Error> {
+        let Some(proxy) = &self.proxy else {
+            if self.blocking(|s| Ok(s.is_mock())).await? {
+                return Err(Error::new(
+                    StatusCode::NOT_IMPLEMENTED,
+                    "not_supported",
+                    "dataset_export writes dataset files and is not supported in --mock mode",
+                )
+                .hint("run `folo mcp` without --mock"));
+            }
+            return Ok(self.opts.data_dir.clone());
+        };
+        let proxy = proxy.clone();
+        let fallback = self.paths.data_dir.clone();
+        tokio::task::spawn_blocking(move || -> Result<PathBuf, Error> {
+            if !crate::confine::is_local_url(proxy.base()) {
+                return Err(Error::new(
+                    StatusCode::NOT_IMPLEMENTED,
+                    "not_supported",
+                    format!("dataset_export is not available through remote server {}", proxy.base()),
+                )
+                .hint("run `folo mcp` locally without --server, or run `folo dataset` on the server host"));
+            }
+            if proxy.is_mock() {
+                return Err(Error::new(
+                    StatusCode::NOT_IMPLEMENTED,
+                    "not_supported",
+                    "dataset_export writes dataset files and is not supported against a --mock server",
+                )
+                .hint("run against a real `folo serve` (without --mock) or embedded `folo mcp`"));
+            }
+            Ok(proxy.remote_data_dir()?.map(PathBuf::from).unwrap_or(fallback))
+        })
+        .await
+        .map_err(super::join)?
+    }
+
     pub(super) async fn dataset_export(&self, a: DatasetExportArgs) -> Result<Output, Error> {
         let DatasetExportFormat::Coco = a.format;
         let explicit_out = match a.out {
@@ -225,14 +241,12 @@ impl Inner {
             }
             None => None,
         };
-        if let Some(ref out_dir) = explicit_out {
-            check_export_out_inside(&self.paths, out_dir)?;
-        }
-        let write_root = self.dataset_write_root("dataset_export").await?;
+        let write_root = self.export_write_root().await?;
         let (ds, path) = self.resolve_local_dataset("dataset_export", &a.dataset_id).await?;
         let src_fmt = to_data_format(ds.format);
         let ds_name = ds.name.clone();
         let confine_paths = self.confinement.active().then(|| self.paths.clone());
+        let confined = confine_paths.is_some();
         let splits: Vec<folo_data::Split> =
             a.splits.unwrap_or_default().into_iter().map(to_data_split).collect();
         let image_mode = to_coco_image_mode(a.images);
@@ -241,25 +255,33 @@ impl Inner {
 
         let report =
             tokio::task::spawn_blocking(move || -> Result<folo_data::convert::CocoExportReport, Error> {
+                if let (Some(dir), Some(paths)) = (explicit_out.as_ref(), confine_paths.as_ref()) {
+                    check_export_out_inside(paths, dir)?;
+                }
                 let loaded = open_with(&path, &OpenOptions { format: src_fmt, verify_images: true })
-                    .map_err(data_error)?;
+                    .map_err(|e| export_error(e, confined))?;
                 check_unreadable_splits(&loaded, &path)?;
                 let (out_dir, cleanup_on_err) = match explicit_out {
                     Some(dir) => {
-                        if let Some(paths) = confine_paths.as_ref() {
-                            check_export_out_inside(paths, &dir)?;
-                        }
                         check_output_outside_input(&dir, &path, &loaded)?;
                         ensure_empty_export_target(&dir)?;
                         (dir, false)
                     }
-                    None => (allocate_export_dir(&write_root, &ds_name, confine_paths.as_ref())?, true),
+                    None => {
+                        check_dir_not_inside_input(&write_root.join("exports"), &path, &loaded)?;
+                        let dir = allocate_export_dir(&write_root, &ds_name, confine_paths.as_ref())?;
+                        if let Err(err) = check_output_outside_input(&dir, &path, &loaded) {
+                            let _ = std::fs::remove_dir_all(&dir);
+                            return Err(err);
+                        }
+                        (dir, true)
+                    }
                 };
                 export_coco(&loaded, &out_dir, &opts).map_err(|e| {
                     if cleanup_on_err {
                         let _ = std::fs::remove_dir_all(&out_dir);
                     }
-                    export_error(e)
+                    export_error(e, confined)
                 })
             })
             .await

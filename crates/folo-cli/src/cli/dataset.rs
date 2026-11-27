@@ -1,4 +1,5 @@
-//! `folo dataset` subcommands and arguments (`check`, `stats`, `synth`, `convert`, `split`, `merge`, `filter`).
+//! `folo dataset` subcommands and arguments (`check`, `stats`, `synth`, `convert`, `split`, `merge`, `filter`,
+//! `export`).
 
 use std::path::PathBuf;
 

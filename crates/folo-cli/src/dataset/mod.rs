@@ -1,4 +1,4 @@
-//! `folo dataset check | stats | synth | convert | split | merge | filter`, on top of folo-data.
+//! `folo dataset check | stats | synth | convert | split | merge | filter | export`, on top of folo-data.
 //!
 //! - `mod.rs`: command dispatch, `stats`, `convert`, and shared error / path helpers.
 //! - `check.rs`: `folo dataset check` (dangling symlink diagnostics, COCO declared-vs-actual dimension
@@ -8,6 +8,7 @@
 //! - `split.rs`: `folo dataset split` (deterministic multi-label stratified train/val/test splitting).
 //! - `merge.rs`: `folo dataset merge` (multi-dataset class unification/remap/drop, split policies, collision-safe YOLO).
 //! - `filter.rs`: `folo dataset filter` (class whitelist/blacklist, split, box area/size, image dims, drop-empty).
+//! - `export.rs`: `folo dataset export` (COCO Detection JSON export with split selection and copy/link/reference modes).
 
 mod check;
 mod export;
@@ -156,22 +157,30 @@ fn canonical_target(p: &Path) -> Option<PathBuf> {
                 }
             }
             std::path::Component::ParentDir => {
-                if !missing {
-                    if let Ok(canon) = std::fs::canonicalize(cur.join("..")) {
-                        cur = canon;
-                    } else {
-                        let _ = cur.pop();
-                        missing = true;
-                    }
+                // When `!missing`, `cur` is already canonical (no symlinks remain), so popping avoids Win32
+                // rejecting `..` after a `\\?\` verbatim prefix while preserving symlink-before-`..` semantics.
+                let _ = cur.pop();
+                if let Ok(canon) = std::fs::canonicalize(&cur) {
+                    cur = canon;
+                    missing = false;
                 } else {
+                    missing = true;
+                }
+            }
+            std::path::Component::Normal(part) => {
+                if part == "." {
+                    continue;
+                }
+                if part == ".." {
                     let _ = cur.pop();
                     if let Ok(canon) = std::fs::canonicalize(&cur) {
                         cur = canon;
                         missing = false;
+                    } else {
+                        missing = true;
                     }
+                    continue;
                 }
-            }
-            std::path::Component::Normal(part) => {
                 cur.push(part);
                 if !missing {
                     if let Ok(canon) = std::fs::canonicalize(&cur) {

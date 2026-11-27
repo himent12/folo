@@ -254,7 +254,7 @@ fn normalize_verbatim_for_components(p: &Path) -> PathBuf {
 /// Resolves a path that failed `std::fs::canonicalize` left-to-right so symlinks and Windows junctions
 /// (including broken ones) are followed before `..` and confinement checks never leak existence of files
 /// outside `--data-dir`.
-fn resolve_nonexistent(p: &Path, depth: u8) -> Option<PathBuf> {
+pub(crate) fn resolve_nonexistent(p: &Path, depth: u8) -> Option<PathBuf> {
     if depth >= MAX_SYMLINK_HOPS || p.as_os_str().is_empty() {
         return None;
     }

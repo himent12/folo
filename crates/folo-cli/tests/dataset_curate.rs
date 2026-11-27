@@ -362,7 +362,7 @@ fn dataset_export_coco_modes_splits_and_errors() {
     assert_eq!(chk["clean"], true);
     assert_eq!(chk["format"], "coco");
 
-    // 2. Link mode with `--split val` only.
+    // 2. Link mode with mixed `--split val --split test` (empty `test` split is skipped, `val` exported).
     let out_link = dir.join("coco_link");
     let (code, rec, stderr) = folo_one(&[
         "dataset",
@@ -374,6 +374,8 @@ fn dataset_export_coco_modes_splits_and_errors() {
         "link",
         "--split",
         "val",
+        "--split",
+        "test",
         "--json",
     ]);
     assert_eq!(code, 0, "{stderr}: {rec}");

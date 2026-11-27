@@ -196,9 +196,9 @@ folo export --model o2o.folo --format onnx --decode                    # o2o mod
 `output_exists` (`synth` / `convert` into a folder that exists and is not empty, exit 1), `usage` (bad flag values
 such as nine classes, exit 2).
 
-`synth` and `convert` keep a `.folo-unfinished` file in the output folder until the dataset is complete. A command
+`synth`, `convert`, `split`, `merge`, `filter` and `export` keep a `.folo-unfinished` file in the output folder until the dataset is complete. A command
 stopped part way leaves it: `stats`, `check`, `convert`, `folo train` and registering in `folo serve` refuse the
-folder with `dataset_unfinished`, and `synth` / `convert` into it stop with `output_exists`; both hint "delete the
+folder with `dataset_unfinished`, and writing into it again stops with `output_exists`; both hint "delete the
 folder and run the command again", which is the way to recover. FOLO never deletes it for you (docs/DATA.md,
 Unfinished datasets).
 
@@ -292,8 +292,9 @@ writing the input dataset's format unless `--to yolo|coco|voc` is passed.
 Exports a YOLO, COCO, or Pascal VOC dataset to COCO Detection JSON (`--format coco`, writing
 `DIR/annotations/instances_<split>.json` with 1-based category ids, pixel `[x, y, w, h]` bboxes, `area`, `iscrowd`,
 and `info` metadata). `DIR` must lie outside the input dataset (`usage`, exit 2) and must not exist or be empty
-(`output_exists`, exit 1). Use `--split train|val|test` (repeatable) to export a subset of splits (a requested split
-with no images fails with `invalid_dataset`, exit 1), `--images copy|link|reference` to choose between copying images
+(`output_exists`, exit 1). Use `--split train|val|test` (repeatable) to export a subset of splits (empty requested
+splits are skipped, and failing when none of the selected splits have images returns `invalid_dataset`, exit 1),
+`--images copy|link|reference` to choose between copying images
 into `DIR/images/<split>/` (default), hard-linking with cross-filesystem copy fallback (`link`), or referencing the
 original image files via relative paths without copying bytes (`reference`), `--pretty` for indented JSON, and
 `--description TEXT` to set COCO `info.description`.

@@ -149,8 +149,9 @@ pub fn quantize(args: QuantizeArgs, out: Out) -> Result<(), CliError> {
     let analysis = quant::analyze_sensitivity_detector(&model, &cal).map_err(nn_error)?;
     let by_name: HashMap<&str, &quant::ConvSensitivity> =
         analysis.iter().map(|e| (e.name.as_str(), e)).collect();
+    let stem_conv = stem_conv_name(&model);
     for name in &selective.explicit_convs {
-        if !by_name.contains_key(name.as_str()) {
+        if !by_name.contains_key(name.as_str()) && name != stem_conv {
             let sample: Vec<&str> = analysis.iter().take(6).map(|e| e.name.as_str()).collect();
             return Err(usage(format!(
                 "--f32-conv `{name}` is not an int8-eligible backbone/neck conv of {}",
@@ -473,6 +474,15 @@ impl quant::walk::Exec for BoundaryCollector {
     }
 }
 
+/// Boundary name of the int8-capable input stem (honoured by `Int8Plan`'s `u8_stem && !is_f32` override in
+/// both FOLO v1 and FOLO v2-Iso, even though sensitivity analysis does not emit a weight-SQNR entry for it).
+fn stem_conv_name(model: &Detector) -> &'static str {
+    match model {
+        Detector::V1(_) => "backbone.stem",
+        Detector::V2(_) => "backbone.stem.conv",
+    }
+}
+
 /// Symbolic zero-compute walk over `model`'s quantised backbone/neck graph to list every int8-eligible conv
 /// name before opening calibration images or running two-pass calibration.
 fn eligible_conv_names(model: &Detector) -> Result<Vec<String>, CliError> {
@@ -499,7 +509,12 @@ fn eligible_conv_names(model: &Detector) -> Result<Vec<String>, CliError> {
         weights: None,
     };
     let analysis = quant::analyze_sensitivity_detector(model, &dummy).map_err(nn_error)?;
-    Ok(analysis.into_iter().map(|e| e.name).collect())
+    let mut names: Vec<String> = analysis.into_iter().map(|e| e.name).collect();
+    let stem = stem_conv_name(model);
+    if !names.iter().any(|n| n == stem) {
+        names.push(stem.to_string());
+    }
+    Ok(names)
 }
 
 /// Validates every `--f32-conv` name against `model`'s int8-eligible convs upfront so typos fail before
@@ -626,9 +641,12 @@ mod tests {
         .unwrap();
         v2.fuse().unwrap();
 
-        for detector in [Detector::V1(Box::new(v1)), Detector::V2(Box::new(v2))] {
-            validate_explicit_convs(&detector, &["neck.out5.cv2".to_string()])
-                .expect("neck.out5.cv2 must be accepted as eligible");
+        for (detector, stem) in [
+            (Detector::V1(Box::new(v1)), "backbone.stem"),
+            (Detector::V2(Box::new(v2)), "backbone.stem.conv"),
+        ] {
+            validate_explicit_convs(&detector, &["neck.out5.cv2".to_string(), stem.to_string()])
+                .expect("neck.out5.cv2 and int8 stem must be accepted as eligible");
             let err = validate_explicit_convs(&detector, &["bogus.conv".to_string()]).unwrap_err();
             assert_eq!((err.exit, err.code.as_str()), (ExitCode::Usage, "usage"), "{err:?}");
             assert!(err.message.contains("bogus.conv"), "{}", err.message);

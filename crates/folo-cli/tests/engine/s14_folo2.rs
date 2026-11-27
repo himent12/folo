@@ -1,5 +1,5 @@
 //! End-to-end `folo2` (`folo2-n`..`folo2-x`) parity across `folo describe`, `train`, `val`, `predict` (plain,
-//! `--tile`, `--tta`, `--track`), `export` (`folo-f16`, `folo`, `weights`, `onnx`), and `quantize` / int8 refusal.
+//! `--tile`, `--tta`, `--track`), `export` (`folo-f16`, `folo`, `weights`, `onnx`), and `quantize` + `--precision int8`.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -65,7 +65,7 @@ fn describe_surfaces_folo2_architectures() {
 
 /// Full `folo2-n` lifecycle on CPU (64 px): auto-batch train -> val (+ diagnostics) -> predict (plain, `--tile`,
 /// `--tta`, `--track`) -> export (`folo-f16`, `folo`, `weights`, `onnx`) -> fine-tune from exported weights ->
-/// stop & resume -> clean `not_supported` on int8 quantize/val.
+/// `quantize` + `--precision int8` val/predict (including explicit `--f32-conv`) -> stop & resume.
 #[test]
 fn folo2_train_val_predict_export_and_resume_end_to_end() {
     let root = TestDir::new("cli-folo2");
@@ -322,7 +322,7 @@ fn folo2_train_val_predict_export_and_resume_end_to_end() {
     assert_eq!(code, 0, "folo2 int8 predict failed: {stderr}");
     assert_eq!(lines[0]["dtype"], "int8");
 
-    // Explicit `--f32-conv` works on `folo2-n` (valid conv accepted, unknown conv rejected upfront with `usage`).
+    // Explicit `--f32-conv` works on `folo2-n` (both neck conv and int8 stem accepted; unknown conv rejected upfront).
     let v2_int8_explicit = root.join("v2-int8-explicit.folo");
     let (code, lines, stderr) = folo(&[
         "quantize",
@@ -337,11 +337,18 @@ fn folo2_train_val_predict_export_and_resume_end_to_end() {
         "none",
         "--f32-conv",
         "neck.out5.cv2",
+        "--f32-conv",
+        "backbone.stem.conv",
         "--output",
         s(&v2_int8_explicit),
     ]);
     assert_eq!(code, 0, "folo2 explicit --f32-conv failed: {stderr}");
-    assert_eq!(lines[0]["f32_convs"], serde_json::json!(["neck.out5.cv2"]), "{}", lines[0]);
+    assert_eq!(
+        lines[0]["f32_convs"],
+        serde_json::json!(["neck.out5.cv2", "backbone.stem.conv"]),
+        "{}",
+        lines[0]
+    );
 
     let v2_int8_bad = root.join("v2-int8-bad.folo");
     let (code, lines, _) = folo(&[

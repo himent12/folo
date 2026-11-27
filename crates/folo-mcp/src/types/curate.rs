@@ -1,5 +1,5 @@
-//! MCP schemas for validation error diagnostics (`val`) and dataset curation tools (`audit_dataset`,
-//! `merge_datasets`, `filter_dataset`).
+//! MCP schemas for validation error diagnostics (`val`) and dataset curation/export tools (`audit_dataset`,
+//! `merge_datasets`, `filter_dataset`, `dataset_export`).
 
 use std::collections::BTreeMap;
 
