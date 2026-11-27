@@ -21,6 +21,7 @@
 //!   checkpoints, early stopping, resume) and its docs/API.md event stream.
 //! - [`val`]: validation of a model on a dataset split.
 //! - [`predict`]: the [`Predictor`] (letterbox, forward, decode, NMS, rescale, with a timing breakdown).
+//! - [`tile`]: SAHI tiled inference ([`TileConfig`], [`Predictor::predict_tiled`]) for small objects in large images.
 //! - [`export`]: ONNX export of a fused model ([`export::onnx`]).
 //! - [`precompile`]: precompiles, on worker threads, the GPU kernels an earlier run of the same kind and shape
 //!   used (docs/GPU.md, Pipeline cache).
@@ -40,6 +41,7 @@ pub mod model;
 pub mod nms;
 pub mod precompile;
 pub mod predict;
+pub mod tile;
 pub mod train;
 pub mod val;
 
@@ -52,4 +54,5 @@ pub use metrics::{EvalConfig, EvalReport, Evaluator, Truth};
 pub use model::{FoloModel, HeadOutput, ModelConfig};
 pub use nms::{Detection, NmsConfig, NmsKind};
 pub use predict::{Precision, PredictConfig, Prediction, Predictor, PreparedBatch, Timing};
+pub use tile::{TileConfig, TileMergeMetric, TileRect};
 pub use train::{TrainConfig, TrainData, TrainOptions, Trainer};

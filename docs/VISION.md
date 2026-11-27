@@ -251,6 +251,20 @@ preprocess / inference / postprocess timing split.
 An unfused model, multi-label settings or f16 on the CPU take the dense forward (the six branch chains side by side)
 and `HeadOutput::detections`, which reads the head outputs in place and extracts candidates the same way.
 
+### Tiled inference (SAHI)
+`folo_vision::tile` wires Slicing Aided Hyper Inference into `Predictor::predict_tiled`,
+`Predictor::predict_batch_tiled`, and `Predictor::predict_file_tiled` (`TileConfig`):
+- High-resolution images are sliced into uniform overlapping `TileRect` windows (`compute_tiles`, clamped back on the
+  trailing edges so every tile shares the same `(width, height)` and `rect` letterbox canvas), cropped with row-slice
+  copies (`crop_tile`), and run through `Predictor::predict_batch` in bounded chunks (`tile_batch`), automatically
+  inheriting CPU/int8/GPU/f16/`o2o`/candidate-first fast paths.
+- Images already fitting within a single tile degrade directly to `Predictor::predict` with zero slicing overhead.
+- An optional full-image pass (`full_image`, on by default) preserves large objects spanning tile boundaries.
+- `merge_tiled_detections` maps and clips boxes to original-image coordinates, sorts deterministically independent of
+  tile order, clusters duplicates via `TileMergeMetric::Ios` (default, suppressing truncated tile-edge fragments) or
+  `TileMergeMetric::Iou`, and refines agreeing boxes with `BoxFusion::Vote` (default), `BoxFusion::Sebf`, or
+  `BoxFusion::None` without letting IoS-suppressed fragments shrink a full box.
+
 ## ONNX export
 - `folo_vision::export::onnx`: `FoloModel::to_onnx` turns a fused model into an opset-17 graph that mirrors `forward`
   op for op (raw head outputs, or the MODEL.md §6.4 decode in the graph, which for an `o2o` model ends in the §6.6

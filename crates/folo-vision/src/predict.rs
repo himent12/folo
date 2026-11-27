@@ -39,6 +39,7 @@ use crate::error::{Error, Result};
 use crate::fusion::{BoxFusion, FUSION_IOU, ScoreRule};
 use crate::model::{FoloModel, HeadMode, HeadOutput};
 use crate::nms::{Detection, NmsConfig, postprocess};
+use crate::tile::{TileConfig, check_image, compute_tiles, crop_tile, merge_tiled_detections};
 
 /// Prediction settings; the defaults are MODEL.md §9.3's `predict` column at `imgsz = 640`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -357,9 +358,90 @@ impl Predictor {
         Ok(p)
     }
 
+    /// Decode an image file and predict it with SAHI tiled inference ([`Predictor::predict_tiled`]).
+    pub fn predict_file_tiled(&self, path: impl AsRef<Path>, tile_cfg: &TileConfig) -> Result<Prediction> {
+        tile_cfg.validate()?;
+        let t = Instant::now();
+        let img = folo_data::read_image(path.as_ref())?;
+        let decode_ms = ms(t);
+        let mut p = self.predict_tiled(&img, tile_cfg)?;
+        p.timing =
+            Timing::new(p.timing.preprocess_ms + decode_ms, p.timing.inference_ms, p.timing.postprocess_ms);
+        Ok(p)
+    }
+
     /// One image, letterboxed `rect` (or square when [`PredictConfig::rect`] is off).
     pub fn predict(&self, img: &Image) -> Result<Prediction> {
         Ok(self.run(std::slice::from_ref(img), self.cfg.rect)?.pop().expect("one image in, one out"))
+    }
+
+    /// Predict one image with Slicing Aided Hyper Inference (SAHI): slices the image into uniform overlapping
+    /// tiles ([`compute_tiles`]), runs them in bounded batches of [`TileConfig::tile_batch`] through
+    /// [`Predictor::predict_batch`] (inheriting CPU/int8/GPU/f16/o2o/candidate-first fast paths), optionally runs
+    /// one full-image pass ([`TileConfig::full_image`]), and merges all detections in original-image coordinates.
+    ///
+    /// When the image fits inside a single tile (`width <= tile_width && height <= tile_height`), this degrades
+    /// cleanly to [`Predictor::predict`] (with `tile_cfg.max_det` applied) so small images incur zero slicing
+    /// overhead.
+    pub fn predict_tiled(&self, img: &Image, tile_cfg: &TileConfig) -> Result<Prediction> {
+        tile_cfg.validate()?;
+        check_image(img)?;
+        let tiles = compute_tiles(img.width, img.height, tile_cfg)?;
+        if tiles.len() == 1 {
+            let mut p = self.predict(img)?;
+            p.detections.truncate(tile_cfg.max_det);
+            return Ok(p);
+        }
+
+        let mut pre_ms = 0.0f64;
+        let mut inf_ms = 0.0f64;
+        let mut post_ms = 0.0f64;
+        let mut all_dets: Vec<Detection> = Vec::new();
+
+        for chunk in tiles.chunks(tile_cfg.tile_batch) {
+            let t_crop = Instant::now();
+            let crops: Vec<Image> = chunk.par_iter().map(|&r| crop_tile(img, r)).collect::<Result<_>>()?;
+            pre_ms += ms(t_crop);
+            let preds = self.predict_batch(&crops)?;
+            for (pred, tile) in preds.into_iter().zip(chunk) {
+                pre_ms += pred.timing.preprocess_ms;
+                inf_ms += pred.timing.inference_ms;
+                post_ms += pred.timing.postprocess_ms;
+                let (ox, oy) = (tile.x as f32, tile.y as f32);
+                all_dets.extend(pred.detections.into_iter().map(|d| Detection {
+                    bbox: Xyxy::new(d.bbox.x1 + ox, d.bbox.y1 + oy, d.bbox.x2 + ox, d.bbox.y2 + oy),
+                    ..d
+                }));
+            }
+        }
+
+        if tile_cfg.full_image {
+            let full = self.predict(img)?;
+            pre_ms += full.timing.preprocess_ms;
+            inf_ms += full.timing.inference_ms;
+            post_ms += full.timing.postprocess_ms;
+            all_dets.extend(full.detections);
+        }
+
+        let t_merge = Instant::now();
+        let detections = merge_tiled_detections(all_dets, img.width, img.height, tile_cfg)?;
+        post_ms += ms(t_merge);
+
+        Ok(Prediction {
+            width: img.width,
+            height: img.height,
+            detections,
+            timing: Timing::new(pre_ms, inf_ms, post_ms),
+        })
+    }
+
+    /// Predict a batch of images with SAHI tiled inference ([`Predictor::predict_tiled`]), in input order.
+    pub fn predict_batch_tiled(&self, imgs: &[Image], tile_cfg: &TileConfig) -> Result<Vec<Prediction>> {
+        tile_cfg.validate()?;
+        if imgs.is_empty() {
+            return Ok(Vec::new());
+        }
+        imgs.iter().map(|img| self.predict_tiled(img, tile_cfg)).collect()
     }
 
     /// A batch, in input order. With [`PredictConfig::rect`] (the default) a batch whose images all get the same
