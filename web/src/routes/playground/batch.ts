@@ -39,6 +39,7 @@ export interface BatchSummary {
   failed: number;
   pending: number;
   totalDetections: number;
+  truncated: number;
 }
 
 export const BATCH_CSV_HEADERS = [
@@ -96,10 +97,12 @@ export function summarizeBatch(
   let running = 0;
   let failed = 0;
   let totalDetections = 0;
+  let truncated = 0;
   for (const item of items) {
     if (item.status === 'done' && item.pred) {
       done++;
       totalDetections += filterBatchBoxes(item.pred, filter, hidden).length;
+      if (isPredictionCutAt(item.pred, filter.conf)) truncated++;
     } else if (item.status === 'running') {
       running++;
     } else if (item.status === 'error') {
@@ -114,6 +117,7 @@ export function summarizeBatch(
     failed,
     pending: Math.max(0, total - done - running),
     totalDetections,
+    truncated,
   };
 }
 

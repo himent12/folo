@@ -75,7 +75,7 @@ export default function DatasetInsights(props: DatasetInsightsProps) {
 
   const isCleanQuality = computed(() => {
     const d = data.get();
-    return d.brokenLabels === 0 && d.emptyImages === 0 && !d.tinyWarn && d.checkErrors === 0 && d.checkWarnings === 0;
+    return d.brokenLabels === 0 && d.imageErrors === 0 && d.emptyImages === 0 && !d.tinyWarn && d.checkErrors === 0 && d.checkWarnings === 0;
   });
 
   return (

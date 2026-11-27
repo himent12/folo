@@ -83,7 +83,7 @@ export default function BatchFilmstrip(props: BatchFilmstripProps) {
               return `Running ${cur} of ${s.total}…`;
             }
             const parts = [`${s.done}/${s.total} run`];
-            if (s.done > 0) parts.push(`${s.totalDetections} ${s.totalDetections === 1 ? 'det' : 'dets'}`);
+            if (s.done > 0) parts.push(`${s.totalDetections}${s.truncated > 0 ? '+' : ''} ${s.totalDetections === 1 && s.truncated === 0 ? 'det' : 'dets'}`);
             if (s.failed > 0) parts.push(`${s.failed} failed`);
             return parts.join(' · ');
           })()}
@@ -97,12 +97,12 @@ export default function BatchFilmstrip(props: BatchFilmstripProps) {
           ) : (
             <Button
               size="sm"
-              variant={b.summary.get().pending > 0 ? 'primary' : 'secondary'}
-              icon={b.summary.get().pending > 0 ? Play : Check}
-              disabled={!props.hasModel || b.summary.get().pending === 0}
+              variant={b.summary.get().done < b.summary.get().total ? 'primary' : 'secondary'}
+              icon={b.summary.get().done < b.summary.get().total ? Play : Check}
+              disabled={!props.hasModel || b.summary.get().done >= b.summary.get().total}
               onclick={() => void b.runAll()}
             >
-              {b.summary.get().pending > 0 ? 'Run all' : 'All run'}
+              {b.summary.get().done < b.summary.get().total ? 'Run all' : 'All run'}
             </Button>
           )}
           <span use:tooltip={b.summary.get().done > 0 ? 'Export all completed batch detections as JSON' : 'Run inference on at least one image first'}>
@@ -145,20 +145,20 @@ export default function BatchFilmstrip(props: BatchFilmstripProps) {
         <For each={b.items.get()} key={(item) => item.id}>
           {(item, idx) => {
             const selected = () => b.activeIndex.get() === idx();
-            const count = () => b.detectionCountFor(item());
+            const info = () => b.detectionCountFor(item());
             const badgeText = () => {
               const st = item().status;
               if (st === 'running') return '…';
               if (st === 'error') return '!';
-              const c = count();
-              return c !== null ? String(c) : '—';
+              const c = info();
+              return c !== null ? `${c.count}${c.cut ? '+' : ''}` : '—';
             };
             const statusDesc = () => {
               const st = item().status;
               if (st === 'running') return 'running inference';
               if (st === 'error') return `failed: ${item().error ?? 'error'}`;
-              const c = count();
-              return c !== null ? `${c} ${c === 1 ? 'detection' : 'detections'}` : 'not run';
+              const c = info();
+              return c !== null ? `${c.count}${c.cut ? '+' : ''} ${c.count === 1 && !c.cut ? 'detection' : 'detections'}` : 'not run';
             };
             return (
               <button

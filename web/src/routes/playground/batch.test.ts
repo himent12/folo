@@ -87,6 +87,7 @@ describe('playground batch helpers', () => {
       failed: 1,
       pending: 2,
       totalDetections: 1,
+      truncated: 0,
     });
   });
 

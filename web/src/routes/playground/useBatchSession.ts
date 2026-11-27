@@ -6,7 +6,7 @@ import type { Model, Prediction } from '$lib/api/types';
 import { isDetectorLoadError, type BrowserEngine } from '$lib/inference/browser';
 import { isOom } from '$lib/oom';
 import { toast } from '$lib/ui/toast';
-import { isPredictionCutAt, markPredictionComplete } from './allCandidates';
+import { isPredictionCutAt, markCompletionFailed, markPredictionComplete } from './allCandidates';
 import {
   batchItemSource,
   batchPredKey,
@@ -304,8 +304,8 @@ export function useBatchSession(o: UseBatchSessionInput) {
     on: RunOn,
     localFile: File | null,
     signal: AbortSignal,
-  ): Promise<Prediction> {
-    if (!isPredictionCutAt(p, o.conf.peek())) return p;
+  ): Promise<{ pred: Prediction; haltError?: unknown }> {
+    if (!isPredictionCutAt(p, o.conf.peek())) return { pred: p };
     try {
       const all = await ask({
         api: hub.api,
@@ -317,12 +317,17 @@ export function useBatchSession(o: UseBatchSessionInput) {
         options: ALL,
         signal,
       });
-      if (signal.aborted) return p;
+      if (signal.aborted) return { pred: p };
       const next = { ...all, timing: p.timing, cold: p.cold };
       markPredictionComplete(next);
-      return next;
-    } catch {
-      return p;
+      return { pred: next };
+    } catch (e: unknown) {
+      if (signal.aborted) return { pred: p };
+      markCompletionFailed(p);
+      if (isOom(e) || (on !== 'server' && !localFile && noServerWeights(e)) || (localFile && on !== 'server' && isDetectorLoadError(e))) {
+        return { pred: p, haltError: e };
+      }
+      return { pred: p };
     }
   }
 
@@ -339,14 +344,18 @@ export function useBatchSession(o: UseBatchSessionInput) {
     // If all items are already complete for this model/backend, nothing to run.
     if (list.every((it) => it.status === 'done' && it.pred && it.predKey === key)) return;
 
-    // Cancel any in-flight single-image request synchronously BEFORE dispatching batch work (zero duplicate requests).
+    // Cancel any in-flight single-image or export completion request synchronously before dispatching batch work.
     o.cancelSinglePredict();
+    exportCtrl?.abort();
+    exportCtrl = null;
     items.set((cur) =>
       cur.some((it) => it.status === 'running')
         ? cur.map((it) => (it.status === 'running' ? { ...it, status: it.pred ? 'done' : 'idle' } : it))
         : cur,
     );
     o.predicting.set(false);
+    o.weightsMissing.set(false);
+    o.error.set(null);
 
     stoppedKey = null;
     const seq = ++runSeq;
@@ -384,8 +393,9 @@ export function useBatchSession(o: UseBatchSessionInput) {
             signal: ctrl.signal,
           });
           if (destroyed || seq !== runSeq || ctrl.signal.aborted) break;
-          const p = await completeIfCut(itemSource, raw, id, on, localFile, ctrl.signal);
+          const completed = await completeIfCut(itemSource, raw, id, on, localFile, ctrl.signal);
           if (destroyed || seq !== runSeq || ctrl.signal.aborted) break;
+          const p = completed.pred;
           updateItem(i, { pred: p, predKey: key, status: 'done', error: null });
           if (i === activeIndex.peek()) {
             o.pred.set(p);
@@ -395,6 +405,19 @@ export function useBatchSession(o: UseBatchSessionInput) {
             o.error.set(null);
             o.weightsMissing.set(false);
             o.predicting.set(false);
+          }
+          if (completed.haltError) {
+            haltedOnNotice = true;
+            const he = completed.haltError;
+            if (localFile && on !== 'server' && isDetectorLoadError(he)) {
+              o.dropLocal(id, localFile, he);
+            } else if (on !== 'server' && !localFile && noServerWeights(he)) {
+              o.weightsMissing.set(true);
+            } else if (isOom(he)) {
+              o.error.set(he);
+              toast.error(he, 'Batch stopped: out of GPU memory');
+            }
+            break;
           }
         } catch (e: unknown) {
           if (destroyed || seq !== runSeq || ctrl.signal.aborted) break;
@@ -442,7 +465,7 @@ export function useBatchSession(o: UseBatchSessionInput) {
         runCtrl = null;
         const activeItem = items.peek()[activeIndex.peek()];
         const curSrc = o.source.peek();
-        if (curSrc && (haltedOnNotice || activeItem?.status === 'error')) {
+        if (curSrc && (haltedOnNotice || (activeItem?.status === 'error' && !!o.error.peek()))) {
           stoppedKey = sourceImageKey(curSrc);
         }
         runningAll.set(false);
@@ -457,9 +480,13 @@ export function useBatchSession(o: UseBatchSessionInput) {
     }
   }
 
-  function detectionCountFor(item: BatchItem): number | null {
+  function detectionCountFor(item: BatchItem): { count: number; cut: boolean } | null {
     if (item.status !== 'done' || !item.pred) return null;
-    return filterBatchBoxes(item.pred, filter.get(), o.hidden.get()).length;
+    const f = filter.get();
+    return {
+      count: filterBatchBoxes(item.pred, f, o.hidden.get()).length,
+      cut: isPredictionCutAt(item.pred, f.conf),
+    };
   }
 
   function makeExportInput() {
@@ -505,7 +532,7 @@ export function useBatchSession(o: UseBatchSessionInput) {
         const item = items.peek()[idx];
         if (!item?.pred || item.predKey !== key) continue;
         const itemSource = batchItemSource(item);
-        const next = await completeIfCut(itemSource, item.pred, id, on, localFile, ctrl.signal);
+        const { pred: next } = await completeIfCut(itemSource, item.pred, id, on, localFile, ctrl.signal);
         if (destroyed || ctrl.signal.aborted) return;
         if (next !== item.pred) {
           updateItem(idx, { pred: next });
@@ -564,8 +591,9 @@ export function useBatchSession(o: UseBatchSessionInput) {
   let lastCompare: boolean | null = null;
   effect(() => {
     const c = o.compare.get();
+    // Cancel in-flight batch without setting manual Stop marker so Model A resumes cleanly alongside Model B.
     if (lastCompare !== null && c !== lastCompare && untrack(() => runningAll.peek())) {
-      untrack(() => stopRunAll());
+      untrack(() => stopRunAll(false));
     }
     lastCompare = c;
   });

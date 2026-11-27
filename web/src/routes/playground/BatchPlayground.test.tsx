@@ -365,33 +365,113 @@ describe('Playground multi-image batch filmstrip', () => {
   });
 
   it('prevents an older batch decode from superseding a newer single-image pick and revokes superseded batch URLs', async () => {
-    let resolveSlowBatch!: (bmp: { width: number; height: number; close(): void }) => void;
+    let resolveSecondBatchImage!: (bmp: { width: number; height: number; close(): void }) => void;
     let calls = 0;
-    const { revokedUrls } = setupPlayground(async (_input, opts) => fakePrediction(opts.model_id, 1));
+    const { createdUrls, revokedUrls } = setupPlayground(async (_input, opts) => fakePrediction(opts.model_id, 1));
     vi.stubGlobal('createImageBitmap', () => {
       calls++;
-      if (calls === 1) {
+      // Let slow-a.png decode and allocate an object URL, then pause on slow-b.png so winner.png supersedes it.
+      if (calls === 2) {
         return new Promise((r) => {
-          resolveSlowBatch = r;
+          resolveSecondBatchImage = r;
         });
       }
       return Promise.resolve({ width: 100, height: 100, close: () => {} });
     });
 
     await until(() => target.querySelector('.model-pick'), 'model picker');
-    // Start a slow 2-image batch load
+    // Start a slow 2-image batch load; wait until slow-a.png created its object URL and slow-b.png is pending
     selectBatchFiles([makeImageFile('slow-a.png'), makeImageFile('slow-b.png')]);
+    await until(() => createdUrls.length === 1 && calls === 2, 'slow-a URL allocated while slow-b decodes');
+    const supersededBatchUrl = createdUrls[0]!;
+
     // Immediately supersede it with a single image pick
     selectBatchFiles([makeImageFile('winner.png')]);
     await until(() => target.querySelector('.src-name')?.textContent === 'winner.png', 'single image won');
+    const winnerUrl = createdUrls[createdUrls.length - 1]!;
 
-    // Now let the older batch decode resolve -> it must NOT replace winner.png or show the filmstrip
-    resolveSlowBatch({ width: 320, height: 240, close: () => {} });
-    await new Promise((r) => setTimeout(r, 20));
+    // Now let slow-b.png resolve -> superseded batch must revoke slow-a's URL and NOT replace winner.png
+    resolveSecondBatchImage({ width: 320, height: 240, close: () => {} });
+    await until(() => revokedUrls.includes(supersededBatchUrl), 'superseded batch URL revoked');
     flushSync();
     expect(target.querySelector('.src-name')?.textContent).toBe('winner.png');
     expect(target.querySelector('[data-batch-bar]')).toBeNull();
-    expect(revokedUrls).toEqual([]);
+    expect(revokedUrls).not.toContain(winnerUrl);
+  });
+
+  it('lets Model A resume cleanly when Compare A/B aborts Run All mid-first-frame, and does not replay a failed ALL request', async () => {
+    // Part 1: toggling Compare while Run All is running on uncached item 0 aborts Run All AND lets Model A resume.
+    const calls: { model: string; maxDet: number | undefined; signal?: AbortSignal; resolve: (p: Prediction) => void; reject: (e: unknown) => void }[] = [];
+    const predictSpy = vi.fn<Api['predict']>((_input, opts, signal) => {
+      return new Promise<Prediction>((resolve, reject) => {
+        signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), { once: true });
+        calls.push({ model: opts.model_id, maxDet: opts.max_det, signal, resolve, reject });
+      });
+    });
+
+    setupPlayground(predictSpy);
+    await until(() => target.querySelector('.model-pick'), 'model picker');
+    selectBatchFiles([makeImageFile('cmp1.png'), makeImageFile('cmp22.png')]);
+    await until(() => calls.length === 1, 'initial single predict');
+
+    const runAllBtn = [...target.querySelectorAll<HTMLButtonElement>('[data-batch-bar] button')].find((b) => b.textContent?.includes('Run all'))!;
+    runAllBtn.click();
+    await until(() => calls.length === 2, 'batch runAll started on item 0');
+
+    // Toggle Compare ON while item 0 is still running in Run All -> aborts Run All, Model A resumes cleanly (not blank!)
+    const cmpBtn = [...target.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('Compare A/B'))!;
+    cmpBtn.click();
+    await until(() => calls[1]!.signal?.aborted && calls.filter((c) => c.model === 'm_hard_s').length >= 3, 'Model A resumed after Compare toggle');
+    // Resolve the resumed Model A request -> badge updates to 2
+    const resumedA = calls.filter((c) => c.model === 'm_hard_s').at(-1)!;
+    resumedA.resolve(fakePrediction('m_hard_s', 2));
+    await until(() => target.querySelector('[data-batch-idx="0"] [data-batch-badge]')?.textContent === '2', 'Model A populated after Compare');
+
+    // Part 2: failed ALL completion during Run All keeps capped result and does NOT automatically replay ALL on exit
+    mounted!.unmount();
+    mounted = undefined;
+    target.remove();
+    session.set(null);
+    vi.restoreAllMocks();
+
+    const dense1000: Prediction['boxes'] = Array.from({ length: 1000 }, (_, i) => ({
+      class: 0,
+      name: 'circle',
+      score: Number((0.99 - i * 0.0005).toFixed(4)),
+      x1: (i % 20) * 15,
+      y1: Math.floor(i / 20) * 10,
+      x2: (i % 20) * 15 + 10,
+      y2: Math.floor(i / 20) * 10 + 8,
+    }));
+    let allCalls = 0;
+    const denseSpy = vi.fn<Api['predict']>(async (_input, opts) => {
+      if (opts.max_det === 30_000) {
+        allCalls++;
+        throw new Error('ALL temporarily failed');
+      }
+      return {
+        model_id: opts.model_id,
+        image: { width: 320, height: 240 },
+        boxes: dense1000,
+        timing: { preprocess_ms: 1, inference_ms: 5, postprocess_ms: 1, total_ms: 7 },
+        device: 'cpu',
+      };
+    });
+    setupPlayground(denseSpy);
+    await until(() => target.querySelector('.model-pick'), 'model picker 2');
+    selectBatchFiles([makeImageFile('cap1.png'), makeImageFile('cap22.png')]);
+    await until(() => target.querySelector('[data-batch-idx="0"] [data-batch-badge]')?.textContent?.includes('+'), 'capped + badge on item 0');
+    const allCallsBefore = allCalls;
+
+    // Select item 1 and immediately start Run All -> item 1 FETCH succeeds, ALL fails once, Run All exits WITHOUT auto-replaying ALL
+    target.querySelector<HTMLButtonElement>('button[aria-label="Next image"]')!.click();
+    flushSync();
+    const runAll2 = [...target.querySelectorAll<HTMLButtonElement>('[data-batch-bar] button')].find((b) => b.textContent?.includes('Run all'))!;
+    runAll2.click();
+    await until(() => target.querySelector('[data-batch-idx="1"] [data-batch-badge]')?.textContent?.includes('+'), 'item 1 finished with capped + badge');
+    await new Promise((r) => setTimeout(r, 30));
+    flushSync();
+    expect(allCalls).toBe(allCallsBefore + 1);
   });
 
   it('ignores keyboard stepping when focus is inside an input and preserves Alt+ArrowLeft inside filmstrip', async () => {
