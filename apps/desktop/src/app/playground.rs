@@ -136,6 +136,7 @@ impl FoloApp {
         self.play_pred_pending = false;
         self.play_pred_dim = false;
         self.play_pred_for = None;
+        self.play_compare.pred_a_meta = None;
         self.clear_play_hover();
         self.clear_play_pred_b();
         self.play_zoom = 1.0;
@@ -169,6 +170,7 @@ impl FoloApp {
             self.play_pred_pending = false;
             self.play_pred_dim = false;
             self.play_pred_for = None;
+            self.play_compare.pred_a_meta = None;
             self.clear_play_hover();
             self.clear_play_pred_b();
             self.play_drag = None;
@@ -316,6 +318,7 @@ impl FoloApp {
         self.play_pred_seq += 1;
         self.play_pred = Load::Idle;
         self.play_pred_for = None;
+        self.play_compare.pred_a_meta = None;
         self.play_pred_pending = false;
         self.play_pred_dim = false;
         self.clear_play_hover();
@@ -364,7 +367,14 @@ impl FoloApp {
             max_det: 300,
         };
         self.play_fetched_floor = floor;
-        let key = (self.play_image_gen, model);
+        let key = (self.play_image_gen, model.clone());
+        let meta = crate::screens::playground::PlayPredMeta {
+            image_gen: self.play_image_gen,
+            model_id: model,
+            iou_bits: self.play_iou.to_bits(),
+            target: self.play_target,
+            floor,
+        };
         // Same image and model (an IoU change): keep showing the old boxes until the new ones land.
         if self.play_pred_for.as_ref() != Some(&key) {
             self.play_pred = Load::Loading;
@@ -385,14 +395,25 @@ impl FoloApp {
                 Some(t) => crate::local::predict(api, &req, t, generation, &ticket),
                 None => api.predict(&req),
             },
-            move |this, r, _| this.play_pred_answered(seq, key, r),
+            move |this, r, _| this.play_pred_answered_with_meta(seq, key, Some(meta), r),
         );
     }
 
     /// A prediction's answer: shown if it is still the latest asked for (`seq`). One that couldn't
     /// reach the server says so to the connection state too, so the next answer from the server
     /// (the 2 s refresh) counts as a reconnect and runs it again, however short the outage was.
+    #[cfg(test)]
     pub(super) fn play_pred_answered(&mut self, seq: u64, key: (u64, String), r: ApiResult<PredictResponse>) {
+        self.play_pred_answered_with_meta(seq, key, None, r);
+    }
+
+    fn play_pred_answered_with_meta(
+        &mut self,
+        seq: u64,
+        key: (u64, String),
+        meta: Option<crate::screens::playground::PlayPredMeta>,
+        r: ApiResult<PredictResponse>,
+    ) {
         if let Err(e) = &r
             && e.code == "server_unreachable"
         {
@@ -411,6 +432,7 @@ impl FoloApp {
             }
             p
         });
+        self.play_compare.pred_a_meta = if r.is_ok() { meta } else { None };
         self.play_pred = r.into();
         self.play_pred_for = Some(key);
         self.play_pred_pending = false;

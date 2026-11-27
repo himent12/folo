@@ -42,11 +42,7 @@ impl FoloApp {
                 if errors_only && matched {
                     continue;
                 }
-                boxes.push(DrawBox {
-                    truth: true,
-                    dim: errors_only && matched,
-                    ..DrawBox::new(x.class, x.x1, x.y1, x.x2, x.y2)
-                });
+                boxes.push(DrawBox { truth: true, ..DrawBox::new(x.class, x.x1, x.y1, x.x2, x.y2) });
             }
         }
         if show_preds {

@@ -17,7 +17,7 @@ pub(crate) fn filter_detections(boxes: &[ScoredBox], conf: f32, class: Option<u3
     boxes.iter().filter(|b| b.score >= conf && class.is_none_or(|c| b.class == c)).collect()
 }
 
-/// Formats the currently visible Playground detections as pretty-printed JSON for clipboard export.
+/// Formats the currently visible Playground detections as pretty-printed JSON for clipboard or file export.
 pub(crate) fn detections_json(
     model: &str,
     image: &str,
@@ -25,7 +25,7 @@ pub(crate) fn detections_json(
     iou: Option<f32>,
     class_filter: Option<u32>,
     boxes: &[&ScoredBox],
-) -> String {
+) -> anyhow::Result<String> {
     #[derive(serde::Serialize)]
     struct Export<'a> {
         model: &'a str,
@@ -37,8 +37,7 @@ pub(crate) fn detections_json(
         class_filter: Option<u32>,
         detections: &'a [&'a ScoredBox],
     }
-    serde_json::to_string_pretty(&Export { model, image, conf, iou, class_filter, detections: boxes })
-        .unwrap_or_else(|_| "{}".to_string())
+    Ok(serde_json::to_string_pretty(&Export { model, image, conf, iou, class_filter, detections: boxes })?)
 }
 
 impl FoloApp {
@@ -74,9 +73,16 @@ impl FoloApp {
 
     /// Copies the currently filtered Playground detections (Single or Compare A/B) as formatted JSON.
     pub(crate) fn copy_play_json(&mut self, cx: &mut Context<Self>) {
-        let Some((json, _, summary)) = self.build_play_export_json() else { return };
-        cx.write_to_clipboard(folo_ui::ClipboardItem::new_string(json));
-        self.toast(Tone::Success, "Copied detection JSON", Some(summary.into()), cx);
+        let Some(built) = self.build_play_export_json() else { return };
+        match built {
+            Ok((json, _, summary)) => {
+                cx.write_to_clipboard(folo_ui::ClipboardItem::new_string(json));
+                self.toast(Tone::Success, "Copied detection JSON", Some(summary.into()), cx);
+            }
+            Err(e) => {
+                self.toast(Tone::Danger, "JSON export failed", Some(e.to_string().into()), cx);
+            }
+        }
     }
 
     pub fn playground(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {

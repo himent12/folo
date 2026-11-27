@@ -24,9 +24,9 @@ pub struct ExportPalette {
 }
 
 impl ExportPalette {
-    /// Snapshots theme colours into plain RGBA bytes safe to send to a background thread.
+    /// Snapshots all theme class colours (`tokens::CLASS_PALETTE`) into plain RGBA bytes safe to send off-thread.
     pub fn from_theme(t: &Theme) -> Self {
-        let classes = (0..12).map(|i| hsla_to_rgba(t.class(i))).collect();
+        let classes = (0..tokens::CLASS_PALETTE.len() as u32).map(|i| hsla_to_rgba(t.class(i))).collect();
         Self {
             classes,
             halo: u32_rgba(tokens::CLASS_HALO),
@@ -63,24 +63,27 @@ pub fn render_image_to_rgba(img: &RenderImage) -> Option<RgbaImage> {
         return None;
     }
     let src = img.as_bytes(0)?;
-    if src.len() < (w as usize) * (h as usize) * 4 {
+    let byte_len = (w as usize).checked_mul(h as usize)?.checked_mul(4)?;
+    if src.len() < byte_len {
         return None;
     }
-    let mut out = Vec::with_capacity((w as usize) * (h as usize) * 4);
-    for px in src[..(w as usize) * (h as usize) * 4].as_chunks::<4>().0 {
+    let mut out = Vec::with_capacity(byte_len);
+    for px in src[..byte_len].as_chunks::<4>().0 {
         out.extend_from_slice(&[px[2], px[1], px[0], px[3]]);
     }
     RgbaImage::from_raw(w, h, out)
 }
 
-/// Sanitizes an arbitrary image/model label into a safe lowercase filename stem.
-pub fn sanitize_export_stem(raw: &str) -> String {
-    // Strip path/dataset prefixes like "shapes / val_001.jpg" -> "val_001".
+fn sanitize_slug(raw: &str, strip_ext: bool) -> String {
     let tail = raw.rsplit(['/', '\\']).next().unwrap_or(raw).trim();
-    let stem = tail.rsplit_once('.').map_or(tail, |(s, _)| if s.is_empty() { tail } else { s });
-    let mut out = String::with_capacity(stem.len());
+    let base = if strip_ext {
+        tail.rsplit_once('.').map_or(tail, |(s, _)| if s.is_empty() { tail } else { s })
+    } else {
+        tail
+    };
+    let mut out = String::with_capacity(base.len());
     let mut prev_dash = false;
-    for ch in stem.chars() {
+    for ch in base.chars() {
         let lower = ch.to_ascii_lowercase();
         if lower.is_ascii_alphanumeric() {
             out.push(lower);
@@ -90,19 +93,20 @@ pub fn sanitize_export_stem(raw: &str) -> String {
             prev_dash = true;
         }
     }
-    while out.ends_with('-') {
-        out.pop();
+    let mut truncated: String = out.chars().take(64).collect();
+    while truncated.ends_with('-') {
+        truncated.pop();
     }
-    if out.is_empty() { "playground".to_string() } else { out.chars().take(64).collect() }
+    if truncated.is_empty() { "playground".to_string() } else { truncated }
 }
 
 /// Suggested filename for Single or Compare Playground export (`.png` or `.json`).
 pub fn export_filename(image: &str, model_a: &str, model_b: Option<&str>, ext: &str) -> String {
-    let img = sanitize_export_stem(image);
-    let ma = sanitize_export_stem(model_a);
+    let img = sanitize_slug(image, true);
+    let ma = sanitize_slug(model_a, false);
     match model_b {
         Some(b) => {
-            let mb = sanitize_export_stem(b);
+            let mb = sanitize_slug(b, false);
             format!("{img}-{ma}-vs-{mb}.{ext}")
         }
         None => format!("{img}-{ma}.{ext}"),
@@ -146,21 +150,17 @@ pub fn render_annotated_compare_png(
     let total_h = h.saturating_add(head_h);
     let mut canvas = RgbaImage::from_pixel(total_w, total_h, image::Rgba(palette.header_bg));
 
-    // Copy base image into left (Model A) and right (Model B) panes.
     blit(&mut canvas, base, 0, head_h);
     blit(&mut canvas, base, w + gap, head_h);
-
-    // Draw subtle vertical divider between panes.
-    fill_rect(&mut canvas, w as i32, 0, gap as i32, total_h as i32, palette.divider);
+    fill_rect(&mut canvas, w as i64, 0, gap as i64, total_h as i64, palette.divider);
 
     if show_boxes {
         draw_annotations(&mut canvas, 0, head_h, w, h, boxes_a, show_labels, palette);
         draw_annotations(&mut canvas, w + gap, head_h, w, h, boxes_b, show_labels, palette);
     }
 
-    // Header captions clipped to each pane width.
-    let pad = (10 * scale) as i32;
-    let ty = ((head_h.saturating_sub(7 * text_scale)) / 2) as i32;
+    let pad = (10 * scale) as i64;
+    let ty = ((head_h.saturating_sub(7 * text_scale)) / 2) as i64;
     draw_text_clipped(
         &mut canvas,
         caption_a,
@@ -173,7 +173,7 @@ pub fn render_annotated_compare_png(
     draw_text_clipped(
         &mut canvas,
         caption_b,
-        (w + gap) as i32 + pad,
+        (w + gap) as i64 + pad,
         ty,
         w.saturating_sub(20 * scale),
         text_scale,
@@ -211,6 +211,33 @@ fn blit(dst: &mut RgbaImage, src: &RgbaImage, ox: u32, oy: u32) {
     }
 }
 
+/// Validates and clips a box to `[0, pane_w] × [0, pane_h]` in `f64` before converting to canvas
+/// integer coordinates; returns `None` for non-finite, degenerate, or fully off-canvas boxes.
+fn clip_box_to_pane(b: &ScoredBox, ox: u32, oy: u32, pane_w: u32, pane_h: u32) -> Option<RectI> {
+    if !b.x1.is_finite() || !b.y1.is_finite() || !b.x2.is_finite() || !b.y2.is_finite() {
+        return None;
+    }
+    if b.x2 <= b.x1 || b.y2 <= b.y1 || pane_w == 0 || pane_h == 0 {
+        return None;
+    }
+    let pw = pane_w as f64;
+    let ph = pane_h as f64;
+    let x1 = (b.x1 as f64).clamp(0.0, pw);
+    let y1 = (b.y1 as f64).clamp(0.0, ph);
+    let x2 = (b.x2 as f64).clamp(0.0, pw);
+    let y2 = (b.y2 as f64).clamp(0.0, ph);
+    if x2 <= x1 || y2 <= y1 {
+        return None;
+    }
+    let lx = ox as i64 + x1.round() as i64;
+    let ty = oy as i64 + y1.round() as i64;
+    let rx = ox as i64 + x2.round() as i64;
+    let by = oy as i64 + y2.round() as i64;
+    let bw = (rx - lx).max(1);
+    let bh = (by - ty).max(1);
+    Some(RectI { x: lx, y: ty, w: bw, h: bh })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn draw_annotations(
     canvas: &mut RgbaImage,
@@ -222,70 +249,58 @@ fn draw_annotations(
     show_labels: bool,
     palette: &ExportPalette,
 ) {
-    let scale = ((pane_w.min(pane_h) as f32) / 640.0).max(1.0).round() as i32;
+    let scale = ((pane_w.min(pane_h) as f32) / 640.0).max(1.0).round() as i64;
     let stroke = (2 * scale).max(2);
     let halo = stroke + (2 * scale).max(2);
-    let clip = RectI { x: ox as i32, y: oy as i32, w: pane_w as i32, h: pane_h as i32 };
+    let clip = RectI { x: ox as i64, y: oy as i64, w: pane_w as i64, h: pane_h as i64 };
 
-    // Pass 1: all box outlines (halo then class-colored stroke).
-    for b in boxes {
-        if !b.x1.is_finite() || !b.y1.is_finite() || !b.x2.is_finite() || !b.y2.is_finite() {
-            continue;
-        }
-        let x1 = ox as i32 + b.x1.round() as i32;
-        let y1 = oy as i32 + b.y1.round() as i32;
-        let x2 = ox as i32 + b.x2.round() as i32;
-        let y2 = oy as i32 + b.y2.round() as i32;
-        let (lx, rx) = (x1.min(x2), x1.max(x2));
-        let (ty, by) = (y1.min(y2), y1.max(y2));
-        let bw = (rx - lx).max(1);
-        let bh = (by - ty).max(1);
-        let halo_pad = (halo - stroke) / 2;
+    let visible_boxes: Vec<(&ScoredBox, RectI)> =
+        boxes.iter().filter_map(|b| clip_box_to_pane(b, ox, oy, pane_w, pane_h).map(|r| (b, r))).collect();
+
+    // Pass 1: all visible box outlines (halo then class-colored stroke).
+    let halo_pad = (halo - stroke) / 2;
+    for &(b, r) in &visible_boxes {
         stroke_rect_clipped(
             canvas,
-            lx - halo_pad,
-            ty - halo_pad,
-            bw + halo_pad * 2,
-            bh + halo_pad * 2,
+            r.x - halo_pad,
+            r.y - halo_pad,
+            r.w + halo_pad * 2,
+            r.h + halo_pad * 2,
             halo,
             palette.halo,
             clip,
         );
-        stroke_rect_clipped(canvas, lx, ty, bw, bh, stroke, palette.class_color(b.class), clip);
+        stroke_rect_clipped(canvas, r.x, r.y, r.w, r.h, stroke, palette.class_color(b.class), clip);
     }
 
     if !show_labels {
         return;
     }
 
-    // Pass 2: label chips above/inside boxes with simple vertical collision avoidance.
+    // Pass 2: label chips above/inside visible boxes with simple vertical collision avoidance.
     let text_scale = (scale as u32).clamp(1, 3);
-    let pad_x = (4 * text_scale) as i32;
-    let pad_y = (3 * text_scale) as i32;
-    let chip_h = (7 * text_scale) as i32 + pad_y * 2;
-    let mut placed: Vec<RectI> = Vec::with_capacity(boxes.len());
+    let pad_x = (4 * text_scale) as i64;
+    let pad_y = (3 * text_scale) as i64;
+    let chip_h = (7 * text_scale) as i64 + pad_y * 2;
+    let mut placed: Vec<RectI> = Vec::with_capacity(visible_boxes.len());
 
-    for b in boxes {
-        if !b.x1.is_finite() || !b.y1.is_finite() || !b.x2.is_finite() || !b.y2.is_finite() {
-            continue;
-        }
+    for &(b, r) in &visible_boxes {
         let name = if b.name.trim().is_empty() { format!("class {}", b.class) } else { b.name.clone() };
-        let label = format!("{name} {:.2}", b.score.clamp(0.0, 1.0));
-        let tw = text_width_px(&label, text_scale) as i32;
-        let cw = (tw + pad_x * 2).min((pane_w as i32 - 4).max(8));
+        let safe_score = if b.score.is_finite() { b.score.clamp(0.0, 1.0) } else { 0.0 };
+        let label = format!("{name} {safe_score:.2}");
+        let tw = text_width_px(&label, text_scale) as i64;
+        let cw = (tw + pad_x * 2).min((pane_w as i64 - 4).max(8));
 
-        let bx1 = ox as i32 + b.x1.min(b.x2).round() as i32;
-        let by1 = oy as i32 + b.y1.min(b.y2).round() as i32;
-        let cx = bx1.clamp(clip.x + 2, (clip.x + clip.w - cw - 2).max(clip.x + 2));
-        let mut cy = by1 - chip_h - 1;
+        let cx = r.x.clamp(clip.x + 2, (clip.x + clip.w - cw - 2).max(clip.x + 2));
+        let mut cy = r.y - chip_h - 1;
         if cy < clip.y + 2 {
-            cy = by1 + 2;
+            cy = r.y + 2;
         }
         cy = cy.clamp(clip.y + 2, (clip.y + clip.h - chip_h - 2).max(clip.y + 2));
 
         for _ in 0..4 {
             let cand = RectI { x: cx, y: cy, w: cw, h: chip_h };
-            if let Some(hit) = placed.iter().find(|r| r.intersects(cand, 2)) {
+            if let Some(hit) = placed.iter().find(|p| p.intersects(cand, 2)) {
                 let next_y = hit.y + hit.h + 2;
                 if next_y + chip_h <= clip.y + clip.h - 2 {
                     cy = next_y;
@@ -308,14 +323,14 @@ fn draw_annotations(
 
 #[derive(Clone, Copy)]
 struct RectI {
-    x: i32,
-    y: i32,
-    w: i32,
-    h: i32,
+    x: i64,
+    y: i64,
+    w: i64,
+    h: i64,
 }
 
 impl RectI {
-    fn intersects(self, other: RectI, pad: i32) -> bool {
+    fn intersects(self, other: RectI, pad: i64) -> bool {
         self.x < other.x + other.w + pad
             && self.x + self.w + pad > other.x
             && self.y < other.y + other.h + pad
@@ -339,19 +354,19 @@ fn blend_pixel(dst: &mut image::Rgba<u8>, src: [u8; 4]) {
     dst[3] = (sa + (dst[3] as u32 * inv) / 255).min(255) as u8;
 }
 
-fn fill_rect(img: &mut RgbaImage, x: i32, y: i32, w: i32, h: i32, color: [u8; 4]) {
-    let clip = RectI { x: 0, y: 0, w: img.width() as i32, h: img.height() as i32 };
+fn fill_rect(img: &mut RgbaImage, x: i64, y: i64, w: i64, h: i64, color: [u8; 4]) {
+    let clip = RectI { x: 0, y: 0, w: img.width() as i64, h: img.height() as i64 };
     fill_rect_clipped(img, x, y, w, h, color, clip);
 }
 
-fn fill_rect_clipped(img: &mut RgbaImage, x: i32, y: i32, w: i32, h: i32, color: [u8; 4], clip: RectI) {
+fn fill_rect_clipped(img: &mut RgbaImage, x: i64, y: i64, w: i64, h: i64, color: [u8; 4], clip: RectI) {
     if w <= 0 || h <= 0 {
         return;
     }
     let x0 = x.max(clip.x).max(0);
     let y0 = y.max(clip.y).max(0);
-    let x1 = (x + w).min(clip.x + clip.w).min(img.width() as i32);
-    let y1 = (y + h).min(clip.y + clip.h).min(img.height() as i32);
+    let x1 = x.saturating_add(w).min(clip.x + clip.w).min(img.width() as i64);
+    let y1 = y.saturating_add(h).min(clip.y + clip.h).min(img.height() as i64);
     if x0 >= x1 || y0 >= y1 {
         return;
     }
@@ -365,19 +380,27 @@ fn fill_rect_clipped(img: &mut RgbaImage, x: i32, y: i32, w: i32, h: i32, color:
 #[allow(clippy::too_many_arguments)]
 fn stroke_rect_clipped(
     img: &mut RgbaImage,
-    x: i32,
-    y: i32,
-    w: i32,
-    h: i32,
-    thickness: i32,
+    x: i64,
+    y: i64,
+    w: i64,
+    h: i64,
+    thickness: i64,
     color: [u8; 4],
     clip: RectI,
 ) {
     let t = thickness.max(1);
     fill_rect_clipped(img, x, y, w, t, color, clip);
-    fill_rect_clipped(img, x, y + h - t, w, t, color, clip);
-    fill_rect_clipped(img, x, y + t, t, (h - 2 * t).max(0), color, clip);
-    fill_rect_clipped(img, x + w - t, y + t, t, (h - 2 * t).max(0), color, clip);
+    fill_rect_clipped(img, x, y.saturating_add(h).saturating_sub(t), w, t, color, clip);
+    fill_rect_clipped(img, x, y.saturating_add(t), t, h.saturating_sub(2 * t).max(0), color, clip);
+    fill_rect_clipped(
+        img,
+        x.saturating_add(w).saturating_sub(t),
+        y.saturating_add(t),
+        t,
+        h.saturating_sub(2 * t).max(0),
+        color,
+        clip,
+    );
 }
 
 fn text_width_px(text: &str, scale: u32) -> u32 {
@@ -388,18 +411,18 @@ fn text_width_px(text: &str, scale: u32) -> u32 {
 fn draw_text_clipped(
     img: &mut RgbaImage,
     text: &str,
-    x: i32,
-    y: i32,
+    x: i64,
+    y: i64,
     max_width: u32,
     scale: u32,
     color: [u8; 4],
 ) {
-    let step = (6 * scale) as i32;
-    let max_x = x + max_width as i32;
+    let step = (6 * scale) as i64;
+    let max_x = x.saturating_add(max_width as i64);
     let mut cx = x;
-    let clip = RectI { x: 0, y: 0, w: img.width() as i32, h: img.height() as i32 };
+    let clip = RectI { x: 0, y: 0, w: img.width() as i64, h: img.height() as i64 };
     for ch in text.chars() {
-        if cx + (5 * scale) as i32 > max_x {
+        if cx.saturating_add((5 * scale) as i64) > max_x {
             break;
         }
         let glyph = glyph_5x7(ch);
@@ -408,17 +431,17 @@ fn draw_text_clipped(
                 if (bits & (1 << (4 - col))) != 0 {
                     fill_rect_clipped(
                         img,
-                        cx + (col as u32 * scale) as i32,
-                        y + (row as u32 * scale) as i32,
-                        scale as i32,
-                        scale as i32,
+                        cx + (col as u32 * scale) as i64,
+                        y + (row as u32 * scale) as i64,
+                        scale as i64,
+                        scale as i64,
                         color,
                         clip,
                     );
                 }
             }
         }
-        cx += step;
+        cx = cx.saturating_add(step);
     }
 }
 
@@ -483,26 +506,28 @@ mod tests {
     use crate::theme::Mode;
 
     #[test]
-    fn filenames_sanitize_dataset_prefixes_and_compare_pairs() {
+    fn filenames_preserve_model_versions_and_strip_image_extensions() {
         assert_eq!(
-            export_filename("shapes / val_001.jpg", "shapes-n best", None, "png"),
-            "val-001-shapes-n-best.png"
+            export_filename("shapes / val_001.jpg", "folo-n v1.2", None, "png"),
+            "val-001-folo-n-v1-2.png"
         );
         assert_eq!(
-            export_filename("cells.png", "model A", Some("model B"), "json"),
-            "cells-model-a-vs-model-b.json"
+            export_filename("cells.png", "model A", Some("model B v2.0"), "json"),
+            "cells-model-a-vs-model-b-v2-0.json"
         );
-        assert_eq!(sanitize_export_stem("///..."), "playground");
+        assert_eq!(sanitize_slug("///...", true), "playground");
     }
 
     #[test]
     fn single_and_compare_annotated_png_render_and_write_to_test_dir() {
         let dir = folo_test_support::TestDir::new("desktop-playground-export");
         let palette = ExportPalette::from_theme(&Theme::new(Mode::Dark));
+        assert_eq!(palette.classes.len(), tokens::CLASS_PALETTE.len());
+
         let base = RgbaImage::from_pixel(160, 120, image::Rgba([24, 32, 48, 255]));
         let boxes_a = vec![
             ScoredBox { class: 0, name: "circle".into(), score: 0.94, x1: 20., y1: 25., x2: 70., y2: 85. },
-            ScoredBox { class: 1, name: "square".into(), score: 0.81, x1: 80., y1: 30., x2: 140., y2: 100. },
+            ScoredBox { class: 15, name: "square".into(), score: 0.81, x1: 80., y1: 30., x2: 140., y2: 100. },
         ];
         let boxes_b = vec![ScoredBox {
             class: 0,
@@ -519,16 +544,13 @@ mod tests {
         write_export_bytes(&single_path, &single_bytes).unwrap();
         let decoded_single = image::open(&single_path).unwrap().to_rgba8();
         assert_eq!(decoded_single.dimensions(), (160, 120));
-        // Bounding box + label chips visibly altered pixels on the base canvas.
         let changed_single = decoded_single.pixels().zip(base.pixels()).filter(|(a, b)| a != b).count();
         assert!(changed_single > 200, "expected boxes and label chips to paint pixels, got {changed_single}");
 
-        // Boxes hidden -> output matches base photo verbatim.
         let clean_bytes = render_annotated_single_png(&base, &boxes_a, false, true, &palette).unwrap();
         let clean_img = image::load_from_memory(&clean_bytes).unwrap().to_rgba8();
         assert_eq!(clean_img, base);
 
-        // Compare side-by-side composite.
         let cmp_bytes = render_annotated_compare_png(
             &base,
             "A · shapes-n · 2 dets · 12.0 ms",
@@ -543,7 +565,46 @@ mod tests {
         let cmp_path = dir.path().join("compare.png");
         write_export_bytes(&cmp_path, &cmp_bytes).unwrap();
         let decoded_cmp = image::open(&cmp_path).unwrap().to_rgba8();
-        assert!(decoded_cmp.width() > 320, "side-by-side composite spans both panes + gap");
-        assert!(decoded_cmp.height() > 120, "composite includes header caption strip");
+        assert!(decoded_cmp.width() > 320);
+        assert!(decoded_cmp.height() > 120);
+    }
+
+    #[test]
+    fn extreme_nan_degenerate_and_offscreen_boxes_never_panic_or_paint_orphaned_chips() {
+        let palette = ExportPalette::from_theme(&Theme::new(Mode::Dark));
+        let base = RgbaImage::from_pixel(120, 80, image::Rgba([20, 20, 20, 255]));
+        // Only invalid/offscreen/degenerate boxes: output must stay pixel-identical to `base` (no orphaned chips).
+        let invisible = vec![
+            ScoredBox {
+                class: 0,
+                name: "nan".into(),
+                score: f32::NAN,
+                x1: f32::NAN,
+                y1: 0.,
+                x2: 50.,
+                y2: 50.,
+            },
+            ScoredBox { class: 0, name: "deg".into(), score: 0.9, x1: 50., y1: 10., x2: 50., y2: 40. },
+            ScoredBox { class: 0, name: "off".into(), score: 0.9, x1: 200., y1: 10., x2: 260., y2: 40. },
+            ScoredBox { class: 0, name: "huge-off".into(), score: 0.9, x1: 1e20, y1: 0., x2: 2e20, y2: 50. },
+        ];
+        let out_bytes = render_annotated_single_png(&base, &invisible, true, true, &palette).unwrap();
+        assert_eq!(image::load_from_memory(&out_bytes).unwrap().to_rgba8(), base);
+
+        // Huge finite coordinates spanning the image with NaN score must clip safely without overflow panic.
+        let huge_visible = vec![ScoredBox {
+            class: 1,
+            name: "huge".into(),
+            score: f32::NAN,
+            x1: -1e20,
+            y1: -1e20,
+            x2: 1e20,
+            y2: 1e20,
+        }];
+        let cmp_bytes =
+            render_annotated_compare_png(&base, "A", &huge_visible, "B", &huge_visible, true, true, &palette)
+                .unwrap();
+        let decoded = image::load_from_memory(&cmp_bytes).unwrap().to_rgba8();
+        assert!(decoded.width() > 240);
     }
 }

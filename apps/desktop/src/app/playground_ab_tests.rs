@@ -279,4 +279,99 @@ fn benchmark_entry_images_error_analysis_filters_and_overlays_render_cleanly() {
         cx.notify();
     });
     app.frame(window.into());
+
+    // Regression (R1): clear_bench() keeps entry_image_order and image_sort synchronized, and
+    // dismiss_bench_form() ignores a preview hidden by the active error filter.
+    drive(&mut app, window, |this, w, cx| {
+        this.bench.entry_image_order = EntryImageOrder::InOrder;
+        this.bench.image_sort = crate::bench::ImageSort::Order;
+        this.clear_bench();
+        assert_eq!(this.bench.entry_image_order, EntryImageOrder::InOrder);
+        assert_eq!(this.bench.image_sort, crate::bench::ImageSort::Order);
+        // Simulate an entry with 1 clean image selected while filter is MissedGt -> dismiss must NOT claim it.
+        let clean = crate::api::BenchEntryImage {
+            image: crate::api::BenchImage {
+                id: "clean_only".into(),
+                file: "clean.jpg".into(),
+                width: 64,
+                height: 64,
+                boxes: vec![crate::api::BBox { class: 0, x1: 0., y1: 0., x2: 10., y2: 10. }],
+            },
+            detections: vec![crate::api::BenchDetection {
+                class: 0,
+                score: 0.9,
+                x1: 0.,
+                y1: 0.,
+                x2: 10.,
+                y2: 10.,
+            }],
+            missed: 0,
+            wrong: 0,
+        };
+        this.bench.entry_image_filter = EntryImageFilter::MissedGt;
+        this.bench.selected_entry_image = Some((bid.into(), eid.clone(), "clean_only".into()));
+        this.bench.entry_images.insert(
+            (bid.into(), eid.clone()),
+            crate::bench::EntryImages {
+                sort: crate::bench::ImageSort::Worst,
+                page: Load::Ready(crate::api::BenchEntryImagePage {
+                    total: 1,
+                    conf: Some(0.25),
+                    images: vec![clean],
+                }),
+                more: false,
+                more_error: None,
+                seq: 1,
+            },
+        );
+        assert!(!this.dismiss_bench_form(w, cx), "Esc must not target a filtered-out preview");
+        assert!(this.bench.selected_entry_image.is_none(), "stale hidden selection is cleared");
+    });
+}
+
+#[test]
+fn playground_compare_freshness_guards_reenable_exports_and_class_filter() {
+    let (mut app, window) = open();
+    drive(&mut app, window, |this, w, cx| {
+        this.navigate(Route::Playground, w, cx);
+        // Pick an NMS (O2m) model for A and another NMS model for B so IoU changes affect both.
+        this.play_model = Some("m_31aa".into());
+        this.play_dataset_image("ds_3b91", "img_03417", cx);
+    });
+    drive(&mut app, window, |this, _, cx| {
+        assert!(this.play_pred.ready().is_some());
+        // Setting a Single-mode class filter must be cleared when entering Compare mode.
+        this.play_class = Some(0);
+        this.set_play_compare(true, cx);
+        assert_eq!(this.play_class, None, "entering Compare clears Single-mode class filter");
+    });
+    drive(&mut app, window, |this, _, cx| {
+        assert!(this.pred_a_is_fresh() && this.pred_b_is_fresh());
+        // Switch back to Single, change NMS IoU, and re-enable Compare: Model B must re-run!
+        let seq_before = this.play_compare.pred_b_seq;
+        this.set_play_compare(false, cx);
+        this.play_iou = 0.45;
+        // Make sure Model B is O2m so IoU matters.
+        if let Some(mb_id) = this.play_compare.model_b.clone()
+            && let Some(m) = this.store.models.ready_mut().unwrap().iter_mut().find(|m| m.id == mb_id)
+        {
+            m.head = crate::api::Head::O2m;
+        }
+        assert!(!this.pred_b_is_fresh(), "Model B from old IoU must not count as fresh");
+        this.set_play_compare(true, cx);
+        assert!(
+            this.play_compare.pred_b_seq > seq_before,
+            "re-enabling Compare after IoU change triggers a fresh Model B prediction"
+        );
+    });
+    drive(&mut app, window, |this, _, _| {
+        assert!(this.pred_b_is_fresh(), "new Model B prediction completed");
+        // While Model A is pending an IoU rerun, A must not be exported as fresh under new IoU.
+        this.play_pred_pending = true;
+        assert!(!this.pred_a_is_fresh());
+        let (json, _, _) = this.build_play_export_json().expect("B is still fresh").expect("valid json");
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(v["a"].is_null(), "stale pending Model A must be omitted from Compare export");
+        assert!(v["b"].is_object(), "fresh Model B remains exported");
+    });
 }

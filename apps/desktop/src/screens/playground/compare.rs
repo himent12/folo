@@ -21,9 +21,41 @@ pub enum CompareSideTab {
     ModelB,
 }
 
+/// Completed prediction request parameters so stale cached results (old device, IoU, or floor)
+/// are never reused on re-enable or exported under new thresholds.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PlayPredMeta {
+    pub image_gen: u64,
+    pub model_id: String,
+    pub iou_bits: u32,
+    pub target: Option<crate::local::Target>,
+    pub floor: f32,
+}
+
+impl PlayPredMeta {
+    /// True when this completed prediction is still valid for the current Playground parameters.
+    pub fn matches_current(
+        &self,
+        image_gen: u64,
+        model_id: &str,
+        iou: f32,
+        target: Option<crate::local::Target>,
+        conf: f32,
+        e2e: bool,
+    ) -> bool {
+        self.image_gen == image_gen
+            && self.model_id == model_id
+            && self.target == target
+            && (e2e || self.iou_bits == iou.to_bits())
+            && conf >= self.floor - 1e-6
+    }
+}
+
 /// All Model B and comparison state held by `FoloApp` for Playground A/B compare.
 pub struct PlayCompareState {
     pub enabled: bool,
+    /// Completed parameters of Model A's current `play_pred` (set only on `Ok`, cleared on `Err`/reset).
+    pub pred_a_meta: Option<PlayPredMeta>,
     /// Model B id; reconciled against the loaded model list just like `play_model`.
     pub model_b: Option<String>,
     /// Run that produced `model_b`, so deleting that run drops `model_b` immediately.
@@ -34,6 +66,8 @@ pub struct PlayCompareState {
     pub pred_b_pending: bool,
     pub pred_b_dim: bool,
     pub pred_b_for: Option<(u64, String)>,
+    /// Completed parameters of Model B's current `pred_b` (set only on `Ok`, cleared on `Err`/reset).
+    pub pred_b_meta: Option<PlayPredMeta>,
     pub pred_b_seq: u64,
     pub fetched_floor_b: f32,
     /// Dedicated local-inference ticket line for Model B so A and B never supersede each other.
@@ -48,6 +82,7 @@ impl Default for PlayCompareState {
     fn default() -> Self {
         Self {
             enabled: false,
+            pred_a_meta: None,
             model_b: None,
             model_b_run: None,
             model_b_gone: None,
@@ -55,6 +90,7 @@ impl Default for PlayCompareState {
             pred_b_pending: false,
             pred_b_dim: false,
             pred_b_for: None,
+            pred_b_meta: None,
             pred_b_seq: 0,
             fetched_floor_b: 0.05,
             line_b: Arc::new(AtomicU64::new(0)),
@@ -70,6 +106,7 @@ impl PlayCompareState {
     /// Resets transient prediction and hover state when switching backend sources.
     pub fn reset_for_backend(&mut self) {
         self.enabled = false;
+        self.pred_a_meta = None;
         self.model_b = None;
         self.model_b_run = None;
         self.model_b_gone = None;
@@ -77,7 +114,9 @@ impl PlayCompareState {
         self.pred_b_pending = false;
         self.pred_b_dim = false;
         self.pred_b_for = None;
+        self.pred_b_meta = None;
         self.pred_b_seq += 1;
+        let _ = crate::local::Ticket::take(&self.line_b);
         self.hover_b = None;
         self.hover_b_from_stage = false;
         self.side_tab = CompareSideTab::Summary;
@@ -286,7 +325,7 @@ pub fn compare_detections_json(
     summary: &CompareSummary,
     a: Option<&CompareSideExport<'_>>,
     b: Option<&CompareSideExport<'_>>,
-) -> String {
+) -> anyhow::Result<String> {
     #[derive(serde::Serialize)]
     struct ImageDims {
         width: u32,
@@ -381,7 +420,7 @@ pub fn compare_detections_json(
         a: a.map(to_side),
         b: b.map(to_side),
     };
-    serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string())
+    Ok(serde_json::to_string_pretty(&payload)?)
 }
 
 #[cfg(test)]
@@ -480,7 +519,8 @@ mod tests {
                 boxes: &ra,
             }),
             Some(&CompareSideExport { model: "shapes-s", model_id: "m_b", iou: None, pred: &pb, boxes: &rb }),
-        );
+        )
+        .expect("serialize compare JSON");
         let v: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
         assert_eq!(v["mode"], "compare");
         assert_eq!(v["comparison"]["count_delta"], 1);

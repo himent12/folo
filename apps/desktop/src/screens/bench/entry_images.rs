@@ -35,8 +35,9 @@ impl FoloApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let t = *t;
-        self.ensure_entry_images(&b.id, &e.id, cx);
         let order = self.bench.entry_image_order;
+        self.bench.image_sort = order.server_sort();
+        self.ensure_entry_images(&b.id, &e.id, cx);
         let (bid, eid) = (b.id.clone(), e.id.clone());
         let orders = [
             EntryImageOrder::MostErrors,
@@ -306,15 +307,27 @@ impl FoloApp {
 
         let more = (page.images.len() as u64) < page.total;
         let (bid, eid) = (b.id.clone(), e.id.clone());
-        let shown_summary = if active_filter == EntryImageFilter::All {
+        let shown_summary = if active_filter == EntryImageFilter::All && !order.is_client_subsort() {
             format!("{} of {} images", int(page.images.len() as u64), int(page.total))
-        } else {
+        } else if active_filter == EntryImageFilter::All {
+            if more {
+                format!(
+                    "{} loaded images sorted (of {} total · Show more to scan remaining)",
+                    int(page.images.len() as u64),
+                    int(page.total)
+                )
+            } else {
+                format!("{} of {} images", int(page.images.len() as u64), int(page.total))
+            }
+        } else if more {
             format!(
-                "{} matching ({} loaded of {})",
+                "{} matching in {} loaded ({} total · Show more to scan remaining)",
                 int(filtered.len() as u64),
                 int(page.images.len() as u64),
                 int(page.total)
             )
+        } else {
+            format!("{} matching of {} images", int(filtered.len() as u64), int(page.total))
         };
         let footer = div()
             .px(px(16.))
@@ -401,6 +414,21 @@ impl FoloApp {
                 cx,
                 act(move |this, _, cx| {
                     this.bench.entry_image_filter = filter;
+                    if let Some((sb, se, sid)) = this.bench.selected_entry_image.clone() {
+                        let still_visible =
+                            this.bench.entry_images.get(&(sb, se)).and_then(|x| x.page.ready()).is_some_and(
+                                |p| {
+                                    p.images.iter().any(|im| {
+                                        im.image.id == sid
+                                            && super::error_analysis::entry_image_matches_filter(im, filter)
+                                    })
+                                },
+                            );
+                        if !still_visible {
+                            this.bench.selected_entry_image = None;
+                            this.bench.entry_image_reveal = None;
+                        }
+                    }
                     cx.notify();
                 }),
             )

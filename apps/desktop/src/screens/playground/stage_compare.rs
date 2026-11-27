@@ -125,6 +125,13 @@ impl FoloApp {
                 act(|this, _, cx| this.play_zoom_by(1.4, cx)),
             ));
 
+        let stage_w = {
+            let rail = if window.viewport_size().width < px(1100.) { 280. } else { 320. };
+            (self.content_width(window) - rail - 16. - 2.).max(0.)
+        };
+        let show_synced_badge = stage_w >= 540.;
+        let show_size = stage_w >= 460.;
+        let file_tip = format!("{name} · {size_text}");
         let toolbar = div()
             .h(px(40.))
             .flex_none()
@@ -137,16 +144,22 @@ impl FoloApp {
             .border_color(t.line_subtle)
             .child(div().flex_none().child(icon("icons/git-compare-arrows.svg", 14., t.accent_text)))
             .child(
-                text(ty::SM, t.text_primary)
-                    .font_family(crate::theme::MONO)
+                div()
+                    .id("play-cmp-file-name")
                     .min_w_0()
                     .flex_shrink()
-                    .ellipsis()
-                    .child(file),
+                    .tooltip(crate::controls::tip(file_tip, None))
+                    .child(
+                        text(ty::SM, t.text_primary)
+                            .font_family(crate::theme::MONO)
+                            .min_w_0()
+                            .ellipsis()
+                            .child(file),
+                    ),
             )
-            .child(text(ty::SM, t.text_tertiary).flex_none().tnum().child(size_text))
+            .when(show_size, |d| d.child(text(ty::SM, t.text_tertiary).flex_none().tnum().child(size_text)))
             .child(div().flex_1().min_w(px(8.)))
-            .child(badge(&t, "Synced zoom", Tone::Neutral).flex_none())
+            .when(show_synced_badge, |d| d.child(badge(&t, "Synced zoom", Tone::Neutral).flex_none()))
             .child(div().flex_none().w(px(1.)).h(px(16.)).bg(t.line_subtle))
             .child(zoom_bar.flex_none());
 
@@ -262,7 +275,14 @@ impl FoloApp {
             parts.join(" · ")
         };
 
+        let header_id: &'static str = if is_b { "play-pane-b-model" } else { "play-pane-a-model" };
+        let header_tip = if status_text.is_empty() {
+            format!("{side_label} · {model_name}")
+        } else {
+            format!("{side_label} · {model_name} · {status_text}")
+        };
         let header = div()
+            .id(header_id)
             .h(px(30.))
             .flex_none()
             .px(px(10.))
@@ -272,6 +292,7 @@ impl FoloApp {
             .flex()
             .items_center()
             .gap(px(6.))
+            .tooltip(crate::controls::tip(header_tip, None))
             .child(badge(t, side_label, side_tone).flex_none())
             .child(
                 text(ty::SM, t.text_primary)
@@ -288,7 +309,9 @@ impl FoloApp {
                     .child(status_text),
             );
 
-        let retry_banner = error.map(|msg| {
+        // Overlay error banner inside the canvas container so both panes always keep identical
+        // height and fit geometry for synchronized zoom and pan.
+        let retry_overlay = error.map(|msg| {
             let btn_key = if is_b { "play-pane-b-retry" } else { "play-pane-a-retry" };
             let retry = self.button(
                 btn_key,
@@ -306,11 +329,16 @@ impl FoloApp {
                 }),
             );
             div()
+                .absolute()
+                .top(px(8.))
+                .left(px(8.))
+                .right(px(8.))
                 .px(px(10.))
                 .py(px(6.))
+                .rounded(px(radius::MD))
                 .bg(t.danger_muted)
-                .border_b_1()
-                .border_color(t.line_subtle)
+                .border_1()
+                .border_color(t.line_default)
                 .flex()
                 .items_center()
                 .justify_between()
@@ -331,7 +359,6 @@ impl FoloApp {
             .flex()
             .flex_col()
             .child(header)
-            .children(retry_banner)
             .child(
                 div()
                     .id(SharedString::from(canvas_id))
@@ -482,7 +509,8 @@ impl FoloApp {
                             "Synced A/B · + − zoom · arrows pan when zoomed · 0 fits"
                         });
                         d
-                    }),
+                    })
+                    .children(retry_overlay),
             )
             .into_any_element()
     }

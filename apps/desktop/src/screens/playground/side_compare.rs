@@ -120,7 +120,7 @@ impl FoloApp {
     /// Export action bar (Export PNG, Export JSON, Copy JSON) shared between Single and Compare modes.
     pub(super) fn play_export_bar(&self, t: &Theme, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let has_image = self.play_image.is_some();
-        let has_json = self.build_play_export_json().is_some();
+        let has_json = self.has_play_export_json();
         let png_btn = if has_image {
             self.button(
                 "play-export-png",
@@ -589,6 +589,7 @@ impl FoloApp {
                 let vis = vis.unwrap_or_default();
                 let active = if is_b { self.play_active_b(window, cx) } else { self.play_active(window, cx) };
                 let prefix = if is_b { "det-b" } else { "det" };
+                let n_vis = vis.len();
                 let rows: Vec<AnyElement> = vis
                     .iter()
                     .enumerate()
@@ -608,6 +609,23 @@ impl FoloApp {
                             .when(hot, |d| d.bg(t.bg_active).child(select_bar(t)))
                             .hover(|s| s.bg(t.bg_hover))
                             .active(|s| s.bg(t.bg_active))
+                            .on_key_down(cx.listener(move |this, ev: &folo_ui::KeyDownEvent, w, cx| {
+                                let m = &ev.keystroke.modifiers;
+                                if m.control || m.alt || m.platform {
+                                    return;
+                                }
+                                let next = match ev.keystroke.key.as_str() {
+                                    "down" => (i + 1 < n_vis).then_some(i + 1),
+                                    "up" => i.checked_sub(1),
+                                    "home" => (i > 0).then_some(0),
+                                    "end" => (i + 1 < n_vis).then_some(n_vis - 1),
+                                    _ => return,
+                                };
+                                if let Some(next) = next {
+                                    this.focus_key_and_reveal(&format!("{prefix}-{next}"), w, cx);
+                                }
+                                cx.stop_propagation();
+                            }))
                             .on_hover(cx.listener(move |this, h: &bool, _, cx| {
                                 if is_b {
                                     if *h {

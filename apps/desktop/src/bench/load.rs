@@ -283,8 +283,10 @@ impl FoloApp {
 
     /// Forgets everything benchmark (a new data source, or Retry).
     pub fn clear_bench(&mut self) {
-        let (tab, form_seq, image_sort) = (self.bench.tab, self.bench.form_seq, self.bench.image_sort);
-        self.bench = BenchState { tab, form_seq, image_sort, ..BenchState::default() };
+        let (tab, form_seq, entry_image_order) =
+            (self.bench.tab, self.bench.form_seq, self.bench.entry_image_order);
+        let image_sort = entry_image_order.server_sort();
+        self.bench = BenchState { tab, form_seq, image_sort, entry_image_order, ..BenchState::default() };
     }
 
     /// The Benchmarks section shows the server as it is now (also when going back to it): the list

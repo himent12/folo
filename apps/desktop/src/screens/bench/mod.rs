@@ -18,4 +18,4 @@ mod new_loop;
 mod page;
 mod plan;
 
-pub use error_analysis::{EntryImageFilter, EntryImageOrder};
+pub use error_analysis::{EntryImageFilter, EntryImageOrder, entry_image_matches_filter};

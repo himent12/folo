@@ -12,8 +12,8 @@ mod stage;
 mod stage_compare;
 
 pub use compare::{
-    CompareSideExport, PlayCompareState, compare_detections_json, compare_pane_caption, pick_default_model_b,
-    summarize_comparison,
+    CompareSideExport, PlayCompareState, PlayPredMeta, compare_detections_json, compare_pane_caption,
+    pick_default_model_b, summarize_comparison,
 };
 pub use export::{
     ExportPalette, export_filename, render_annotated_compare_png, render_annotated_single_png,

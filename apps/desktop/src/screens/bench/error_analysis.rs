@@ -1,11 +1,12 @@
-//! Benchmark entry image error analysis: greedy IoU-0.50 TP/FP/FN classification, per-image
+//! Benchmark entry image error analysis: greedy IoU-0.50 TP/FP/FN classification matching
+//! `folo-bench` semantics (coordinate validation, `f64` IoU, `>=` tie-breaking), per-image
 //! localization IoU, filter chips, and error-focused sorting computed directly from
 //! `BenchEntryImage` without backend API changes.
 
 use crate::api::{BBox, BenchDetection, BenchEntryImage};
 
 /// IoU threshold used for matching predictions to ground truth (matches `folo-bench` outcome rules).
-pub const MATCH_IOU_THRESHOLD: f32 = 0.50;
+pub const MATCH_IOU_THRESHOLD: f64 = 0.50;
 
 /// Filter chip for a benchmark entry's Images panel.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
@@ -26,11 +27,11 @@ pub enum EntryImageOrder {
     /// Most total errors (`missed + wrong`) first (backed by server `worst` sort).
     #[default]
     MostErrors,
-    /// Most missed ground-truth boxes (FN) first.
+    /// Most missed ground-truth boxes (FN) first (within loaded images).
     MostFn,
-    /// Most false-positive detections (FP) first.
+    /// Most false-positive detections (FP) first (within loaded images).
     MostFp,
-    /// Lowest mean matched IoU first (images with errors or poor localization first).
+    /// Lowest mean matched IoU first (within loaded images).
     LowestIou,
     /// Original benchmark order (backed by server `order` sort).
     InOrder,
@@ -43,6 +44,11 @@ impl EntryImageOrder {
             EntryImageOrder::InOrder => crate::bench::ImageSort::Order,
             _ => crate::bench::ImageSort::Worst,
         }
+    }
+
+    /// True when this order re-sorts only the loaded prefix client-side.
+    pub fn is_client_subsort(self) -> bool {
+        matches!(self, EntryImageOrder::MostFn | EntryImageOrder::MostFp | EntryImageOrder::LowestIou)
     }
 }
 
@@ -91,20 +97,28 @@ pub struct FilterCounts {
     pub has_errors: usize,
 }
 
-/// Axis-aligned Intersection-over-Union between two `[x1, y1, x2, y2]` boxes.
-pub fn box_iou(a: (f32, f32, f32, f32), b: (f32, f32, f32, f32)) -> f32 {
-    let ix1 = a.0.max(b.0);
-    let iy1 = a.1.max(b.1);
-    let ix2 = a.2.min(b.2);
-    let iy2 = a.3.min(b.3);
-    let iw = (ix2 - ix1).max(0.0);
-    let ih = (iy2 - iy1).max(0.0);
-    let inter = iw * ih;
-    if inter <= 0.0 || !inter.is_finite() {
+#[inline]
+fn valid_box(x1: f32, y1: f32, x2: f32, y2: f32) -> bool {
+    x1.is_finite() && y1.is_finite() && x2.is_finite() && y2.is_finite() && x2 > x1 && y2 > y1
+}
+
+/// Axis-aligned Intersection-over-Union in `f64` matching `folo-bench::score::iou_with_areas`.
+/// Returns `0.0` if any coordinate is non-finite or either box has non-positive area.
+pub fn box_iou(a: (f32, f32, f32, f32), b: (f32, f32, f32, f32)) -> f64 {
+    if !valid_box(a.0, a.1, a.2, a.3) || !valid_box(b.0, b.1, b.2, b.3) {
         return 0.0;
     }
-    let area_a = (a.2 - a.0).max(0.0) * (a.3 - a.1).max(0.0);
-    let area_b = (b.2 - b.0).max(0.0) * (b.3 - b.1).max(0.0);
+    let w = (a.2 as f64).min(b.2 as f64) - (a.0 as f64).max(b.0 as f64);
+    if w <= 0.0 {
+        return 0.0;
+    }
+    let h = (a.3 as f64).min(b.3 as f64) - (a.1 as f64).max(b.1 as f64);
+    if h <= 0.0 {
+        return 0.0;
+    }
+    let inter = w * h;
+    let area_a = (a.2 as f64 - a.0 as f64) * (a.3 as f64 - a.1 as f64);
+    let area_b = (b.2 as f64 - b.0 as f64) * (b.3 as f64 - b.1 as f64);
     let union = area_a + area_b - inter;
     if union <= 0.0 || !union.is_finite() { 0.0 } else { (inter / union).clamp(0.0, 1.0) }
 }
@@ -117,59 +131,82 @@ fn det_rect(d: &BenchDetection) -> (f32, f32, f32, f32) {
     (d.x1, d.y1, d.x2, d.y2)
 }
 
-/// Classifies every detection (TP/FP) and ground-truth box (matched/FN) in `im` using standard
-/// greedy highest-confidence same-class matching at IoU ≥ 0.50.
+/// Classifies every detection (TP/FP) and ground-truth box (matched/FN) in `im` using `folo-bench`'s
+/// exact greedy highest-confidence same-class matching at IoU ≥ 0.50 (`f64` IoU, `>=` tie-break).
 pub fn analyze_entry_image(im: &BenchEntryImage) -> ImageErrorStats {
     let n_gt = im.image.boxes.len();
     let n_det = im.detections.len();
     let mut gt_matched = vec![false; n_gt];
     let mut det_matches = vec![DetMatch::Fp { best_same_class_iou: 0.0 }; n_det];
 
-    // Sort detection indices by descending score (stable on input order for ties/unscored entries).
+    let gt_valid: Vec<bool> = im.image.boxes.iter().map(|g| valid_box(g.x1, g.y1, g.x2, g.y2)).collect();
+
+    // Sort detection indices by descending score (canonicalizing `-0.0` to `+0.0`, stable on ties).
     let mut order: Vec<usize> = (0..n_det).collect();
     order.sort_by(|&a, &b| {
-        let sa = if im.detections[a].score.is_finite() { im.detections[a].score } else { -1.0 };
-        let sb = if im.detections[b].score.is_finite() { im.detections[b].score } else { -1.0 };
-        sb.total_cmp(&sa).then_with(|| a.cmp(&b))
+        let norm = |s: f32| {
+            if !s.is_finite() {
+                -1.0f32
+            } else if s == 0.0 {
+                0.0f32
+            } else {
+                s
+            }
+        };
+        norm(im.detections[b].score).total_cmp(&norm(im.detections[a].score)).then_with(|| a.cmp(&b))
     });
 
     let mut tp = 0u32;
-    let mut iou_sum = 0.0f32;
+    let mut iou_sum = 0.0f64;
     for det_idx in order {
         let d = &im.detections[det_idx];
         let dr = det_rect(d);
-        let mut best_unmatched: Option<(usize, f32)> = None;
-        let mut best_any_same = 0.0f32;
+        if !valid_box(dr.0, dr.1, dr.2, dr.3) {
+            continue;
+        }
+        let mut best_unmatched: Option<(usize, f64)> = None;
+        let mut best_threshold = MATCH_IOU_THRESHOLD;
+        let mut best_any_same = 0.0f64;
         for (gt_idx, gt) in im.image.boxes.iter().enumerate() {
-            if gt.class != d.class {
+            if !gt_valid[gt_idx] || gt.class != d.class {
                 continue;
             }
             let iou = box_iou(dr, gt_rect(gt));
             if iou > best_any_same {
                 best_any_same = iou;
             }
-            if !gt_matched[gt_idx]
-                && iou >= MATCH_IOU_THRESHOLD
-                && best_unmatched.is_none_or(|(_, best)| iou > best)
-            {
+            // Use `>=` to match `folo_bench::score::match_image_into` exact tie-breaking.
+            if !gt_matched[gt_idx] && iou >= best_threshold {
+                best_threshold = iou;
                 best_unmatched = Some((gt_idx, iou));
             }
         }
         if let Some((gt_idx, iou)) = best_unmatched {
             gt_matched[gt_idx] = true;
-            det_matches[det_idx] = DetMatch::Tp { gt_index: gt_idx, iou };
+            det_matches[det_idx] = DetMatch::Tp { gt_index: gt_idx, iou: iou as f32 };
             tp += 1;
             iou_sum += iou;
         } else {
-            det_matches[det_idx] = DetMatch::Fp { best_same_class_iou: best_any_same };
+            det_matches[det_idx] = DetMatch::Fp { best_same_class_iou: best_any_same as f32 };
         }
     }
 
-    let fn_count = gt_matched.iter().filter(|&&m| !m).count() as u32;
+    let valid_gt_count = gt_valid.iter().filter(|&&v| v).count() as u32;
+    let fn_count = valid_gt_count.saturating_sub(tp);
     let fp = (n_det as u32).saturating_sub(tp);
-    let mean_iou = (tp > 0).then(|| iou_sum / tp as f32);
+    let mean_iou = (tp > 0).then(|| (iou_sum / tp as f64) as f32);
 
     ImageErrorStats { tp, fp, fn_count, mean_iou, det_matches, gt_matched }
+}
+
+/// Returns whether an entry image matches `filter` (shared by rendering and `Esc` handling).
+pub fn entry_image_matches_filter(im: &BenchEntryImage, filter: EntryImageFilter) -> bool {
+    match filter {
+        EntryImageFilter::All => true,
+        EntryImageFilter::MissedGt => analyze_entry_image(im).fn_count > 0,
+        EntryImageFilter::FalsePositives => analyze_entry_image(im).fp > 0,
+        EntryImageFilter::HasErrors => analyze_entry_image(im).has_errors(),
+    }
 }
 
 /// Counts how many loaded images match each error-analysis filter chip.
@@ -235,8 +272,6 @@ pub fn filter_and_sort_entry_images(
             });
         }
         EntryImageOrder::LowestIou => {
-            // Images with no TP despite having errors sort first (effective IoU 0.0), then ascending mean IoU,
-            // and clean background images (no GT, no detections) sort last.
             let key = |st: &ImageErrorStats| -> f32 {
                 match st.mean_iou {
                     Some(v) => v,
@@ -316,22 +351,40 @@ mod tests {
     }
 
     #[test]
+    fn nan_and_degenerate_boxes_never_match_and_ties_match_folo_bench() {
+        // NaN coordinate must yield IoU 0.0, never 1.0.
+        assert_eq!(box_iou((f32::NAN, 0.0, 100.0, 100.0), (0.0, 0.0, 200.0, 100.0)), 0.0);
+        assert_eq!(box_iou((0.0, 0.0, 0.0, 100.0), (0.0, 0.0, 100.0, 100.0)), 0.0);
+        let nan_im = entry_img(
+            "nan",
+            vec![gt(0, 0.0, 0.0, 200.0, 100.0)],
+            vec![det(0, 0.9, f32::NAN, 0.0, 100.0, 100.0)],
+        );
+        let nan_st = analyze_entry_image(&nan_im);
+        assert_eq!((nan_st.tp, nan_st.fp, nan_st.fn_count), (0, 1, 1));
+
+        // Exact IoU tie (2/3 with both GT 0 and GT 1): `folo-bench` takes the last GT (GT 1),
+        // leaving GT 0 free for the second detection -> 2 TP, 0 FP, 0 FN.
+        let tie_im = entry_img(
+            "tie",
+            vec![gt(0, 0.0, 0.0, 100.0, 100.0), gt(0, 50.0, 0.0, 150.0, 100.0)],
+            vec![
+                det(0, 0.9, 0.0, 0.0, 150.0, 100.0), // ties at 2/3 with GT 0 and GT 1 -> takes GT 1
+                det(0, 0.8, 0.0, 0.0, 100.0, 100.0), // matches GT 0 exactly
+            ],
+        );
+        let tie_st = analyze_entry_image(&tie_im);
+        assert_eq!((tie_st.tp, tie_st.fp, tie_st.fn_count), (2, 0, 0));
+    }
+
+    #[test]
     fn filters_and_orders_entry_images_accurately() {
-        let clean = entry_img(
-            "clean",
-            vec![gt(0, 0., 0., 100., 100.)],
-            vec![det(0, 0.9, 0., 0., 100., 100.)], // TP=1, FP=0, FN=0, IoU=1.0
-        );
-        let low_iou = entry_img(
-            "low_iou",
-            vec![gt(0, 0., 0., 100., 100.)],
-            vec![det(0, 0.9, 25., 0., 125., 100.)], // IoU = 75/125 = 0.60, TP=1, FP=0, FN=0
-        );
-        let only_fn = entry_img(
-            "only_fn",
-            vec![gt(0, 0., 0., 50., 50.), gt(0, 100., 100., 150., 150.)],
-            vec![], // TP=0, FP=0, FN=2
-        );
+        let clean =
+            entry_img("clean", vec![gt(0, 0., 0., 100., 100.)], vec![det(0, 0.9, 0., 0., 100., 100.)]);
+        let low_iou =
+            entry_img("low_iou", vec![gt(0, 0., 0., 100., 100.)], vec![det(0, 0.9, 25., 0., 125., 100.)]);
+        let only_fn =
+            entry_img("only_fn", vec![gt(0, 0., 0., 50., 50.), gt(0, 100., 100., 150., 150.)], vec![]);
         let only_fp = entry_img(
             "only_fp",
             vec![],
@@ -339,7 +392,7 @@ mod tests {
                 det(0, 0.9, 0., 0., 50., 50.),
                 det(0, 0.8, 60., 60., 110., 110.),
                 det(0, 0.7, 120., 120., 170., 170.),
-            ], // TP=0, FP=3, FN=0
+            ],
         );
 
         let all = vec![clean, low_iou, only_fn, only_fp];
