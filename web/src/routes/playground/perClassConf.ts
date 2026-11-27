@@ -12,6 +12,17 @@ export function roundConf(v: number): number {
   return Math.round(clamped * 10_000) / 10_000;
 }
 
+/**
+ * Formats a confidence threshold for badges, tooltips, and status copy: uses 2 fixed decimals for standard 0.01-step
+ * values (`0.40`, `0.25`) while preserving finer 3-4 decimal calibration steps (`0.005`, `0.375`, `0.0025`).
+ */
+export function formatConfThreshold(v: number): string {
+  const r = roundConf(Number.isFinite(v) ? v : 0);
+  const two = Math.round(r * 100) / 100;
+  if (Math.abs(r - two) <= 1e-6) return two.toFixed(2);
+  return String(r);
+}
+
 /** Keeps only canonical non-negative integer class IDs with finite `[0, 1]` thresholds. */
 export function normalizePerClassConf(map: Readonly<Record<number, number>> | null | undefined): PerClassConfMap {
   if (!map) return {};
