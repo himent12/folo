@@ -521,7 +521,9 @@ impl FoloV2Model {
                 clone.to_dtype(dtype)?;
             }
         }
-        clone.int8 = self.active_int8().map(|p| Arc::new(quant::Int8Plan::new(p.calibration().clone())));
+        clone.int8 = self
+            .active_int8()
+            .map(|p| Arc::new(quant::Int8Plan::new_for_module(p.calibration().clone(), &clone)));
         clone.eval();
         for p in clone.parameters() {
             p.set_requires_grad(false);
@@ -572,7 +574,9 @@ impl FoloV2Model {
         if !self.fused {
             clone.fuse()?;
         }
-        clone.int8 = self.active_int8().map(|p| Arc::new(quant::Int8Plan::new(p.calibration().clone())));
+        clone.int8 = self
+            .active_int8()
+            .map(|p| Arc::new(quant::Int8Plan::new_for_module(p.calibration().clone(), &clone)));
         clone.eval();
         for p in clone.parameters() {
             p.set_requires_grad(false);
@@ -598,10 +602,11 @@ impl FoloV2Model {
     /// Cast all floating weights and buffers to `dtype` in place. Converting away from `F32` (lossy) clears any
     /// attached int8 calibration plan so a subsequent `F16 → F32` round-trip cannot reuse stale ranges.
     pub fn to_dtype(&mut self, dtype: DType) -> Result<()> {
+        Module::to_dtype(self, dtype)?;
         if dtype != DType::F32 {
             self.int8 = None;
         }
-        Module::to_dtype(self, dtype)
+        Ok(())
     }
 
     /// Run the backbone and SPD-PAN neck in int8 on the CPU with the ranges of `cal` (docs/MODEL.md §9.6), or
@@ -627,13 +632,15 @@ impl FoloV2Model {
             let _g = no_grad();
             quant::FakeQuant::new(c).features_v2(self, &x).map_err(|e| Error::Invalid(e.to_string()))?;
         }
-        self.int8 = cal.map(|c| Arc::new(quant::Int8Plan::new(c)));
+        self.int8 = cal.map(|c| Arc::new(quant::Int8Plan::new_for_module(c, self)));
         Ok(())
     }
 
-    /// Active, non-invalidated int8 plan (requires `F32` weights).
+    /// Active, non-invalidated int8 plan (requires `F32` weights and matching recorded fingerprint if any).
     pub(crate) fn active_int8(&self) -> Option<&Arc<quant::Int8Plan>> {
-        (self.dtype() == DType::F32).then(|| self.int8.as_ref().filter(|p| p.is_valid())).flatten()
+        (self.dtype() == DType::F32)
+            .then(|| self.int8.as_ref().filter(|p| p.check_module(self, || quant::fingerprint_v2(self))))
+            .flatten()
     }
 
     /// The calibration of the int8 plan, if [`FoloV2Model::set_int8`] turned it on and it has not been

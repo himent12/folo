@@ -141,13 +141,8 @@ impl FoloModel {
             opts.classes = Some(self.classes.clone());
         }
         let report = file.load(self, &opts)?;
-        // Invalidate a fingerprinted int8 plan if replacement weights no longer match its recorded fingerprint.
-        if let Some(plan) = self.active_int8()
-            && let Some(want) = plan.calibration().weights.as_deref()
-            && quant::fingerprint(self)? != want
-        {
-            plan.invalidate();
-        }
+        // Eagerly check/invalidate a fingerprinted int8 plan against the newly loaded weights.
+        let _ = self.active_int8();
         Ok(report)
     }
 

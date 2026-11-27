@@ -314,12 +314,37 @@ fn folo2_int8_dot_folo_save_load_round_trip() {
         "save() after weight replacement must not persist stale folo.quant"
     );
 
-    // Lossy `to_dtype(F16) -> to_dtype(F32)` round-trip invalidates int8 on both `FoloV2Model` and `FoloModel`.
+    // Lossy `to_dtype(F16) -> to_dtype(F32)` invalidates int8, while a rejected `to_dtype(U8)` preserves it.
     let mut cast_v2 = FoloV2Model::open_int8(&path_q8).unwrap();
+    assert!(cast_v2.to_dtype(folo_core::DType::U8).is_err());
+    assert!(cast_v2.int8().is_some(), "rejected to_dtype(U8) must preserve active int8 plan");
     cast_v2.to_dtype(folo_core::DType::F16).unwrap();
     assert!(cast_v2.int8().is_none());
     cast_v2.to_dtype(folo_core::DType::F32).unwrap();
     assert!(cast_v2.int8().is_none());
+
+    // Even trait-level `Module::to_dtype` F32 -> F16 -> F32 or direct `ModelFile::load(&model, ...)` detects
+    // weight drift via tensor storage stamps and invalidates a fingerprinted plan automatically.
+    {
+        use folo_nn::Module;
+        let mut trait_v2 = FoloV2Model::open_int8(&path_q8).unwrap();
+        Module::to_dtype(&mut trait_v2, folo_core::DType::F16).unwrap();
+        assert!(trait_v2.int8().is_none());
+        Module::to_dtype(&mut trait_v2, folo_core::DType::F32).unwrap();
+        assert!(
+            trait_v2.int8().is_none(),
+            "trait Module::to_dtype F32->F16->F32 must invalidate fingerprinted int8"
+        );
+
+        let direct_v2 = FoloV2Model::open_int8(&path_q8).unwrap();
+        other_file
+            .load(&direct_v2, &folo_nn::io::LoadOptions::strict(folo_nn::io::Purpose::Inference))
+            .unwrap();
+        assert!(
+            direct_v2.int8().is_none(),
+            "direct ModelFile::load must invalidate fingerprinted int8 via weight stamp"
+        );
+    }
 
     let mut v1 = folo_vision::model::FoloModel::with_rng(
         folo_vision::model::ModelConfig::new("n", 4).unwrap(),
@@ -329,6 +354,10 @@ fn folo2_int8_dot_folo_save_load_round_trip() {
     v1.fuse().unwrap();
     let v1_cal = quant::calibrate(&v1, || std::iter::once(Ok(x_cal.clone())), Method::MinMax).unwrap();
     v1.set_int8(Some(v1_cal)).unwrap();
+    assert!(v1.to_dtype(folo_core::DType::U8).is_err());
+    assert!(v1.int8().is_some(), "v1 rejected to_dtype(U8) must preserve active int8 plan");
+    // Detached `fused_eval_clone` must keep its own independent `Int8Plan` when `v1.load()` invalidates `v1`.
+    let v1_clone = v1.fused_eval_clone().unwrap();
     let mut v1_other = folo_vision::model::FoloModel::with_rng(
         folo_vision::model::ModelConfig::new("n", 4).unwrap(),
         &mut Rng::seed(54),
@@ -343,6 +372,10 @@ fn folo2_int8_dot_folo_save_load_round_trip() {
     )
     .unwrap();
     assert!(v1.int8().is_none(), "v1 load() with different weights must invalidate fingerprinted int8");
+    assert!(
+        v1_clone.int8().is_some(),
+        "invalidating v1 must not disable int8 on its detached fused_eval_clone"
+    );
     let path_v1_after = dir.path().join("folo-v1-after.folo");
     v1.save(&path_v1_after).unwrap();
     assert!(
@@ -458,8 +491,8 @@ fn folo2_candidate_first_f2x2_tile_patch_matches_dense_with_poison() {
     let mut m = FoloV2Model::with_rng(FoloV2Config::new("m", 2).unwrap(), &mut Rng::seed(81)).unwrap();
     m.fuse().unwrap();
 
-    // Force only a single isolated interior candidate on P5 (`20×20`, site `(7, 9)`) while keeping all other
-    // sites strongly negative, so `conv1` (`64→64`, `20×20 < 24`) exercises Winograd F(2×2) sparsely.
+    // Silence P3/P4 completely and make P5 (`20×20`, `< 24` -> Winograd F(2×2)) fire only on its top peak
+    // site(s), staying strictly sparse (well below the 2/3 dense fallback threshold).
     {
         let _g = no_grad();
         for lv in &m.head.levels {
@@ -470,15 +503,11 @@ fn folo2_candidate_first_f2x2_tile_patch_matches_dense_with_poison() {
             }
         }
     }
-    // Use a 640×640 input so P5 is 20×20 (`< 24` -> F(2×2) branch); bump a single P5 spatial feature to fire
-    // via a deterministic input and low enough P5 bias only on level 2.
     let p5 = &m.head.levels[2];
     {
         let _g = no_grad();
-        // Set P5 cls bias to `-10.0` except make class 0 respond to spatial peak via an interior site check:
-        // even simpler, give class 0 a tiny weight on channel 0 and tune conf so only a handful of sites fire.
         let mut w_cls = vec![0.0f32; p5.cls_branch.out.weight.numel()];
-        w_cls[0] = 1.0;
+        w_cls[0] = 10.0;
         p5.cls_branch
             .out
             .weight
@@ -489,19 +518,40 @@ fn folo2_candidate_first_f2x2_tile_patch_matches_dense_with_poison() {
         }
     }
 
-    let x = Tensor::rand_uniform([1, 3, 640, 640], 0.0, 1.0, &mut Rng::seed(82));
+    // Place a localized bright interior patch around `(320, 320)` so P5 (`20×20`) has a clear unique peak.
+    let mut img_buf = vec![0.0f32; 3 * 640 * 640];
+    let mut rng = Rng::seed(82);
+    for c in 0..3 {
+        for y in 272..368 {
+            for x0 in 272..368 {
+                img_buf[c * 640 * 640 + y * 640 + x0] = rng.uniform(0.5, 2.0);
+            }
+        }
+    }
+    let x = Tensor::from_vec(img_buf, [1, 3, 640, 640]).unwrap();
     let _g = no_grad();
-    // Pick a threshold just below the maximum P5 class-0 score so only 1..5 isolated P5 sites survive.
+    // Pick a threshold midway between the 1st and 2nd highest P5 class-0 scores so only 1 isolated P5 site fires.
     let dense_out = m.forward(&x).unwrap();
     let (_, scores) = dense_out.decode_images(DEFAULT_IOU_FUSION_ALPHA).unwrap().pop().unwrap();
     let p5_offset = 80 * 80 + 40 * 40;
-    let max_p5 = scores[p5_offset * 2..].iter().copied().fold(0.0f32, f32::max);
-    assert!(max_p5 > 0.01, "expected positive P5 score");
-    let nms = NmsConfig { conf: (max_p5 - 1e-4).max(0.0), ..NmsConfig::default() };
+    let mut p5_cls0: Vec<f32> = scores[p5_offset * 2..].chunks_exact(2).map(|c| c[0]).collect();
+    p5_cls0.sort_by(|a, b| b.total_cmp(a));
+    assert!(p5_cls0[0] > p5_cls0[1], "expected unique P5 peak, got top-2 {:?}", &p5_cls0[..2]);
+    let conf = 0.5 * (p5_cls0[0] + p5_cls0[1]);
+    let nms = NmsConfig { conf, ..NmsConfig::default() };
     let dense = dense_out.detections(&nms, DEFAULT_IOU_FUSION_ALPHA).unwrap();
-    let lazy: Vec<_> =
-        m.predict_candidates(&x, &nms).unwrap().iter().map(|c| m.finish_candidates(c, &nms)).collect();
-    assert!(!dense[0].is_empty(), "expected at least one isolated P5 detection");
+    let cands = m.predict_candidates(&x, &nms).unwrap();
+    assert_eq!(
+        cands[0].cands.len(),
+        1,
+        "expected exactly 1 isolated P5 candidate (strictly sparse F(2×2)), got {}",
+        cands[0].cands.len()
+    );
+    assert!(
+        cands[0].cands.iter().all(|c| (c.anchor as usize) >= p5_offset),
+        "expected all surviving candidates on P5"
+    );
+    let lazy: Vec<_> = cands.iter().map(|c| m.finish_candidates(c, &nms)).collect();
     assert_eq!(
         dense, lazy,
         "F(2×2) isolated P5 candidate must match dense bit-for-bit even with poisoned buffers"

@@ -780,6 +780,11 @@ impl FullPadGate {
             && self.proj.weight.dtype() == DType::F32
             && self.proj.weight.dims().len() == 2
             && self.proj.weight.dims()[0] == c
+            && self
+                .proj
+                .bias
+                .as_ref()
+                .is_none_or(|bias| bias.device().is_cpu() && bias.dtype() == DType::F32 && bias.dims() == [c])
         {
             let raw = self.proj.forward(g_scene)?;
             let hw = h * w;

@@ -7,193 +7,28 @@
 //! a single FNV-1a table with precomputed half-split hashes and per-part max scales; each conv's packed weights
 //! (and direct `u8` stem) are kept with its weight tensor ([`Tensor::derived_f32`]) until written.
 
+mod plan;
 mod v2;
 
+pub use plan::Int8Plan;
 pub use v2::{features_v2, features_v2_rgb0_u8};
 
 use std::cell::{OnceCell, RefCell};
-use std::collections::HashMap;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::Arc;
 
 use folo_core::Tensor;
 use folo_core::cpu::q8::{self, C4, Grid, QConv, QOut, QStem};
 use folo_nn::{ConvBnAct, Error, Result};
 
-use super::cache::{BoundaryGrids, FnvBuildHasher, PartKeyRef, load_qconv_view, load_qstem};
+use self::plan::GridOwner;
+use super::cache::{PartKeyRef, load_qconv_view, load_qstem};
 use super::calib::conv_f32;
-use super::pool::{ScratchPool, ScratchStats, SlotHandle};
+use super::pool::{ScratchPool, SlotHandle};
 use super::walk::{self, Exec};
-use super::{
-    Calibration, ConvView, VERSION_V2, int8_able, static_int8_able, static_int8_able_rep, stem_int8_able,
-};
+use super::{ConvView, VERSION_V2, int8_able, static_int8_able, static_int8_able_rep, stem_int8_able};
 use crate::model::FoloModel;
 use crate::model::v2::{StemV2, WsQARepConv3x3};
-
-/// Maximum number of warm [`ScratchPool`]s retained per [`Int8Plan`] for concurrent `predict_batch` threads.
-const MAX_CACHED_POOLS: usize = 8;
-
-struct BoundaryEntry {
-    ch: Option<BoundaryGrids>,
-    tensor: Option<Grid>,
-    is_f32: bool,
-}
-
-/// Borrowed (v2) or shared (v1 lazy uniform) reference to a [`BoundaryGrids`] so v2 forwards incur zero atomic
-/// reference-count traffic per activation.
-#[derive(Clone)]
-pub(super) enum GridOwner<'a> {
-    Borrowed(&'a BoundaryGrids),
-    Owned(Arc<BoundaryGrids>),
-}
-
-impl GridOwner<'_> {
-    #[inline]
-    pub(super) fn as_ref(&self) -> &BoundaryGrids {
-        match self {
-            GridOwner::Borrowed(bg) => bg,
-            GridOwner::Owned(arc) => arc,
-        }
-    }
-}
-
-/// A calibrated model's int8 plan. A conv's packed weights are kept with its weight tensor
-/// ([`Tensor::derived_f32`]) under a key of everything else they are made from: a write to the weights drops
-/// them, even one that overlaps a forward, and the next forward packs them again.
-pub struct Int8Plan {
-    pub(super) cal: Calibration,
-    /// Whether `cal.f32_convs` is non-empty (lets `wants_f32` skip HashMap lookups when empty).
-    has_f32_convs: bool,
-    /// Unified FNV-1a boundary table: precomputed per-channel grids, per-tensor fallback grid, and `f32_convs`
-    /// membership in a single lookup.
-    boundaries: HashMap<String, BoundaryEntry, FnvBuildHasher>,
-    /// Lazily expanded per-boundary uniform grids for `version: 1` per-tensor calibrations.
-    uniform_grids: RwLock<HashMap<String, Arc<BoundaryGrids>, FnvBuildHasher>>,
-    /// Warm reusable C4 activation buffer pools shared across forward calls (one checked out per active forward).
-    scratch: Mutex<Vec<ScratchPool>>,
-    /// Cumulative scratch pool stats across all checked-in forwards (for diagnostics and tests).
-    stats: Mutex<ScratchStats>,
-    /// Set when the owning model's weights are replaced in place (`load`) and no longer match `cal.weights`.
-    invalidated: AtomicBool,
-}
-
-impl Int8Plan {
-    /// The plan of `cal`.
-    pub fn new(cal: Calibration) -> Self {
-        let cap = cal.ranges.len().max(cal.f32_convs.len()) + 4;
-        let mut boundaries: HashMap<String, BoundaryEntry, FnvBuildHasher> =
-            HashMap::with_capacity_and_hasher(cap, FnvBuildHasher);
-        if cal.check_version().is_ok() {
-            for name in cal.ranges.keys() {
-                let tensor = cal.param(name).ok();
-                let ch = cal
-                    .channel_ranges
-                    .get(name)
-                    .and_then(|crs| cal.channel_params(name, crs.len()).ok())
-                    .map(BoundaryGrids::new);
-                boundaries.insert(name.clone(), BoundaryEntry { ch, tensor, is_f32: false });
-            }
-        }
-        for name in &cal.f32_convs {
-            boundaries.entry(name.clone()).and_modify(|e| e.is_f32 = true).or_insert(BoundaryEntry {
-                ch: None,
-                tensor: None,
-                is_f32: true,
-            });
-        }
-        let has_f32_convs = !cal.f32_convs.is_empty();
-        Int8Plan {
-            cal,
-            has_f32_convs,
-            boundaries,
-            uniform_grids: RwLock::new(HashMap::with_hasher(FnvBuildHasher)),
-            scratch: Mutex::new(Vec::new()),
-            stats: Mutex::new(ScratchStats::default()),
-            invalidated: AtomicBool::new(false),
-        }
-    }
-
-    /// Mark this plan stale after its model's weights were replaced with incompatible ones.
-    pub(crate) fn invalidate(&self) {
-        self.invalidated.store(true, Ordering::Release);
-    }
-
-    /// Whether this plan is still valid for the model's current weights.
-    #[inline]
-    pub(crate) fn is_valid(&self) -> bool {
-        !self.invalidated.load(Ordering::Acquire)
-    }
-
-    /// The calibration.
-    pub fn calibration(&self) -> &Calibration {
-        &self.cal
-    }
-
-    /// Cumulative activation scratch-buffer reuse and allocation counters across completed forwards on this plan.
-    pub fn scratch_stats(&self) -> ScratchStats {
-        self.stats.lock().map(|g| *g).unwrap_or_default()
-    }
-
-    #[inline]
-    pub(super) fn is_f32(&self, name: &str) -> bool {
-        self.has_f32_convs && self.boundaries.get(name).is_some_and(|e| e.is_f32)
-    }
-
-    /// Single-lookup resolution of `(grids, is_f32)` for boundary `name` of channel count `c`.
-    pub(super) fn boundary_for(&self, name: &str, c: usize) -> Result<(GridOwner<'_>, bool)> {
-        if let Some(entry) = self.boundaries.get(name) {
-            if let Some(bg) = &entry.ch
-                && bg.grids.len() == c
-            {
-                return Ok((GridOwner::Borrowed(bg), entry.is_f32));
-            }
-            if !self.cal.channel_ranges.contains_key(name)
-                && let Some(g) = entry.tensor
-            {
-                if let Ok(guard) = self.uniform_grids.read()
-                    && let Some(bg) = guard.get(name)
-                    && bg.grids.len() == c
-                {
-                    return Ok((GridOwner::Owned(bg.clone()), entry.is_f32));
-                }
-                if let Ok(mut guard) = self.uniform_grids.write() {
-                    if let Some(bg) = guard.get(name)
-                        && bg.grids.len() == c
-                    {
-                        return Ok((GridOwner::Owned(bg.clone()), entry.is_f32));
-                    }
-                    let bg = Arc::new(BoundaryGrids::new(vec![g; c]));
-                    guard.insert(name.to_string(), bg.clone());
-                    return Ok((GridOwner::Owned(bg), entry.is_f32));
-                }
-                return Ok((GridOwner::Owned(Arc::new(BoundaryGrids::new(vec![g; c]))), entry.is_f32));
-            }
-        }
-        let gs = self.cal.channel_params(name, c)?;
-        Ok((GridOwner::Owned(Arc::new(BoundaryGrids::new(gs))), self.is_f32(name)))
-    }
-
-    pub(super) fn checkout_scratch(&self) -> ScratchPool {
-        self.scratch.lock().ok().and_then(|mut v| v.pop()).unwrap_or_default()
-    }
-
-    pub(super) fn checkin_scratch(&self, mut pool: ScratchPool, prev_stats: ScratchStats) {
-        let cur = pool.stats();
-        let d_reuses = cur.reuses.saturating_sub(prev_stats.reuses);
-        let d_allocs = cur.allocs.saturating_sub(prev_stats.allocs);
-        if let Ok(mut total) = self.stats.lock() {
-            total.reuses += d_reuses;
-            total.allocs += d_allocs;
-        }
-        pool.trim_for_checkin();
-        if let Ok(mut v) = self.scratch.lock()
-            && v.len() < MAX_CACHED_POOLS
-        {
-            v.push(pool);
-        }
-    }
-}
 
 /// A materialised u8 C4 activation (or a channel slice of one) backed by a pooled [`SlotHandle`].
 #[derive(Clone)]
@@ -918,7 +753,8 @@ mod tests {
 
     use super::*;
     use crate::model::blocks::Init;
-    use crate::model::quant::Method;
+    use crate::model::quant::cache::BoundaryGrids;
+    use crate::model::quant::{Calibration, Method};
     use folo_core::rng::Rng;
 
     /// Weight and bias views sharing the same underlying storage `RwLock` must never deadlock during `qconv` or

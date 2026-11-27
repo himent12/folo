@@ -509,7 +509,9 @@ impl FoloModel {
         if !self.fused {
             clone.fuse()?;
         }
-        clone.int8 = self.int8.clone();
+        clone.int8 = self
+            .active_int8()
+            .map(|p| Arc::new(quant::Int8Plan::new_for_module(p.calibration().clone(), &clone)));
         clone.eval();
         for p in clone.parameters() {
             p.set_requires_grad(false);
@@ -543,13 +545,15 @@ impl FoloModel {
             let _g = folo_core::no_grad();
             quant::FakeQuant::new(c).features(self, &x).map_err(|e| Error::Invalid(e.to_string()))?;
         }
-        self.int8 = cal.map(|c| Arc::new(quant::Int8Plan::new(c)));
+        self.int8 = cal.map(|c| Arc::new(quant::Int8Plan::new_for_module(c, self)));
         Ok(())
     }
 
-    /// Active, non-invalidated int8 plan (requires `F32` weights).
+    /// Active, non-invalidated int8 plan (requires `F32` weights and matching recorded fingerprint if any).
     pub(crate) fn active_int8(&self) -> Option<&Arc<quant::Int8Plan>> {
-        (self.dtype() == folo_core::DType::F32).then(|| self.int8.as_ref().filter(|p| p.is_valid())).flatten()
+        (self.dtype() == folo_core::DType::F32)
+            .then(|| self.int8.as_ref().filter(|p| p.check_module(self, || quant::fingerprint(self))))
+            .flatten()
     }
 
     /// The calibration of the int8 plan, if [`FoloModel::set_int8`] turned it on and it has not been
@@ -818,10 +822,11 @@ impl FoloModel {
     /// Cast all floating weights and buffers to `dtype` in place. Converting away from `F32` (lossy) clears any
     /// attached int8 calibration plan so a subsequent `F16 → F32` round-trip cannot reuse stale ranges.
     pub fn to_dtype(&mut self, dtype: folo_core::DType) -> Result<()> {
+        Module::to_dtype(self, dtype)?;
         if dtype != folo_core::DType::F32 {
             self.int8 = None;
         }
-        Module::to_dtype(self, dtype)
+        Ok(())
     }
 }
 
