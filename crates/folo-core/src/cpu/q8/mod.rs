@@ -10,10 +10,11 @@
 //! - `silu.rs`: bit-exact division-free Estrin degree-5 fast SiLU (`silu_q8`, scalar and AVX2).
 //! - `kernel.rs`: the 4 × 24 micro-kernel (VNNI, AVX-512 VNNI VL, AVX2, and portable), L1 `TileF32` part
 //!   accumulator, and per-channel epilogue (dequantise, bias, SiLU, residual, requantise), the same bits on all paths.
-//! - `fused.rs` + `fused_epi.rs`: fused x86-64 L1-blocked tile-block drivers and zero-spill epilogues for `conv`,
-//!   `conv_per_channel`, and `stem_u8`.
+//! - `fused.rs` + `fused_epi.rs` + `fused_pack.rs`: fused x86-64 L1-blocked tile-block drivers, L1-resident
+//!   B-panel packing with 4× K-unrolled aligned 256-bit `1×1` microkernels, and zero-spill split-pair epilogues
+//!   with direct `f32` writes for `conv`, `conv_per_channel`, and `stem_u8`.
 //! - `fused_3x3.rs`: single-barrier L1-hot rotating row-strip x86-64 driver for single-part `3×3, pad = 1` convs
-//!   at stride 2 and large-input stride 1.
+//!   at stride 1 and stride 2, with multi-row weight reuse (`RB ∈ {1, 2, 4}`) and shared-strip small-spatial `s=1`.
 //! - `vnni512/`: 512-bit ZMM AVX-512 VNNI (`4 × 48` / hybrid `4 × 24`) microkernels, bit-exact 16-lane SiLU,
 //!   and fused drivers (`avx512f + avx512bw + avx512vl + avx512vnni`).
 //! - `rows.rs`: input row-pointer preparation and row-band parallelised padded phase copies (`image_rows`).
@@ -29,6 +30,8 @@ mod fused;
 mod fused_3x3;
 #[cfg(target_arch = "x86_64")]
 mod fused_epi;
+#[cfg(target_arch = "x86_64")]
+mod fused_pack;
 mod kernel;
 mod quant;
 mod rows;
@@ -328,9 +331,34 @@ unsafe fn deinterleave_even_odd_avx2(src: &[u32], even: &mut [u32], odd: &mut [u
     debug_assert_eq!(odd.len(), pairs);
     let full = (w / 16).min(pairs / 8);
     let mut j = 0;
-    // SAFETY: `2 * (j + 8) <= w` and `j + 8 <= pairs`.
+    // SAFETY: `2 * (j + 16) <= w` and `j + 16 <= pairs` for the 2× loop; `2 * (j + 8) <= w` and `j + 8 <= pairs`
+    // for the 1× tail.
     unsafe {
-        for _ in 0..full {
+        let mut rem = full;
+        while rem >= 2 {
+            let sp = src.as_ptr().add(2 * j) as *const __m256i;
+            let lo0 = _mm256_castsi256_ps(_mm256_loadu_si256(sp));
+            let hi0 = _mm256_castsi256_ps(_mm256_loadu_si256(sp.add(1)));
+            let lo1 = _mm256_castsi256_ps(_mm256_loadu_si256(sp.add(2)));
+            let hi1 = _mm256_castsi256_ps(_mm256_loadu_si256(sp.add(3)));
+            let ev0 =
+                _mm256_permute4x64_epi64::<0xD8>(_mm256_castps_si256(_mm256_shuffle_ps::<0x88>(lo0, hi0)));
+            let od0 =
+                _mm256_permute4x64_epi64::<0xD8>(_mm256_castps_si256(_mm256_shuffle_ps::<0xDD>(lo0, hi0)));
+            let ev1 =
+                _mm256_permute4x64_epi64::<0xD8>(_mm256_castps_si256(_mm256_shuffle_ps::<0x88>(lo1, hi1)));
+            let od1 =
+                _mm256_permute4x64_epi64::<0xD8>(_mm256_castps_si256(_mm256_shuffle_ps::<0xDD>(lo1, hi1)));
+            let ep = even.as_mut_ptr().add(j) as *mut __m256i;
+            let op = odd.as_mut_ptr().add(j) as *mut __m256i;
+            _mm256_storeu_si256(ep, ev0);
+            _mm256_storeu_si256(op, od0);
+            _mm256_storeu_si256(ep.add(1), ev1);
+            _mm256_storeu_si256(op.add(1), od1);
+            j += 16;
+            rem -= 2;
+        }
+        if rem == 1 {
             let sp = src.as_ptr().add(2 * j) as *const __m256i;
             let lo = _mm256_castsi256_ps(_mm256_loadu_si256(sp));
             let hi = _mm256_castsi256_ps(_mm256_loadu_si256(sp.add(1)));

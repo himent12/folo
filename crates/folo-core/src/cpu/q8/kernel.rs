@@ -272,13 +272,16 @@ pub(crate) unsafe fn kernel_vnni(
     // SAFETY: the caller guarantees `ks · MR` words at `a` and `col + NR` words at every row.
     unsafe {
         let mut p = 0;
-        while p + 2 <= ks {
+        while p + 4 <= ks {
             step!(p);
             step!(p + 1);
-            p += 2;
+            step!(p + 2);
+            step!(p + 3);
+            p += 4;
         }
-        if p < ks {
+        while p < ks {
             step!(p);
+            p += 1;
         }
         let out = acc.as_mut_ptr() as *mut __m256i;
         for (i, v) in [c00, c01, c02, c10, c11, c12, c20, c21, c22, c30, c31, c32].into_iter().enumerate() {
@@ -335,13 +338,16 @@ pub(crate) unsafe fn kernel_avx512vnni(
     // SAFETY: the caller guarantees `ks · MR` words at `a` and `col + NR` words at every row.
     unsafe {
         let mut p = 0;
-        while p + 2 <= ks {
+        while p + 4 <= ks {
             step!(p);
             step!(p + 1);
-            p += 2;
+            step!(p + 2);
+            step!(p + 3);
+            p += 4;
         }
-        if p < ks {
+        while p < ks {
             step!(p);
+            p += 1;
         }
         let out = acc.as_mut_ptr() as *mut __m256i;
         for (i, v) in [c00, c01, c02, c10, c11, c12, c20, c21, c22, c30, c31, c32].into_iter().enumerate() {

@@ -13,9 +13,9 @@ use std::arch::x86_64::*;
 use std::cell::RefCell;
 
 use super::conv::OutPtr;
-use super::fused_epi::{AlignedTile, FusedIsa, apply_epi_aligned, zero_pairs};
+use super::fused_epi::{AlignedTile, FusedIsa, apply_epi_aligned_fstride, zero_pairs};
 use super::kernel::{MR, NR};
-use super::{C4, deinterleave_even_odd};
+use super::{C4, deinterleave_even_odd, recycle, words};
 
 /// Cap on per-thread retained scratch (`4 MiB`) so pathological huge shapes do not bloat thread-local memory.
 const MAX_RETAINED_WORDS: usize = 1 << 20;
@@ -80,7 +80,7 @@ pub(super) struct Conv3x3Params<'a> {
     pub fptr: OutPtr<f32>,
 }
 
-/// Per-row arguments passed into the target-feature-specialized `compute_row` / `run_row` kernels.
+/// Per-row arguments passed into the 512-bit AVX-512 VNNI `run_3x3_row` kernel.
 pub(super) struct RowArgs<'a> {
     pub(super) p: &'a Conv3x3Params<'a>,
     pub(super) img: usize,
@@ -92,6 +92,22 @@ pub(super) struct RowArgs<'a> {
     pub(super) slot_words: usize,
     pub(super) ord: [usize; 3],
     pub(super) buf: &'a [u32],
+}
+
+/// Multi-row batch arguments (`rows_len ∈ 1..=4`) passed into 256-bit `compute_rows` kernels so each `g`'s
+/// weight panel is loaded once and reused across `rows_len` output rows inside L1D.
+struct BatchRowArgs<'a> {
+    p: &'a Conv3x3Params<'a>,
+    img: usize,
+    oy_start: usize,
+    rows_len: usize,
+    ob_start: usize,
+    ob_end: usize,
+    group_stride: usize,
+    ev_w: usize,
+    slot_words: usize,
+    ord: [usize; 9],
+    buf: &'a [u32],
 }
 
 /// Source group lookup `(part_index, local_group_index)` and precomputed packed zero word.
@@ -237,18 +253,20 @@ macro_rules! define_3x3_strip_isa {
             }
 
             #[target_feature(enable = $feat)]
-            unsafe fn compute_row<
+            unsafe fn compute_rows<
                 const IS_S2: bool,
                 const SILU: bool,
                 const HAS_RES: bool,
                 const OUT_U8: bool,
             >(
-                r: &RowArgs<'_>,
+                r: &BatchRowArgs<'_>,
             ) {
                 let p = r.p;
-                let (img, oy, ob_start, ob_end) = (r.img, r.oy, r.ob_start, r.ob_end);
+                let (img, oy_start, rows_len, ob_start, ob_end) =
+                    (r.img, r.oy_start, r.rows_len, r.ob_start, r.ob_end);
                 let (group_stride, ev_w, slot_words, ord, buf) =
                     (r.group_stride, r.ev_w, r.slot_words, r.ord, r.buf);
+                let stride = if IS_S2 { 2usize } else { 1usize };
                 let ohw = p.oh * p.ow;
                 let full_chunks = p.ow / NR;
                 let tail = p.ow % NR;
@@ -264,14 +282,9 @@ macro_rules! define_3x3_strip_isa {
                 let mut resw: [u32; NR];
                 let mut fv = [[0f32; NR]; MR];
                 let bptr = buf.as_ptr();
-                let row_off = oy * p.ow;
-                // SAFETY: caller validated all buffer bounds and disjoint `(img, oy, ob_start..ob_end)` ownership.
+                // SAFETY: caller validated all buffer bounds, `rows_len <= 4`, slot indices, and disjoint
+                // `(img, oy_start..oy_start + rows_len, ob_start..ob_end)` ownership.
                 unsafe {
-                    let slots = [
-                        bptr.add(ord[0] * slot_words),
-                        bptr.add(ord[1] * slot_words),
-                        bptr.add(ord[2] * slot_words),
-                    ];
                     for g in ob_start..ob_end {
                         let a_panel = p.a.as_ptr().add(g * ks * MR);
                         let corr: [i32; MR] = p.corr[4 * g..4 * g + 4].try_into().unwrap();
@@ -288,114 +301,114 @@ macro_rules! define_3x3_strip_isa {
                         let res_plane = if HAS_RES { res_img_ptr.add(g * ohw) } else { std::ptr::null() };
                         let q_plane = if OUT_U8 { q_img_ptr.add(g * ohw) } else { std::ptr::null_mut() };
                         let f_base = if !OUT_U8 { f_img_ptr.add(4 * g * ohw) } else { std::ptr::null_mut() };
-                        for chunk in 0..full_chunks {
-                            let col = chunk * NR;
-                            if IS_S2 {
-                                k_loop_s2::<3>(p.groups, a_panel, slots, group_stride, ev_w, col, &mut acc);
-                            } else {
-                                k_loop_s1::<3>(p.groups, a_panel, slots, group_stride, col, &mut acc);
-                            }
-                            let res_ptr = if HAS_RES { res_plane.add(row_off + col) } else { std::ptr::null() };
-                            if OUT_U8 {
-                                apply_epi_aligned::<SILU, HAS_RES, true, 3>(
-                                    &acc, &corr, &scale, &bias, res_ptr, &rs, &rz, &inv,
-                                    &z01_arr, &z23_arr, q_plane.add(row_off + col), &mut fv,
-                                );
-                            } else {
-                                apply_epi_aligned::<SILU, HAS_RES, false, 3>(
-                                    &acc, &corr, &scale, &bias, res_ptr, &rs, &rz, &inv,
-                                    &z01_arr, &z23_arr, std::ptr::null_mut(), &mut fv,
-                                );
-                                for (rr, row) in fv.iter().enumerate() {
-                                    std::ptr::copy_nonoverlapping(
-                                        row.as_ptr(),
-                                        f_base.add(rr * ohw + row_off + col),
-                                        NR,
-                                    );
+                        for r_idx in 0..rows_len {
+                            let row_off = (oy_start + r_idx) * p.ow;
+                            let s0 = r_idx * stride;
+                            let slots = [
+                                bptr.add(ord[s0] * slot_words),
+                                bptr.add(ord[s0 + 1] * slot_words),
+                                bptr.add(ord[s0 + 2] * slot_words),
+                            ];
+                            for chunk in 0..full_chunks {
+                                let col = chunk * NR;
+                                if IS_S2 {
+                                    k_loop_s2::<3>(p.groups, a_panel, slots, group_stride, ev_w, col, &mut acc);
+                                } else {
+                                    k_loop_s1::<3>(p.groups, a_panel, slots, group_stride, col, &mut acc);
                                 }
+                                let res_ptr = if HAS_RES { res_plane.add(row_off + col) } else { std::ptr::null() };
+                                apply_epi_aligned_fstride::<SILU, HAS_RES, OUT_U8, 3>(
+                                    &acc, &corr, &scale, &bias, res_ptr, &rs, &rz, &inv,
+                                    &z01_arr, &z23_arr,
+                                    if OUT_U8 { q_plane.add(row_off + col) } else { std::ptr::null_mut() },
+                                    if !OUT_U8 { f_base.add(row_off + col) } else { std::ptr::null_mut() },
+                                    ohw,
+                                );
                             }
-                        }
-                        if tail > 0 {
-                            let col = full_chunks * NR;
-                            macro_rules! run_tail {
-                                ($vecs:literal) => {{
-                                    if IS_S2 {
-                                        k_loop_s2::<$vecs>(p.groups, a_panel, slots, group_stride, ev_w, col, &mut acc);
-                                    } else {
-                                        k_loop_s1::<$vecs>(p.groups, a_panel, slots, group_stride, col, &mut acc);
-                                    }
-                                    let res_ptr = if HAS_RES {
-                                        if tail == $vecs * 8 {
-                                            res_plane.add(row_off + col)
+                            if tail > 0 {
+                                let col = full_chunks * NR;
+                                macro_rules! run_tail {
+                                    ($vecs:literal) => {{
+                                        if IS_S2 {
+                                            k_loop_s2::<$vecs>(p.groups, a_panel, slots, group_stride, ev_w, col, &mut acc);
                                         } else {
-                                            resw = [0u32; NR];
-                                            std::ptr::copy_nonoverlapping(
-                                                res_plane.add(row_off + col),
-                                                resw.as_mut_ptr(),
-                                                tail,
-                                            );
-                                            resw.as_ptr()
+                                            k_loop_s1::<$vecs>(p.groups, a_panel, slots, group_stride, col, &mut acc);
                                         }
-                                    } else {
-                                        std::ptr::null()
-                                    };
-                                    if OUT_U8 {
-                                        if tail == $vecs * 8 {
-                                            apply_epi_aligned::<SILU, HAS_RES, true, $vecs>(
-                                                &acc, &corr, &scale, &bias, res_ptr, &rs, &rz, &inv,
-                                                &z01_arr, &z23_arr, q_plane.add(row_off + col), &mut fv,
-                                            );
+                                        let direct = tail == $vecs * 8;
+                                        let res_ptr = if HAS_RES {
+                                            if direct {
+                                                res_plane.add(row_off + col)
+                                            } else {
+                                                resw = [0u32; NR];
+                                                std::ptr::copy_nonoverlapping(
+                                                    res_plane.add(row_off + col),
+                                                    resw.as_mut_ptr(),
+                                                    tail,
+                                                );
+                                                resw.as_ptr()
+                                            }
                                         } else {
-                                            apply_epi_aligned::<SILU, HAS_RES, true, $vecs>(
-                                                &acc, &corr, &scale, &bias, res_ptr, &rs, &rz, &inv,
-                                                &z01_arr, &z23_arr, qw.as_mut_ptr(), &mut fv,
-                                            );
-                                            std::ptr::copy_nonoverlapping(
-                                                qw.as_ptr(),
-                                                q_plane.add(row_off + col),
-                                                tail,
-                                            );
-                                        }
-                                    } else {
-                                        apply_epi_aligned::<SILU, HAS_RES, false, $vecs>(
+                                            std::ptr::null()
+                                        };
+                                        let q_dst = if OUT_U8 {
+                                            if direct { q_plane.add(row_off + col) } else { qw.as_mut_ptr() }
+                                        } else {
+                                            std::ptr::null_mut()
+                                        };
+                                        let (f_dst, f_stride) = if !OUT_U8 {
+                                            if direct { (f_base.add(row_off + col), ohw) } else { (fv.as_mut_ptr() as *mut f32, NR) }
+                                        } else {
+                                            (std::ptr::null_mut(), 0)
+                                        };
+                                        apply_epi_aligned_fstride::<SILU, HAS_RES, OUT_U8, $vecs>(
                                             &acc, &corr, &scale, &bias, res_ptr, &rs, &rz, &inv,
-                                            &z01_arr, &z23_arr, std::ptr::null_mut(), &mut fv,
+                                            &z01_arr, &z23_arr, q_dst, f_dst, f_stride,
                                         );
-                                        for (rr, row) in fv.iter().enumerate() {
-                                            std::ptr::copy_nonoverlapping(
-                                                row.as_ptr(),
-                                                f_base.add(rr * ohw + row_off + col),
-                                                tail,
-                                            );
+                                        if OUT_U8 {
+                                            if !direct {
+                                                std::ptr::copy_nonoverlapping(
+                                                    qw.as_ptr(),
+                                                    q_plane.add(row_off + col),
+                                                    tail,
+                                                );
+                                            }
+                                        } else if !direct {
+                                            for (rr, row) in fv.iter().enumerate() {
+                                                std::ptr::copy_nonoverlapping(
+                                                    row.as_ptr(),
+                                                    f_base.add(rr * ohw + row_off + col),
+                                                    tail,
+                                                );
+                                            }
                                         }
-                                    }
-                                }};
-                            }
-                            if tail <= 8 {
-                                run_tail!(1);
-                            } else if tail <= 16 {
-                                run_tail!(2);
-                            } else {
-                                run_tail!(3);
+                                    }};
+                                }
+                                if tail <= 8 {
+                                    run_tail!(1);
+                                } else if tail <= 16 {
+                                    run_tail!(2);
+                                } else {
+                                    run_tail!(3);
+                                }
                             }
                         }
                     }
                 }
             }
 
-            pub(super) unsafe fn run_row<const IS_S2: bool>(r: &RowArgs<'_>) {
+            pub(super) unsafe fn run_rows<const IS_S2: bool>(r: &BatchRowArgs<'_>) {
                 let has_res = r.p.res_view.is_some();
                 // SAFETY: ISA checked by caller.
                 unsafe {
                     match (r.p.silu, has_res, r.p.is_u8) {
-                        (true, false, true) => compute_row::<IS_S2, true, false, true>(r),
-                        (false, false, true) => compute_row::<IS_S2, false, false, true>(r),
-                        (true, true, true) => compute_row::<IS_S2, true, true, true>(r),
-                        (false, true, true) => compute_row::<IS_S2, false, true, true>(r),
-                        (true, false, false) => compute_row::<IS_S2, true, false, false>(r),
-                        (false, false, false) => compute_row::<IS_S2, false, false, false>(r),
-                        (true, true, false) => compute_row::<IS_S2, true, true, false>(r),
-                        (false, true, false) => compute_row::<IS_S2, false, true, false>(r),
+                        (true, false, true) => compute_rows::<IS_S2, true, false, true>(r),
+                        (false, false, true) => compute_rows::<IS_S2, false, false, true>(r),
+                        (true, true, true) => compute_rows::<IS_S2, true, true, true>(r),
+                        (false, true, true) => compute_rows::<IS_S2, false, true, true>(r),
+                        (true, false, false) => compute_rows::<IS_S2, true, false, false>(r),
+                        (false, false, false) => compute_rows::<IS_S2, false, false, false>(r),
+                        (true, true, false) => compute_rows::<IS_S2, true, true, false>(r),
+                        (false, true, false) => compute_rows::<IS_S2, false, true, false>(r),
                     }
                 }
             }
@@ -523,9 +536,9 @@ fn plan_3x3_strip(
     let row_blk = oh.div_ceil(rbs);
     let rbs = oh.div_ceil(row_blk);
     let total_rbs = n * rbs;
-    let og_blk = if total_rbs < want && og > 1 && macs / total_rbs >= min_macs.saturating_mul(6) {
-        // Cap duplicate row-band packing across output channel blocks at 4× so small `oh` (e.g. rect 640×384)
-        // never re-packs the same input rows excessively.
+    let og_blk = if total_rbs < want && og > 1 && macs / total_rbs >= min_macs.saturating_mul(3) {
+        // Cap duplicate row-band packing across output channel blocks at 4× so small `oh` (e.g. rect 640×384
+        // or 20×20/40×40 feature maps) never re-packs the same input rows excessively.
         let max_obs = (max_tasks / total_rbs).clamp(1, 4);
         let want_o = ((per_img + rbs / 2) / rbs).clamp(1, max_obs).min(og);
         og.div_ceil(want_o)
@@ -632,8 +645,8 @@ pub(super) unsafe fn try_run_3x3_strip(
         (slot_w, 0)
     };
     let Some(slot_words) = p.groups.checked_mul(group_stride) else { return false };
-    let Some(scratch_words) = slot_words.checked_mul(3) else { return false };
-    if scratch_words > MAX_SCRATCH_WORDS {
+    let Some(base_scratch_words) = slot_words.checked_mul(3) else { return false };
+    if base_scratch_words > MAX_SCRATCH_WORDS {
         return false;
     }
 
@@ -666,10 +679,126 @@ pub(super) unsafe fn try_run_3x3_strip(
 
     let threads = rayon::current_num_threads();
     let is_s2 = stride == 2;
+
+    // Small-spatial stride-1 fast path (e.g. `20×20` P5 layers: `64->64` × 9 calls, `256->64` × 1 call):
+    // when the entire `(oh + 2)` padded strip fits in `<= 256 KiB` (`65536` words), pack each image's padded
+    // rows ONCE into a pooled buffer and split tasks by output channel group `og` first. This avoids 4×–16×
+    // duplicate input row packing and keeps each task's weight panel hot across all rows of its plane.
+    let shared_s1_words = (!is_s2 && p.oh <= 24)
+        .then(|| p.oh.checked_add(2).and_then(|rows| rows.checked_mul(slot_words)))
+        .flatten()
+        .filter(|&img_w| {
+            img_w <= 65_536 && p.n.checked_mul(img_w).is_some_and(|tot| tot <= MAX_SCRATCH_WORDS)
+        });
+    if let Some(img_words) = shared_s1_words
+        && isa != FusedIsa::Avx512Vnni512
+    {
+        let macs =
+            p.n.saturating_mul(p.oh)
+                .saturating_mul(p.ow)
+                .saturating_mul(p.og * 4)
+                .saturating_mul(p.groups * 4)
+                .saturating_mul(9);
+        let serial_floor =
+            if threads >= 16 { min_macs.saturating_mul(8) } else { min_macs.saturating_mul(2) };
+        let max_tasks = (3 * threads).max(1);
+        let want = if threads > 1 && macs >= serial_floor {
+            max_tasks.min(macs / min_macs.max(1)).max(1)
+        } else {
+            p.n.min(threads.max(1)).max(1)
+        };
+        let per_img = want.div_ceil(p.n);
+        let og_blk = p.og.div_ceil(per_img.min(p.og));
+        let obs = p.og.div_ceil(og_blk);
+        let max_rbs = (max_tasks / (p.n * obs)).min((p.oh / 4).max(1)).max(1);
+        let want_r = ((per_img + obs / 2) / obs).clamp(1, max_rbs);
+        let row_blk = p.oh.div_ceil(want_r.min(p.oh));
+        let rbs = p.oh.div_ceil(row_blk);
+        let tasks = p.n * rbs * obs;
+        let padded_rows = p.oh + 2;
+        let total_words = p.n * img_words;
+        let mut shared = words(total_words);
+        let sptr = OutPtr(shared.as_mut_ptr());
+        let sptr = &sptr;
+        let fill_one = |ir: usize| {
+            let (img, r) = (ir / padded_rows, ir % padded_rows);
+            // SAFETY: each `(img, r)` owns disjoint `slot_words` inside `shared[..total_words]`.
+            let dst = unsafe {
+                std::slice::from_raw_parts_mut(sptr.at(img * img_words + r * slot_words), slot_words)
+            };
+            fill_s1_row(p.xs, gsrcs, img, p.h, p.w, group_stride, r as isize - 1, dst);
+        };
+        if total_words >= (1 << 14) && threads > 1 {
+            crate::cpu::par_for(p.n * padded_rows, &fill_one);
+        } else {
+            (0..p.n * padded_rows).for_each(fill_one);
+        }
+        let shared_slice: &[u32] = &shared[..total_words];
+        let run_shared = |t: usize| {
+            let (img, rest) = (t / (rbs * obs), t % (rbs * obs));
+            let (ob, rb) = (rest / rbs, rest % rbs);
+            let oy0 = rb * row_blk;
+            let oy1 = (oy0 + row_blk).min(p.oh);
+            let ob_start = ob * og_blk;
+            let ob_end = (ob_start + og_blk).min(p.og);
+            let img_buf = &shared_slice[img * img_words..(img + 1) * img_words];
+            let ord = [0usize, 1, 2, 3, 4, 5, 6, 7, 8];
+            let mut oy = oy0;
+            while oy < oy1 {
+                let b_len = 4usize.min(oy1 - oy);
+                let sub = &img_buf[oy * slot_words..(oy + b_len + 2) * slot_words];
+                let batch_args = BatchRowArgs {
+                    p,
+                    img,
+                    oy_start: oy,
+                    rows_len: b_len,
+                    ob_start,
+                    ob_end,
+                    group_stride,
+                    ev_w: 0,
+                    slot_words,
+                    ord,
+                    buf: sub,
+                };
+                // SAFETY: ISA checked by caller; `(img, oy..oy+b_len, ob_start..ob_end)` is disjointly owned.
+                unsafe {
+                    match isa {
+                        FusedIsa::AvxVnni => vnni_3x3::run_rows::<false>(&batch_args),
+                        FusedIsa::Avx512Vnni => avx512vnni_3x3::run_rows::<false>(&batch_args),
+                        FusedIsa::Avx2 => avx2_3x3::run_rows::<false>(&batch_args),
+                        FusedIsa::Avx512Vnni512 => unreachable!(),
+                    }
+                }
+                oy += b_len;
+            }
+        };
+        if tasks <= 1 {
+            (0..tasks).for_each(run_shared);
+        } else {
+            crate::cpu::par_for(tasks, &run_shared);
+        }
+        recycle(shared);
+        return true;
+    }
+
     let (row_blk, og_blk) = plan_3x3_strip(p.n, p.oh, p.ow, p.groups, p.og, is_s2, (threads, min_macs));
     let rbs = p.oh.div_ceil(row_blk);
     let obs = p.og.div_ceil(og_blk);
     let tasks = p.n * rbs * obs;
+    // Choose L1-resident multi-row batch size `max_rb ∈ {1, 2, 4}` for 256-bit ISAs when `ow <= 96` so each
+    // weight panel `a_panel` is reused across `max_rb` output rows without spilling the strip out of L1D (32 KiB).
+    let max_rb = if isa == FusedIsa::Avx512Vnni512 || p.ow > 96 {
+        1
+    } else if row_blk >= 4 && (stride * 3 + 3).saturating_mul(slot_words).saturating_mul(4) <= (32 << 10) {
+        4
+    } else if row_blk >= 2 && (stride + 3).saturating_mul(slot_words).saturating_mul(4) <= (32 << 10) {
+        2
+    } else {
+        1
+    };
+    let max_slots = stride * (max_rb - 1) + 3;
+    let scratch_words = slot_words * max_slots;
+    let overlap = 3 - stride;
     let run_task = |t: usize| {
         let (img, rest) = (t / (rbs * obs), t % (rbs * obs));
         let (rb, ob) = (rest / obs, rest % obs);
@@ -678,143 +807,98 @@ pub(super) unsafe fn try_run_3x3_strip(
         let ob_start = ob * og_blk;
         let ob_end = (ob_start + og_blk).min(p.og);
         with_scratch_u32(scratch_words, |buf| {
-            let mut ord = [0usize, 1, 2];
-            for (i, oy) in (oy0..oy1).enumerate() {
+            let fill_row = |iy: isize, dst: &mut [u32]| {
                 if is_s2 {
-                    if i == 0 {
-                        fill_s2_row(
-                            p.xs,
-                            gsrcs,
-                            img,
-                            p.h,
-                            p.w,
-                            p.ow,
-                            ev_w,
-                            group_stride,
-                            (2 * oy) as isize - 1,
-                            &mut buf[0..slot_words],
-                        );
-                        fill_s2_row(
-                            p.xs,
-                            gsrcs,
-                            img,
-                            p.h,
-                            p.w,
-                            p.ow,
-                            ev_w,
-                            group_stride,
-                            (2 * oy) as isize,
-                            &mut buf[slot_words..2 * slot_words],
-                        );
-                        fill_s2_row(
-                            p.xs,
-                            gsrcs,
-                            img,
-                            p.h,
-                            p.w,
-                            p.ow,
-                            ev_w,
-                            group_stride,
-                            (2 * oy + 1) as isize,
-                            &mut buf[2 * slot_words..3 * slot_words],
-                        );
-                    } else {
-                        ord.rotate_left(2);
-                        let (s1, s2) = (ord[1], ord[2]);
-                        fill_s2_row(
-                            p.xs,
-                            gsrcs,
-                            img,
-                            p.h,
-                            p.w,
-                            p.ow,
-                            ev_w,
-                            group_stride,
-                            (2 * oy) as isize,
-                            &mut buf[s1 * slot_words..(s1 + 1) * slot_words],
-                        );
-                        fill_s2_row(
-                            p.xs,
-                            gsrcs,
-                            img,
-                            p.h,
-                            p.w,
-                            p.ow,
-                            ev_w,
-                            group_stride,
-                            (2 * oy + 1) as isize,
-                            &mut buf[s2 * slot_words..(s2 + 1) * slot_words],
-                        );
-                    }
-                    let row_args =
-                        RowArgs { p, img, oy, ob_start, ob_end, group_stride, ev_w, slot_words, ord, buf };
-                    // SAFETY: ISA checked by caller; `(img, oy, ob_start..ob_end)` is disjointly owned.
-                    unsafe {
-                        match isa {
-                            FusedIsa::Avx512Vnni512 => super::vnni512::run_3x3_row::<true>(&row_args),
-                            FusedIsa::AvxVnni => vnni_3x3::run_row::<true>(&row_args),
-                            FusedIsa::Avx512Vnni => avx512vnni_3x3::run_row::<true>(&row_args),
-                            FusedIsa::Avx2 => avx2_3x3::run_row::<true>(&row_args),
-                        }
-                    }
+                    fill_s2_row(p.xs, gsrcs, img, p.h, p.w, p.ow, ev_w, group_stride, iy, dst);
                 } else {
-                    if i == 0 {
-                        fill_s1_row(
-                            p.xs,
-                            gsrcs,
-                            img,
-                            p.h,
-                            p.w,
-                            group_stride,
-                            oy as isize - 1,
-                            &mut buf[0..slot_words],
-                        );
-                        fill_s1_row(
-                            p.xs,
-                            gsrcs,
-                            img,
-                            p.h,
-                            p.w,
-                            group_stride,
-                            oy as isize,
-                            &mut buf[slot_words..2 * slot_words],
-                        );
-                        fill_s1_row(
-                            p.xs,
-                            gsrcs,
-                            img,
-                            p.h,
-                            p.w,
-                            group_stride,
-                            oy as isize + 1,
-                            &mut buf[2 * slot_words..3 * slot_words],
-                        );
+                    fill_s1_row(p.xs, gsrcs, img, p.h, p.w, group_stride, iy, dst);
+                }
+            };
+            if isa == FusedIsa::Avx512Vnni512 {
+                let mut ord = [0usize, 1, 2];
+                for (i, oy) in (oy0..oy1).enumerate() {
+                    let fill_from = if i == 0 {
+                        0
                     } else {
-                        ord.rotate_left(1);
-                        let s2 = ord[2];
-                        fill_s1_row(
-                            p.xs,
-                            gsrcs,
-                            img,
-                            p.h,
-                            p.w,
-                            group_stride,
-                            oy as isize + 1,
-                            &mut buf[s2 * slot_words..(s2 + 1) * slot_words],
-                        );
+                        ord.rotate_left(stride);
+                        overlap
+                    };
+                    for (s_idx, &sl) in ord.iter().enumerate().skip(fill_from) {
+                        let iy = (stride * oy) as isize - 1 + s_idx as isize;
+                        fill_row(iy, &mut buf[sl * slot_words..(sl + 1) * slot_words]);
                     }
-                    let row_args =
-                        RowArgs { p, img, oy, ob_start, ob_end, group_stride, ev_w: 0, slot_words, ord, buf };
+                    let row_args = RowArgs {
+                        p,
+                        img,
+                        oy,
+                        ob_start,
+                        ob_end,
+                        group_stride,
+                        ev_w: if is_s2 { ev_w } else { 0 },
+                        slot_words,
+                        ord,
+                        buf,
+                    };
                     // SAFETY: ISA checked by caller; `(img, oy, ob_start..ob_end)` is disjointly owned.
                     unsafe {
-                        match isa {
-                            FusedIsa::Avx512Vnni512 => super::vnni512::run_3x3_row::<false>(&row_args),
-                            FusedIsa::AvxVnni => vnni_3x3::run_row::<false>(&row_args),
-                            FusedIsa::Avx512Vnni => avx512vnni_3x3::run_row::<false>(&row_args),
-                            FusedIsa::Avx2 => avx2_3x3::run_row::<false>(&row_args),
+                        if is_s2 {
+                            super::vnni512::run_3x3_row::<true>(&row_args);
+                        } else {
+                            super::vnni512::run_3x3_row::<false>(&row_args);
                         }
                     }
                 }
+                return;
+            }
+            let mut ord = [0usize, 1, 2, 3, 4, 5, 6, 7, 8];
+            let mut oy = oy0;
+            let mut first = true;
+            while oy < oy1 {
+                let b_len = max_rb.min(oy1 - oy);
+                let need_slots = stride * (b_len - 1) + 3;
+                let fill_from = if first {
+                    first = false;
+                    0
+                } else {
+                    ord[..max_slots].rotate_left(stride * max_rb);
+                    overlap
+                };
+                for (s_idx, &sl) in ord[..need_slots].iter().enumerate().skip(fill_from) {
+                    let iy = (stride * oy) as isize - 1 + s_idx as isize;
+                    fill_row(iy, &mut buf[sl * slot_words..(sl + 1) * slot_words]);
+                }
+                let batch_args = BatchRowArgs {
+                    p,
+                    img,
+                    oy_start: oy,
+                    rows_len: b_len,
+                    ob_start,
+                    ob_end,
+                    group_stride,
+                    ev_w: if is_s2 { ev_w } else { 0 },
+                    slot_words,
+                    ord,
+                    buf,
+                };
+                // SAFETY: ISA checked by caller; `(img, oy..oy+b_len, ob_start..ob_end)` is disjointly owned.
+                unsafe {
+                    if is_s2 {
+                        match isa {
+                            FusedIsa::AvxVnni => vnni_3x3::run_rows::<true>(&batch_args),
+                            FusedIsa::Avx512Vnni => avx512vnni_3x3::run_rows::<true>(&batch_args),
+                            FusedIsa::Avx2 => avx2_3x3::run_rows::<true>(&batch_args),
+                            FusedIsa::Avx512Vnni512 => unreachable!(),
+                        }
+                    } else {
+                        match isa {
+                            FusedIsa::AvxVnni => vnni_3x3::run_rows::<false>(&batch_args),
+                            FusedIsa::Avx512Vnni => avx512vnni_3x3::run_rows::<false>(&batch_args),
+                            FusedIsa::Avx2 => avx2_3x3::run_rows::<false>(&batch_args),
+                            FusedIsa::Avx512Vnni512 => unreachable!(),
+                        }
+                    }
+                }
+                oy += b_len;
             }
         });
     };

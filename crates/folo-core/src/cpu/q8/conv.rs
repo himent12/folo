@@ -525,12 +525,10 @@ fn conv_inner(
         && single_part
         && cv.k == 3
         && cv.pad == 1
-        && ((cv.stride == 2
-            && !(cv.o.saturating_mul(cv.c).saturating_mul(9) > (512 << 10)
-                && cv.c.saturating_mul(h.saturating_mul(w)) <= SPLIT_CHANNELS_MAX))
-            || (cv.stride == 1
-                && oh >= 8
-                && cv.c.saturating_mul(oh.saturating_mul(ow.saturating_add(2))) > SPLIT_CHANNELS_MAX))
+        && (cv.stride == 1
+            || (cv.stride == 2
+                && !(cv.o.saturating_mul(cv.c).saturating_mul(9) > (512 << 10)
+                    && cv.c.saturating_mul(h.saturating_mul(w)) <= SPLIT_CHANNELS_MAX)))
     {
         let p0 = &cv.parts[0];
         let params = super::fused_3x3::Conv3x3Params {

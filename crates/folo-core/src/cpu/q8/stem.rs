@@ -3,8 +3,6 @@
 //! L1-resident row strips (`9 × ow × 4` bytes ≈ 12 KiB for 640² s2), avoiding the `f32` stem write + scalar
 //! requantize pass.
 
-use rayon::prelude::*;
-
 use super::conv::{MAX_PAD, MAX_STRIDE, QOut, out_size, quantize_weights};
 use super::kernel::{Epi, MR, NR, Out, Tile, kernel};
 
@@ -105,15 +103,35 @@ pub fn pack_f32_to_rgb0_u8(x: &[f32], n: usize, h: usize, w: usize, out: &mut [u
     if n_hw == 0 {
         return;
     }
+    if n_hw < crate::cpu::PAR_MIN {
+        for img in 0..n {
+            let base = img * 3 * hw;
+            pack_rgb0_slice(
+                &x[base..base + hw],
+                &x[base + hw..base + 2 * hw],
+                &x[base + 2 * hw..base + 3 * hw],
+                &mut out[img * hw..(img + 1) * hw],
+            );
+        }
+        return;
+    }
     const BLOCK: usize = 4096;
-    out[..n * hw].par_chunks_mut(hw).enumerate().for_each(|(img, dst)| {
-        let base = img * 3 * hw;
-        let (rp, gp, bp) =
-            (&x[base..base + hw], &x[base + hw..base + 2 * hw], &x[base + 2 * hw..base + 3 * hw]);
-        dst.par_chunks_mut(BLOCK).enumerate().for_each(|(b, o)| {
-            let p0 = b * BLOCK;
-            pack_rgb0_slice(&rp[p0..p0 + o.len()], &gp[p0..p0 + o.len()], &bp[p0..p0 + o.len()], o);
-        });
+    let blocks = hw.div_ceil(BLOCK);
+    let optr = OutPtr(out.as_mut_ptr());
+    let optr = &optr;
+    crate::cpu::par_for(n * blocks, &|t| {
+        let (img, b) = (t / blocks, t % blocks);
+        let p0 = b * BLOCK;
+        let len = BLOCK.min(hw - p0);
+        let base = img * 3 * hw + p0;
+        // SAFETY: each `(img, b)` owns disjoint words `img * hw + p0..+len` inside `out`.
+        let o = unsafe { std::slice::from_raw_parts_mut(optr.at(img * hw + p0), len) };
+        pack_rgb0_slice(
+            &x[base..base + len],
+            &x[base + hw..base + hw + len],
+            &x[base + 2 * hw..base + 2 * hw + len],
+            o,
+        );
     });
 }
 
@@ -147,8 +165,45 @@ unsafe fn pack_rgb0_slice_avx2(r: &[f32], g: &[f32], b: &[f32], out: &mut [u32])
         0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15, 0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7,
         11, 15,
     );
-    // SAFETY: `i + 8 <= len` and all four slices have length `len`.
+    // SAFETY: `i + 16 <= len` (and `i + 8 <= len`) and all four slices have length `len`.
     unsafe {
+        while i + 16 <= len {
+            let vra = _mm256_cvtps_epi32(_mm256_min_ps(
+                _mm256_max_ps(_mm256_mul_ps(_mm256_loadu_ps(r.as_ptr().add(i)), scale), zero),
+                scale,
+            ));
+            let vga = _mm256_cvtps_epi32(_mm256_min_ps(
+                _mm256_max_ps(_mm256_mul_ps(_mm256_loadu_ps(g.as_ptr().add(i)), scale), zero),
+                scale,
+            ));
+            let vba = _mm256_cvtps_epi32(_mm256_min_ps(
+                _mm256_max_ps(_mm256_mul_ps(_mm256_loadu_ps(b.as_ptr().add(i)), scale), zero),
+                scale,
+            ));
+            let bytes_a = _mm256_shuffle_epi8(
+                _mm256_packus_epi16(_mm256_packs_epi32(vra, vga), _mm256_packs_epi32(vba, z_i)),
+                transpose,
+            );
+            let vrb = _mm256_cvtps_epi32(_mm256_min_ps(
+                _mm256_max_ps(_mm256_mul_ps(_mm256_loadu_ps(r.as_ptr().add(i + 8)), scale), zero),
+                scale,
+            ));
+            let vgb = _mm256_cvtps_epi32(_mm256_min_ps(
+                _mm256_max_ps(_mm256_mul_ps(_mm256_loadu_ps(g.as_ptr().add(i + 8)), scale), zero),
+                scale,
+            ));
+            let vbb = _mm256_cvtps_epi32(_mm256_min_ps(
+                _mm256_max_ps(_mm256_mul_ps(_mm256_loadu_ps(b.as_ptr().add(i + 8)), scale), zero),
+                scale,
+            ));
+            let bytes_b = _mm256_shuffle_epi8(
+                _mm256_packus_epi16(_mm256_packs_epi32(vrb, vgb), _mm256_packs_epi32(vbb, z_i)),
+                transpose,
+            );
+            _mm256_storeu_si256(out.as_mut_ptr().add(i) as *mut __m256i, bytes_a);
+            _mm256_storeu_si256(out.as_mut_ptr().add(i + 8) as *mut __m256i, bytes_b);
+            i += 16;
+        }
         while i + 8 <= len {
             let vr = _mm256_cvtps_epi32(_mm256_min_ps(
                 _mm256_max_ps(_mm256_mul_ps(_mm256_loadu_ps(r.as_ptr().add(i)), scale), zero),
