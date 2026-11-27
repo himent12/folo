@@ -330,6 +330,13 @@ impl FoloApp {
     pub fn pick_play_model(&mut self, id: String, cx: &mut Context<Self>) {
         self.select_play_model(id);
         self.run_predict(cx);
+        if self.play_compare.enabled
+            && self.play_image.is_some()
+            && !self.play_compare.pred_b_pending
+            && !self.pred_b_is_fresh()
+        {
+            self.run_predict_b(cx);
+        }
     }
 
     /// The model Playground shows and runs: only `play_model`, never another in its place.
@@ -485,16 +492,15 @@ impl FoloApp {
         // lower-threshold classes before `max_det = 300` truncation. Without per-class overrides,
         // fetch at the low scalar floor so dragging the confidence slider filters locally.
         let per_class = self.play_thresholds.per_class.clone();
-        let has_overrides = !per_class.is_empty();
-        let floor = if has_overrides { self.play_conf } else { self.play_conf.min(PLAY_CONF_FLOOR) };
+        let (req_conf, req_per_class, req_inclusive, floor) = self.play_predict_threshold_params(&per_class);
         let req = PredictRequest {
             model_id: model.clone(),
             input: img.predict_input(self.play_target.is_some()),
-            conf: floor,
+            conf: req_conf,
             iou: self.play_iou,
             max_det: 300,
-            per_class_conf: has_overrides.then(|| per_class.clone()),
-            conf_inclusive: has_overrides,
+            per_class_conf: req_per_class,
+            conf_inclusive: req_inclusive,
         };
         self.play_fetched_floor = floor;
         self.play_fetched_per_class = per_class.clone();

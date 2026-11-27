@@ -15,7 +15,7 @@ use crate::screens::playground::{
 use crate::store::{ImgKey, ImgKind, Load, decode_upright, to_render_image};
 use crate::ui::*;
 
-use super::playground::{OpenRequest, PLAY_CONF_FLOOR};
+use super::playground::OpenRequest;
 use super::playground_compare::{export_default_dir, picked_save};
 use super::{FoloApp, PlayImage, Route, act};
 
@@ -738,8 +738,7 @@ impl FoloApp {
         let source = item.source.clone();
         let name = item.name.to_string();
         let per_class = self.play_thresholds.per_class.clone();
-        let has_overrides = !per_class.is_empty();
-        let floor = if has_overrides { self.play_conf } else { self.play_conf.min(PLAY_CONF_FLOOR) };
+        let (req_conf, req_per_class, req_inclusive, floor) = self.play_predict_threshold_params(&per_class);
         let iou = self.play_iou;
         let iou_bits = iou.to_bits();
         let target = self.play_target;
@@ -791,11 +790,11 @@ impl FoloApp {
                 let req = PredictRequest {
                     model_id: model_req.clone(),
                     input,
-                    conf: floor,
+                    conf: req_conf,
                     iou,
                     max_det: 300,
-                    per_class_conf: has_overrides.then(|| per_class.clone()),
-                    conf_inclusive: has_overrides,
+                    per_class_conf: req_per_class,
+                    conf_inclusive: req_inclusive,
                 };
                 let mut pred = match target {
                     Some(t) => crate::local::predict(api, &req, t, local_gen, &ticket)?,

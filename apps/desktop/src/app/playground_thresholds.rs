@@ -13,11 +13,35 @@ use crate::screens::playground::{
 use crate::store::Load;
 use crate::ui::*;
 
+use super::playground::PLAY_CONF_FLOOR;
 use super::playground_batch::picked_paths;
 use super::playground_compare::{export_default_dir, picked_save};
 use super::{FoloApp, Route, act};
 
 impl FoloApp {
+    /// Resolves `(request_conf, request_per_class, request_inclusive, cache_floor)` for a
+    /// `PredictRequest`. Local inference and servers advertising `threshold_calibration` enforce
+    /// `per_class_conf` + inclusive scoring before `max_det` truncation; older servers ignore those
+    /// fields, so we fall back to a low scalar floor covering the minimum active class override and
+    /// filter per-class client-side.
+    pub(crate) fn play_predict_threshold_params(
+        &self,
+        per_class: &BTreeMap<u32, f32>,
+    ) -> (f32, Option<BTreeMap<u32, f32>>, bool, f32) {
+        if per_class.is_empty() {
+            let floor = self.play_conf.min(PLAY_CONF_FLOOR);
+            return (floor, None, false, floor);
+        }
+        let native_per_class = self.play_target.is_some() || self.store.supports_threshold_calibration();
+        if native_per_class {
+            (self.play_conf, Some(per_class.clone()), true, self.play_conf)
+        } else {
+            let min_override =
+                per_class.values().copied().filter(|v| v.is_finite()).fold(self.play_conf, f32::min);
+            (min_override.min(PLAY_CONF_FLOOR), None, false, self.play_conf)
+        }
+    }
+
     /// Model B's effective per-class confidence overrides mapped from Model A's class list by name.
     pub(crate) fn play_per_class_b(&self) -> BTreeMap<u32, f32> {
         if self.play_thresholds.per_class.is_empty() {
@@ -155,11 +179,12 @@ impl FoloApp {
     }
 
     /// Prompts for a `.json` threshold file on disk and imports it into Playground.
-    pub fn pick_play_thresholds_file(&mut self, cx: &mut Context<Self>) {
+    pub fn pick_play_thresholds_file(&mut self, window: &Window, cx: &mut Context<Self>) {
         self.play_thresh_import_seq += 1;
         let seq = self.play_thresh_import_seq;
         let backend_gen = self.backend_gen;
         let active_model = self.play_model.clone();
+        let handle = window.window_handle();
         let rx = cx.prompt_for_paths(folo_ui::PathPromptOptions {
             files: true,
             directories: false,
@@ -184,25 +209,30 @@ impl FoloApp {
                         .map_err(|e| format!("Could not read {}: {e}", path.display()))
                 })
                 .await;
-            this.update(cx, |this, cx| {
-                if this.play_thresh_import_seq != seq
-                    || this.backend_gen != backend_gen
-                    || this.play_model != active_model
-                {
-                    return;
-                }
-                match read {
-                    Ok(text) => {
-                        this.apply_play_thresholds_json(&text, cx);
-                    }
-                    Err(msg) => {
-                        this.play_thresholds.import_error = Some(msg);
-                        this.play_thresholds.import_note = None;
-                        cx.notify();
-                    }
-                }
-            })
-            .ok();
+            handle
+                .update(cx, |_, window, cx| {
+                    this.update(cx, |this, cx| {
+                        if this.play_thresh_import_seq != seq
+                            || this.backend_gen != backend_gen
+                            || this.play_model != active_model
+                        {
+                            return;
+                        }
+                        match read {
+                            Ok(text) => {
+                                if this.apply_play_thresholds_json(&text, cx) {
+                                    this.focus_key("play-thr-import", window, cx);
+                                }
+                            }
+                            Err(msg) => {
+                                this.play_thresholds.import_error = Some(msg);
+                                this.play_thresholds.import_note = None;
+                                cx.notify();
+                            }
+                        }
+                    })
+                })
+                .ok();
         })
         .detach();
     }
@@ -415,7 +445,9 @@ impl FoloApp {
 
     /// Copies a model's calibrated `ThresholdCalibration` JSON to the clipboard.
     pub fn copy_model_calibration_json(&mut self, model_id: &str, cx: &mut Context<Self>) {
-        let Some(cal) = self.store.calibrations.get(model_id).and_then(|l| l.ready()).cloned() else {
+        let Some(cal) =
+            self.store.calibrations.get(model_id).and_then(|l| l.ready()).filter(|c| !c.is_empty()).cloned()
+        else {
             return;
         };
         let classes = self.store.model(model_id).map(|m| m.classes.as_slice()).unwrap_or(&[]);

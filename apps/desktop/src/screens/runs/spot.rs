@@ -410,7 +410,6 @@ pub fn spot_recovery_status(
     let err_lower = err.to_ascii_lowercase();
     let exhausted_max = parse_exhausted_max(&err_lower);
     let max_retries = exhausted_max.or(parsed.max_retries).unwrap_or(DEFAULT_MAX_PREEMPTION_RETRIES);
-    let retries = parsed.attempt.unwrap_or(0).max(replaced_instances).max(exhausted_max.unwrap_or(0));
 
     let err_exhausted = r.status == RunStatus::Failed
         && (exhausted_max.is_some() || err_lower.contains("automatic checkpoint resume exhausted"));
@@ -418,18 +417,37 @@ pub fn spot_recovery_status(
         && ((err_lower.contains("no synced checkpoint") && err_lower.contains("auto-resume"))
             || err_lower.contains("no incomplete training state to auto-resume")
             || err_lower.contains("no incomplete weights/last.folo"));
+    // Only count prior ledger instances as spot replacements when preemption/recovery evidence is
+    // present in the current attempt's logs or error: a manually resumed cloud run shares the same
+    // run ID in the ledger and its manual-resume log marker may be unloaded or scrolled out of the
+    // 1,000-line tail window.
+    let has_preempt_evidence = parsed.attempt.is_some()
+        || parsed.restarted_during_recovery
+        || parsed.stopped_during_recovery_log
+        || err_exhausted
+        || err_no_ckpt
+        || err_lower.contains("during preemption recovery");
+    let replaced_instances = if has_preempt_evidence { replaced_instances } else { 0 };
+    let retries = parsed.attempt.unwrap_or(0).max(replaced_instances).max(exhausted_max.unwrap_or(0));
+
     let has_recovery_activity = retries > 0 || parsed.restarted_during_recovery;
     let ended_before_training = c.ended_in.is_some_and(|p| p < CloudPhase::Training);
-    let stopped_in_recovery = r.status == RunStatus::Stopped
+    let unconfirmed_replacement = logs.is_some()
+        && (parsed.attempt.is_some() || parsed.restarted_during_recovery)
+        && !parsed.confirmed_resumed_after_preempt;
+    let releasing_after_failed_recovery = r.status.is_active()
+        && c.phase >= CloudPhase::Releasing
+        && has_recovery_activity
+        && (ended_before_training || unconfirmed_replacement);
+    let stopped_in_recovery = (r.status == RunStatus::Stopped
         && (parsed.stopped_during_recovery_log
             || err_lower.contains("during preemption recovery")
-            || (has_recovery_activity && ended_before_training));
-    let failed_in_recovery = r.status == RunStatus::Failed
+            || (has_recovery_activity && ended_before_training)))
+        || (releasing_after_failed_recovery && parsed.stopped_during_recovery_log);
+    let failed_in_recovery = (r.status == RunStatus::Failed
         && has_recovery_activity
-        && (ended_before_training
-            || (logs.is_some()
-                && (parsed.attempt.is_some() || parsed.restarted_during_recovery)
-                && !parsed.confirmed_resumed_after_preempt));
+        && (ended_before_training || unconfirmed_replacement))
+        || (releasing_after_failed_recovery && !parsed.stopped_during_recovery_log);
 
     let state = if err_exhausted {
         SpotRecoveryState::Exhausted
@@ -561,6 +579,13 @@ mod tests {
         assert!(failed_rec.header_badge().is_some_and(|(_, _, tone)| tone == Tone::Danger));
         assert!(failed_rec.failure_hint().is_some());
 
+        // 1b. Still-active Releasing phase after replacement failed during provisioning -> RecoveryFailed.
+        r.status = RunStatus::Running;
+        c.phase = CloudPhase::Releasing;
+        c.ended_in = Some(CloudPhase::Provisioning);
+        let releasing_failed = spot_recovery_status(&r, &c, true, Some(&logs), None);
+        assert_eq!(releasing_failed.state, SpotRecoveryState::RecoveryFailed);
+
         // 2. Time limit expired during preemption recovery -> StoppedDuringRecovery (never Recovered!).
         r.status = RunStatus::Stopped;
         r.error = None;
@@ -632,7 +657,10 @@ mod tests {
         let no_ckpt = spot_recovery_status(&r, &c, true, None, None);
         assert_eq!(no_ckpt.state, SpotRecoveryState::NoCheckpoint);
 
-        let (r2, c2) = cloud_run_fixture();
+        // Prior ledger rows without preemption log/error evidence must NOT fabricate a Recovered
+        // badge (prevents manual-resume false positives when logs are unloaded or truncated).
+        let (r2, mut c2) = cloud_run_fixture();
+        c2.synced = Some("2026-11-08T06:05:00Z".into());
         let replaced = CloudInstance {
             id: "ci_old_spot".into(),
             connection_id: c2.connection_id.clone(),
@@ -648,9 +676,20 @@ mod tests {
             cost_usd: Some(0.69),
             error: None,
         };
-        let from_ledger = spot_recovery_status(&r2, &c2, true, None, Some(&[replaced]));
-        assert_eq!(from_ledger.state, SpotRecoveryState::Recovered);
-        assert_eq!(from_ledger.replaced_instances, 1);
-        assert_eq!(from_ledger.retries, 1);
+        let without_logs = spot_recovery_status(&r2, &c2, true, None, Some(std::slice::from_ref(&replaced)));
+        assert_eq!(without_logs.state, SpotRecoveryState::Armed);
+        assert_eq!(without_logs.replaced_instances, 0);
+        assert_eq!(without_logs.retries, 0);
+
+        // With preemption log evidence present, ledger replacement rows are counted.
+        let preempt_log = vec![log_at(
+            "2026-11-08T06:01:00Z",
+            LogLevel::Warn,
+            "worker preempted or lost (reclaimed); auto-resuming from synced checkpoint weights/last.folo (epoch 4, attempt 1/3 after 10.0s backoff)",
+        )];
+        let with_logs = spot_recovery_status(&r2, &c2, true, Some(&preempt_log), Some(&[replaced]));
+        assert_eq!(with_logs.state, SpotRecoveryState::Recovered);
+        assert_eq!(with_logs.replaced_instances, 1);
+        assert_eq!(with_logs.retries, 1);
     }
 }

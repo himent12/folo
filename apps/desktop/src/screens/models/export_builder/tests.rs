@@ -552,4 +552,24 @@ fn validate_save_thresholds_and_predict_thresholds_share_path_and_exclude_conf()
         p_cur_int8.command,
         "folo predict --model D:/models/best.folo <images> --thresholds D:/models/best-int8-thresholds.json --precision int8"
     );
+
+    // Already-INT8 checkpoint (`best-int8-mse.folo`): F32 gets `-f32-thresholds.json` so it never collides with INT8 Current.
+    let mut qm = sample_model();
+    qm.path = Some("D:/models/best-int8-mse.folo".into());
+    st.predict_precision = PredictPrecision::Int8;
+    st.predict_int8_target = Some(PredictInt8Target::Current);
+    st.mode = ModelCliMode::Validate;
+    let q_int8 = build_model_cli(&qm, Some("D:/data/shapes"), &st);
+    assert!(
+        q_int8.command.ends_with("--save-thresholds D:/models/best-int8-mse-thresholds.json"),
+        "{}",
+        q_int8.command
+    );
+    st.predict_precision = PredictPrecision::F32;
+    let q_f32 = build_model_cli(&qm, Some("D:/data/shapes"), &st);
+    assert!(
+        q_f32.command.ends_with("--save-thresholds D:/models/best-int8-mse-f32-thresholds.json"),
+        "{}",
+        q_f32.command
+    );
 }

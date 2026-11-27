@@ -189,7 +189,7 @@ impl FoloApp {
                 Some("icons/folder-open.svg"),
                 window,
                 cx,
-                act(|this, _, cx| this.pick_play_thresholds_file(cx)),
+                act(|this, w, cx| this.pick_play_thresholds_file(w, cx)),
             );
             let cancel = self.button(
                 "play-thr-cancel",
@@ -199,6 +199,7 @@ impl FoloApp {
                 window,
                 cx,
                 act(|this, w, cx| {
+                    this.play_thresh_import_seq += 1;
                     this.play_thresholds.import_open = false;
                     this.play_thresholds.import_error = None;
                     this.focus_key("play-thr-import", w, cx);
@@ -361,7 +362,12 @@ impl FoloApp {
                         cx,
                         act(move |this, w, cx| {
                             this.clear_play_class_conf(cid, cx);
-                            this.focus_key(&format!("play-cls-thr-inc-{cid}"), w, cx);
+                            let target = if this.play_conf >= 1.0 - 1e-6 {
+                                format!("play-cls-thr-dec-{cid}")
+                            } else {
+                                format!("play-cls-thr-inc-{cid}")
+                            };
+                            this.focus_key(&target, w, cx);
                         }),
                     )
                 });

@@ -512,7 +512,13 @@ pub(super) fn derive_thresholds_path(
         String::new()
     };
     let prec_tag = match precision {
-        PredictPrecision::F32 => "",
+        PredictPrecision::F32 => {
+            if is_int8_model_path(&format!("{stem}.folo")) {
+                "-f32"
+            } else {
+                ""
+            }
+        }
         PredictPrecision::F16 => "-f16",
         PredictPrecision::Int8 => {
             if !use_quantized_output && !is_int8_model_path(&format!("{stem}.folo")) {

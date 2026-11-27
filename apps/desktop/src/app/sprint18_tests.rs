@@ -240,7 +240,24 @@ fn playground_per_class_thresholds_drive_overlays_compare_batch_and_remap_on_mod
         assert!(this.play_thresholds.per_class.is_empty());
     });
 
-    // 5. Switching to a model with an incompatible class list clears stale overrides (no silent leak!).
+    // 5. Older server lacking `threshold_calibration` falls back to low scalar floor without sending per_class_conf.
+    drive(&mut app, window, |this, _, _| {
+        this.play_conf = 0.50;
+        this.play_target = None;
+        let mut ov = BTreeMap::new();
+        ov.insert(0u32, 0.15f32);
+        let (req_conf, req_map, inc, floor) = this.play_predict_threshold_params(&ov);
+        assert!((req_conf - 0.50).abs() < 1e-6);
+        assert!(req_map.is_some() && inc);
+        assert!((floor - 0.50).abs() < 1e-6);
+        this.store.features.retain(|f| f != crate::api::FEATURE_THRESHOLD_CALIBRATION);
+        let (old_conf, old_map, old_inc, old_floor) = this.play_predict_threshold_params(&ov);
+        assert!((old_conf - 0.05).abs() < 1e-6);
+        assert!(old_map.is_none() && !old_inc);
+        assert!((old_floor - 0.50).abs() < 1e-6);
+    });
+
+    // 6. Switching to a model with an incompatible class list clears stale overrides (no silent leak!).
     drive(&mut app, window, |this, _, cx| {
         let incompatible = this
             .store

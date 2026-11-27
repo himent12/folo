@@ -103,10 +103,15 @@ impl FoloApp {
             self.play_compare.pred_b_pending = false;
             self.play_compare.pred_b_dim = false;
             self.play_compare.model_b_gone = None;
-            // Restore fetched_floor_b to the last completed Model B prediction so cancelling a
-            // lowered-confidence rerun cannot mask a later refetch.
+            // Restore fetched threshold metadata to the last completed Model B prediction so
+            // cancelling an in-flight rerun cannot mask a later refetch.
             self.play_compare.fetched_floor_b =
                 self.play_compare.pred_b_meta.as_ref().map_or(PLAY_CONF_FLOOR, |m| m.floor);
+            self.play_compare.fetched_per_class_b = self
+                .play_compare
+                .pred_b_meta
+                .as_ref()
+                .map_or_else(Default::default, |m| m.per_class_conf.clone());
             self.play_compare.class_filter = crate::screens::playground::CompareClassFilter::All;
         }
         cx.notify();
@@ -170,6 +175,7 @@ impl FoloApp {
         std::mem::swap(&mut self.play_compare.pred_a_meta, &mut self.play_compare.pred_b_meta);
         std::mem::swap(&mut self.play_pred_dim, &mut self.play_compare.pred_b_dim);
         std::mem::swap(&mut self.play_fetched_floor, &mut self.play_compare.fetched_floor_b);
+        std::mem::swap(&mut self.play_fetched_per_class, &mut self.play_compare.fetched_per_class_b);
         self.remap_play_thresholds_for_model(prev_a_classes, next_a_id.as_deref());
         self.play_compare.class_filter = match self.play_compare.class_filter {
             crate::screens::playground::CompareClassFilter::OnlyA => {
@@ -184,10 +190,18 @@ impl FoloApp {
         self.play_compare.clear_hover();
         self.play_class = None;
 
-        if b_pending || (self.play_image.is_some() && matches!(self.play_pred, Load::Loading)) {
+        if self.play_image.is_some()
+            && (b_pending
+                || matches!(self.play_pred, Load::Loading)
+                || (matches!(self.play_pred, Load::Ready(_)) && !self.pred_a_is_fresh()))
+        {
             self.run_predict(cx);
         }
-        if a_pending || (self.play_image.is_some() && matches!(self.play_compare.pred_b, Load::Loading)) {
+        if self.play_image.is_some()
+            && (a_pending
+                || matches!(self.play_compare.pred_b, Load::Loading)
+                || (matches!(self.play_compare.pred_b, Load::Ready(_)) && !self.pred_b_is_fresh()))
+        {
             self.run_predict_b(cx);
         }
         cx.notify();
@@ -235,6 +249,13 @@ impl FoloApp {
             return;
         }
         if self.play_compare.model_b.is_some() {
+            if self.play_image.is_some()
+                && !self.play_compare.pred_b_pending
+                && matches!(self.play_compare.pred_b, Load::Ready(_))
+                && !self.pred_b_is_fresh()
+            {
+                self.run_predict_b(cx);
+            }
             return;
         }
         let next = self.store.models.ready().and_then(|models| {
@@ -286,16 +307,15 @@ impl FoloApp {
             return;
         };
         let per_b = self.play_per_class_b();
-        let has_overrides = !per_b.is_empty();
-        let floor = if has_overrides { self.play_conf } else { self.play_conf.min(PLAY_CONF_FLOOR) };
+        let (req_conf, req_per_class, req_inclusive, floor) = self.play_predict_threshold_params(&per_b);
         let req = PredictRequest {
             model_id: model.clone(),
             input: img.predict_input(self.play_target.is_some()),
-            conf: floor,
+            conf: req_conf,
             iou: self.play_iou,
             max_det: 300,
-            per_class_conf: has_overrides.then(|| per_b.clone()),
-            conf_inclusive: has_overrides,
+            per_class_conf: req_per_class,
+            conf_inclusive: req_inclusive,
         };
         self.play_compare.fetched_floor_b = floor;
         self.play_compare.fetched_per_class_b = per_b.clone();
