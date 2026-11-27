@@ -167,7 +167,19 @@ describe('CliCommand auto-batch preview', () => {
     expect(target.querySelector('.cli code')).toBeNull();
     expect(target.querySelector('.cli .cli-note')?.textContent).toMatch(/0.*20/);
 
-    // Explicit serverUrl is forwarded via --server for cloud CLI commands.
+    // Invalid cloud time limit (e.g. 0 hours) also holds the CLI command instead of emitting `--max-hours 0`.
+    preemptInput.value = '3';
+    preemptInput.dispatchEvent(new Event('input', { bubbles: true }));
+    const hoursInput = target.querySelector<HTMLInputElement>('input#hours')!;
+    hoursInput.value = '0';
+    hoursInput.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    expect(target.querySelector('.cli code')).toBeNull();
+    hoursInput.value = '12';
+    hoursInput.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+
+    // Explicit serverUrl is forwarded via --server (with FOLO_TOKEN hint), and cloud --data passes dataset ID.
     const prevServer = prefs.serverUrl;
     prefs.serverUrl = 'http://gpu-box:7878';
     try {
@@ -175,8 +187,11 @@ describe('CliCommand auto-batch preview', () => {
       preemptInput.value = '0';
       preemptInput.dispatchEvent(new Event('input', { bubbles: true }));
       flushSync();
-      expect(target.querySelector('.cli code')?.textContent).toContain('--max-preempt-retries 0');
-      expect(target.querySelector('.cli code')?.textContent).toContain('--server http://gpu-box:7878');
+      const cloudCode = target.querySelector('.cli code')?.textContent ?? '';
+      expect(cloudCode).toContain('--max-preempt-retries 0');
+      expect(cloudCode).toContain('--server http://gpu-box:7878');
+      expect(cloudCode).toMatch(/--data ds_\w+/);
+      expect(target.querySelector('.cli')?.textContent).toContain('FOLO_TOKEN');
 
       // Submit: createRun receives max_preempt_retries: 0, while estimateRun never receives it.
       target.querySelector('form')!.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));

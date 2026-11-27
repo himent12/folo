@@ -51,6 +51,8 @@ export interface CliCommandProps {
   seedMissing?: boolean;
   /** Cloud compute or retry policy incomplete/invalid: hold the command so it never drops `--cloud` or `--max-preempt-retries`. */
   cloudBlocked?: string | null;
+  /** Connected server URL targeted by `--server` on cloud CLI commands (displays a `FOLO_TOKEN` hint). */
+  cloudServer?: string | null;
 }
 
 export default function CliCommand(props: CliCommandProps) {
@@ -154,6 +156,12 @@ export default function CliCommand(props: CliCommandProps) {
           {props.cliPlaceholder ? (
             <p class="cli-note" id="cli-note">
               Put the path of {props.cliPlaceholder} on the server in its place: this server does not report it.
+            </p>
+          ) : null}
+          {props.onCloud && props.cloudServer ? (
+            <p class="cli-note">
+              Targets <span class="mono">{props.cloudServer}</span>; if this server requires a token, set{' '}
+              <span class="mono">FOLO_TOKEN</span> (or pass <span class="mono">--token</span>).
             </p>
           ) : null}
         </>

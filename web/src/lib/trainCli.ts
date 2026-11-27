@@ -147,6 +147,20 @@ export function withAutoBatch(parts: readonly string[], line: string): { parts: 
   return { parts: [...parts, AUTO_BATCH_FLAG], line: `${line} ${AUTO_BATCH_FLAG}` };
 }
 
+/** Normalizes an http(s) URL to ASCII (Punycode host + percent-encoded path) so the Rust CLI accepts it. */
+function normalizeServerUrl(raw: string): string | null {
+  const trimmed = raw.trim().replace(/\/+$/, '');
+  if (!trimmed) return null;
+  try {
+    const parsed = new URL(trimmed);
+    if (!/^https?:$/i.test(parsed.protocol)) return null;
+    // Drop the default `/` path URL.toString() adds to bare origins (`http://host:7878/` -> `http://host:7878`).
+    return parsed.toString().replace(/\/+$/, '');
+  } catch {
+    return trimmed;
+  }
+}
+
 /**
  * Resolves the `--server` URL for CLI handoffs that reference IDs on the connected FOLO server.
  * Uses the user's explicit `prefs.serverUrl` when set, else `location.origin` while connected to a live server
@@ -157,9 +171,9 @@ export function cliServerUrl(
   mode: string,
   origin = typeof location !== 'undefined' ? location.origin : '',
 ): string | null {
-  const explicit = configuredUrl.trim().replace(/\/+$/, '');
+  const explicit = normalizeServerUrl(configuredUrl);
   if (explicit) return explicit;
-  if (mode === 'live' && /^https?:\/\//i.test(origin)) return origin.replace(/\/+$/, '');
+  if (mode === 'live' && /^https?:\/\//i.test(origin)) return normalizeServerUrl(origin);
   return null;
 }
 

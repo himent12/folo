@@ -621,16 +621,21 @@ export function runNewState() {
       ? cloudPick.preemptRetries
       : null,
   );
+  const cloudServerUrl = computed(() => (onCloud.get() ? cliServerUrl(prefs.serverUrl, hub.mode) : null));
   const cliBlocked = computed(() => {
     if (!onCloud.get()) return null;
-    if (errors.get().preempt) return `${errors.get().preempt} Fix this before copying the command.`;
+    const e = errors.get();
+    const fieldErr = e.runon ?? e.offer ?? e.hours ?? e.preempt;
+    if (fieldErr) return `${fieldErr} Fix this before copying the command.`;
     if (cloudPick.offers.loading) return 'Loading cloud GPU offers…';
     if (!cloudPick.compute) return 'Finish cloud compute settings first: the command needs a valid cloud target.';
     return null;
   });
   const cli = cliOf(
     () => config.get(),
-    () => dataset.get()?.path ?? datasetId.get(),
+    // `folo train --cloud` looks up registered dataset IDs first (`crates/folo-cli/src/train/cloud.rs`); passing the
+    // exact dataset id avoids format ambiguity if a folder is registered twice (YOLO + COCO).
+    () => (onCloud.get() ? datasetId.get() : (dataset.get()?.path ?? datasetId.get())),
     () => models.data?.find((m) => m.id === weights.get()),
     () => {
       if (onCloud.get()) return null;
@@ -640,7 +645,7 @@ export function runNewState() {
       return cmd ? withServerCliName(cmd, s.name, config.get().name) : null;
     },
     () => activePreemptRetries.get(),
-    () => (onCloud.get() ? cliServerUrl(prefs.serverUrl, hub.mode) : null),
+    () => cloudServerUrl.get(),
   );
 
   async function jump(key: Jump) {
@@ -828,6 +833,7 @@ export function runNewState() {
     applyFix,
     cli,
     cliBlocked,
+    cloudServerUrl,
     review,
     jump,
     submit,

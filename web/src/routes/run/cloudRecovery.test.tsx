@@ -284,14 +284,28 @@ describe('parseSpotRecovery & SpotRecoveryTracker', () => {
     expect(exhausted.badge).toBe('Auto-resume exhausted');
     expect(exhausted.maxAttempts).toBe(5);
 
-    // Stale `recovering: true` snapshot from before SSE resumes training must clear once training begins.
+    // Stale `recovering: true` snapshot from before SSE resumes training must clear once training begins,
+    // even if the takeover log line was missed.
     const clearedByPhase = parseSpotRecovery(
       baseCloud({ phase: 'training' }),
       { status: 'running', error: null, cloud_preemption: { retries: 1, max_retries: 1, recovering: true } },
-      [log('the worker took the run as r_w2', 'info')],
+      [log('worker preempted or lost (gone); auto-resuming from synced checkpoint weights/last.folo (epoch 4, attempt 1/3)')],
     )!;
     expect(clearedByPhase.kind).toBe('resumed');
     expect(clearedByPhase.badge).toBe('Auto-resumed (1×)');
+
+    // Truncated log tail containing only attempt 2 + takeover must preserve full count (2×) rather than undercounting as 1×.
+    const truncatedTail = parseSpotRecovery(
+      baseCloud({ phase: 'training' }),
+      { status: 'running', error: null, cloud_preemption: { retries: 2, max_retries: 3, recovering: false } },
+      [
+        log('worker preempted or lost (gone); auto-resuming from synced checkpoint weights/last.folo (epoch 9, attempt 2/3)'),
+        log('the worker took the run as r_w3', 'info'),
+      ],
+    )!;
+    expect(truncatedTail.kind).toBe('resumed');
+    expect(truncatedTail.attempts).toBe(2);
+    expect(truncatedTail.badge).toBe('Auto-resumed (2×)');
 
     // After 1 successful recovery on a 1-retry budget, manually terminating the replacement (`cloud_instance_lost`
     // without exhaustion message) must NOT falsely report "Auto-resume exhausted".

@@ -184,6 +184,9 @@ describe('trainCommand (DOGFOOD-3 S1)', () => {
 
   it('resolves connected server URL for live and explicit server targets while staying null in bare mock mode', () => {
     expect(cliServerUrl('http://gpu-box:7878/', 'mock', 'http://localhost:3000')).toBe('http://gpu-box:7878');
+    expect(cliServerUrl('https://büro.example/équipe/', 'mock', 'http://localhost:3000')).toBe(
+      'https://xn--bro-hoa.example/%C3%A9quipe',
+    );
     expect(cliServerUrl('', 'live', 'https://studio.example.com/')).toBe('https://studio.example.com');
     expect(cliServerUrl('', 'mock', 'http://localhost:3000')).toBeNull();
   });
