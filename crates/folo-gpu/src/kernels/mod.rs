@@ -10,7 +10,7 @@
 //! and gets their WGSL one of two ways: `include_str!` of a file in `src/shaders/`, often prefixed by shared
 //! snippets (`unary_fn.wgsl`, `bn_common.wgsl`, `bn_welford.wgsl`, `detect_common.wgsl`, the `E` / `V4` / `OUT`
 //! aliases of `vec_prelude`), or a generator in Rust that writes the source from the spec with no `.wgsl` file
-//! (the GEMM and implicit-GEMM convs, tensor cores, `ew.rs`, `strided/`, `pool_grad.rs`, Muon, the
+//! (the GEMM and implicit-GEMM convs, tensor cores, `ew.rs`, `strided/`, `pool_grad/`, Muon, the
 //! multi-tensor optimizer kernels). At compile time `pipeline::render` puts the specialisation constants and the
 //! shared prelude in front of either.
 //!
@@ -22,7 +22,7 @@
 //!   `gemm_cat.rs`: GEMMs whose `B` is a concatenation read in place.
 //! - `conv/`: conv2d forward, gradients, split-K, depthwise and per-site convs.
 //! - `coop/`: tensor-core (cooperative-matrix) f16 GEMM and conv.
-//! - `pool_grad.rs`: pooling with folo-core's semantics and the pooling and upsampling gradients.
+//! - `pool_grad/`: pooling with folo-core's semantics and the pooling and upsampling gradients.
 //! - `layout.rs`: permute, concat, nearest upsampling and f32 / f16 casts (upsampling for the backend too).
 //! - `norm/`: train-mode BatchNorm + activation; `optim.rs`: fused optimizer updates, clipping and
 //!   unscaling; `muon.rs`: MuSGD's Muon step.

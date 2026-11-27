@@ -27,7 +27,7 @@ and FOLO Desktop (`apps/desktop`) for local inference.
 | `src/profile.rs` | Per-kernel GPU timings (`FOLO_GPU_PROFILE=1`). |
 | `src/dtype.rs`, `src/error.rs` | Buffer element types; `GpuError`. |
 | `src/tests/` | The GPU tests (unit tests, compiled with `cargo test`; `kernel_list.rs`, `pool.rs` and `pipeline_cache.rs` also have unit tests of their own): `backend/` (the backend against folo-core's CPU backend, by area) and kernel-level files (`gemm.rs`, `conv.rs`, `coop.rs`, `elementwise.rs`, ...) plus runtime tests (`runtime.rs`, `pool.rs`, `binds.rs`, `plan.rs`, `precompile.rs`, `pipeline_cache.rs`). |
-| `benches/` | `gemm.rs`, `conv.rs`, `conv_model.rs`, `elementwise.rs`, `backend.rs`, `pooling.rs`, `norm_softmax.rs`. |
+| `benches/` | `gemm.rs`, `conv.rs`, `conv_model.rs`, `elementwise.rs`, `backend.rs`, `pooling.rs`, `norm_softmax.rs`, `vision.rs`. |
 
 There is no `tests/` folder at the crate root and no `build.rs`.
 
@@ -39,7 +39,7 @@ function that returns WGSL for a `Spec`. Generators either concatenate files wit
 (`unary_fn.wgsl`, `bn_common.wgsl`, `bn_welford.wgsl`, `detect_common.wgsl` — shared across `tal_*`, `det_*`, `dfl_stats.wgsl`, `detect.wgsl`, `sites_class.wgsl`, `sites_decode.wgsl`, and `kd_*.wgsl`, `kd_common.wgsl`, the `E` / `V4` / `OUT` aliases of
 `kernels::vec_prelude`) or write the whole source in Rust: the GEMM and implicit-GEMM convs (`kernels/gemm/`,
 `kernels/conv/`), tensor cores (`kernels/coop/shader.rs`), `kernels/ew.rs`, `kernels/strided/`,
-`kernels/pool_grad.rs`, Muon and the multi-tensor optimizer kernels. There is no include mechanism inside WGSL.
+`kernels/pool_grad/`, Muon and the multi-tensor optimizer kernels. There is no include mechanism inside WGSL.
 `pipeline::render` then puts `Spec::header` (`enable f16;` and `enable wgpu_cooperative_matrix;` when asked,
 `alias T = f32|f16`, one `const` per specialisation constant) and `PRELUDE` (the uniform block and `pu` / `pi` /
 `pf` / `linear_id`) in front. `Spec::header` omits `enable subgroups;` because Naga 30 rejects that directive; native
@@ -75,14 +75,14 @@ kernels (`kd_*.wgsl`). Tests are grouped by area, not by op.
 | matmul | `matmul` | `kernels::gemm::gemm` | generated in `gemm/shader.rs` | `src/tests/backend/matmul.rs`, `src/tests/gemm.rs` |
 | conv2d and its gradients | `conv2d`, `conv2d_act`, `conv2d_backward_input`, `conv2d_backward_weight(_as)` | `kernels::conv::{conv2d, conv2d_input, conv2d_backward_input, conv2d_backward_weight_as}` (16×16 shared-memory tiled + `vec4` depthwise forward for stride-1 `2..=7` kernels, plus 16×16 tiled stride-1, phase-unrolled stride-2, and `vec4`-store `VX4` depthwise input-gradient paths) | generated (`gemm/shader.rs`, `conv/`, `coop/shader.rs`); `depthwise.wgsl` | `src/tests/backend/conv.rs`, `src/tests/conv.rs`, `src/tests/coop_conv/` |
 | 1x1 conv over a concatenation | `conv2d_act_cat` | `kernels::conv::conv2d_cat` (`conv/forward.rs`, calling `gemm_cat.rs`) | generated | `src/tests/backend/conv_cat.rs` |
-| max / avg / adaptive pooling and gradients | `max_pool2d`, `max_pool2d_values` (inference, skips `i64` indices within `maxpool` limits), `avg_pool2d`, `adaptive_avg_pool2d`, their `_backward` | `kernels::pooling::max_pool2d` (values only; 16×16 separable shared-memory tiled stride-1 `2..=7` and `vec4` 2×2 stride-2), `kernels::pool_grad::*` (16×16 tiled stride-1 max fwd/bwd, `vec4` 2×2 stride-2 avg fwd/bwd, GAP 1×1 via `reduce_split` + `adaptive_gap_bwd`) | `maxpool.wgsl`; generated in `pooling.rs`, `pool_grad.rs` | `src/tests/backend/pooling.rs` |
+| max / avg / adaptive pooling and gradients | `max_pool2d`, `max_pool2d_values` (inference, skips `i64` indices within `maxpool` limits), `avg_pool2d`, `adaptive_avg_pool2d`, their `_backward` | `kernels::pooling::max_pool2d` (values only; whole-plane `PLANE_VEC4` and 32×16 `TILED_VEC4` separable stride-1 `{3,5,7}` same-pad fast paths, 16×16 scalar tiled stride-1 `2..=7`, and `vec4` 2×2 stride-2), `kernels::pool_grad::*` (whole-plane `PLANE_VEC4` and 32×16 `TILED_VEC4` stride-1 max fwd/bwd in `pool_grad/max_tiled.rs`, 16×16 scalar tiled fallback, `vec4` 2×2 stride-2 avg fwd/bwd, GAP 1×1 via `reduce_split` + `adaptive_gap_bwd`) | `maxpool.wgsl`; generated in `pooling.rs`, `pool_grad/` | `src/tests/backend/pooling.rs` |
 | nearest upsampling | `upsample_nearest2d`, `upsample_nearest2d_backward` | `kernels::layout::upsample_nearest2d` (`upsample_2x_vec4` fast path for 2×2 even widths), `kernels::pool_grad::upsample_nearest2d_backward` (`pool_2x2_s2_vec4` fast path for 2×2 even widths) | `upsample.wgsl`; generated | `src/tests/backend/pooling.rs` |
 | index ops | `index_select`, `index_add`, `gather`, `scatter_add`, `index_select_backward`, `gather_backward` | `kernels::strided::*` (`vec4` fast paths for `index_select`, `gather`, `index_add`, and `scatter_add`, plus direct zero-cleared backward) | generated in `strided/` | `src/tests/backend/index.rs` |
 | copies, casts, fills | `copy_strided`, `copy_into`, `cast`, `full` | `kernels::strided::*` | generated in `strided/` | `src/tests/backend/transfer.rs` |
 | train-mode BatchNorm + activation | `batch_norm_act`, `batch_norm_act_backward` | `kernels::norm::{batch_norm_forward, batch_norm_backward}` (in `norm/mod.rs`, `norm/fused.rs`: single-dispatch register-cached `bn_fused_fwd`/`bn_fused_bwd` up to 8,192 elems/ch and streaming 2-pass single-dispatch up to 25,600 elems/ch when `C >= 64` with 1-barrier subgroups / portable fallback, plus 3-pass split-K for larger planes) | `bn_*.wgsl`; generated in `norm/fused.rs` | `src/tests/amp.rs`; folo-nn `tests/gpu/main.rs` |
 | optimizer updates, clipping, loss-scaler unscale | `optimizer_step(_many)`, `norm_partials_many`, `scale_many`, `unscale_check(_many)` | `kernels::optim::*` (`vec4` fast paths on 4-aligned tensors, partitioning mixed-alignment multi-tensor batches so 4-aligned tensors stay vectorized) | `optim.wgsl`; generated `_many` kernels | `src/tests/reduce.rs`, `src/tests/backend/reduce.rs`; folo-nn `tests/gpu/main.rs` |
 | Muon (MuSGD) | `muon_step_many` | `kernels::muon::muon_step_many` (Polar-FOLO + `Polar3-CS9` / `muon_s8`) | generated in `muon/shader.rs` | `src/tests/muon.rs`; folo-nn `tests/gpu/muon.rs` |
-| letterbox, packed `u8` upload/normalize | `letterbox_rgb8` | `kernels::vision::{letterbox_rgb8, u8_to_float_scale, rgb8_hwc_to_chw_norm, upload_u8_scaled, upload_rgb8_hwc_to_chw_norm}` | `letterbox.wgsl`; generated in `vision.rs` | `src/tests/vision.rs`; folo-vision `tests/gpu.rs` |
+| letterbox, packed `u8` upload/normalize | `letterbox_rgb8` | `kernels::vision::{letterbox_rgb8, u8_to_float_scale, rgb8_hwc_to_chw_norm, upload_u8_scaled, upload_rgb8_hwc_to_chw_norm}` (two-pass packed-`u32` box prefilter for `fx·fy ≥ 4` + coalesced `vec4<T>` letterbox) | `letterbox_prefilter.wgsl`, `letterbox.wgsl`; generated in `vision.rs` | `src/tests/vision.rs`; folo-vision `tests/gpu.rs` |
 | detection candidates | `detect_candidates` | `kernels::vision::detect_candidates` | `detect.wgsl` (after `detect_common.wgsl`, register-cached DFL for `R <= 32`) | `src/tests/sites.rs` |
 | candidate-first detection | `conv2d_act_sites`, `detect_class_sites`, `detect_decode_sites` (in `backend/sites.rs`) | `kernels::conv::conv2d_sites`, `kernels::detect_sites::*` | `sites_*.wgsl` (`sites_class` / `sites_decode` after `detect_common.wgsl`); generated | `src/tests/sites.rs` |
 | assigner, detection loss & DFL stats (not `Backend` methods) | `folo_gpu::detect::{assign, detection_loss, multi_label_candidates, dfl_stats}` (device-cached static anchors) | `kernels::detect::*` (32-wide subgroup `det_bce_fwd` & `det_combine`, fused VFL/QFL/S-AEIoU/CRPS-DFL, 128-bit `det_candidates`, single-pass `det_dfl_stats`) | `tal_*.wgsl`, `det_*.wgsl`, `dfl_stats.wgsl`, `detect_common.wgsl` | `src/tests/reduce.rs`; folo-vision `tests/gpu_loss/`, `tests/gpu_lazy_head.rs` |
@@ -130,7 +130,7 @@ cargo bench -p folo-gpu --bench gemm          # also: conv, conv_model, elementw
 - Benches: `gemm` (GFLOPS, f32 and f16, transposed, batched), `conv` (conv2d at YOLO-typical shapes), `conv_model`
   (folo-n and folo-s forward convs at batch 16), `elementwise` (bandwidth of memory-bound kernels), `backend` (a
   YOLOv8n-shaped network on the GPU backend against the CPU backend), `pooling` (max/avg/adaptive pooling and 2×2
-  upsample backward).
+  upsample backward), `vision` (`letterbox_rgb8` across 640p–4K resolutions in f32 and f16).
 
 ## Further reading
 

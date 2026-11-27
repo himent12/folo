@@ -8,14 +8,122 @@ use crate::DType;
 use crate::context::GpuContext;
 use crate::error::{GpuError, Result, shape_err};
 use crate::kernels::gemm::check_dtype;
+use crate::memory_budget::{AllocationKind, MemoryBudget};
 use crate::pipeline::{Access, KernelDef, Params, Source, Spec};
 use crate::pool::GpuBuffer;
 
+static LETTERBOX_PREFILTER: KernelDef = KernelDef {
+    name: "letterbox_prefilter",
+    storage: &[Access::Read, Access::ReadWrite],
+    source: Source::Static(include_str!("../shaders/letterbox_prefilter.wgsl")),
+};
 static LETTERBOX: KernelDef = KernelDef {
     name: "letterbox",
     storage: &[Access::Read, Access::Read, Access::ReadWrite],
-    source: Source::Static(include_str!("../shaders/letterbox.wgsl")),
+    source: Source::Generated(gen_letterbox),
 };
+
+const LETTERBOX_MAIN_SCALAR: &str = r#"
+@group(0) @binding(1) var<storage, read> SRC: array<u32>;
+@group(0) @binding(2) var<storage, read> TAPS: array<u32>;
+@group(0) @binding(3) var<storage, read_write> Y: array<T>;
+
+@compute @workgroup_size(256)
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,
+        @builtin(local_invocation_index) lid: u32) {
+    let ow = pu(0u);
+    let oh = pu(1u);
+    let i = linear_id(wid, nwg, lid, 256u);
+    if (i >= ow * oh) { return; }
+    let x = i % ow;
+    let y = i / ow;
+    let plane = ow * oh;
+    let base = pu(12u) + i;
+    let scale = pf(11u);
+    let px = pu(4u);
+    let py = pu(5u);
+    let rw = pu(6u);
+    let rh = pu(7u);
+    if (x < px || x >= px + rw || y < py || y >= py + rh) {
+        let v = T(f32(pu(10u)) * scale);
+        Y[base] = v;
+        Y[base + plane] = v;
+        Y[base + 2u * plane] = v;
+        return;
+    }
+    let dx = x - px;
+    let dy = y - py;
+    let tx = pu(13u);
+    let ty = tx + 3u * rw;
+    let ya = TAPS[ty + dy];
+    let yb = TAPS[ty + rh + dy];
+    let wy = TAPS[ty + 2u * rh + dy];
+    let v = sample_bilinear(dx, rw, tx, ya, yb, wy, 2048u - wy);
+    Y[base] = T(f32(v.x) * scale);
+    Y[base + plane] = T(f32(v.y) * scale);
+    Y[base + 2u * plane] = T(f32(v.z) * scale);
+}
+"#;
+
+const LETTERBOX_MAIN_VEC4: &str = r#"
+@group(0) @binding(1) var<storage, read> SRC: array<u32>;
+@group(0) @binding(2) var<storage, read> TAPS: array<u32>;
+@group(0) @binding(3) var<storage, read_write> Y: array<vec4<T>>;
+
+fn sample_lane(x: u32, px: u32, rw: u32, tx: u32, ya: u32, yb: u32, wy: u32, iwy: u32, pad_v: f32, scale: f32) -> vec3<f32> {
+    if (x < px || x >= px + rw) {
+        return vec3<f32>(pad_v);
+    }
+    let v = sample_bilinear(x - px, rw, tx, ya, yb, wy, iwy);
+    return vec3<f32>(v) * scale;
+}
+
+@compute @workgroup_size(256)
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,
+        @builtin(local_invocation_index) lid: u32) {
+    let ow4 = pu(0u) >> 2u;
+    let oh = pu(1u);
+    let plane4 = ow4 * oh;
+    let i = linear_id(wid, nwg, lid, 256u);
+    if (i >= plane4) { return; }
+    let x4 = i % ow4;
+    let y = i / ow4;
+    let x0 = x4 << 2u;
+    let base4 = pu(12u) + i;
+    let scale = pf(11u);
+    let pad_v = f32(pu(10u)) * scale;
+    let px = pu(4u);
+    let py = pu(5u);
+    let rw = pu(6u);
+    let rh = pu(7u);
+    if (y < py || y >= py + rh || x0 + 4u <= px || x0 >= px + rw) {
+        let pv = vec4<T>(T(pad_v));
+        Y[base4] = pv;
+        Y[base4 + plane4] = pv;
+        Y[base4 + 2u * plane4] = pv;
+        return;
+    }
+    let dy = y - py;
+    let tx = pu(13u);
+    let ty = tx + 3u * rw;
+    let ya = TAPS[ty + dy];
+    let yb = TAPS[ty + rh + dy];
+    let wy = TAPS[ty + 2u * rh + dy];
+    let iwy = 2048u - wy;
+    let c0 = sample_lane(x0, px, rw, tx, ya, yb, wy, iwy, pad_v, scale);
+    let c1 = sample_lane(x0 + 1u, px, rw, tx, ya, yb, wy, iwy, pad_v, scale);
+    let c2 = sample_lane(x0 + 2u, px, rw, tx, ya, yb, wy, iwy, pad_v, scale);
+    let c3 = sample_lane(x0 + 3u, px, rw, tx, ya, yb, wy, iwy, pad_v, scale);
+    Y[base4] = vec4<T>(vec4<f32>(c0.x, c1.x, c2.x, c3.x));
+    Y[base4 + plane4] = vec4<T>(vec4<f32>(c0.y, c1.y, c2.y, c3.y));
+    Y[base4 + 2u * plane4] = vec4<T>(vec4<f32>(c0.z, c1.z, c2.z, c3.z));
+}
+"#;
+
+fn gen_letterbox(spec: &Spec) -> String {
+    let main = if spec.get_bool("VEC4") { LETTERBOX_MAIN_VEC4 } else { LETTERBOX_MAIN_SCALAR };
+    format!("{main}{}", include_str!("../shaders/letterbox.wgsl"))
+}
 static DETECT: KernelDef = KernelDef {
     name: "detect",
     storage: &[Access::Read, Access::Read, Access::Read, Access::ReadWrite],
@@ -210,6 +318,32 @@ pub struct LetterboxDesc {
     pub taps: usize,
 }
 
+/// Returns `Some(pw * ph)` when [`letterbox_rgb8`] should run the two-pass packed-`u32` box prefilter:
+/// - `fx * fy >= 4` so avoiding 4-corner recomputation outweighs the extra dispatch and intermediate traffic,
+/// - `4 * rw * rh > pw * ph` so Pass 1 evaluates strictly fewer cells than 4 corners per resized pixel, and
+/// - the compact `pw * ph * 4` scratch buffer fits within per-buffer limits and immediately available VRAM
+///   headroom (`fits && !needs_reclaim`), falling back to the 1-pass shader under GPU memory pressure.
+fn letterbox_two_pass_cells(
+    budget: &MemoryBudget,
+    fx: usize,
+    fy: usize,
+    pw: usize,
+    ph: usize,
+    rw: usize,
+    rh: usize,
+) -> Option<usize> {
+    if (fx == 1 && fy == 1) || fx.saturating_mul(fy) < 4 {
+        return None;
+    }
+    let cells = pw.checked_mul(ph)?;
+    if cells > u32::MAX as usize || rw.saturating_mul(rh).saturating_mul(4) <= cells {
+        return None;
+    }
+    let bytes = (cells as u64).checked_mul(4)?;
+    let est = budget.estimate_headroom(bytes, AllocationKind::Storage);
+    (est.fits && !est.needs_reclaim).then_some(cells)
+}
+
 /// Letterbox one image (see [`LetterboxDesc`]) into `y` of `dtype`. In f32 bit-exact with folo-data's CPU
 /// resize followed by `value as f32 * scale`; in f16 converted from that f32 value (within 1 binary16 ULP under
 /// WGSL's floating-point conversion rules).
@@ -262,13 +396,52 @@ pub fn letterbox_rgb8(
     check_buf(src, src_end.div_ceil(4), DType::F32, "letterbox source")?;
     check_buf(taps, taps_words, DType::F32, "letterbox taps")?;
     check_buf(y, out_end, dtype, "letterbox output")?;
-    let k =
-        ctx.kernel(&LETTERBOX, Spec::new().bool("PREFILTER", fx > 1 || fy > 1).f16(dtype == DType::F16))?;
+    let prefilter = fx > 1 || fy > 1;
+    let pw = sw.div_ceil(fx);
+    let ph = sh.div_ceil(fy);
+    let pre_cells = if prefilter && fx.saturating_mul(fy) >= 4 {
+        letterbox_two_pass_cells(&ctx.memory_budget(), fx, fy, pw, ph, rw, rh)
+    } else {
+        None
+    };
+    let pre_buf = if let Some(cells) = pre_cells {
+        match ctx.alloc((cells as u64) * 4) {
+            Ok(buf) => {
+                let kp = ctx.kernel(&LETTERBOX_PREFILTER, Spec::new())?;
+                let pp = Params::new().uz(cells)?.uz(pw)?.uz(sw)?.uz(sh)?.uz(fx)?.uz(fy)?.uz(d.src_offset)?;
+                ctx.dispatch(&kp, &[src, buf.raw()], &pp, ctx.grid_1d(cells as u64, 256)?)?;
+                Some(buf)
+            }
+            Err(_) => None,
+        }
+    } else {
+        None
+    };
+    let use_two_pass = pre_buf.is_some();
+    // Use 4-pixel-per-thread coalesced `vec4<T>` stores when reading aligned packed-u32 prefiltered pixels or
+    // same-size non-prefiltered frames (low register pressure); fractional resizes on raw RGB bytes keep 1
+    // pixel per thread so unaligned `rgb_at` loads maximize occupancy.
+    let vec4 = ow.is_multiple_of(4)
+        && d.out_offset.is_multiple_of(4)
+        && (use_two_pass || (!prefilter && rw == sw && rh == sh));
+    let (sample_src, sample_w, sample_h, sample_src_off) = match &pre_buf {
+        Some(buf) => (buf.raw(), pw, ph, 0usize),
+        None => (src, sw, sh, d.src_offset),
+    };
+    let k = ctx.kernel(
+        &LETTERBOX,
+        Spec::new()
+            .bool("PREFILTER", prefilter && !use_two_pass)
+            .bool("PACKED_SRC", use_two_pass)
+            .bool("VEC4", vec4)
+            .f16(dtype == DType::F16),
+    )?;
+    let (out_off_param, threads) = if vec4 { (d.out_offset / 4, n / 4) } else { (d.out_offset, n) };
     let p = Params::new()
         .uz(ow)?
         .uz(oh)?
-        .uz(sw)?
-        .uz(sh)?
+        .uz(sample_w)?
+        .uz(sample_h)?
         .uz(d.pad[0])?
         .uz(d.pad[1])?
         .uz(rw)?
@@ -277,10 +450,10 @@ pub fn letterbox_rgb8(
         .uz(fy)?
         .u(d.pad_value as u32)
         .f(d.scale)
-        .uz(d.out_offset)?
+        .uz(out_off_param)?
         .uz(d.taps)?
-        .uz(d.src_offset)?;
-    ctx.dispatch(&k, &[src, taps, y], &p, ctx.grid_1d(n as u64, 256)?)
+        .uz(sample_src_off)?;
+    ctx.dispatch(&k, &[sample_src, taps, y], &p, ctx.grid_1d(threads as u64, 256)?)
 }
 
 /// Whether the shader can sum and round an `fx x fy` prefilter block in u32: `255 · n + n / 2` for
@@ -478,11 +651,14 @@ pub fn upload_rgb8_hwc_to_chw_norm(
 }
 
 /// This module's kernels, for the precompile registry (`kernels::find_def`).
-pub(crate) static DEFS: &[&KernelDef] = &[&LETTERBOX, &DETECT, &U8_SCALE, &RGB8_CHW_NORM];
+pub(crate) static DEFS: &[&KernelDef] =
+    &[&LETTERBOX_PREFILTER, &LETTERBOX, &DETECT, &U8_SCALE, &RGB8_CHW_NORM];
 
 #[cfg(test)]
 mod tests {
-    use super::prefilter_fits;
+    use super::{letterbox_two_pass_cells, prefilter_fits};
+    use crate::memory_budget::{MemoryBudget, MemoryLimits, MemoryUsage};
+    use crate::pool::PoolStats;
 
     #[test]
     fn prefilter_guard_counts_the_rounding_term() {
@@ -492,5 +668,57 @@ mod tests {
         assert!((4101u64 * 4101 * 255) <= u32::MAX as u64);
         assert!(!prefilter_fits(4101, 4101));
         assert!(!prefilter_fits(usize::MAX, 2));
+    }
+
+    #[test]
+    fn two_pass_letterbox_falls_back_under_memory_pressure_and_limits() {
+        let limits = MemoryLimits {
+            max_buffer_size: 64 * 1024 * 1024,
+            max_storage_buffer_binding_size: 32 * 1024 * 1024,
+            dedicated_bytes: Some(100 * 1024 * 1024),
+        };
+        // 4096x4096 -> 2048x2048 with 2x2 prefilter => pw=2048, ph=2048 => 16 MiB scratch.
+        let ample = MemoryBudget::new(limits, MemoryUsage::from_pool(PoolStats::default()));
+        assert_eq!(letterbox_two_pass_cells(&ample, 2, 2, 2048, 2048, 2048, 2048), Some(2048 * 2048));
+
+        // Tight live VRAM (only 8 MiB remaining < 16 MiB scratch) must decline 2-pass and keep 1-pass.
+        let tight_live = MemoryBudget::new(
+            limits,
+            MemoryUsage::from_pool(PoolStats {
+                live_bytes: 92 * 1024 * 1024,
+                allocated_bytes: 92 * 1024 * 1024,
+                ..PoolStats::default()
+            }),
+        );
+        assert_eq!(letterbox_two_pass_cells(&tight_live, 2, 2, 2048, 2048, 2048, 2048), None);
+
+        // Tight un-reclaimed VRAM (live + cached leaves < 16 MiB without eviction) also declines 2-pass.
+        let tight_cached = MemoryBudget::new(
+            limits,
+            MemoryUsage::from_pool(PoolStats {
+                live_bytes: 50 * 1024 * 1024,
+                cached_bytes: 40 * 1024 * 1024,
+                allocated_bytes: 90 * 1024 * 1024,
+                ..PoolStats::default()
+            }),
+        );
+        assert_eq!(letterbox_two_pass_cells(&tight_cached, 2, 2, 2048, 2048, 2048, 2048), None);
+
+        // Exceeding max_storage_buffer_binding_size or max_buffer_size declines 2-pass.
+        let small_bind = MemoryLimits {
+            max_buffer_size: 64 * 1024 * 1024,
+            max_storage_buffer_binding_size: 8 * 1024 * 1024,
+            dedicated_bytes: None,
+        };
+        let b_bind = MemoryBudget::new(small_bind, MemoryUsage::from_pool(PoolStats::default()));
+        assert_eq!(letterbox_two_pass_cells(&b_bind, 2, 2, 2048, 2048, 2048, 2048), None);
+
+        let small_buf = MemoryLimits {
+            max_buffer_size: 8 * 1024 * 1024,
+            max_storage_buffer_binding_size: 32 * 1024 * 1024,
+            dedicated_bytes: None,
+        };
+        let b_buf = MemoryBudget::new(small_buf, MemoryUsage::from_pool(PoolStats::default()));
+        assert_eq!(letterbox_two_pass_cells(&b_buf, 2, 2, 2048, 2048, 2048, 2048), None);
     }
 }

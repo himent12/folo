@@ -476,8 +476,8 @@ fn tiled_max_pool_vec4_2x2_and_gap_fast_paths() {
         backend.adaptive_avg_pool2d_backward(View::new(&b_gap, &Layout::contiguous(s_gap)), &s_even).unwrap();
     assert_eq!(fresh.trace_end().iter().map(|o| o.name).collect::<Vec<_>>(), vec!["adaptive_gap_bwd"]);
 
-    // Tiled 16x16 stride-1 max_pool2d (values-only, indexed fwd, and bwd) on [1, 4, 20, 20]:
-    // 4 planes * 2x2 tiles = 16 workgroups (vs 7 for scalar 1-D launch).
+    // Whole-plane `PLANE_VEC4` stride-1 max_pool2d (values-only, indexed fwd, and bwd) on [1, 4, 20, 20]:
+    // 4 planes -> 4 workgroups (1 workgroup/plane, down from 16 in 16x16 scalar tiling).
     let s_sppf = Shape::new(&[1, 4, 20, 20]);
     let b_sppf = backend.full(dev, DType::F32, s_sppf.numel(), 1.0).unwrap();
     let sppf_p = Pool2dParams { kernel: [5, 5], stride: [1, 1], padding: [2, 2] };
@@ -486,14 +486,14 @@ fn tiled_max_pool_vec4_2x2_and_gap_fast_paths() {
         backend.max_pool2d_values(View::new(&b_sppf, &Layout::contiguous(s_sppf.clone())), &sppf_p).unwrap();
     let tr = fresh.trace_end();
     assert_eq!(tr.len(), 1);
-    assert_eq!((tr[0].name, tr[0].groups), ("max_pool2d", [16, 1, 1]));
+    assert_eq!((tr[0].name, tr[0].groups), ("max_pool2d", [4, 1, 1]));
 
     fresh.trace_begin();
     let (b_mv, b_mi) =
         backend.max_pool2d(View::new(&b_sppf, &Layout::contiguous(s_sppf.clone())), &sppf_p).unwrap();
     let tr = fresh.trace_end();
     assert_eq!(tr.len(), 1);
-    assert_eq!((tr[0].name, tr[0].groups), ("pool_idx", [16, 1, 1]));
+    assert_eq!((tr[0].name, tr[0].groups), ("pool_idx", [4, 1, 1]));
 
     fresh.trace_begin();
     let _ = backend
@@ -506,7 +506,27 @@ fn tiled_max_pool_vec4_2x2_and_gap_fast_paths() {
         .unwrap();
     let tr = fresh.trace_end();
     assert_eq!(tr.len(), 1);
-    assert_eq!((tr[0].name, tr[0].groups), ("pool_bw_idx", [16, 1, 1]));
+    assert_eq!((tr[0].name, tr[0].groups), ("pool_bw_idx", [4, 1, 1]));
+
+    // Larger same-padded plane [1, 2, 80, 80] uses `TILED_VEC4` (32x16 tiles = ceil(20/8) * ceil(80/16) = 15 tiles/plane -> 30 workgroups).
+    let s_80 = Shape::new(&[1, 2, 80, 80]);
+    let b_80 = backend.full(dev, DType::F32, s_80.numel(), 1.0).unwrap();
+    fresh.trace_begin();
+    let _ = backend.max_pool2d_values(View::new(&b_80, &Layout::contiguous(s_80.clone())), &sppf_p).unwrap();
+    let tr = fresh.trace_end();
+    assert_eq!(tr.len(), 1);
+    assert_eq!((tr[0].name, tr[0].groups), ("max_pool2d", [30, 1, 1]));
+
+    // Odd-width plane [1, 4, 21, 21] falls back to 16x16 scalar `TILED` (4 planes * 2x2 = 16 workgroups).
+    let s_odd_s1 = Shape::new(&[1, 4, 21, 21]);
+    let b_odd_s1 = backend.full(dev, DType::F32, s_odd_s1.numel(), 1.0).unwrap();
+    fresh.trace_begin();
+    let _ = backend
+        .max_pool2d_values(View::new(&b_odd_s1, &Layout::contiguous(s_odd_s1.clone())), &sppf_p)
+        .unwrap();
+    let tr = fresh.trace_end();
+    assert_eq!(tr.len(), 1);
+    assert_eq!((tr[0].name, tr[0].groups), ("max_pool2d", [16, 1, 1]));
 
     // 2x2 stride-2 pad-0 values-only max_pool2d S2_VEC4 fast path: even width uses 1/4 threads of output pixels.
     let s_m2 = Shape::new(&[1, 4, 16, 16]);
@@ -576,4 +596,173 @@ fn tiled_max_pool_vec4_2x2_and_gap_fast_paths() {
         "unregistered kernels: {:?}",
         fresh.kernels_without_registry()
     );
+}
+
+/// Parity and edge-case coverage for the stride-1 `PLANE_VEC4` (`PLANE_CAP = 256` & `512`) and `TILED_VEC4`
+/// max-pool paths across all supported odd kernel sizes (`3×3`, `5×5`, `7×7`, and rectangular `3×5` / `5×7`),
+/// both `F32` and `F16`, verifying values-only inference, indexed forward, exact `i64` indices, backward
+/// gradients, row-major tie-breaking, NaN propagation, and `-0.0` sign preservation.
+#[test]
+fn stride1_vec4_max_pool_all_tiers_and_edges() {
+    use folo_core::backend::Pool2dParams;
+    use folo_core::{DType, no_grad};
+
+    let dev = dev!();
+    let ctx = crate::context_for(dev).unwrap();
+    let has_f16 = ctx.caps().shader_f16;
+    let dtypes: Vec<DType> = if has_f16 { vec![DType::F32, DType::F16] } else { vec![DType::F32] };
+
+    // Shapes exercising every tier:
+    // - [1, 2, 8, 8] & [2, 3, 20, 20]: PLANE_VEC4 small (PLANE_CAP=256)
+    // - [1, 2, 40, 40]: PLANE_VEC4 large (PLANE_CAP=512 when workgroup storage permits)
+    // - [1, 2, 52, 44]: TILED_VEC4 with partial right/bottom tiles (w4=11 -> 2 tiles of 8, h=52 -> 4 tiles of 16)
+    let shapes = [[1usize, 2, 8, 8], [2, 3, 20, 20], [1, 2, 40, 40], [1, 2, 52, 44]];
+    let kernels = [(3usize, 3usize), (5, 5), (7, 7), (3, 5), (5, 7)];
+
+    for &dt in &dtypes {
+        for shape in shapes {
+            let n: usize = shape.iter().product();
+            // Quantized values create frequent horizontal and vertical ties to stress row-major tie-breaking.
+            let mut data: Vec<f32> = (0..n).map(|i| (((i * 37 + 13) % 19) as f32 - 9.0) * 0.25).collect();
+            let hw = shape[2] * shape[3];
+            // Inject NaNs across edge, interior, and vec4-lane boundaries on plane 0; keep plane 1 finite.
+            if hw >= 64 {
+                data[0] = f32::NAN;
+                data[3] = f32::NAN;
+                data[4] = f32::NAN;
+                data[shape[3] + 5] = f32::NAN;
+                data[hw - 1] = f32::NAN;
+            }
+            let x_raw = Tensor::from_slice(&data, shape).unwrap().to_dtype(dt).unwrap();
+            let x_cpu_f32 =
+                if dt == DType::F16 { x_raw.to_dtype(DType::F32).unwrap() } else { x_raw.clone() };
+            let g_data: Vec<f32> = (0..n).map(|i| (((i * 29 + 5) % 17) as f32 - 8.0) * 0.125).collect();
+            let g_raw = Tensor::from_slice(&g_data, shape).unwrap().to_dtype(dt).unwrap();
+            let g_cpu_f32 =
+                if dt == DType::F16 { g_raw.to_dtype(DType::F32).unwrap() } else { g_raw.clone() };
+
+            for &(kh, kw) in &kernels {
+                let p = Pool2dParams { kernel: [kh, kw], stride: [1, 1], padding: [kh / 2, kw / 2] };
+
+                // 1. Values-only inference path (`no_grad` -> `max_pool2d_values` -> `pooling::max_pool2d`).
+                {
+                    let _g = no_grad();
+                    let want = x_cpu_f32.max_pool2d_with(&p).unwrap().to_dtype(dt).unwrap();
+                    let got = x_raw.to_device(dev).unwrap().max_pool2d_with(&p).unwrap();
+                    assert_close_t(&got, &want, 0.0, 0.0, &format!("max_val {dt:?} {shape:?} {kh}x{kw}"));
+                }
+
+                // 2. Indexed forward + autograd backward parity (`pool_idx` + `pool_bw_idx`).
+                let xc = x_cpu_f32.detach().requires_grad_();
+                let yc = xc.max_pool2d_with(&p).unwrap();
+                let gc = yc.backward_with(&g_cpu_f32).unwrap();
+                let want_y = yc.to_dtype(dt).unwrap();
+                let want_gx = gc.get(&xc).unwrap().to_dtype(dt).unwrap();
+
+                let xg = x_raw.to_device(dev).unwrap().detach().requires_grad_();
+                let yg = xg.max_pool2d_with(&p).unwrap();
+                let gg = yg.backward_with(&g_raw.to_device(dev).unwrap()).unwrap();
+                assert_close_t(&yg, &want_y, 0.0, 0.0, &format!("max_idx val {dt:?} {shape:?} {kh}x{kw}"));
+                let tol = if dt == DType::F16 { 1e-2 } else { 1e-5 };
+                assert_close_t(
+                    gg.get(&xg).unwrap(),
+                    &want_gx,
+                    tol,
+                    tol,
+                    &format!("max_bwd {dt:?} {shape:?} {kh}x{kw}"),
+                );
+            }
+        }
+
+        // Exact signed-zero (-0.0 over -inf) preservation on PLANE_VEC4 (8x8) and TILED_VEC4 (48x48).
+        for side in [8usize, 48] {
+            let mut z = vec![f32::NEG_INFINITY; side * side];
+            z[0] = -0.0;
+            z[side * side / 2 + 3] = -0.0;
+            let tz = Tensor::from_slice(&z, [1, 1, side, side]).unwrap().to_dtype(dt).unwrap();
+            let _g = no_grad();
+            let cz = if dt == DType::F16 { tz.to_dtype(DType::F32).unwrap() } else { tz.clone() };
+            let want = cz.max_pool2d(5, 1, 2).unwrap().to_dtype(dt).unwrap();
+            let got = tz.to_device(dev).unwrap().max_pool2d(5, 1, 2).unwrap();
+            super::fixtures::assert_same(&got, &want, &format!("max_val -0.0 {dt:?} {side}x{side}"));
+        }
+    }
+
+    // Direct kernel-level exact `i64` argmax index verification (first max in row-major order, first NaN)
+    // and synthetic out-of-window index rejection in `max_pool2d_backward` on PLANE_VEC4 & TILED_VEC4.
+    {
+        use crate::DType as Gdt;
+        use crate::kernels::pool_grad::{self, Pool2d};
+        let win = Pool2d { kernel: (5, 5), stride: (1, 1), padding: (2, 2) };
+        for (h, w) in [(20usize, 20usize), (40, 40), (48, 44)] {
+            let hw = h * w;
+            let mut vals: Vec<f32> = (0..hw).map(|i| ((i * 11 + 3) % 7) as f32).collect();
+            vals[2 * w + 5] = f32::NAN;
+            vals[2 * w + 6] = f32::NAN; // earlier NaN at (2, 5) must win
+            let gx_buf = ctx.upload(bytemuck::cast_slice(&vals)).unwrap();
+            let gy_buf = ctx.alloc(Gdt::F32.bytes(hw)).unwrap();
+            let gi_buf = ctx.alloc(Gdt::F32.bytes(hw * 2)).unwrap();
+            pool_grad::max_pool2d_indices(
+                &ctx,
+                gx_buf.raw(),
+                gy_buf.raw(),
+                gi_buf.raw(),
+                (1, h, w),
+                &win,
+                Gdt::F32,
+            )
+            .unwrap();
+            let raw_i = ctx.read(gi_buf.raw(), 0, (hw * 8) as u64).unwrap();
+            let got_i: Vec<i64> = bytemuck::cast_slice::<u8, i64>(&raw_i).to_vec();
+            let mut want_i = vec![0i64; hw];
+            for oy in 0..h {
+                for ox in 0..w {
+                    let mut best = f32::NEG_INFINITY;
+                    let mut bi = -1i64;
+                    for ky in 0..5usize {
+                        let iy = oy as isize + ky as isize - 2;
+                        if iy < 0 || iy >= h as isize {
+                            continue;
+                        }
+                        for kx in 0..5usize {
+                            let ix = ox as isize + kx as isize - 2;
+                            if ix < 0 || ix >= w as isize {
+                                continue;
+                            }
+                            let at = (iy as usize * w + ix as usize) as i64;
+                            let v = vals[at as usize];
+                            if bi < 0 || (!best.is_nan() && (v.is_nan() || v > best)) {
+                                best = v;
+                                bi = at;
+                            }
+                        }
+                    }
+                    want_i[oy * w + ox] = bi;
+                }
+            }
+            assert_eq!(got_i, want_i, "exact i64 argmax indices {h}x{w}");
+
+            // Synthetic backward index pointing outside each output's 5x5 window must NOT accumulate.
+            let synth_i: Vec<i64> = vec![0i64; hw]; // pixel 0 only covered by oy<=2, ox<=2 -> 9 outputs
+            let ones = vec![1.0f32; hw];
+            let g_buf = ctx.upload(bytemuck::cast_slice(&ones)).unwrap();
+            let si_buf = ctx.upload(bytemuck::cast_slice(&synth_i)).unwrap();
+            let out_buf = ctx.alloc(Gdt::F32.bytes(hw)).unwrap();
+            pool_grad::max_pool2d_backward(
+                &ctx,
+                g_buf.raw(),
+                si_buf.raw(),
+                out_buf.raw(),
+                (1, h, w),
+                &win,
+                Gdt::F32,
+            )
+            .unwrap();
+            let raw_gx = ctx.read(out_buf.raw(), 0, (hw * 4) as u64).unwrap();
+            let got_gx: &[f32] = bytemuck::cast_slice(&raw_gx);
+            assert_eq!(got_gx[0], 9.0, "out-of-window synthetic index leaked on {h}x{w}");
+            assert!(got_gx[1..].iter().all(|&v| v == 0.0), "unexpected non-zero grad on {h}x{w}");
+        }
+    }
+    assert!(ctx.kernels_without_registry().is_empty());
 }

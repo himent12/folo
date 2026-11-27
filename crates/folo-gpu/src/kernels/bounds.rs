@@ -188,8 +188,62 @@ mod tests {
             ("conv2d_depthwise_grad", Spec::new().u32("KH", 99).u32("KW", 99).u32("MODE", 0)),
             ("upsample_2x_vec4", Spec::new().f16(true)),
             ("max_pool2d", Spec::new().bool("TILED", true).u32("KH", 5).u32("KW", 5).f16(true)),
+            (
+                "max_pool2d",
+                Spec::new()
+                    .bool("PLANE_VEC4", true)
+                    .u32("PLANE_CAP", 256)
+                    .u32("KH", 5)
+                    .u32("KW", 5)
+                    .f16(true),
+            ),
+            (
+                "max_pool2d",
+                Spec::new().bool("PLANE_VEC4", true).u32("PLANE_CAP", 512).u32("KH", 5).u32("KW", 5),
+            ),
+            ("max_pool2d", Spec::new().bool("TILED_VEC4", true).u32("KH", 3).u32("KW", 7).f16(false)),
             ("pool_idx", Spec::new().u32("MODE", 0).bool("TILED", true).u32("KH", 5).u32("KW", 5)),
+            (
+                "pool_idx",
+                Spec::new()
+                    .u32("MODE", 0)
+                    .bool("PLANE_VEC4", true)
+                    .u32("PLANE_CAP", 256)
+                    .u32("KH", 5)
+                    .u32("KW", 5),
+            ),
+            (
+                "pool_idx",
+                Spec::new()
+                    .u32("MODE", 0)
+                    .bool("PLANE_VEC4", true)
+                    .u32("PLANE_CAP", 512)
+                    .u32("KH", 5)
+                    .u32("KW", 5),
+            ),
+            ("pool_idx", Spec::new().u32("MODE", 0).bool("TILED_VEC4", true).u32("KH", 7).u32("KW", 3)),
             ("pool_bw_idx", Spec::new().u32("MODE", 1).bool("TILED", true).u32("KH", 3).u32("KW", 3)),
+            (
+                "pool_bw_idx",
+                Spec::new()
+                    .u32("MODE", 1)
+                    .bool("PLANE_VEC4", true)
+                    .u32("PLANE_CAP", 256)
+                    .u32("KH", 5)
+                    .u32("KW", 5),
+            ),
+            (
+                "pool_bw_idx",
+                Spec::new()
+                    .u32("MODE", 1)
+                    .bool("PLANE_VEC4", true)
+                    .u32("PLANE_CAP", 512)
+                    .u32("KH", 5)
+                    .u32("KW", 5),
+            ),
+            ("pool_bw_idx", Spec::new().u32("MODE", 1).bool("TILED_VEC4", true).u32("KH", 3).u32("KW", 5)),
+            ("letterbox_prefilter", Spec::new()),
+            ("letterbox", Spec::new().bool("PREFILTER", false).bool("PACKED_SRC", true).bool("VEC4", true)),
             ("pool_2x2_s2_vec4", Spec::new().f16(true)),
             ("avg_2x2_s2_bwd_vec4", Spec::new().f16(true)),
             ("adaptive_gap_bwd", Spec::new().bool("VEC4", true)),
@@ -223,7 +277,7 @@ mod tests {
             ("cast_u8_vec4", Spec::new().bool("TO_F16", true)),
             ("u8_to_float_scale", Spec::new().bool("VEC4", true).f16(true)),
             ("rgb8_hwc_to_chw_norm", Spec::new().bool("VEC4", true)),
-            ("letterbox", Spec::new().bool("PREFILTER", false)),
+            ("letterbox", Spec::new().bool("PREFILTER", false).bool("PACKED_SRC", false).bool("VEC4", false)),
             ("tal_topk", Spec::new().u32("K", 64).u32("WG", 16)),
             ("det_box", Spec::new().u32("R", 16).u32("K", 10)),
             ("det_dfl_stats", Spec::new().f16(true).u32("R", 16).bool("MOMENTS", true).bool("ENT", true)),
@@ -316,13 +370,52 @@ mod tests {
             ("max_pool2d", Spec::new().bool("TILED", true).u32("KH", 8).u32("KW", 5)),
             ("max_pool2d", Spec::new().bool("TILED", true).u32("KH", 1).u32("KW", 3)),
             ("max_pool2d", Spec::new().bool("TILED", true).i32("KH", 5).u32("KW", 5)),
+            (
+                "max_pool2d",
+                Spec::new().bool("PLANE_VEC4", true).u32("PLANE_CAP", 256).u32("KH", 4).u32("KW", 5),
+            ),
+            (
+                "max_pool2d",
+                Spec::new().bool("PLANE_VEC4", true).u32("PLANE_CAP", 1024).u32("KH", 5).u32("KW", 5),
+            ),
+            ("max_pool2d", Spec::new().bool("PLANE_VEC4", true).u32("KH", 5).u32("KW", 5)),
+            ("max_pool2d", Spec::new().bool("TILED_VEC4", true).u32("KH", 2).u32("KW", 5)),
             ("pool", Spec::new().bool("TILED", true).u32("MODE", 0).u32("KH", 5).u32("KW", 5)),
             ("pool", Spec::new().bool("TILED", true).u32("MODE", 2).u32("KH", 5).u32("KW", 5)),
+            (
+                "pool",
+                Spec::new()
+                    .bool("PLANE_VEC4", true)
+                    .u32("PLANE_CAP", 256)
+                    .u32("MODE", 0)
+                    .u32("KH", 5)
+                    .u32("KW", 5),
+            ),
             ("pool_idx", Spec::new().u32("MODE", 0).bool("TILED", true).u32("KH", 8).u32("KW", 5)),
             ("pool_idx", Spec::new().u32("MODE", 1).bool("TILED", true).u32("KH", 5).u32("KW", 5)),
             ("pool_idx", Spec::new().u32("MODE", 0).bool("TILED", true).i32("KH", 5).u32("KW", 5)),
+            (
+                "pool_idx",
+                Spec::new()
+                    .u32("MODE", 0)
+                    .bool("PLANE_VEC4", true)
+                    .u32("PLANE_CAP", 128)
+                    .u32("KH", 5)
+                    .u32("KW", 5),
+            ),
+            ("pool_idx", Spec::new().u32("MODE", 1).bool("TILED_VEC4", true).u32("KH", 5).u32("KW", 5)),
             ("pool_bw_idx", Spec::new().u32("MODE", 0).bool("TILED", true).u32("KH", 3).u32("KW", 3)),
             ("pool_bw_idx", Spec::new().u32("MODE", 2).bool("TILED", true).u32("KH", 3).u32("KW", 3)),
+            (
+                "pool_bw_idx",
+                Spec::new()
+                    .u32("MODE", 0)
+                    .bool("PLANE_VEC4", true)
+                    .u32("PLANE_CAP", 256)
+                    .u32("KH", 5)
+                    .u32("KW", 5),
+            ),
+            ("pool_bw_idx", Spec::new().u32("MODE", 1).bool("TILED_VEC4", true).u32("KH", 6).u32("KW", 5)),
             ("conv2d_depthwise", Spec::new().u32("KH", 65536).u32("KW", 65536)),
             ("conv2d_depthwise", Spec::new().u32("KH", 3).u32("KW", 3).u32("SW", 65536)),
             ("conv2d_depthwise", Spec::new().u32("KH", 3).u32("KW", 0)),
