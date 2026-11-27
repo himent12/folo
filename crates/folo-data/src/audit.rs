@@ -315,9 +315,32 @@ pub fn audit_dataset(dataset: &LoadedDataset) -> AuditReport {
     audit_dataset_with(dataset, &AuditOptions::default())
 }
 
-/// Audits an opened [`LoadedDataset`] with configurable options (exact byte hashing plus optional 64-bit
-/// `dHash` perceptual near-duplicate and cross-split leakage detection).
-pub fn audit_dataset_with(dataset: &LoadedDataset, opts: &AuditOptions) -> AuditReport {
+/// Per-entry file scan result produced by [`scan_dataset_images`], shared between [`audit_dataset_with`] and
+/// [`crate::curate::deduplicate_dataset`].
+pub(crate) struct ScannedImage {
+    pub(crate) split: Split,
+    pub(crate) index: usize,
+    pub(crate) path: PathBuf,
+    pub(crate) content: std::result::Result<ScannedContent, String>,
+}
+
+/// Decoded 64-bit `dHash` and image `(width, height)` produced during a perceptual scan.
+#[derive(Clone, Copy)]
+pub(crate) struct DecodedDhash {
+    pub(crate) dhash: u64,
+    pub(crate) size: (u32, u32),
+}
+
+/// Byte hash, file length, and optional decoded `dHash` + dimensions for one readable image.
+pub(crate) struct ScannedContent {
+    pub(crate) digest: u128,
+    pub(crate) bytes: u64,
+    pub(crate) perceptual: Option<std::result::Result<DecodedDhash, String>>,
+}
+
+/// Scans every image in `dataset` in parallel, computing a streaming 128-bit content hash and (when `perceptual`
+/// is `true`) a 64-bit `dHash` plus decoded `(width, height)`, reusing decoded results across byte-identical copies.
+pub(crate) fn scan_dataset_images(dataset: &LoadedDataset, perceptual: bool) -> Vec<ScannedImage> {
     let entries: Vec<(Split, usize, &Path)> = Split::ALL
         .into_iter()
         .flat_map(|s| {
@@ -325,86 +348,52 @@ pub fn audit_dataset_with(dataset: &LoadedDataset, opts: &AuditOptions) -> Audit
         })
         .collect();
 
-    let mut unreadable = Vec::new();
-    let mut group_order: Vec<(u128, u64)> = Vec::new();
-    let mut groups: HashMap<(u128, u64), Vec<AuditImageRef>> = HashMap::new();
-    let mut perceptual_entries: Vec<PerceptualEntry> = Vec::new();
-
-    if opts.perceptual {
-        struct ScannedFile {
-            digest: u128,
-            len: u64,
-            dhash: std::result::Result<u64, String>,
-        }
-        // Cache successful dHashes by exact `(digest, len)` so byte-identical copies reuse a previously decoded
-        // dHash without re-decoding (simultaneous first misses may decode independently; decode errors are never
-        // cached so every unreadable file keeps its own path in the error message).
-        let decoded_cache: std::sync::Mutex<HashMap<(u128, u64), u64>> =
+    if perceptual {
+        // Cache successful `DecodedDhash` by exact `(digest, len)` so byte-identical copies reuse a previously
+        // decoded hash without re-decoding (simultaneous first misses may decode independently; decode errors
+        // are never cached so every unreadable file keeps its own path in the error message).
+        let decoded_cache: std::sync::Mutex<HashMap<(u128, u64), DecodedDhash>> =
             std::sync::Mutex::new(HashMap::new());
-        let scanned: Vec<std::result::Result<ScannedFile, String>> = entries
+        let scanned: Vec<std::result::Result<ScannedContent, String>> = entries
             .par_iter()
             .map(|(_, _, path)| {
                 crate::guard::check(path).map_err(|e| e.to_string())?;
-                let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
-                let digest = hash128(&bytes);
-                let len = bytes.len() as u64;
-                let cached = decoded_cache.lock().ok().and_then(|m| m.get(&(digest, len)).copied());
-                let dhash = match cached {
-                    Some(h) => Ok(h),
+                let raw = std::fs::read(path).map_err(|e| e.to_string())?;
+                let digest = hash128(&raw);
+                let bytes = raw.len() as u64;
+                let cached = decoded_cache.lock().ok().and_then(|m| m.get(&(digest, bytes)).copied());
+                let decoded = match cached {
+                    Some(v) => Ok(v),
                     None => {
                         let res = crate::par::serial(|| {
-                            crate::image::decode_with_path(&bytes, path)
-                                .map(|img| dhash_image(&img))
+                            crate::image::decode_with_path(&raw, path)
+                                .map(|img| DecodedDhash {
+                                    dhash: dhash_image(&img),
+                                    size: (img.width, img.height),
+                                })
                                 .map_err(|e| e.to_string())
                         });
-                        if let Ok(h) = res
+                        if let Ok(v) = res
                             && let Ok(mut m) = decoded_cache.lock()
                         {
-                            m.insert((digest, len), h);
+                            m.insert((digest, bytes), v);
                         }
                         res
                     }
                 };
-                Ok(ScannedFile { digest, len, dhash })
+                Ok(ScannedContent { digest, bytes, perceptual: Some(decoded) })
             })
             .collect();
-
-        for ((split, index, path), res) in entries.into_iter().zip(scanned) {
-            match res {
-                Ok(ScannedFile { digest, len, dhash }) => {
-                    let key = (digest, len);
-                    groups
-                        .entry(key)
-                        .or_insert_with(|| {
-                            group_order.push(key);
-                            Vec::new()
-                        })
-                        .push(AuditImageRef { split, index, path: path.to_path_buf() });
-                    match dhash {
-                        Ok(dhash) => {
-                            perceptual_entries.push(PerceptualEntry {
-                                split,
-                                index,
-                                path: path.to_path_buf(),
-                                byte_key: key,
-                                dhash,
-                            });
-                        }
-                        Err(message) => {
-                            unreadable.push(UnreadableImage {
-                                split,
-                                index,
-                                path: path.to_path_buf(),
-                                message,
-                            });
-                        }
-                    }
-                }
-                Err(message) => {
-                    unreadable.push(UnreadableImage { split, index, path: path.to_path_buf(), message });
-                }
-            }
-        }
+        entries
+            .into_iter()
+            .zip(scanned)
+            .map(|((split, index, path), content)| ScannedImage {
+                split,
+                index,
+                path: path.to_path_buf(),
+                content,
+            })
+            .collect()
     } else {
         let hashed: Vec<std::result::Result<(u128, u64), String>> = entries
             .par_iter()
@@ -413,21 +402,69 @@ pub fn audit_dataset_with(dataset: &LoadedDataset, opts: &AuditOptions) -> Audit
                 |buf, (_, _, path)| hash128_file_with_buf(path, buf).map_err(|e| e.to_string()),
             )
             .collect();
+        entries
+            .into_iter()
+            .zip(hashed)
+            .map(|((split, index, path), res)| ScannedImage {
+                split,
+                index,
+                path: path.to_path_buf(),
+                content: res.map(|(digest, bytes)| ScannedContent { digest, bytes, perceptual: None }),
+            })
+            .collect()
+    }
+}
 
-        for ((split, index, path), res) in entries.into_iter().zip(hashed) {
-            match res {
-                Ok(key) => {
-                    groups
-                        .entry(key)
-                        .or_insert_with(|| {
-                            group_order.push(key);
-                            Vec::new()
-                        })
-                        .push(AuditImageRef { split, index, path: path.to_path_buf() });
+/// Audits an opened [`LoadedDataset`] with configurable options (exact byte hashing plus optional 64-bit
+/// `dHash` perceptual near-duplicate and cross-split leakage detection).
+pub fn audit_dataset_with(dataset: &LoadedDataset, opts: &AuditOptions) -> AuditReport {
+    let scanned = scan_dataset_images(dataset, opts.perceptual);
+
+    let mut unreadable = Vec::new();
+    let mut group_order: Vec<(u128, u64)> = Vec::new();
+    let mut groups: HashMap<(u128, u64), Vec<AuditImageRef>> = HashMap::new();
+    let mut perceptual_entries: Vec<PerceptualEntry> = Vec::new();
+
+    for item in scanned {
+        match item.content {
+            Ok(ScannedContent { digest, bytes, perceptual }) => {
+                let key = (digest, bytes);
+                groups
+                    .entry(key)
+                    .or_insert_with(|| {
+                        group_order.push(key);
+                        Vec::new()
+                    })
+                    .push(AuditImageRef { split: item.split, index: item.index, path: item.path.clone() });
+                if let Some(decoded) = perceptual {
+                    match decoded {
+                        Ok(DecodedDhash { dhash, .. }) => {
+                            perceptual_entries.push(PerceptualEntry {
+                                split: item.split,
+                                index: item.index,
+                                path: item.path,
+                                byte_key: key,
+                                dhash,
+                            });
+                        }
+                        Err(message) => {
+                            unreadable.push(UnreadableImage {
+                                split: item.split,
+                                index: item.index,
+                                path: item.path,
+                                message,
+                            });
+                        }
+                    }
                 }
-                Err(message) => {
-                    unreadable.push(UnreadableImage { split, index, path: path.to_path_buf(), message });
-                }
+            }
+            Err(message) => {
+                unreadable.push(UnreadableImage {
+                    split: item.split,
+                    index: item.index,
+                    path: item.path,
+                    message,
+                });
             }
         }
     }
@@ -496,17 +533,17 @@ fn distinct_splits_of(splits: impl Iterator<Item = Split>) -> Vec<Split> {
 }
 
 /// Disjoint-set union over `0..n`.
-struct Dsu {
+pub(crate) struct Dsu {
     parent: Vec<usize>,
     rank: Vec<u8>,
 }
 
 impl Dsu {
-    fn new(n: usize) -> Self {
+    pub(crate) fn new(n: usize) -> Self {
         Self { parent: (0..n).collect(), rank: vec![0; n] }
     }
 
-    fn find(&mut self, mut x: usize) -> usize {
+    pub(crate) fn find(&mut self, mut x: usize) -> usize {
         while self.parent[x] != x {
             let p = self.parent[x];
             self.parent[x] = self.parent[p];
@@ -515,7 +552,7 @@ impl Dsu {
         x
     }
 
-    fn union(&mut self, a: usize, b: usize) {
+    pub(crate) fn union(&mut self, a: usize, b: usize) {
         let ra = self.find(a);
         let rb = self.find(b);
         if ra == rb {
@@ -535,7 +572,7 @@ impl Dsu {
 /// Connects unique hashes within `threshold` Hamming distance using O(m) fast path at `threshold >= 64`, exact
 /// pigeonhole multi-index hashing for large sets with small thresholds (`threshold <= 7`), or direct pairwise
 /// scan otherwise.
-fn connect_hashes(hashes: &[u64], threshold: u32, dsu: &mut Dsu) {
+pub(crate) fn connect_hashes(hashes: &[u64], threshold: u32, dsu: &mut Dsu) {
     let m = hashes.len();
     if m < 2 || threshold == 0 {
         return;
@@ -590,7 +627,7 @@ fn connect_hashes(hashes: &[u64], threshold: u32, dsu: &mut Dsu) {
 
 /// Computes the exact maximum pairwise Hamming distance across a slice of distinct 64-bit hashes, stopping early
 /// once the theoretical upper bound `64` is reached.
-fn exact_max_hamming(hashes: &[u64]) -> u32 {
+pub(crate) fn exact_max_hamming(hashes: &[u64]) -> u32 {
     if hashes.len() < 2 {
         return 0;
     }

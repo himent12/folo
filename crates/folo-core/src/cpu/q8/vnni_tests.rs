@@ -83,8 +83,11 @@ fn conv_ref_packed(
                                     }
                                 }
                             }
-                            ((acc as i32).wrapping_sub(part.corr[oc]) as f32)
-                                .mul_add(part.scale[oc], cv.bias[oc])
+                            super::silu::fmadd(
+                                (acc as i32).wrapping_sub(part.corr[oc]) as f32,
+                                part.scale[oc],
+                                cv.bias[oc],
+                            )
                         } else {
                             let mut sum = 0.0f32;
                             for part in &cv.parts {
@@ -115,8 +118,11 @@ fn conv_ref_packed(
                                         }
                                     }
                                 }
-                                sum = ((acc as i32).wrapping_sub(part.corr[oc]) as f32)
-                                    .mul_add(part.scale[oc], sum);
+                                sum = super::silu::fmadd(
+                                    (acc as i32).wrapping_sub(part.corr[oc]) as f32,
+                                    part.scale[oc],
+                                    sum,
+                                );
                             }
                             sum + cv.bias[oc]
                         };
@@ -126,7 +132,7 @@ fn conv_ref_packed(
                         if let Some((rv, rg)) = &res {
                             let rw = rv.data[rv.offset + img * rv.img_stride + g * ohw + px];
                             let rq = ((rw >> (8 * r)) & 0xFF) as i32;
-                            y = rg[oc].scale.mul_add((rq - rg[oc].zero as i32) as f32, y);
+                            y = super::silu::fmadd(rg[oc].scale, (rq - rg[oc].zero as i32) as f32, y);
                         }
                         if let Some(ogs) = out_grids {
                             word |= (ogs[oc].quantize(y) as u32) << (8 * r);
@@ -523,7 +529,7 @@ fn stem_u8_odd_and_48_boundary_widths_bit_exact() {
                                 }
                             }
                         }
-                        let y = silu_q8((acc as f32).mul_add(stem.scale[oc], stem.bias[oc]));
+                        let y = silu_q8(super::silu::fmadd(acc as f32, stem.scale[oc], stem.bias[oc]));
                         word |= (out_grid.quantize(y) as u32) << (8 * r);
                     }
                     expected[g * ohw + oy * ow + ox] = word;
@@ -601,7 +607,7 @@ fn per_channel_large_3x3_s1_hits_rotating_strip_bit_exact() {
             let mut word = 0u32;
             for (r, &acc) in acc_i32.iter().enumerate() {
                 let oc = 4 * g + r;
-                let y = silu_q8(((acc - p0.corr[oc]) as f32).mul_add(p0.scale[oc], cv.bias[oc]));
+                let y = silu_q8(super::silu::fmadd((acc - p0.corr[oc]) as f32, p0.scale[oc], cv.bias[oc]));
                 word |= (out_grids[oc].quantize(y) as u32) << (8 * r);
             }
             assert_eq!(got[g * hw + oy * w + ox], word, "large 3x3 s1 mismatch at ({oy}, {ox}) g={g}");

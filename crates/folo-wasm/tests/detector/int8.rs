@@ -15,7 +15,7 @@ use folo_wasm::{
     TtaDetectOptions,
 };
 
-use super::{folo2_bytes, has_gpu, load_with_imgsz, model_bytes, rgba};
+use super::{folo2_bytes, folo2_iou_bytes, folo2_o2o_bytes, has_gpu, load_with_imgsz, model_bytes, rgba};
 
 fn calib_inputs() -> Vec<Tensor> {
     let (w, h) = (160, 128);
@@ -41,14 +41,14 @@ fn make_quantized_folo1() -> Vec<u8> {
     std::fs::read(&path).unwrap()
 }
 
-fn make_quantized_folo2() -> Vec<u8> {
-    let file = ModelFile::from_bytes(folo2_bytes()).unwrap();
+fn make_quantized_folo2_from(raw: Vec<u8>, tag: &str) -> Vec<u8> {
+    let file = ModelFile::from_bytes(raw).unwrap();
     let (mut m, _) = FoloV2Model::from_file(&file, Purpose::Inference).unwrap();
     m.fuse().unwrap();
     let inputs = calib_inputs();
     let cal = calibrate_v2(&m, || inputs.iter().cloned().map(Ok), Method::MinMax).unwrap();
     m.set_int8(Some(cal)).unwrap();
-    let dir = TestDir::new("wasm-int8-v2");
+    let dir = TestDir::new(tag);
     let path = dir.join("m2-int8.folo");
     m.save(&path).unwrap();
     std::fs::read(&path).unwrap()
@@ -61,7 +61,17 @@ fn folo1_int8_bytes() -> Vec<u8> {
 
 fn folo2_int8_bytes() -> Vec<u8> {
     static BYTES: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
-    BYTES.get_or_init(make_quantized_folo2).clone()
+    BYTES.get_or_init(|| make_quantized_folo2_from(folo2_bytes(), "wasm-int8-v2")).clone()
+}
+
+fn folo2_iou_int8_bytes() -> Vec<u8> {
+    static BYTES: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    BYTES.get_or_init(|| make_quantized_folo2_from(folo2_iou_bytes(), "wasm-int8-v2-iou")).clone()
+}
+
+fn folo2_o2o_int8_bytes() -> Vec<u8> {
+    static BYTES: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    BYTES.get_or_init(|| make_quantized_folo2_from(folo2_o2o_bytes(), "wasm-int8-v2-o2o")).clone()
 }
 
 /// Write a valid `.folo` file whose `folo.quant` metadata JSON is malformed, to test error vs fallback paths.
@@ -91,9 +101,11 @@ fn int8_folo1_and_folo2_match_predictor_across_single_tiled_tta() {
     let rgb = rgba_to_image(&img, w, h).unwrap();
     let (conf, iou, max_det) = (0.3, 0.7, 40);
 
-    for (label, bytes, want_family, want_arch) in [
-        ("folo1-int8", folo1_int8_bytes(), "folo", "folo-n"),
-        ("folo2-int8", folo2_int8_bytes(), "folo2", "folo2-n"),
+    for (label, bytes, want_family, want_arch, want_head, want_o2o, want_iou) in [
+        ("folo1-int8", folo1_int8_bytes(), "folo", "folo-n", "o2m", false, false),
+        ("folo2-int8", folo2_int8_bytes(), "folo2", "folo2-n", "o2m", false, false),
+        ("folo2-iou-int8", folo2_iou_int8_bytes(), "folo2", "folo2-n", "o2m", false, true),
+        ("folo2-o2o-int8", folo2_o2o_int8_bytes(), "folo2", "folo2-n", "o2o", true, false),
     ] {
         // Explicit `precision: "int8"` on CPU.
         let det_explicit =
@@ -103,7 +115,17 @@ fn int8_folo1_and_folo2_match_predictor_across_single_tiled_tta() {
         assert_eq!(info.precision, Precision::Int8, "{label}: expected int8 precision");
         assert!(info.precision_fallback.is_none(), "{label}: unexpected precision_fallback {info:?}");
         assert!(info.fallback.is_none(), "{label}: unexpected fallback {info:?}");
-        assert_eq!((info.family.as_str(), info.arch.as_str()), (want_family, want_arch));
+        assert_eq!(
+            (
+                info.family.as_str(),
+                info.arch.as_str(),
+                info.head_mode.as_str(),
+                info.has_o2o,
+                info.has_iou_head,
+            ),
+            (want_family, want_arch, want_head, want_o2o, want_iou),
+            "{label}: DetectorInfo metadata mismatch"
+        );
 
         // Omitted `precision` on CPU auto-activates `int8` when `folo.quant` is present.
         let det_auto_cpu = load_with_imgsz(bytes.clone(), BackendChoice::Cpu, None, 128).unwrap();
@@ -164,26 +186,98 @@ fn int8_folo1_and_folo2_match_predictor_across_single_tiled_tta() {
         let want_a = p.predict_tta(&rgb, &tta_opts.to_tta_config().unwrap()).unwrap();
         assert_eq!(got_a.response.boxes, want_a.scored_boxes(p.classes()), "{label}: TTA mismatch");
 
-        // Combined int8 + perClassConf + confInclusive parity.
-        let boundary = &got.response.boxes[got.response.boxes.len() / 2];
-        let per_class =
-            BTreeMap::from([(boundary.class, boundary.score), ((boundary.class + 1) % 3, 0.9999)]);
-        let mut p_cal = int8_predictor(bytes, 128, 0.5, iou, max_det);
-        p_cal.set_per_class_conf(Some(per_class.clone())).unwrap();
-        p_cal.set_conf_inclusive(true);
-        let got_cal = pollster::block_on(det_explicit.detect(
-            &img,
-            w,
-            h,
-            DetectOptions { conf: 0.5, iou, max_det, per_class_conf: Some(per_class), conf_inclusive: true },
-        ))
-        .unwrap();
-        let want_cal = p_cal.predict(&rgb).unwrap();
-        assert_eq!(
-            got_cal.response.boxes,
-            want_cal.scored_boxes(p_cal.classes()),
-            "{label}: int8 + perClassConf + confInclusive mismatch"
-        );
+        // Combined int8 + perClassConf + confInclusive parity across single-pass, SAHI tiled, and TTA,
+        // using a mode-specific boundary box so strict `>` vs inclusive `>=` is exercised in every mode.
+        assert!(!got_t.response.boxes.is_empty(), "{label}: tiled int8 test needs detections");
+        assert!(!got_a.response.boxes.is_empty(), "{label}: TTA int8 test needs detections");
+
+        let single_b = &got.response.boxes[got.response.boxes.len() / 2];
+        let tile_b = &got_t.response.boxes[got_t.response.boxes.len() / 2];
+        let tta_b = &got_a.response.boxes[got_a.response.boxes.len() / 2];
+        let make_per_class =
+            |b: &folo_api::ScoredBox| BTreeMap::from([(b.class, b.score), ((b.class + 1) % 3, 0.9999)]);
+        let has_box = |boxes: &[folo_api::ScoredBox], b: &folo_api::ScoredBox| {
+            boxes.iter().any(|x| x.class == b.class && x.score.to_bits() == b.score.to_bits())
+        };
+
+        let (mut single_pair, mut tile_pair, mut tta_pair) = (Vec::new(), Vec::new(), Vec::new());
+        for conf_inclusive in [false, true] {
+            let single_pc = make_per_class(single_b);
+            let mut p_single = int8_predictor(bytes.clone(), 128, 0.5, iou, max_det);
+            p_single.set_per_class_conf(Some(single_pc.clone())).unwrap();
+            p_single.set_conf_inclusive(conf_inclusive);
+            let got_cal = pollster::block_on(det_explicit.detect(
+                &img,
+                w,
+                h,
+                DetectOptions { conf: 0.5, iou, max_det, per_class_conf: Some(single_pc), conf_inclusive },
+            ))
+            .unwrap();
+            let want_cal = p_single.predict(&rgb).unwrap();
+            assert_eq!(
+                got_cal.response.boxes,
+                want_cal.scored_boxes(p_single.classes()),
+                "{label}: int8 + perClassConf + confInclusive={conf_inclusive} single mismatch"
+            );
+            single_pair.push(got_cal.response.boxes);
+
+            let tile_pc = make_per_class(tile_b);
+            let mut p_tile = int8_predictor(bytes.clone(), 128, 0.5, iou, max_det);
+            p_tile.set_per_class_conf(Some(tile_pc.clone())).unwrap();
+            p_tile.set_conf_inclusive(conf_inclusive);
+            let tile_cal_opts = TileDetectOptions {
+                conf: 0.5,
+                iou,
+                max_det,
+                per_class_conf: Some(tile_pc),
+                conf_inclusive,
+                tile_size: Some(112),
+                overlap: Some(0.25),
+                full_image: true,
+                tile_batch: 4,
+                ..Default::default()
+            };
+            let got_tc =
+                pollster::block_on(det_explicit.detect_tiled(&img, w, h, tile_cal_opts.clone())).unwrap();
+            let want_tc = p_tile.predict_tiled(&rgb, &tile_cal_opts.to_tile_config().unwrap()).unwrap();
+            assert_eq!(
+                got_tc.response.boxes,
+                want_tc.scored_boxes(p_tile.classes()),
+                "{label}: int8 + perClassConf + confInclusive={conf_inclusive} tiled mismatch"
+            );
+            tile_pair.push(got_tc.response.boxes);
+
+            let tta_pc = make_per_class(tta_b);
+            let mut p_tta = int8_predictor(bytes.clone(), 128, 0.5, iou, max_det);
+            p_tta.set_per_class_conf(Some(tta_pc.clone())).unwrap();
+            p_tta.set_conf_inclusive(conf_inclusive);
+            let tta_cal_opts = TtaDetectOptions {
+                conf: 0.5,
+                iou,
+                max_det,
+                per_class_conf: Some(tta_pc),
+                conf_inclusive,
+                hflip: true,
+                scales: vec![0.75, 1.0],
+                ..Default::default()
+            };
+            let got_ac =
+                pollster::block_on(det_explicit.detect_tta(&img, w, h, tta_cal_opts.clone())).unwrap();
+            let want_ac = p_tta.predict_tta(&rgb, &tta_cal_opts.to_tta_config().unwrap()).unwrap();
+            assert_eq!(
+                got_ac.response.boxes,
+                want_ac.scored_boxes(p_tta.classes()),
+                "{label}: int8 + perClassConf + confInclusive={conf_inclusive} TTA mismatch"
+            );
+            tta_pair.push(got_ac.response.boxes);
+        }
+
+        assert!(!has_box(&single_pair[0], single_b), "{label}: single strict `>` must exclude boundary");
+        assert!(has_box(&single_pair[1], single_b), "{label}: single inclusive `>=` must keep boundary");
+        assert!(!has_box(&tile_pair[0], tile_b), "{label}: tiled strict `>` must exclude boundary");
+        assert!(has_box(&tile_pair[1], tile_b), "{label}: tiled inclusive `>=` must keep boundary");
+        assert!(!has_box(&tta_pair[0], tta_b), "{label}: TTA strict `>` must exclude boundary");
+        assert!(has_box(&tta_pair[1], tta_b), "{label}: TTA inclusive `>=` must keep boundary");
     }
 }
 

@@ -13,6 +13,17 @@ use folo_core::cpu::q8::{
 };
 use folo_core::rng::Rng;
 
+fn fmadd(a: f32, b: f32, c: f32) -> f32 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        a * b + c
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        a.mul_add(b, c)
+    }
+}
+
 fn pool(threads: usize) -> rayon::ThreadPool {
     rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap()
 }
@@ -29,13 +40,14 @@ fn fast_silu_accuracy_and_extremes() {
         max_rel = max_rel.max(err);
         assert!(err <= 2e-6, "silu_q8({x}) = {got}, want {want}, rel {err:e}");
     }
-    assert!(max_rel <= 2.5e-7, "max_rel {max_rel:e} exceeded 2.5e-7");
+    let bound = if cfg!(target_arch = "wasm32") { 3e-7 } else { 2.5e-7 };
+    assert!(max_rel <= bound, "max_rel {max_rel:e} exceeded {bound:e}");
     // Pin peak-error boundary inputs (worst hybrid error ~2.01e-7 near 0x3fc8_331e and reduced f = ±0.5).
     for x in [f32::from_bits(0x3fc8_331e), 0.5 / std::f32::consts::LOG2_E, -0.5 / std::f32::consts::LOG2_E] {
         let want = x as f64 / (1.0 + (-(x as f64)).exp());
         let got = silu_q8(x) as f64;
         let err = (got - want).abs() / want.abs().max(1.0);
-        assert!(err <= 2.5e-7, "silu_q8({x}) = {got}, want {want}, err {err:e}");
+        assert!(err <= bound, "silu_q8({x}) = {got}, want {want}, err {err:e}");
     }
     assert_eq!(silu_q8(0.0).to_bits(), 0.0f32.to_bits());
     assert_eq!(silu_q8(-0.0).to_bits(), (-0.0f32).to_bits());
@@ -111,7 +123,7 @@ fn u8_stem_matches_exact_integer_and_f32_reference() {
                                 }
                             }
                         }
-                        let mut y = (acc as f32).mul_add(sw[oc], bias[oc]);
+                        let mut y = fmadd(acc as f32, sw[oc], bias[oc]);
                         if silu {
                             y = silu_q8(y);
                         }
@@ -442,7 +454,7 @@ fn ref_conv_parts(
                             }
                         }
                         let diff = (acc - corr) as i32 as f32;
-                        yv = if single { diff.mul_add(sw[oc], bias[oc]) } else { diff.mul_add(sw[oc], yv) };
+                        yv = if single { fmadd(diff, sw[oc], bias[oc]) } else { fmadd(diff, sw[oc], yv) };
                     }
                     if !single {
                         yv += bias[oc];
@@ -453,7 +465,7 @@ fn ref_conv_parts(
                     let pos = oy * ow + ox;
                     if let Some((rbuf, rgs)) = res {
                         let b = rbuf[(img * (o / 4) + oc / 4) * ohw + pos].to_le_bytes()[oc % 4];
-                        yv = rgs[oc].scale.mul_add((b as i32 - rgs[oc].zero as i32) as f32, yv);
+                        yv = fmadd(rgs[oc].scale, (b as i32 - rgs[oc].zero as i32) as f32, yv);
                     }
                     fout[(img * o + oc) * ohw + pos] = yv;
                     qout[(img * (o / 4) + oc / 4) * ohw + pos] |=

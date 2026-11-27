@@ -211,7 +211,7 @@ fn merge_internal(datasets: &[&LoadedDataset], config: &MergeConfig) -> Result<M
 }
 
 /// Validates that every box can be serialised to YOLO text and read back cleanly without losing annotations.
-fn validate_yolo_boxes(entry: &ImageEntry, num_classes: usize) -> Result<()> {
+pub(super) fn validate_yolo_boxes(entry: &ImageEntry, num_classes: usize) -> Result<()> {
     for b in &entry.boxes {
         if (b.class as usize) >= num_classes {
             return Err(DataError::Config(format!(
@@ -260,7 +260,7 @@ fn validate_yolo_boxes(entry: &ImageEntry, num_classes: usize) -> Result<()> {
 
 /// Formats boxes with exact shortest round-trip `f32` decimals (matching [`crate::pack`]) so small valid boxes
 /// are never rounded down to `0.000000` and dropped on reopen.
-fn format_yolo_labels(boxes: &[BBox]) -> String {
+pub(super) fn format_yolo_labels(boxes: &[BBox]) -> String {
     let mut text = String::with_capacity(boxes.len() * 48);
     for b in boxes {
         let _ = writeln!(text, "{} {} {} {} {}", b.class, b.cx, b.cy, b.w, b.h);
@@ -269,7 +269,7 @@ fn format_yolo_labels(boxes: &[BBox]) -> String {
 }
 
 /// Copies `from` to `to` using `create_new(true)` so a filesystem alias can never silently overwrite another file.
-fn copy_exclusive(from: &Path, to: &Path) -> Result<()> {
+pub(super) fn copy_exclusive(from: &Path, to: &Path) -> Result<()> {
     crate::guard::check(from).map_err(|e| DataError::io(from, e))?;
     let mut src = std::fs::File::open(from).map_err(|e| DataError::io(from, e))?;
     let mut dst =
@@ -279,7 +279,7 @@ fn copy_exclusive(from: &Path, to: &Path) -> Result<()> {
 }
 
 /// Writes `content` to `to` using `create_new(true)` so a filesystem alias can never silently overwrite another file.
-fn write_exclusive(to: &Path, content: &[u8]) -> Result<()> {
+pub(super) fn write_exclusive(to: &Path, content: &[u8]) -> Result<()> {
     let mut dst =
         OpenOptions::new().write(true).create_new(true).open(to).map_err(|e| DataError::io(to, e))?;
     dst.write_all(content).map_err(|e| DataError::io(to, e))
@@ -287,7 +287,7 @@ fn write_exclusive(to: &Path, content: &[u8]) -> Result<()> {
 
 /// Writes one entry sequentially with exclusive creation, disambiguating OS-level filename aliases (such as
 /// Unicode NFC/NFD normalization on APFS) by bumping `_N` if either the image or label file already exists.
-fn write_entry_resolving_os_aliases(
+pub(super) fn write_entry_resolving_os_aliases(
     entry: &ImageEntry,
     initial_stem: &str,
     ext: &str,
@@ -482,7 +482,7 @@ fn clean_stem(p: &Path) -> String {
 
 /// Generates collision-free `(stem, ".ext", was_renamed)` tuples for one split of a merged dataset, comparing stems
 /// case-insensitively so Windows and macOS filesystems (and YOLO `.txt` label pairing) never overwrite an entry.
-fn resolve_merge_filenames(
+pub(super) fn resolve_merge_filenames(
     items: &[(usize, ImageEntry)],
     prefixes: &[String],
     policy: CollisionPolicy,

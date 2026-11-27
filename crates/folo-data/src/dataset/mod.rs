@@ -401,6 +401,15 @@ impl LoadedDataset {
     pub fn filter(&self, config: &crate::curate::FilterConfig) -> Result<LoadedDataset> {
         crate::curate::filter_dataset(self, config)
     }
+
+    /// Deduplicates exact and/or perceptual (`dHash`) near-duplicate images in memory without modifying source
+    /// files on disk. See [`crate::curate::deduplicate_dataset`].
+    pub fn deduplicate(
+        &self,
+        opts: &crate::curate::DedupOptions,
+    ) -> Result<(LoadedDataset, crate::curate::DedupReport)> {
+        crate::curate::deduplicate_dataset(self, opts)
+    }
 }
 
 /// Opens a dataset at `path`, detecting the format. See [`open_with`].
