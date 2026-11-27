@@ -30,6 +30,7 @@ impl WindowInner {
     ) -> LRESULT {
         let handled = match msg {
             WM_ACTIVATE => self.handle_activate(hwnd, wparam),
+            WM_MOUSEACTIVATE => self.offscreen.then_some(MA_NOACTIVATE as isize),
             WM_CREATE => self.handle_create(hwnd),
             WM_MOVE => self.handle_move(hwnd, lparam),
             WM_SIZE => self.handle_size(wparam, lparam),

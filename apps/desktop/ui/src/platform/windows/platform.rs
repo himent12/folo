@@ -135,6 +135,14 @@ impl WindowsPlatform {
         Ok(window)
     }
 
+    /// Opens an off-screen window directly without mutating process environment variables.
+    #[cfg(test)]
+    pub(crate) fn open_windows_window_offscreen(&self, params: WindowParams) -> Result<WindowsWindow> {
+        let window = WindowsWindow::new_with_offscreen(params, self.shared.clone(), true)?;
+        self.shared.windows.borrow_mut().push(window.hwnd().0 as isize);
+        Ok(window)
+    }
+
     /// Puts `launcher` behind the gate in place of the shell's, closed when `offscreen` (tests launch
     /// nothing real); the gate's state as the platform built it is returned.
     #[cfg(test)]

@@ -262,7 +262,7 @@ impl WindowInner {
                     OFFSCREEN_ORIGIN,
                     r.right - r.left,
                     r.bottom - r.top,
-                    SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+                    SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW,
                 )
             };
             self.post_expose();
@@ -468,12 +468,19 @@ impl WindowsWindow {
     }
 
     pub(crate) fn new(params: WindowParams, shared: Rc<Shared>) -> Result<Self> {
+        Self::new_with_offscreen(params, shared, offscreen())
+    }
+
+    pub(crate) fn new_with_offscreen(
+        params: WindowParams,
+        shared: Rc<Shared>,
+        offscreen: bool,
+    ) -> Result<Self> {
         register_window_class(shared.icon);
         let hide_title_bar = params.titlebar.as_ref().map(|t| t.appears_transparent).unwrap_or(true);
         let title = HSTRING::from(
             params.titlebar.as_ref().and_then(|t| t.title.as_ref()).map(|t| t.as_ref()).unwrap_or(""),
         );
-        let offscreen = offscreen();
         let (mut ex_style, style) = if params.kind == WindowKind::PopUp {
             (WS_EX_TOOLWINDOW, WINDOW_STYLE(0))
         } else {
@@ -486,18 +493,20 @@ impl WindowsWindow {
             }
             (WS_EX_APPWINDOW, style)
         };
-        // Off screen: no taskbar button or Alt-Tab entry (owned, without WS_EX_APPWINDOW), same style.
+        // Off screen: no taskbar button, Alt-Tab entry, or activation (owned, without WS_EX_APPWINDOW,
+        // with WS_EX_NOACTIVATE), keeping the same non-client window style.
         let owner = if offscreen {
             ex_style &= !WS_EX_APPWINDOW;
+            ex_style |= WS_EX_NOACTIVATE;
             // SAFETY: a plain hidden STATIC window, destroyed with ours.
             unsafe {
                 CreateWindowExW(
-                    WINDOW_EX_STYLE(0),
+                    WS_EX_NOACTIVATE,
                     w!("STATIC"),
                     w!(""),
                     WS_OVERLAPPED,
-                    0,
-                    0,
+                    OFFSCREEN_ORIGIN,
+                    OFFSCREEN_ORIGIN,
                     0,
                     0,
                     None,
@@ -547,12 +556,30 @@ impl WindowsWindow {
                 Some(context_ptr as *const _),
             )
         };
+        let destroy_owner = |owner: Option<HWND>| {
+            if let Some(owner) = owner {
+                // SAFETY: the hidden owner window is ours and not yet attached to a WindowInner.
+                let _ = unsafe { DestroyWindow(owner) };
+            }
+        };
         let this = match context.inner.take() {
             Some(Ok(this)) => this,
-            Some(Err(e)) => return Err(e),
-            None => return Err(anyhow::anyhow!("window creation failed: {:?}", created.err())),
+            Some(Err(e)) => {
+                destroy_owner(owner);
+                return Err(e);
+            }
+            None => {
+                destroy_owner(owner);
+                return Err(anyhow::anyhow!("window creation failed: {:?}", created.err()));
+            }
         };
-        let hwnd = created?;
+        let hwnd = match created {
+            Ok(hwnd) => hwnd,
+            Err(e) => {
+                destroy_owner(owner);
+                return Err(e.into());
+            }
+        };
         this.owner.set(owner);
         drop_target::register(&this);
         configure_dwm_dark_mode(hwnd, appearance);
@@ -574,7 +601,7 @@ impl WindowsWindow {
                     OFFSCREEN_ORIGIN,
                     r.right - r.left,
                     r.bottom - r.top,
-                    SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+                    SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW,
                 )?
             };
             this.post_expose();

@@ -6,7 +6,8 @@ use std::sync::Arc;
 
 use folo_ui::prelude::FluentBuilder;
 use folo_ui::{
-    AnyElement, Context, FontWeight, Hsla, IntoElement, ParentElement, SharedString, Styled, Window, div, px,
+    AnyElement, Context, FontWeight, Hsla, InteractiveElement, IntoElement, ParentElement, SharedString,
+    StatefulInteractiveElement, Styled, Window, div, px,
 };
 
 use super::compare_data::{
@@ -29,6 +30,14 @@ const RUN_SLOTS: [usize; 4] = [0, 1, 2, 4];
 
 pub(super) fn run_slot_color(t: &Theme, slot: usize) -> Hsla {
     t.chart_series[RUN_SLOTS[slot % RUN_SLOTS.len()]]
+}
+
+/// Legend scope label distinguishing resting (`latest`) values from hovered (`cursor`) values.
+pub(crate) fn compare_legend_scope(hover: Option<f32>, has_data: bool) -> Option<&'static str> {
+    if !has_data {
+        return None;
+    }
+    if hover.is_some_and(f32::is_finite) { Some("cursor") } else { Some("latest") }
 }
 
 pub(super) fn slot_swatch(color: Hsla, slot: usize) -> AnyElement {
@@ -319,7 +328,25 @@ impl FoloApp {
                     cx.notify();
                 }),
             );
-            let best_str = r.best.as_ref().map_or("–".into(), |b| f3(b.map50_95));
+            let best_el = match &r.best {
+                Some(b) => div()
+                    .id(("cmp-chip-best", slot))
+                    .flex_none()
+                    .tooltip(crate::controls::tip(
+                        format!("Best mAP50-95: {} at epoch {}", f3(b.map50_95), b.epoch),
+                        None,
+                    ))
+                    .child(
+                        text(ty::SM, t.text_secondary)
+                            .tnum()
+                            .whitespace_nowrap()
+                            .child(format!("best {}", f3(b.map50_95))),
+                    ),
+                None => div()
+                    .id(("cmp-chip-best", slot))
+                    .flex_none()
+                    .child(text(ty::SM, t.text_tertiary).whitespace_nowrap().child("–")),
+            };
             let chip = div()
                 .flex()
                 .items_center()
@@ -338,7 +365,7 @@ impl FoloApp {
                         .ellipsis()
                         .child(r.name.clone()),
                 )
-                .child(text(ty::SM, t.text_secondary).tnum().child(best_str))
+                .child(best_el)
                 .when(is_base, |d| d.child(badge(&t, "baseline", Tone::Accent)))
                 .child(div().flex().items_center().gap(px(2.)).child(pin_btn).child(open_btn).child(rm_btn));
             bar = bar.child(chip);
@@ -619,23 +646,40 @@ impl FoloApp {
                 None => crate::charts::value_at(pts, None, 0.0, x_max).map(f3),
             }
         };
-        let map_legend = div().flex().flex_wrap().items_center().gap(px(12.)).children(
-            chosen.iter().enumerate().map(|(slot, r)| {
-                let val = legend_val(&map_pts[slot], hover_of("cmp-map"));
+        let map_hv = hover_of("cmp-map");
+        let loss_hv = hover_of("cmp-loss");
+        let map_has_data = map_pts.iter().any(|p| !p.is_empty());
+        let loss_has_data = loss_arcs.iter().any(|p| !p.is_empty());
+        // Fixed-width neutral scope ("latest" at rest, "cursor" while hovering — the chart's own
+        // axis chip reports the snapped coordinate) so hovering never re-wraps or shifts the plot.
+        let scope_el = |scope: &'static str| {
+            div().w(px(44.)).flex_none().child(text(ty::XS, t.text_tertiary).whitespace_nowrap().child(scope))
+        };
+        let map_legend = div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap(px(12.))
+            .when_some(compare_legend_scope(map_hv, map_has_data), |d, s| d.child(scope_el(s)))
+            .children(chosen.iter().enumerate().map(|(slot, r)| {
+                let val = legend_val(&map_pts[slot], map_hv);
                 legend_item(&r.name, slot, val)
-            }),
-        );
-        let loss_legend = div().flex().flex_wrap().items_center().gap(px(12.)).children(
-            chosen.iter().enumerate().map(|(slot, r)| {
+            }));
+        let loss_legend = div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap(px(12.))
+            .when_some(compare_legend_scope(loss_hv, loss_has_data), |d, s| d.child(scope_el(s)))
+            .children(chosen.iter().enumerate().map(|(slot, r)| {
                 let val = if smooth_on {
                     let sm = crate::charts::smoothed(&loss_arcs[slot], COMPARE_LOSS_EMA);
-                    legend_val(&sm, hover_of("cmp-loss"))
+                    legend_val(&sm, loss_hv)
                 } else {
-                    legend_val(&loss_arcs[slot], hover_of("cmp-loss"))
+                    legend_val(&loss_arcs[slot], loss_hv)
                 };
                 legend_item(&r.name, slot, val)
-            }),
-        );
+            }));
 
         let map_metric_seg = self.segmented(
             "run-cmp-map-metric",

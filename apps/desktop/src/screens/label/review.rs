@@ -381,57 +381,70 @@ impl FoloApp {
             .tooltip(crate::controls::tip("Redo box edit", Some("Ctrl Shift Z")))
         };
 
-        let discard_btn = dirty.then(|| {
-            if busy {
-                self.button_disabled(
-                    "label-discard",
-                    "Discard",
-                    Btn::Secondary,
-                    Some("icons/x.svg"),
-                    "Saving…",
-                    window,
-                    cx,
-                )
-            } else {
-                let (j, im_id) = (jid.clone(), active.id.clone());
-                self.button(
-                    "label-discard",
-                    "Discard",
-                    Btn::Secondary,
-                    Some("icons/x.svg"),
-                    window,
-                    cx,
-                    act(move |this, _, cx| this.discard_label_edits(&j, &im_id, cx)),
-                )
-                .tooltip(crate::controls::tip("Revert unsaved edits (undoable with Ctrl+Z)", None))
+        let discard_disabled = !dirty || busy;
+        let save_disabled = !dirty || locked || busy;
+        for (key, disabled) in [("label-discard", discard_disabled), ("label-save", save_disabled)] {
+            let dis_key = format!("{key}-disabled");
+            if disabled && self.fh(key, cx).is_focused(window) {
+                window.focus(&self.fh(dis_key, cx));
+            } else if !disabled && self.fh(&dis_key, cx).is_focused(window) {
+                window.focus(&self.fh(key, cx));
             }
-        });
+        }
 
-        let save_btn = dirty.then(|| {
-            if locked || busy {
-                self.button_disabled(
-                    "label-save",
-                    if busy { "Saving…" } else { "Save" },
-                    Btn::Primary,
-                    Some("icons/check.svg"),
-                    if locked { "Agent is labeling this image" } else { "Saving…" },
-                    window,
-                    cx,
-                )
-            } else {
-                let (j, im_id) = (jid.clone(), active.id.clone());
-                self.button(
-                    "label-save",
-                    "Save",
-                    Btn::Primary,
-                    Some("icons/check.svg"),
-                    window,
-                    cx,
-                    act(move |this, _, cx| this.save_label_edits(&j, &im_id, false, cx)),
-                )
-                .tooltip(crate::controls::tip("Save box edits and stay on this image", Some("Ctrl S")))
-            }
-        });
+        let discard_btn = if discard_disabled {
+            self.button_disabled(
+                "label-discard",
+                "Discard",
+                Btn::Secondary,
+                Some("icons/x.svg"),
+                if busy { "Saving…" } else { "No unsaved edits" },
+                window,
+                cx,
+            )
+        } else {
+            let (j, im_id) = (jid.clone(), active.id.clone());
+            self.button(
+                "label-discard",
+                "Discard",
+                Btn::Secondary,
+                Some("icons/x.svg"),
+                window,
+                cx,
+                act(move |this, _, cx| this.discard_label_edits(&j, &im_id, cx)),
+            )
+            .tooltip(crate::controls::tip("Revert unsaved edits (undoable with Ctrl+Z)", None))
+        };
+
+        let save_btn = if save_disabled {
+            self.button_disabled(
+                "label-save",
+                if busy { "Saving…" } else { "Save" },
+                if dirty { Btn::Primary } else { Btn::Secondary },
+                Some("icons/check.svg"),
+                if !dirty {
+                    "No unsaved edits (Ctrl+S)"
+                } else if locked {
+                    "Agent is labeling this image"
+                } else {
+                    "Saving…"
+                },
+                window,
+                cx,
+            )
+        } else {
+            let (j, im_id) = (jid.clone(), active.id.clone());
+            self.button(
+                "label-save",
+                "Save",
+                Btn::Primary,
+                Some("icons/check.svg"),
+                window,
+                cx,
+                act(move |this, _, cx| this.save_label_edits(&j, &im_id, false, cx)),
+            )
+            .tooltip(crate::controls::tip("Save box edits and stay on this image", Some("Ctrl S")))
+        };
 
         let approve_label = if dirty {
             "Save & next"
@@ -551,11 +564,10 @@ impl FoloApp {
         };
         let dirty_badge = dirty.then(|| badge(t, "Unsaved", Tone::Warning));
 
+        // Two stable rows so toggling dirty state never wraps controls or shifts the image stage.
         let review_header = div()
             .flex()
-            .flex_wrap()
-            .items_center()
-            .justify_between()
+            .flex_col()
             .gap(px(8.))
             .px(px(14.))
             .py(px(10.))
@@ -565,42 +577,76 @@ impl FoloApp {
                 div()
                     .flex()
                     .items_center()
-                    .gap(px(6.))
-                    .min_w_0()
-                    .child(prev_btn)
+                    .justify_between()
+                    .gap(px(8.))
                     .child(
-                        text(ty::SM, t.text_secondary).tnum().whitespace_nowrap().flex_none().child(counter),
-                    )
-                    .child(next_btn)
-                    .child(
-                        text(ty::SM, t.text_primary)
-                            .font_weight(FontWeight::MEDIUM)
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .flex_1()
                             .min_w_0()
-                            .flex_shrink()
-                            .ellipsis()
-                            .max_w(px(200.))
-                            .child(active.file.clone()),
+                            .child(prev_btn)
+                            .child(
+                                text(ty::SM, t.text_secondary)
+                                    .tnum()
+                                    .whitespace_nowrap()
+                                    .flex_none()
+                                    .child(counter),
+                            )
+                            .child(next_btn)
+                            .child(
+                                text(ty::SM, t.text_primary)
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .min_w_0()
+                                    .flex_shrink()
+                                    .ellipsis()
+                                    .max_w(px(240.))
+                                    .child(active.file.clone()),
+                            )
+                            .child(div().flex_none().child(img_status_badge))
+                            .children(dirty_badge.map(|b| div().flex_none().child(b))),
                     )
-                    .child(div().flex_none().child(img_status_badge))
-                    .children(dirty_badge.map(|b| div().flex_none().child(b))),
+                    .child(
+                        div()
+                            .flex()
+                            .flex_none()
+                            .items_center()
+                            .gap(px(6.))
+                            .child(skip_btn)
+                            .child(approve_btn),
+                    ),
             )
             .child(
                 div()
                     .flex()
                     .flex_wrap()
                     .items_center()
+                    .justify_between()
                     .gap(px(6.))
-                    .child(tool_seg)
-                    .child(undo_btn)
-                    .child(redo_btn)
-                    .child(boxes_btn)
-                    .child(zoom_out)
-                    .child(zoom_in)
-                    .child(del_box_btn)
-                    .children(discard_btn)
-                    .children(save_btn)
-                    .child(skip_btn)
-                    .child(approve_btn),
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .items_center()
+                            .gap(px(6.))
+                            .child(tool_seg)
+                            .child(undo_btn)
+                            .child(redo_btn)
+                            .child(boxes_btn)
+                            .child(zoom_out)
+                            .child(zoom_in)
+                            .child(del_box_btn),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_none()
+                            .items_center()
+                            .gap(px(6.))
+                            .child(discard_btn)
+                            .child(save_btn),
+                    ),
             );
 
         // Error, conflict, and unsaved-switch banners.
@@ -616,8 +662,10 @@ impl FoloApp {
                     .flex()
                     .items_center()
                     .gap(px(8.))
-                    .child(icon("icons/circle-alert.svg", 14., t.danger_solid))
-                    .child(text(ty::SM, t.danger_text).whitespace_normal().child(err.clone())),
+                    .child(div().flex_none().child(icon("icons/circle-alert.svg", 14., t.danger_solid)))
+                    .child(
+                        text(ty::SM, t.danger_text).flex_1().min_w_0().whitespace_normal().child(err.clone()),
+                    ),
             );
         }
         if let Some(err) = &self.label.review_error {
@@ -631,8 +679,14 @@ impl FoloApp {
                     .flex()
                     .items_center()
                     .gap(px(8.))
-                    .child(icon("icons/triangle-alert.svg", 14., t.warning_solid))
-                    .child(text(ty::SM, t.warning_text).whitespace_normal().child(err.message.clone())),
+                    .child(div().flex_none().child(icon("icons/triangle-alert.svg", 14., t.warning_solid)))
+                    .child(
+                        text(ty::SM, t.warning_text)
+                            .flex_1()
+                            .min_w_0()
+                            .whitespace_normal()
+                            .child(err.message.clone()),
+                    ),
             );
         }
         if changed_elsewhere {
@@ -697,10 +751,14 @@ impl FoloApp {
                             .flex()
                             .items_center()
                             .gap(px(8.))
-                            .min_w_0()
-                            .child(icon("icons/info.svg", 14., t.warning_solid))
+                            .flex_1()
+                            .min_w(px(200.))
+                            .max_w_full()
+                            .child(div().flex_none().child(icon("icons/info.svg", 14., t.warning_solid)))
                             .child(
                                 text(ty::SM, t.warning_text)
+                                    .flex_1()
+                                    .min_w_0()
                                     .whitespace_normal()
                                     .child("Boxes changed on the server while you edited. Choose whether to overwrite with your draft or load the latest server boxes."),
                             ),
@@ -708,6 +766,9 @@ impl FoloApp {
                     .child(
                         div()
                             .flex()
+                            .flex_wrap()
+                            .flex_none()
+                            .max_w_full()
                             .items_center()
                             .gap(px(6.))
                             .child(load_btn)
@@ -783,11 +844,19 @@ impl FoloApp {
                             .flex()
                             .items_center()
                             .gap(px(8.))
-                            .min_w_0()
-                            .child(icon("icons/triangle-alert.svg", 14., t.warning_solid))
+                            .flex_1()
+                            .min_w(px(180.))
+                            .max_w_full()
+                            .child(div().flex_none().child(icon(
+                                "icons/triangle-alert.svg",
+                                14.,
+                                t.warning_solid,
+                            )))
                             .child(
                                 text(ty::SM, t.warning_text)
                                     .font_weight(FontWeight::MEDIUM)
+                                    .flex_1()
+                                    .min_w_0()
                                     .whitespace_normal()
                                     .child(format!("Unsaved box edits on {}.", active.file)),
                             ),
@@ -795,6 +864,9 @@ impl FoloApp {
                     .child(
                         div()
                             .flex()
+                            .flex_wrap()
+                            .flex_none()
+                            .max_w_full()
                             .items_center()
                             .gap(px(6.))
                             .child(stay_btn)

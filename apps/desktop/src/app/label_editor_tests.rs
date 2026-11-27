@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use folo_ui::{
     AppContext, Bounds, HeadlessApp, HeadlessOptions, KeyDownEvent, KeyUpEvent, Keystroke, PlatformInput,
-    WindowBounds, WindowHandle, WindowOptions, point, px, size,
+    ScrollDelta, ScrollWheelEvent, WindowBounds, WindowHandle, WindowOptions, point, px, size,
 };
 
 use crate::api::mock::MockBackend;
@@ -460,4 +460,202 @@ fn route_exit_guard_sse_filter_eviction_dirty_delete_and_many_classes() {
         this.navigate(Route::LabelJobs, w, cx);
         assert_eq!(this.route, Route::LabelJobs, "missing job never traps user on Not found screen");
     });
+}
+
+#[test]
+fn playtest_r11_wheel_scroll_stage_stability_and_conflict_banner() {
+    // 1. Drawing the first box (clean -> dirty) must NOT shift the stage canvas vertically across
+    //    standard, side-by-side breakpoint, and narrow viewports (1280, 1200, 1120, 960).
+    for (w, h) in [(1280.0_f32, 800.0_f32), (1200.0, 800.0), (1120.0, 780.0), (960.0, 620.0)] {
+        let (mut app, win) = open_with(Arc::new(MockBackend::new(4200, true)), w, h, Mode::Dark);
+        drive(&mut app, win, |this, win, cx| this.navigate(Route::LabelJob("lb_4f10".into()), win, cx));
+        settle(&mut app, win);
+
+        let y_clean = drive(&mut app, win, |this, _, _| {
+            assert!(!this.label.editor.is_dirty());
+            f32::from(this.label.stage_view.get().expect("clean stage bounds").origin.y)
+        });
+        drive(&mut app, win, |this, _, cx| {
+            this.label.editor.add_box(BBox { class: 0, x1: 12., y1: 12., x2: 52., y2: 52. });
+            cx.notify();
+        });
+        settle(&mut app, win);
+        let y_dirty = drive(&mut app, win, |this, _, _| {
+            assert!(this.label.editor.is_dirty());
+            f32::from(this.label.stage_view.get().expect("dirty stage bounds").origin.y)
+        });
+        assert!(
+            (y_clean - y_dirty).abs() < 0.5,
+            "stage jumped vertically at {w}x{h} on clean->dirty transition: {y_clean} -> {y_dirty}"
+        );
+    }
+
+    // 2. Keyboard focus transfers cleanly between disabled and enabled Save / Discard handles when
+    //    undo/redo flips dirty state, keeping Tab order intact.
+    {
+        let (mut app, win) = open_with(Arc::new(MockBackend::new(4200, true)), 1280., 800., Mode::Dark);
+        drive(&mut app, win, |this, win, cx| this.navigate(Route::LabelJob("lb_4f10".into()), win, cx));
+        settle(&mut app, win);
+        drive(&mut app, win, |this, _, cx| {
+            this.label.editor.add_box(BBox { class: 0, x1: 10., y1: 10., x2: 50., y2: 50. });
+            cx.notify();
+        });
+        settle(&mut app, win);
+        press(&mut app, win, "ctrl-z");
+        drive(&mut app, win, |this, win, cx| {
+            assert!(!this.label.editor.is_dirty());
+            this.focus_key("label-save-disabled", win, cx);
+            assert!(this.fh("label-save-disabled", cx).is_focused(win));
+        });
+        press(&mut app, win, "ctrl-shift-z");
+        drive(&mut app, win, |this, win, cx| {
+            assert!(this.label.editor.is_dirty());
+            assert!(
+                this.fh("label-save", cx).is_focused(win),
+                "focus must move from label-save-disabled to label-save on redo"
+            );
+        });
+        press(&mut app, win, "ctrl-z");
+        drive(&mut app, win, |this, win, cx| {
+            assert!(!this.label.editor.is_dirty());
+            assert!(
+                this.fh("label-save-disabled", cx).is_focused(win),
+                "focus must move back to label-save-disabled on undo"
+            );
+        });
+    }
+
+    // 3. At 960x620 and 1x zoom:
+    //    - NaN delta is ignored safely (zoom stays 1x)
+    //    - Wheel down at 1x bubbles to scroll the page down
+    //    - Wheel up zooms in without scrolling the page
+    //    - Wheel down while zoomed returns zoom to 1x without scrolling the page
+    let (mut app, win) = open_with(Arc::new(MockBackend::new(4200, true)), 960., 620., Mode::Dark);
+    drive(&mut app, win, |this, win, cx| this.navigate(Route::LabelJob("lb_4f10".into()), win, cx));
+    settle(&mut app, win);
+
+    let (stage_center, y_before) = drive(&mut app, win, |this, _, _| {
+        let b = this.label.stage_view.get().expect("stage bounds at 960x620");
+        assert!((this.label.zoom - 1.0).abs() < 1e-4);
+        (point(b.origin.x + b.size.width * 0.5, b.origin.y + b.size.height * 0.5), f32::from(b.origin.y))
+    });
+    app.simulate_input(
+        win.into(),
+        PlatformInput::ScrollWheel(ScrollWheelEvent {
+            position: stage_center,
+            delta: ScrollDelta::Pixels(point(px(0.), px(f32::NAN))),
+            ..Default::default()
+        }),
+    );
+    settle(&mut app, win);
+    assert!(
+        drive(&mut app, win, |this, _, _| (this.label.zoom - 1.0).abs() < 1e-4),
+        "NaN wheel delta leaves zoom at 1x"
+    );
+
+    app.simulate_input(
+        win.into(),
+        PlatformInput::ScrollWheel(ScrollWheelEvent {
+            position: stage_center,
+            delta: ScrollDelta::Pixels(point(px(0.), px(-120.))),
+            ..Default::default()
+        }),
+    );
+    settle(&mut app, win);
+    let y_after_down = drive(&mut app, win, |this, _, _| {
+        assert!((this.label.zoom - 1.0).abs() < 1e-4, "wheel down at 1x keeps zoom at 1x");
+        f32::from(this.label.stage_view.get().expect("stage bounds after wheel down").origin.y)
+    });
+    assert!(
+        y_after_down < y_before - 1.0,
+        "wheel down at 1x must bubble to scroll page (stage y {y_before} -> {y_after_down})"
+    );
+
+    // Wheel up zooms into the stage and consumes the event (page offset stays unchanged).
+    let (stage_center_now, y_before_zoom) = drive(&mut app, win, |this, _, _| {
+        let b = this.label.stage_view.get().unwrap();
+        (point(b.origin.x + b.size.width * 0.5, b.origin.y + b.size.height * 0.5), f32::from(b.origin.y))
+    });
+    app.simulate_input(
+        win.into(),
+        PlatformInput::ScrollWheel(ScrollWheelEvent {
+            position: stage_center_now,
+            delta: ScrollDelta::Pixels(point(px(0.), px(120.))),
+            ..Default::default()
+        }),
+    );
+    settle(&mut app, win);
+    let (zoomed, y_after_zoom_in) = drive(&mut app, win, |this, _, _| {
+        (this.label.zoom, f32::from(this.label.stage_view.get().unwrap().origin.y))
+    });
+    assert!(zoomed > 1.05, "wheel up over stage zooms in: {zoomed}");
+    assert!(
+        (y_after_zoom_in - y_before_zoom).abs() < 0.5,
+        "wheel up zoom must not scroll the page: {y_before_zoom} -> {y_after_zoom_in}"
+    );
+
+    // Wheel down while zoomed returns to 1x and consumes the event (page offset stays unchanged).
+    app.simulate_input(
+        win.into(),
+        PlatformInput::ScrollWheel(ScrollWheelEvent {
+            position: stage_center_now,
+            delta: ScrollDelta::Pixels(point(px(0.), px(-240.))),
+            ..Default::default()
+        }),
+    );
+    settle(&mut app, win);
+    let (zoomed_back, y_after_zoom_out) = drive(&mut app, win, |this, _, _| {
+        (this.label.zoom, f32::from(this.label.stage_view.get().unwrap().origin.y))
+    });
+    assert!((zoomed_back - 1.0).abs() < 1e-4, "wheel down while zoomed returns to 1x: {zoomed_back}");
+    assert!(
+        (y_after_zoom_out - y_before_zoom).abs() < 0.5,
+        "zoom-out wheel must not scroll the page: {y_before_zoom} -> {y_after_zoom_out}"
+    );
+
+    // 4. Conflict recovery banner wraps cleanly inside viewport bounds and its actions are
+    //    focusable and actionable via Enter at 1280x800 and 960x620.
+    for (w, h) in [(1280.0_f32, 800.0_f32), (960.0, 620.0)] {
+        let (mut a, win) = open_with(Arc::new(MockBackend::new(4200, true)), w, h, Mode::Dark);
+        drive(&mut a, win, |this, win, cx| this.navigate(Route::LabelJob("lb_4f10".into()), win, cx));
+        settle(&mut a, win);
+        let y_no_banner =
+            drive(&mut a, win, |this, _, _| f32::from(this.label.stage_view.get().unwrap().origin.y));
+        drive(&mut a, win, |this, _, cx| {
+            this.label.editor.add_box(BBox { class: 0, x1: 8., y1: 8., x2: 40., y2: 40. });
+            this.label.editor.changed_elsewhere = true;
+            cx.notify();
+        });
+        settle(&mut a, win);
+        let y_with_banner = drive(&mut a, win, |this, win, cx| {
+            this.focus_key("label-load-server", win, cx);
+            assert!(
+                this.fh("label-load-server", cx).is_focused(win),
+                "Load server button mounted at {w}x{h}"
+            );
+            assert!(
+                this.focus.borrow().contains_key("label-overwrite-edits"),
+                "Overwrite server button mounted at {w}x{h}"
+            );
+            f32::from(this.label.stage_view.get().unwrap().origin.y)
+        });
+        assert!(
+            y_with_banner > y_no_banner + 30.0,
+            "conflict banner renders cleanly above stage at {w}x{h}: {y_no_banner} -> {y_with_banner}"
+        );
+        let scene = a.scene(win.into());
+        assert!(
+            scene.primitives.iter().all(|p| match p {
+                folo_ui::Primitive::Quad(q) => f64::from(q.bounds.right()) <= f64::from(w) + 2.0,
+                _ => true,
+            }),
+            "conflict banner quads must not overflow viewport width {w}"
+        );
+        press(&mut a, win, "enter");
+        settle(&mut a, win);
+        drive(&mut a, win, |this, _, _| {
+            assert!(!this.label.editor.changed_elsewhere, "Enter on Load server boxes clears conflict");
+            assert!(!this.label.editor.is_dirty(), "Load server boxes reverts dirty draft");
+        });
+    }
 }

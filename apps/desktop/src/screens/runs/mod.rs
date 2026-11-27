@@ -13,7 +13,11 @@ mod per_class;
 mod samples;
 
 pub(crate) use charts::RunChartOpts;
+#[cfg(test)]
+pub(crate) use compare::compare_legend_scope;
 pub(crate) use compare_data::RunCompareState;
+#[cfg(test)]
+pub(crate) use compare_table::compare_best_badge_label;
 #[cfg(test)]
 pub(crate) use list::filter_runs;
 pub(crate) use logs::LogFilterCache;

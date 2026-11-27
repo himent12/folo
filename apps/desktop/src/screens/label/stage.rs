@@ -126,6 +126,10 @@ impl FoloApp {
             .on_scroll_wheel(cx.listener(move |this, ev: &ScrollWheelEvent, w, cx| {
                 let Some(b) = view_for_wheel.get() else { return };
                 let dy = f32::from(ev.delta.pixel_delta(w.line_height()).y);
+                // Ignore non-finite or zero deltas, and let downward scroll at 1x fit zoom bubble to the page.
+                if !dy.is_finite() || dy == 0.0 || (dy < 0.0 && this.label.zoom <= 1.0 + 1e-4) {
+                    return;
+                }
                 let new_zoom = (this.label.zoom * (1.0 + dy * 0.0025).clamp(0.5, 2.0)).clamp(1.0, 12.0);
                 this.label.pan = zoom_about(b, dims, this.label.zoom, this.label.pan, ev.position, new_zoom);
                 this.label.zoom = new_zoom;
