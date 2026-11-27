@@ -185,6 +185,12 @@ window.foloDemo = {
       "detect huge": () => det.detect(new Uint8Array(0), 65536, 65536),
       "detect no size": () => det.detect(new Uint8Array(16)),
       "detect bad conf": () => det.detect(imageData, undefined, undefined, { conf: 2 }),
+      "detect perClassConf undefined entry": () => det.detect(imageData, undefined, undefined, { perClassConf: { 0: undefined } }),
+      "detect perClassConf function entry": () => det.detect(imageData, undefined, undefined, { perClassConf: { 0: () => 0.5 } }),
+      "detect perClassConf symbol entry": () => det.detect(imageData, undefined, undefined, { perClassConf: { 0: Symbol("x") } }),
+      "detect perClassConf function": () => det.detect(imageData, undefined, undefined, { perClassConf: () => ({}) }),
+      "detect perClassConf bad key": () => det.detect(imageData, undefined, undefined, { perClassConf: { "+0": 0.5 } }),
+      "detect perClassConf f64 overflow": () => det.detect(imageData, undefined, undefined, { perClassConf: { 0: 1.00000001 } }),
     };
     const out = {};
     for (const [name, f] of Object.entries(cases)) {

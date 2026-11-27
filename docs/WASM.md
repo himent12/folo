@@ -48,7 +48,7 @@ det.free();                                            // releases the model (wa
 
 ### `FoloDetector.load(bytes, options?) → Promise<FoloDetector>`
 `bytes` is a `Uint8Array` or `ArrayBuffer` holding a `.folo` file for either **FOLO v1** (`folo-*`) or **FOLO v2-Iso** (`folo2-*`, including `o2o`, `iou_head`, and `folo.quant` int8 quantized checkpoints): weights, a checkpoint (its EMA weights are used),
-an export (`folo export`, F32 or F16), or a quantized checkpoint (`folo quantize`), matching `Predictor::open` / `Predictor::open_int8`. The model is fused (`Conv+BN` and v2 `WS-QARepConv3x3` multi-branch folding) on
+an export (`folo export`, F32 or F16), or a quantized checkpoint (`folo quantize` for v1 `folo-*`, or `folo2-*` calibrated via the Rust API), matching `Predictor::open` / `Predictor::open_int8`. The model is fused (`Conv+BN` and v2 `WS-QARepConv3x3` multi-branch folding) on
 the CPU, then moved to the backend. Options (all optional; unknown fields are ignored):
 
 | option | default | meaning |

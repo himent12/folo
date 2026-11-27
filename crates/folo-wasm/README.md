@@ -54,7 +54,7 @@ rustup when missing) and `wasm-bindgen-cli` at exactly the `wasm-bindgen` versio
 
 | To do this | Touch these files |
 |---|---|
-| Add or change an option or a result field | `LoadOptions`, `DetectOptions`, `TileDetectOptions`, `TtaDetectOptions` or `DetectorInfo` in `src/detector/options.rs`; a result field in `DetectResult` (`src/detector/options.rs`) or in `folo_api::PredictResponse`, which it flattens; the matching interface in `TS_TYPES` in `src/lib.rs`; `tests/detector.rs`; `demo/api-check.ts`; WASM.md (JS API) |
+| Add or change an option or a result field | `LoadOptions`, `DetectOptions`, `TileDetectOptions`, `TtaDetectOptions` or `DetectorInfo` in `src/detector/options.rs`; a result field in `DetectResult` (`src/detector/options.rs`) or in `folo_api::PredictResponse`, which it flattens; the matching interface in `TS_TYPES` in `src/lib.rs`; `tests/detector/`; `demo/api-check.ts`; WASM.md (JS API) |
 | Change the JS bindings | `src/lib.rs` (keep `TS_TYPES` in step: `load`, `detect`, `detectTiled`, and `detectTta` are declared there, not generated); `demo/api-check.ts`; WASM.md |
 
 ## Tests
@@ -65,7 +65,7 @@ sh scripts/build-wasm.sh && web/node_modules/.bin/tsc -p crates/folo-wasm/demo/t
 node crates/folo-wasm/demo/test.mjs --model shapes-n.folo --image img.jpg [--expect native.json]
 ```
 
-The GPU test in `tests/detector.rs` skips without a hardware adapter (`FOLO_GPU_TEST_SOFTWARE=1` allows a software
+The GPU test in `tests/detector/` skips without a hardware adapter (`FOLO_GPU_TEST_SOFTWARE=1` allows a software
 one). `demo/test.mjs` needs `playwright-core`, from `web/node_modules` (`npm ci` in `web/`) or anywhere Node resolves
 it, and a Chrome. No test is `#[ignore]`d.
 
