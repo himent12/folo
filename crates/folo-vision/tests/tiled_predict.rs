@@ -203,3 +203,141 @@ fn predict_batch_tiled_file_tiled_and_error_handling() {
     let bad_small_buf = Image { width: 64, height: 64, data: vec![0u8; 10] };
     assert!(pred.predict_tiled(&bad_small_buf, &tile_cfg).is_err());
 }
+
+fn gpu() -> Option<folo_core::Device> {
+    let ctx = match folo_gpu::GpuContext::shared() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("note: skipping GPU SAHI test, no adapter: {e}");
+            return None;
+        }
+    };
+    if ctx.summary().device_type == "Cpu" && std::env::var("FOLO_GPU_TEST_SOFTWARE").is_err() {
+        eprintln!("note: skipping GPU SAHI test on software adapter {}", ctx.summary().name);
+        return None;
+    }
+    folo_gpu::init().ok()
+}
+
+/// Cross-image batched `predict_batch_tiled` matches `predict_tiled` bit-for-bit on CPU across uniform batches,
+/// mixed single+multi-tile batches (`rect` on and off), `full_image` on/off, and `tile_batch` chunk sizes without
+/// double-counting parallel wall time; on GPU it matches single-image `predict_tiled` within f32 tolerance.
+#[test]
+fn batched_sahi_uniform_mixed_timing_and_gpu_parity() {
+    let m = fused_model(2, HeadMode::O2m, 61);
+    let pred_rect = Predictor::new(
+        m.fused_eval_clone().unwrap(),
+        PredictConfig { imgsz: 64, conf: 0.0, max_det: 25, rect: true, ..Default::default() },
+    )
+    .unwrap();
+    let pred_sq = Predictor::new(
+        m.fused_eval_clone().unwrap(),
+        PredictConfig { imgsz: 64, conf: 0.0, max_det: 25, rect: false, ..Default::default() },
+    )
+    .unwrap();
+
+    // 1. Uniform 4-image batch across `full_image` and `tile_batch` values (including non-divisible chunking).
+    let mut uniform = Vec::new();
+    for i in 0..4u32 {
+        let mut im = patterned_image(160, 160);
+        im.fill_rect(20 + (i as i64) * 18, 25, 48 + (i as i64) * 18, 55, [210, 60 + (i as u8) * 35, 220]);
+        uniform.push(im);
+    }
+    for full_image in [true, false] {
+        let base_cfg = TileConfig {
+            tile_width: 80,
+            tile_height: 80,
+            overlap_x: 0.25,
+            overlap_y: 0.25,
+            full_image,
+            tile_batch: 1,
+            max_det: 20,
+            ..Default::default()
+        };
+        let singles: Vec<_> =
+            uniform.iter().map(|im| pred_rect.predict_tiled(im, &base_cfg).unwrap()).collect();
+        for tb in [1usize, 3, 8, 16] {
+            let cfg = TileConfig { tile_batch: tb, ..base_cfg.clone() };
+            let t_wall = std::time::Instant::now();
+            let batch = pred_rect.predict_batch_tiled(&uniform, &cfg).unwrap();
+            let wall_ms = t_wall.elapsed().as_secs_f64() * 1e3;
+            assert_eq!(batch.len(), uniform.len());
+            for (got, want) in batch.iter().zip(&singles) {
+                assert_eq!(got.detections, want.detections, "full_image={full_image} tile_batch={tb}");
+            }
+            let sum_total: f64 = batch.iter().map(|p| p.timing.total_ms).sum();
+            assert!(
+                sum_total <= wall_ms + 3.0,
+                "sum of batched SAHI total_ms ({sum_total:.2}) must not exceed wall time ({wall_ms:.2})"
+            );
+        }
+    }
+
+    // 2. Mixed batch combining single-tile + wide + tall + square images under both `rect=true` and `rect=false`.
+    let mixed = vec![
+        patterned_image(64, 48),
+        patterned_image(180, 96),
+        patterned_image(96, 180),
+        patterned_image(160, 160),
+    ];
+    let mixed_cfg = TileConfig {
+        tile_width: 80,
+        tile_height: 80,
+        overlap_x: 0.2,
+        overlap_y: 0.2,
+        full_image: true,
+        tile_batch: 4,
+        max_det: 12,
+        ..Default::default()
+    };
+    for pred in [&pred_rect, &pred_sq] {
+        let batch = pred.predict_batch_tiled(&mixed, &mixed_cfg).unwrap();
+        for (got, im) in batch.iter().zip(&mixed) {
+            let single = pred.predict_tiled(im, &mixed_cfg).unwrap();
+            assert_eq!(
+                got.detections,
+                single.detections,
+                "mixed rect={} {}x{}",
+                pred.config().rect,
+                im.width,
+                im.height
+            );
+        }
+    }
+
+    // 3. GPU batched SAHI parity (skips gracefully without a GPU adapter).
+    if let Some(dev) = gpu() {
+        let mut m_gpu = m.fused_eval_clone().unwrap();
+        m_gpu.to_device(dev).unwrap();
+        let pred_gpu =
+            Predictor::new(m_gpu, PredictConfig { imgsz: 64, conf: 0.0, max_det: 20, ..Default::default() })
+                .unwrap();
+        let gpu_cfg = TileConfig {
+            tile_width: 80,
+            tile_height: 80,
+            overlap_x: 0.25,
+            overlap_y: 0.25,
+            full_image: true,
+            tile_batch: 6,
+            max_det: 15,
+            ..Default::default()
+        };
+        let batch_gpu = pred_gpu.predict_batch_tiled(&uniform[..2], &gpu_cfg).unwrap();
+        assert_eq!(batch_gpu.len(), 2);
+        for (got, im) in batch_gpu.iter().zip(&uniform[..2]) {
+            let single_gpu = pred_gpu.predict_tiled(im, &gpu_cfg).unwrap();
+            assert_eq!(got.detections.len(), single_gpu.detections.len());
+            for (a, b) in got.detections.iter().zip(&single_gpu.detections) {
+                assert_eq!(a.class, b.class);
+                assert!(
+                    (a.score - b.score).abs() < 1e-3,
+                    "GPU SAHI score mismatch: {} vs {}",
+                    a.score,
+                    b.score
+                );
+                assert!((a.bbox.x1 - b.bbox.x1).abs() < 0.25 && (a.bbox.y1 - b.bbox.y1).abs() < 0.25);
+                assert!((a.bbox.x2 - b.bbox.x2).abs() < 0.25 && (a.bbox.y2 - b.bbox.y2).abs() < 0.25);
+            }
+        }
+    }
+}

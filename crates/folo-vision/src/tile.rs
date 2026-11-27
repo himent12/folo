@@ -6,13 +6,23 @@
 //! f16, o2o, and candidate-first fast path), optionally runs one full-image pass to keep large boundary-spanning
 //! objects intact, and merges all detections in original-image coordinates ([`merge_tiled_detections`]).
 
+use std::path::Path;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
+
+#[cfg(target_arch = "wasm32")]
+use web_time::Instant;
+
 use folo_data::Image;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::boxes::{IouKind, Xyxy, iou as box_iou};
 use crate::error::{Error, Result};
 use crate::fusion::{BoxFusion, fuse_boxes_sebf};
 use crate::nms::Detection;
+use crate::predict::{Prediction, Predictor, Timing, add_scaled_timing, ms, rect_canvas};
+use crate::tta::run_views_with_oom_fallback;
 
 /// One axis-aligned tile crop inside an image, in original-image pixel coordinates.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -201,8 +211,27 @@ pub(crate) fn check_image(img: &Image) -> Result<()> {
     Ok(())
 }
 
-/// Crop `rect` from `img` using contiguous row-slice copies.
-pub fn crop_tile(img: &Image, rect: TileRect) -> Result<Image> {
+/// Copy `rect` rows from an already-validated `img` into `dst`, reusing `dst.data`'s allocation when sized.
+fn copy_tile_rows(img: &Image, rect: TileRect, dst: &mut Image) {
+    let dst_row = rect.width as usize * 3;
+    let need = dst_row * rect.height as usize;
+    dst.width = rect.width;
+    dst.height = rect.height;
+    if dst.data.len() != need {
+        dst.data.resize(need, 0);
+    }
+    let src_stride = img.stride();
+    let x_off = rect.x as usize * 3;
+    for row in 0..rect.height as usize {
+        let src_start = (rect.y as usize + row) * src_stride + x_off;
+        let dst_start = row * dst_row;
+        dst.data[dst_start..dst_start + dst_row].copy_from_slice(&img.data[src_start..src_start + dst_row]);
+    }
+}
+
+/// Crop `rect` from `img` into `dst`, reusing `dst`'s backing pixel buffer when already sized to avoid
+/// repeated multi-megabyte allocations across SAHI tile chunks.
+pub fn crop_tile_into(img: &Image, rect: TileRect, dst: &mut Image) -> Result<()> {
     check_image(img)?;
     let x_end = rect.x.checked_add(rect.width);
     let y_end = rect.y.checked_add(rect.height);
@@ -216,16 +245,15 @@ pub fn crop_tile(img: &Image, rect: TileRect) -> Result<Image> {
             img.width, img.height
         )));
     }
-    let dst_row = rect.width as usize * 3;
-    let src_stride = img.stride();
-    let x_off = rect.x as usize * 3;
-    let mut data = vec![0u8; dst_row * rect.height as usize];
-    for row in 0..rect.height as usize {
-        let src_start = (rect.y as usize + row) * src_stride + x_off;
-        let dst_start = row * dst_row;
-        data[dst_start..dst_start + dst_row].copy_from_slice(&img.data[src_start..src_start + dst_row]);
-    }
-    Ok(Image { width: rect.width, height: rect.height, data })
+    copy_tile_rows(img, rect, dst);
+    Ok(())
+}
+
+/// Crop `rect` from `img` using contiguous row-slice copies.
+pub fn crop_tile(img: &Image, rect: TileRect) -> Result<Image> {
+    let mut dst = Image { width: 0, height: 0, data: Vec::new() };
+    crop_tile_into(img, rect, &mut dst)?;
+    Ok(dst)
 }
 
 #[inline]
@@ -451,6 +479,281 @@ pub(crate) fn merge_detections(
     Ok(out)
 }
 
+/// Push `item` into the group matching `key` (preserving first-seen group order for deterministic execution).
+fn push_grouped<K: PartialEq, V>(groups: &mut Vec<(K, Vec<V>)>, key: K, item: V) {
+    if let Some((_, items)) = groups.iter_mut().find(|(k, _)| *k == key) {
+        items.push(item);
+    } else {
+        groups.push((key, vec![item]));
+    }
+}
+
+/// Distribute one batch's scaled `(pre, inf, post)` wall time evenly across the owning images of each view.
+fn distribute_chunk_timing(
+    per_img_timing: &mut [[f64; 3]],
+    owners: impl Iterator<Item = usize>,
+    preds: &[Prediction],
+    batch_wall: f64,
+) {
+    let count = preds.len();
+    if count == 0 {
+        return;
+    }
+    let (mut b_pre, mut b_inf, mut b_post) = (0.0f64, 0.0f64, 0.0f64);
+    for p in preds {
+        b_pre += p.timing.preprocess_ms;
+        b_inf += p.timing.inference_ms;
+        b_post += p.timing.postprocess_ms;
+    }
+    let (mut s_pre, mut s_inf, mut s_post) = (0.0f64, 0.0f64, 0.0f64);
+    add_scaled_timing(&mut s_pre, &mut s_inf, &mut s_post, b_pre, b_inf, b_post, batch_wall);
+    let inv = 1.0 / count as f64;
+    let (d_pre, d_inf, d_post) = (s_pre * inv, s_inf * inv, s_post * inv);
+    for img_idx in owners {
+        per_img_timing[img_idx][0] += d_pre;
+        per_img_timing[img_idx][1] += d_inf;
+        per_img_timing[img_idx][2] += d_post;
+    }
+}
+
+impl Predictor {
+    fn run_tile_views(&self, views: &[&Image], rect: bool) -> Result<Vec<Prediction>> {
+        let imgsz = self.config().imgsz;
+        run_views_with_oom_fallback(views, &mut |chunk| self.run_with_imgsz(chunk, rect, imgsz))
+    }
+
+    /// Decode an image file and predict it with SAHI tiled inference ([`Predictor::predict_tiled`]).
+    pub fn predict_file_tiled(&self, path: impl AsRef<Path>, tile_cfg: &TileConfig) -> Result<Prediction> {
+        tile_cfg.validate()?;
+        let t = Instant::now();
+        let img = folo_data::read_image(path.as_ref())?;
+        let decode_ms = ms(t);
+        let mut p = self.predict_tiled(&img, tile_cfg)?;
+        p.timing =
+            Timing::new(p.timing.preprocess_ms + decode_ms, p.timing.inference_ms, p.timing.postprocess_ms);
+        Ok(p)
+    }
+
+    /// Predict one image with Slicing Aided Hyper Inference (SAHI): slices the image into uniform overlapping
+    /// tiles ([`compute_tiles`]), reuses a bounded scratch pool of [`TileConfig::tile_batch`] crop buffers across
+    /// chunks (with automatic GPU OOM chunk splitting), optionally runs one full-image pass
+    /// ([`TileConfig::full_image`]), and merges all detections in original-image coordinates.
+    ///
+    /// When the image fits inside a single tile (`width <= tile_width && height <= tile_height`), this degrades
+    /// cleanly to [`Predictor::predict`] (with `tile_cfg.max_det` applied) so small images incur zero slicing
+    /// overhead.
+    pub fn predict_tiled(&self, img: &Image, tile_cfg: &TileConfig) -> Result<Prediction> {
+        tile_cfg.validate()?;
+        check_image(img)?;
+        let tiles = compute_tiles(img.width, img.height, tile_cfg)?;
+        if tiles.len() == 1 {
+            let mut p = self.predict(img)?;
+            p.detections.truncate(tile_cfg.max_det);
+            return Ok(p);
+        }
+
+        let rect = self.config().rect;
+        let mut pre_ms = 0.0f64;
+        let mut inf_ms = 0.0f64;
+        let mut post_ms = 0.0f64;
+        let mut all_dets: Vec<Detection> = Vec::new();
+        let cap = tile_cfg.tile_batch.min(tiles.len());
+        let mut scratch: Vec<Image> = Vec::with_capacity(cap);
+
+        for chunk in tiles.chunks(tile_cfg.tile_batch) {
+            let t_crop = Instant::now();
+            if scratch.len() < chunk.len() {
+                scratch.resize_with(chunk.len(), || Image { width: 0, height: 0, data: Vec::new() });
+            }
+            scratch[..chunk.len()]
+                .par_iter_mut()
+                .zip(chunk.par_iter())
+                .for_each(|(dst, &r)| copy_tile_rows(img, r, dst));
+            pre_ms += ms(t_crop);
+
+            let refs: Vec<&Image> = scratch[..chunk.len()].iter().collect();
+            let t_batch = Instant::now();
+            let preds = self.run_tile_views(&refs, rect)?;
+            let batch_wall = ms(t_batch);
+            let (mut b_pre, mut b_inf, mut b_post) = (0.0f64, 0.0f64, 0.0f64);
+            for (pred, tile) in preds.into_iter().zip(chunk) {
+                b_pre += pred.timing.preprocess_ms;
+                b_inf += pred.timing.inference_ms;
+                b_post += pred.timing.postprocess_ms;
+                let (ox, oy) = (tile.x as f32, tile.y as f32);
+                all_dets.extend(pred.detections.into_iter().map(|d| Detection {
+                    bbox: Xyxy::new(d.bbox.x1 + ox, d.bbox.y1 + oy, d.bbox.x2 + ox, d.bbox.y2 + oy),
+                    ..d
+                }));
+            }
+            add_scaled_timing(&mut pre_ms, &mut inf_ms, &mut post_ms, b_pre, b_inf, b_post, batch_wall);
+        }
+
+        if tile_cfg.full_image {
+            let full = self.predict(img)?;
+            pre_ms += full.timing.preprocess_ms;
+            inf_ms += full.timing.inference_ms;
+            post_ms += full.timing.postprocess_ms;
+            all_dets.extend(full.detections);
+        }
+
+        let t_merge = Instant::now();
+        let detections = merge_tiled_detections(all_dets, img.width, img.height, tile_cfg)?;
+        post_ms += ms(t_merge);
+
+        Ok(Prediction {
+            width: img.width,
+            height: img.height,
+            detections,
+            timing: Timing::new(pre_ms, inf_ms, post_ms),
+        })
+    }
+
+    /// Predict a batch of images with SAHI tiled inference ([`Predictor::predict_tiled`]), in input order.
+    ///
+    /// Tiles and optional full-image passes are batched across images that share the same letterbox canvas (in
+    /// bounded chunks of [`TileConfig::tile_batch`] with reusable crop scratch buffers and GPU OOM chunk
+    /// splitting), and per-image cross-tile merging runs in parallel — eliminating per-image remainder batches
+    /// and sequential batch-1 full-image passes while preserving exact CPU parity with [`Predictor::predict_tiled`].
+    pub fn predict_batch_tiled(&self, imgs: &[Image], tile_cfg: &TileConfig) -> Result<Vec<Prediction>> {
+        tile_cfg.validate()?;
+        if imgs.is_empty() {
+            return Ok(Vec::new());
+        }
+        for img in imgs {
+            check_image(img)?;
+        }
+        if imgs.len() == 1 {
+            return self.predict_tiled(&imgs[0], tile_cfg).map(|p| vec![p]);
+        }
+
+        let n = imgs.len();
+        let imgsz = self.config().imgsz;
+        let rect = self.config().rect;
+        type TileGroup = ([u32; 2], Vec<(usize, TileRect)>);
+        let mut is_single_tile = vec![false; n];
+        let mut tile_groups: Vec<TileGroup> = Vec::new();
+        let mut full_groups: Vec<([u32; 2], Vec<usize>)> = Vec::new();
+
+        for (i, img) in imgs.iter().enumerate() {
+            let tiles = compute_tiles(img.width, img.height, tile_cfg)?;
+            if tiles.len() == 1 {
+                is_single_tile[i] = true;
+                let canvas = rect_canvas(img.width, img.height, imgsz, rect);
+                push_grouped(&mut full_groups, canvas, i);
+            } else {
+                let first = tiles[0];
+                let tile_canvas = rect_canvas(first.width, first.height, imgsz, rect);
+                let bucket = match tile_groups.iter_mut().find(|(k, _)| *k == tile_canvas) {
+                    Some((_, v)) => v,
+                    None => {
+                        tile_groups.push((tile_canvas, Vec::with_capacity(tiles.len())));
+                        &mut tile_groups.last_mut().expect("just pushed").1
+                    }
+                };
+                bucket.extend(tiles.into_iter().map(|r| (i, r)));
+                if tile_cfg.full_image {
+                    let canvas = rect_canvas(img.width, img.height, imgsz, rect);
+                    push_grouped(&mut full_groups, canvas, i);
+                }
+            }
+        }
+
+        let mut per_img_dets: Vec<Vec<Detection>> = vec![Vec::new(); n];
+        let mut per_img_timing: Vec<[f64; 3]> = vec![[0.0; 3]; n];
+
+        // 1. Batched cropped tiles grouped by shared letterbox canvas, reusing one crop buffer pool.
+        let max_tile_chunk =
+            tile_groups.iter().map(|(_, jobs)| jobs.len().min(tile_cfg.tile_batch)).max().unwrap_or(0);
+        let mut scratch: Vec<Image> = Vec::with_capacity(max_tile_chunk);
+
+        for (_, jobs) in &tile_groups {
+            for chunk in jobs.chunks(tile_cfg.tile_batch) {
+                let t_crop = Instant::now();
+                if scratch.len() < chunk.len() {
+                    scratch.resize_with(chunk.len(), || Image { width: 0, height: 0, data: Vec::new() });
+                }
+                scratch[..chunk.len()]
+                    .par_iter_mut()
+                    .zip(chunk.par_iter())
+                    .for_each(|(dst, &(img_idx, r))| copy_tile_rows(&imgs[img_idx], r, dst));
+                let crop_share = ms(t_crop) / chunk.len() as f64;
+                for &(img_idx, _) in chunk {
+                    per_img_timing[img_idx][0] += crop_share;
+                }
+
+                let refs: Vec<&Image> = scratch[..chunk.len()].iter().collect();
+                let t_batch = Instant::now();
+                let preds = self.run_tile_views(&refs, rect)?;
+                let batch_wall = ms(t_batch);
+                distribute_chunk_timing(
+                    &mut per_img_timing,
+                    chunk.iter().map(|&(idx, _)| idx),
+                    &preds,
+                    batch_wall,
+                );
+                for (pred, &(img_idx, tile)) in preds.into_iter().zip(chunk) {
+                    let (ox, oy) = (tile.x as f32, tile.y as f32);
+                    per_img_dets[img_idx].extend(pred.detections.into_iter().map(|d| Detection {
+                        bbox: Xyxy::new(d.bbox.x1 + ox, d.bbox.y1 + oy, d.bbox.x2 + ox, d.bbox.y2 + oy),
+                        ..d
+                    }));
+                }
+            }
+        }
+        drop(scratch);
+
+        // 2. Batched full-image passes (both single-tile images and `full_image: true` multi-tile images).
+        for (_, idxs) in &full_groups {
+            for chunk in idxs.chunks(tile_cfg.tile_batch) {
+                let refs: Vec<&Image> = chunk.iter().map(|&idx| &imgs[idx]).collect();
+                let t_batch = Instant::now();
+                let preds = self.run_tile_views(&refs, rect)?;
+                let batch_wall = ms(t_batch);
+                distribute_chunk_timing(&mut per_img_timing, chunk.iter().copied(), &preds, batch_wall);
+                for (mut pred, &img_idx) in preds.into_iter().zip(chunk) {
+                    if is_single_tile[img_idx] {
+                        pred.detections.truncate(tile_cfg.max_det);
+                        per_img_dets[img_idx] = pred.detections;
+                    } else {
+                        per_img_dets[img_idx].extend(pred.detections);
+                    }
+                }
+            }
+        }
+
+        // 3. Parallel cross-tile merging for multi-tile images; single-tile images pass straight through.
+        let t_merge_all = Instant::now();
+        let merged: Vec<(Vec<Detection>, f64)> = per_img_dets
+            .into_par_iter()
+            .enumerate()
+            .map(|(i, dets)| -> Result<(Vec<Detection>, f64)> {
+                if is_single_tile[i] {
+                    return Ok((dets, 0.0));
+                }
+                let t0 = Instant::now();
+                let out = merge_tiled_detections(dets, imgs[i].width, imgs[i].height, tile_cfg)?;
+                Ok((out, ms(t0)))
+            })
+            .collect::<Result<_>>()?;
+        let merge_wall = ms(t_merge_all);
+        let merge_sum: f64 = merged.iter().map(|(_, m)| *m).sum();
+        let merge_scale = if merge_sum > 0.0 { merge_wall / merge_sum } else { 0.0 };
+
+        Ok(imgs
+            .iter()
+            .zip(merged)
+            .zip(per_img_timing)
+            .map(|((img, (detections, m_ms)), [pre, inf, post])| Prediction {
+                width: img.width,
+                height: img.height,
+                detections,
+                timing: Timing::new(pre, inf, post + m_ms * merge_scale),
+            })
+            .collect())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -500,6 +803,20 @@ mod tests {
         }
         assert!(crop_tile(&img, TileRect { x: 8, y: 0, width: 3, height: 4 }).is_err());
         assert!(crop_tile(&img, TileRect { x: 0, y: 0, width: 0, height: 4 }).is_err());
+
+        // `crop_tile_into` matches `crop_tile` and reuses backing storage across equal-sized tiles.
+        let mut scratch = Image { width: 0, height: 0, data: Vec::new() };
+        crop_tile_into(&img, rect, &mut scratch).unwrap();
+        assert_eq!(scratch, crop);
+        let ptr_before = scratch.data.as_ptr();
+        let rect2 = TileRect { x: 1, y: 3, width: 5, height: 4 };
+        crop_tile_into(&img, rect2, &mut scratch).unwrap();
+        assert_eq!(scratch.data.as_ptr(), ptr_before, "equal-size crop_tile_into must reuse buffer");
+        assert_eq!(scratch, crop_tile(&img, rect2).unwrap());
+        let rect_small = TileRect { x: 0, y: 0, width: 2, height: 2 };
+        crop_tile_into(&img, rect_small, &mut scratch).unwrap();
+        assert_eq!(scratch, crop_tile(&img, rect_small).unwrap());
+        assert!(crop_tile_into(&img, TileRect { x: 8, y: 0, width: 3, height: 4 }, &mut scratch).is_err());
     }
 
     #[test]

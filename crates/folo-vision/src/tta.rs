@@ -18,6 +18,7 @@ use std::time::Instant;
 #[cfg(target_arch = "wasm32")]
 use web_time::Instant;
 
+use folo_core::Tensor;
 use folo_data::Image;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -26,7 +27,9 @@ use crate::boxes::Xyxy;
 use crate::error::{Error, Result};
 use crate::fusion::BoxFusion;
 use crate::nms::Detection;
-use crate::predict::{Prediction, Predictor, Timing, add_scaled_timing, ms, one_canvas};
+use crate::predict::{
+    Prediction, Predictor, Timing, add_scaled_timing, ms, one_canvas, upload_images_on_device,
+};
 use crate::tile::{MergeOptions, TileConfig, TileMergeMetric, check_image, merge_detections};
 
 /// Default multi-scale factors for Test-Time Augmentation (`[0.83, 1.0, 1.17]`).
@@ -238,15 +241,68 @@ pub(crate) fn run_views_with_oom_fallback<T>(
     }
 }
 
+/// Like [`run_views_with_oom_fallback`] for views already uploaded to a GPU (`dev_imgs` parallel to `views`),
+/// splitting both slices in half on GPU OOM / buffer-limit errors without re-uploading pixels.
+fn run_uploaded_views_with_oom_fallback<T>(
+    dev_imgs: &[Tensor],
+    views: &[&Image],
+    run_chunk: &mut impl FnMut(&[Tensor], &[&Image]) -> Result<Vec<T>>,
+) -> Result<Vec<T>> {
+    match run_chunk(dev_imgs, views) {
+        Ok(out) => Ok(out),
+        Err(e) if views.len() > 1 && e.is_gpu_out_of_memory() => {
+            let mid = views.len() / 2;
+            let mut left = run_uploaded_views_with_oom_fallback(&dev_imgs[..mid], &views[..mid], run_chunk)?;
+            let right = run_uploaded_views_with_oom_fallback(&dev_imgs[mid..], &views[mid..], run_chunk)?;
+            left.extend(right);
+            Ok(left)
+        }
+        Err(e) => Err(e),
+    }
+}
+
 impl Predictor {
     fn run_tta_views(&self, views: &[&Image], rect: bool, imgsz: u32) -> Result<Vec<Prediction>> {
         run_views_with_oom_fallback(views, &mut |chunk| self.run_with_imgsz(chunk, rect, imgsz))
+    }
+
+    fn run_uploaded_tta_views(
+        &self,
+        dev_imgs: &[Tensor],
+        views: &[&Image],
+        rect: bool,
+        imgsz: u32,
+    ) -> Result<Vec<Prediction>> {
+        run_uploaded_views_with_oom_fallback(dev_imgs, views, &mut |dev_chunk, img_chunk| {
+            self.run_uploaded_with_imgsz(dev_chunk, img_chunk, rect, imgsz)
+        })
+    }
+
+    /// Upload `views` once to a GPU when multi-scale TTA will evaluate more than one inference size, returning
+    /// `Ok(None)` on CPU, single-scale TTA, or GPU OOM (so callers fall back cleanly to chunked per-scale uploads).
+    fn upload_tta_views_once(
+        &self,
+        views: &[&Image],
+        num_scales: usize,
+    ) -> Result<Option<(Vec<Tensor>, f64)>> {
+        if self.device().is_cpu() || num_scales <= 1 {
+            return Ok(None);
+        }
+        let t_up = Instant::now();
+        match upload_images_on_device(views, self.device()) {
+            Ok(dev_imgs) => Ok(Some((dev_imgs, ms(t_up)))),
+            Err(e) if e.is_gpu_out_of_memory() => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 
     /// Predict one image with Test-Time Augmentation ([`TtaConfig`]): runs each resolved stride-32 scale (and
     /// its horizontally flipped mirror when [`TtaConfig::hflip`] is enabled, batched together per scale without
     /// cloning the original RGB buffer), un-flips mirrored boxes back to original-image pixels, and merges all
     /// view detections via [`merge_tta_detections`].
+    ///
+    /// On a GPU with multiple scales, source views are uploaded once and letterboxed directly on device at every
+    /// scale rather than repeating PCIe transfers per scale.
     ///
     /// When TTA resolves to a single unflipped view (`!tta_cfg.hflip && resolved_imgszs.len() == 1`), this
     /// degrades cleanly to one pass at that size (bit-identical to [`Predictor::predict`] when the size equals
@@ -290,10 +346,19 @@ impl Predictor {
             }
         };
 
+        let uploaded = self.upload_tta_views_once(views, imgszs.len())?;
+        if let Some((_, up_ms)) = &uploaded {
+            pre_ms += *up_ms;
+        }
+        let dev_imgs = uploaded.as_ref().map(|(v, _)| v.as_slice());
+
         let mut all_dets: Vec<Detection> = Vec::new();
         for &imgsz in &imgszs {
             let t_scale = Instant::now();
-            let mut preds = self.run_tta_views(views, self.config().rect, imgsz)?;
+            let mut preds = match dev_imgs {
+                Some(dev) => self.run_uploaded_tta_views(dev, views, self.config().rect, imgsz)?,
+                None => self.run_tta_views(views, self.config().rect, imgsz)?,
+            };
             let scale_wall = ms(t_scale);
             let (mut b_pre, mut b_inf, mut b_post) = (0.0f64, 0.0f64, 0.0f64);
             for p in &preds {
@@ -320,6 +385,7 @@ impl Predictor {
             }
             post_ms += ms(t_collect);
         }
+        drop(uploaded);
 
         let t_merge = Instant::now();
         let detections = merge_tta_detections(
@@ -344,7 +410,8 @@ impl Predictor {
     ///
     /// Original (and optional flipped) views are batched per resolved scale without cloning the input RGB buffers
     /// so same-canvas batches share one `rect` letterbox pass (matching [`Predictor::predict_batch`]'s canvas
-    /// rules), falling back to smaller view chunks on GPU memory / buffer-limit errors.
+    /// rules), uploading source images once on GPU across multi-scale passes and falling back to smaller view
+    /// chunks on GPU memory / buffer-limit errors.
     pub fn predict_batch_tta(&self, imgs: &[Image], tta_cfg: &TtaConfig) -> Result<Vec<Prediction>> {
         let imgszs = tta_cfg.resolve_imgszs(self.config().imgsz)?;
         if imgs.is_empty() {
@@ -385,12 +452,21 @@ impl Predictor {
         views.extend(imgs.iter());
         views.extend(flipped.iter());
 
+        let uploaded = self.upload_tta_views_once(&views, imgszs.len())?;
+        if let Some((_, up_ms)) = &uploaded {
+            pre_ms += *up_ms * inv_n;
+        }
+        let dev_imgs = uploaded.as_ref().map(|(v, _)| v.as_slice());
+
         let mut per_img_dets: Vec<Vec<Detection>> = vec![Vec::new(); n];
         for &imgsz in &imgszs {
             // `flipped[i]` has the exact same dimensions as `imgs[i]`, so scanning `imgs` alone suffices.
             let rect = self.config().rect && one_canvas(imgs, imgsz);
             let t_scale = Instant::now();
-            let preds = self.run_tta_views(&views, rect, imgsz)?;
+            let preds = match dev_imgs {
+                Some(dev) => self.run_uploaded_tta_views(dev, &views, rect, imgsz)?,
+                None => self.run_tta_views(&views, rect, imgsz)?,
+            };
             let scale_wall = ms(t_scale);
             let (mut b_pre, mut b_inf, mut b_post) = (0.0f64, 0.0f64, 0.0f64);
             for p in &preds {
@@ -427,6 +503,7 @@ impl Predictor {
             }
             post_ms += ms(t_collect) * inv_n;
         }
+        drop(uploaded);
 
         let t_merge = Instant::now();
         let default_iou = self.config().iou;
@@ -691,6 +768,25 @@ mod tests {
             Err(Error::Core(folo_core::Error::Backend { backend: "wgpu", msg: "Out of Memory".into() }))
         });
         assert!(err.is_err());
+
+        // Uploaded-view OOM fallback keeps paired device tensors aligned across splits and propagates non-OOM errors.
+        let dev_imgs: Vec<Tensor> = (0..6).map(|i| Tensor::full([1], i as f32)).collect();
+        let out_up = run_uploaded_views_with_oom_fallback(&dev_imgs, &refs, &mut |devs, chunk| {
+            assert_eq!(devs.len(), chunk.len());
+            if chunk.len() > 2 {
+                return Err(Error::Core(folo_core::Error::Backend {
+                    backend: "wgpu",
+                    msg: "Out of Memory".into(),
+                }));
+            }
+            Ok(devs
+                .iter()
+                .zip(chunk)
+                .map(|(t, im)| (t.to_vec::<f32>().unwrap()[0] as u32, im.width))
+                .collect())
+        })
+        .unwrap();
+        assert_eq!(out_up, vec![(0, 8), (1, 9), (2, 10), (3, 11), (4, 12), (5, 13)]);
     }
 
     #[test]

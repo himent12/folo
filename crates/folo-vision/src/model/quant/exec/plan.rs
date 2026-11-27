@@ -70,9 +70,11 @@ pub struct Int8Plan {
     pub(super) cal: Calibration,
     /// Whether `cal.f32_convs` is non-empty (lets `wants_f32` skip HashMap lookups when empty).
     has_f32_convs: bool,
-    /// Unified FNV-1a boundary table: precomputed per-channel grids, per-tensor fallback grid, and `f32_convs`
-    /// membership in a single lookup.
-    boundaries: HashMap<String, BoundaryEntry, FnvBuildHasher>,
+    /// Unified FNV-1a boundary table: maps boundary name to its slot in `boundary_list`.
+    boundaries: HashMap<String, usize, FnvBuildHasher>,
+    /// Flat immutable table of `(name, BoundaryEntry)` indexed by per-step cached slot indices for O(1) lookups
+    /// without re-hashing boundary strings on every steady-state forward pass.
+    boundary_list: Vec<(String, BoundaryEntry)>,
     /// Lazily expanded per-boundary uniform grids for `version: 1` per-tensor calibrations.
     uniform_grids: RwLock<HashMap<String, Arc<BoundaryGrids>, FnvBuildHasher>>,
     /// Warm reusable C4 activation buffer pools shared across forward calls (one checked out per active forward).
@@ -106,8 +108,9 @@ impl Int8Plan {
 
     fn new_inner(cal: Calibration, weight_stamp: Option<RwLock<Vec<(TensorId, u64)>>>) -> Self {
         let cap = cal.ranges.len().max(cal.f32_convs.len()) + 4;
-        let mut boundaries: HashMap<String, BoundaryEntry, FnvBuildHasher> =
+        let mut boundaries: HashMap<String, usize, FnvBuildHasher> =
             HashMap::with_capacity_and_hasher(cap, FnvBuildHasher);
+        let mut boundary_list: Vec<(String, BoundaryEntry)> = Vec::with_capacity(cap);
         if cal.check_version().is_ok() {
             for name in cal.ranges.keys() {
                 let tensor = cal.param(name).ok();
@@ -116,21 +119,26 @@ impl Int8Plan {
                     .get(name)
                     .and_then(|crs| cal.channel_params(name, crs.len()).ok())
                     .map(BoundaryGrids::new);
-                boundaries.insert(name.clone(), BoundaryEntry { ch, tensor, is_f32: false });
+                let idx = boundary_list.len();
+                boundary_list.push((name.clone(), BoundaryEntry { ch, tensor, is_f32: false }));
+                boundaries.insert(name.clone(), idx);
             }
         }
         for name in &cal.f32_convs {
-            boundaries.entry(name.clone()).and_modify(|e| e.is_f32 = true).or_insert(BoundaryEntry {
-                ch: None,
-                tensor: None,
-                is_f32: true,
-            });
+            if let Some(&idx) = boundaries.get(name) {
+                boundary_list[idx].1.is_f32 = true;
+            } else {
+                let idx = boundary_list.len();
+                boundary_list.push((name.clone(), BoundaryEntry { ch: None, tensor: None, is_f32: true }));
+                boundaries.insert(name.clone(), idx);
+            }
         }
         let has_f32_convs = !cal.f32_convs.is_empty();
         Int8Plan {
             cal,
             has_f32_convs,
             boundaries,
+            boundary_list,
             uniform_grids: RwLock::new(HashMap::with_hasher(FnvBuildHasher)),
             scratch: Mutex::new(Vec::new()),
             stats: Mutex::new(ScratchStats::default()),
@@ -192,16 +200,39 @@ impl Int8Plan {
 
     #[inline]
     pub(super) fn is_f32(&self, name: &str) -> bool {
-        self.has_f32_convs && self.boundaries.get(name).is_some_and(|e| e.is_f32)
+        self.has_f32_convs && self.boundaries.get(name).is_some_and(|&idx| self.boundary_list[idx].1.is_f32)
     }
 
-    /// Single-lookup resolution of `(grids, is_f32)` for boundary `name` of channel count `c`.
-    pub(super) fn boundary_for(&self, name: &str, c: usize) -> Result<(GridOwner<'_>, bool)> {
-        if let Some(entry) = self.boundaries.get(name) {
+    /// Fast O(1) boundary hit check using a cached slot index from [`ScratchPool`].
+    #[inline]
+    pub(super) fn boundary_at_slot(
+        &self,
+        slot: usize,
+        name: &str,
+        c: usize,
+    ) -> Option<(GridOwner<'_>, bool)> {
+        let (entry_name, entry) = self.boundary_list.get(slot)?;
+        if entry_name == name
+            && let Some(bg) = &entry.ch
+            && bg.grids.len() == c
+        {
+            return Some((GridOwner::Borrowed(bg), entry.is_f32));
+        }
+        None
+    }
+
+    /// Single-lookup resolution of `(grids, is_f32, optional_slot)` for boundary `name` of channel count `c`.
+    pub(super) fn boundary_for_slot(
+        &self,
+        name: &str,
+        c: usize,
+    ) -> Result<(GridOwner<'_>, bool, Option<usize>)> {
+        if let Some(&idx) = self.boundaries.get(name) {
+            let entry = &self.boundary_list[idx].1;
             if let Some(bg) = &entry.ch
                 && bg.grids.len() == c
             {
-                return Ok((GridOwner::Borrowed(bg), entry.is_f32));
+                return Ok((GridOwner::Borrowed(bg), entry.is_f32, Some(idx)));
             }
             if !self.cal.channel_ranges.contains_key(name)
                 && let Some(g) = entry.tensor
@@ -210,23 +241,23 @@ impl Int8Plan {
                     && let Some(bg) = guard.get(name)
                     && bg.grids.len() == c
                 {
-                    return Ok((GridOwner::Owned(bg.clone()), entry.is_f32));
+                    return Ok((GridOwner::Owned(bg.clone()), entry.is_f32, None));
                 }
                 if let Ok(mut guard) = self.uniform_grids.write() {
                     if let Some(bg) = guard.get(name)
                         && bg.grids.len() == c
                     {
-                        return Ok((GridOwner::Owned(bg.clone()), entry.is_f32));
+                        return Ok((GridOwner::Owned(bg.clone()), entry.is_f32, None));
                     }
                     let bg = Arc::new(BoundaryGrids::new(vec![g; c]));
                     guard.insert(name.to_string(), bg.clone());
-                    return Ok((GridOwner::Owned(bg), entry.is_f32));
+                    return Ok((GridOwner::Owned(bg), entry.is_f32, None));
                 }
-                return Ok((GridOwner::Owned(Arc::new(BoundaryGrids::new(vec![g; c]))), entry.is_f32));
+                return Ok((GridOwner::Owned(Arc::new(BoundaryGrids::new(vec![g; c]))), entry.is_f32, None));
             }
         }
         let gs = self.cal.channel_params(name, c)?;
-        Ok((GridOwner::Owned(Arc::new(BoundaryGrids::new(gs))), self.is_f32(name)))
+        Ok((GridOwner::Owned(Arc::new(BoundaryGrids::new(gs))), self.is_f32(name), None))
     }
 
     pub(super) fn checkout_scratch(&self) -> ScratchPool {

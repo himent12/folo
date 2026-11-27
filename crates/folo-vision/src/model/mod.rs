@@ -649,23 +649,28 @@ impl FoloModel {
         self.forward_impl(x, Some(trace), self.head_mode)
     }
 
-    /// Whether CPU int8 inference with the direct `u8` stem is active for this model.
-    pub(crate) fn int8_u8_stem_active(&self) -> bool {
-        self.device().is_cpu()
-            && !self.is_training()
-            && self.config.in_channels == 3
-            && self
-                .active_int8()
-                .is_some_and(|p| p.calibration().u8_stem && !p.calibration().is_f32("backbone.stem"))
+    /// Active int8 plan when CPU direct `u8` stem inference applies (validating the weight stamp once per call).
+    pub(crate) fn int8_u8_stem_plan(&self) -> Option<Arc<quant::Int8Plan>> {
+        (self.device().is_cpu() && !self.is_training() && self.config.in_channels == 3)
+            .then(|| {
+                self.active_int8()
+                    .filter(|p| p.calibration().u8_stem && !p.calibration().is_f32("backbone.stem"))
+                    .cloned()
+            })
+            .flatten()
     }
 
     /// Forward pass reading a pre-packed `[b, h, w]` `u32` `[R, G, B, 0]` canvas straight into the direct `u8`
-    /// int8 stem (skipping `f32` canvas materialisation).
-    pub(crate) fn forward_rgb0_u8(&self, rgb0: &[u32], b: usize, h: usize, w: usize) -> Result<HeadOutput> {
+    /// int8 stem using an already-validated [`quant::Int8Plan`].
+    pub(crate) fn forward_rgb0_u8_with_plan(
+        &self,
+        plan: &quant::Int8Plan,
+        rgb0: &[u32],
+        b: usize,
+        h: usize,
+        w: usize,
+    ) -> Result<HeadOutput> {
         self.check_hw(b, h, w)?;
-        let plan = self
-            .active_int8()
-            .ok_or_else(|| Error::Invalid("forward_rgb0_u8 requires an int8 plan".into()))?;
         let feats = quant::exec::features_rgb0_u8(self, plan, rgb0, b, h, w)?;
         self.head_from_features(feats, h, w, self.head_mode)
     }

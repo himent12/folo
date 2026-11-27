@@ -1,7 +1,9 @@
 //! FOLO v2-Iso int8 executor operations: direct `u8` `SPD(2×2)` stem packing, fused `WsQARepConv3x3`
 //! dispatch, zero-copy C4 `space_to_depth_2x2` (`P2 → P3`), and `features_v2` / `features_v2_rgb0_u8`.
 
-use std::cell::{OnceCell, RefCell};
+#[cfg(target_arch = "x86_64")]
+use std::arch::x86_64::*;
+use std::cell::{Cell, OnceCell, RefCell};
 use std::rc::Rc;
 
 use folo_core::Tensor;
@@ -10,6 +12,8 @@ use folo_nn::{Error, Forward, Result};
 use rayon::prelude::*;
 
 use super::{GridOwner, Int8, Int8Plan, QAct, QActF32, QActRepr, QActU8};
+#[cfg(target_arch = "x86_64")]
+use crate::model::attn_simd;
 use crate::model::quant::cache::BoundaryGrids;
 use crate::model::quant::walk::{self, Exec};
 use crate::model::quant::{ConvView, int8_able, int8_able_view, spd_stem_int8_able};
@@ -90,12 +94,111 @@ fn pack_f32_to_spd12_c4(x: &[f32], n: usize, h: usize, w: usize, out: &mut [u32]
     }
 }
 
+/// Deinterleave 16 adjacent `u32` words `[a0,b0,a1,b1,...,a7,b7]` into `([a0..a7], [b0..b7])` in 4 AVX2 ops.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+#[inline]
+unsafe fn deinterleave_u32x16_avx2(lo: __m256i, hi: __m256i) -> (__m256i, __m256i) {
+    let lo_f = _mm256_castsi256_ps(lo);
+    let hi_f = _mm256_castsi256_ps(hi);
+    let even_shuf = _mm256_castps_si256(_mm256_shuffle_ps::<0x88>(lo_f, hi_f));
+    let odd_shuf = _mm256_castps_si256(_mm256_shuffle_ps::<0xDD>(lo_f, hi_f));
+    (_mm256_permute4x64_epi64::<0xD8>(even_shuf), _mm256_permute4x64_epi64::<0xD8>(odd_shuf))
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn pack_rgb0_to_spd12_row_avx2(
+    r_even: &[u32],
+    r_odd: &[u32],
+    o0: &mut [u32],
+    o1: &mut [u32],
+    o2: &mut [u32],
+    ow: usize,
+) {
+    let m24 = _mm256_set1_epi32(0x00FF_FFFFu32 as i32);
+    let m16 = _mm256_set1_epi32(0x0000_FFFFu32 as i32);
+    let m08 = _mm256_set1_epi32(0x0000_00FFu32 as i32);
+    let mut ox = 0usize;
+    // SAFETY: `2 * (ox + 8) <= 2 * ow <= r_even.len(), r_odd.len()` and `ox + 8 <= ow <= o{0,1,2}.len()`.
+    unsafe {
+        while ox + 8 <= ow {
+            let e_ptr = r_even.as_ptr().add(2 * ox) as *const __m256i;
+            let o_ptr = r_odd.as_ptr().add(2 * ox) as *const __m256i;
+            let (p_tl, p_tr) =
+                deinterleave_u32x16_avx2(_mm256_loadu_si256(e_ptr), _mm256_loadu_si256(e_ptr.add(1)));
+            let (p_bl, p_br) =
+                deinterleave_u32x16_avx2(_mm256_loadu_si256(o_ptr), _mm256_loadu_si256(o_ptr.add(1)));
+            let v0 = _mm256_or_si256(_mm256_and_si256(p_tl, m24), _mm256_slli_epi32::<24>(p_tr));
+            let v1 = _mm256_or_si256(
+                _mm256_and_si256(_mm256_srli_epi32::<8>(p_tr), m16),
+                _mm256_slli_epi32::<16>(p_bl),
+            );
+            let v2 = _mm256_or_si256(
+                _mm256_and_si256(_mm256_srli_epi32::<16>(p_bl), m08),
+                _mm256_slli_epi32::<8>(p_br),
+            );
+            _mm256_storeu_si256(o0.as_mut_ptr().add(ox) as *mut __m256i, v0);
+            _mm256_storeu_si256(o1.as_mut_ptr().add(ox) as *mut __m256i, v1);
+            _mm256_storeu_si256(o2.as_mut_ptr().add(ox) as *mut __m256i, v2);
+            ox += 8;
+        }
+    }
+    for ox in ox..ow {
+        let p_tl = r_even[2 * ox];
+        let p_tr = r_even[2 * ox + 1];
+        let p_bl = r_odd[2 * ox];
+        let p_br = r_odd[2 * ox + 1];
+        o0[ox] = (p_tl & 0x00FF_FFFF) | (p_tr << 24);
+        o1[ox] = ((p_tr >> 8) & 0x0000_FFFF) | (p_bl << 16);
+        o2[ox] = ((p_bl >> 16) & 0x0000_00FF) | (p_br << 8);
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn space_to_depth2_row_avx2(
+    r_even: &[u32],
+    r_odd: &[u32],
+    t0: &mut [u32],
+    t1: &mut [u32],
+    t2: &mut [u32],
+    t3: &mut [u32],
+    ow: usize,
+) {
+    let mut ox = 0usize;
+    // SAFETY: `2 * (ox + 8) <= 2 * ow <= r_even.len(), r_odd.len()` and `ox + 8 <= ow <= t{0,1,2,3}.len()`.
+    unsafe {
+        while ox + 8 <= ow {
+            let e_ptr = r_even.as_ptr().add(2 * ox) as *const __m256i;
+            let o_ptr = r_odd.as_ptr().add(2 * ox) as *const __m256i;
+            let (e_tl, e_tr) =
+                deinterleave_u32x16_avx2(_mm256_loadu_si256(e_ptr), _mm256_loadu_si256(e_ptr.add(1)));
+            let (o_bl, o_br) =
+                deinterleave_u32x16_avx2(_mm256_loadu_si256(o_ptr), _mm256_loadu_si256(o_ptr.add(1)));
+            _mm256_storeu_si256(t0.as_mut_ptr().add(ox) as *mut __m256i, e_tl);
+            _mm256_storeu_si256(t1.as_mut_ptr().add(ox) as *mut __m256i, e_tr);
+            _mm256_storeu_si256(t2.as_mut_ptr().add(ox) as *mut __m256i, o_bl);
+            _mm256_storeu_si256(t3.as_mut_ptr().add(ox) as *mut __m256i, o_br);
+            ox += 8;
+        }
+    }
+    for ox in ox..ow {
+        t0[ox] = r_even[2 * ox];
+        t1[ox] = r_even[2 * ox + 1];
+        t2[ox] = r_odd[2 * ox];
+        t3[ox] = r_odd[2 * ox + 1];
+    }
+}
+
 /// Pack `[n, h, w]` `u32` `[R, G, B, 0]` pixels directly into `[n, 3, h/2, w/2]` C4 words representing
 /// `space_to_depth_2x2` of the 3-channel RGB image (`12` channels = 3 C4 groups:
 /// `[R_tl, G_tl, B_tl, R_tr]`, `[G_tr, B_tr, R_bl, G_bl]`, `[B_bl, R_br, G_br, B_br]`).
 fn pack_rgb0_to_spd12_c4(rgb0: &[u32], n: usize, h: usize, w: usize, out: &mut [u32]) {
     let (oh, ow) = (h / 2, w / 2);
     let (hw, ohw) = (h * w, oh * ow);
+    #[cfg(target_arch = "x86_64")]
+    let use_avx2 = attn_simd::has_avx2_fma();
     let run_img = |(img, dst): (usize, &mut [u32])| {
         let src = &rgb0[img * hw..(img + 1) * hw];
         let (g0, rest) = dst.split_at_mut(ohw);
@@ -103,6 +206,12 @@ fn pack_rgb0_to_spd12_c4(rgb0: &[u32], n: usize, h: usize, w: usize, out: &mut [
         let run_rows = |(oy, ((o0, o1), o2)): Spd3Row<'_>| {
             let r_even = &src[(2 * oy) * w..(2 * oy + 1) * w];
             let r_odd = &src[(2 * oy + 1) * w..(2 * oy + 2) * w];
+            #[cfg(target_arch = "x86_64")]
+            if use_avx2 {
+                // SAFETY: AVX2 detected above; row slices cover `2 * ow` and `ow` elements.
+                unsafe { pack_rgb0_to_spd12_row_avx2(r_even, r_odd, o0, o1, o2, ow) };
+                return;
+            }
             for ox in 0..ow {
                 let p_tl = r_even[2 * ox];
                 let p_tr = r_even[2 * ox + 1];
@@ -146,6 +255,8 @@ fn space_to_depth2_c4(u: &QActU8<'_>, src_data: &[u32], out: &mut [u32]) {
     let img_out_words = 4 * part_words;
     let u_offset = u.offset;
     let u_img_stride = u.img_stride;
+    #[cfg(target_arch = "x86_64")]
+    let use_avx2 = attn_simd::has_avx2_fma();
 
     for img in 0..n {
         let dst_img = &mut out[img * img_out_words..(img + 1) * img_out_words];
@@ -161,6 +272,12 @@ fn space_to_depth2_c4(u: &QActU8<'_>, src_data: &[u32], out: &mut [u32]) {
                 let t1 = &mut o1[oy * ow..(oy + 1) * ow];
                 let t2 = &mut o2[oy * ow..(oy + 1) * ow];
                 let t3 = &mut o3[oy * ow..(oy + 1) * ow];
+                #[cfg(target_arch = "x86_64")]
+                if use_avx2 {
+                    // SAFETY: AVX2 detected above; row slices cover `2 * ow` and `ow` elements.
+                    unsafe { space_to_depth2_row_avx2(r_even, r_odd, t0, t1, t2, t3, ow) };
+                    continue;
+                }
                 for ox in 0..ow {
                     t0[ox] = r_even[2 * ox];
                     t1[ox] = r_even[2 * ox + 1];
@@ -194,7 +311,7 @@ impl<'a> Int8<'a> {
         }
         let conv = &stem.conv;
         let o = conv.conv.config().out_channels;
-        let (bg, is_f32) = self.plan.boundary_for(name, o)?;
+        let (bg, is_f32) = self.boundary_for(name, o)?;
         let (n, c, h, w) = match self.rgb0_input {
             Some((_, [n, h, w])) => (n, 3, h, w),
             None => x.dims4()?,
@@ -255,7 +372,7 @@ impl<'a> Int8<'a> {
         let xd = x.dims();
         let [n, _, _, _] = xd;
         let o = rep.out_channels;
-        let (bg, is_f32) = self.plan.boundary_for(name, o)?;
+        let (bg, is_f32) = self.boundary_for(name, o)?;
         let able = (!is_f32)
             .then(|| {
                 ConvView::from_rep(rep).and_then(|view| {
@@ -398,7 +515,7 @@ impl<'a> Int8<'a> {
             && cg.is_multiple_of(4)
             && int8_able(&h_ctx.out_proj, [b, cg, h, w], Some(res_dims)).is_some();
         if proj_runs_int8 {
-            let (bg, _) = self.plan.boundary_for(pin_name, cg)?;
+            let (bg, _) = self.boundary_for(pin_name, cg)?;
             let mut out = self.pool.borrow_mut().take_buf(b, cg, h * w);
             match h_ctx.attend_and_scene_into_c4(av, b, h, w, &bg.as_ref().grids, &mut out) {
                 Ok(Some(g_scene)) => return Ok((QAct::new(&self.pool, out, [b, cg, h, w], bg), g_scene)),
@@ -496,7 +613,13 @@ fn run_walk_v2(
     let pool = plan.checkout_scratch();
     let prev_stats = pool.stats();
     let pool_rc = Rc::new(RefCell::new(pool));
-    let mut exec = Int8 { plan, rgb0_input, pool: Rc::clone(&pool_rc) };
+    let mut exec = Int8 {
+        plan,
+        rgb0_input,
+        pool: Rc::clone(&pool_rc),
+        conv_step: Cell::new(0),
+        boundary_step: Cell::new(0),
+    };
     let res = walk::features_v2(model, &mut exec, x);
     drop(exec);
     if let Ok(cell) = Rc::try_unwrap(pool_rc) {
@@ -523,4 +646,89 @@ pub fn features_v2_rgb0_u8(
 ) -> Result<[Tensor; 3]> {
     let dummy = Tensor::zeros([0]);
     run_walk_v2(model, plan, Some((rgb0, [n, h, w])), &dummy)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::quant::pool::ScratchPool;
+
+    /// AVX2 `pack_rgb0_to_spd12_c4` and `space_to_depth2_c4` match scalar bit-for-bit across small, odd,
+    /// SIMD-aligned, and SIMD+tail widths.
+    #[test]
+    fn spd12_and_space_to_depth2_c4_match_scalar_bit_for_bit() {
+        for &(n, h, w) in &[(1, 2, 2), (1, 4, 6), (1, 4, 14), (1, 6, 16), (2, 4, 18), (1, 10, 34), (2, 8, 64)]
+        {
+            let rgb0: Vec<u32> = (0..n * h * w)
+                .map(|i: usize| {
+                    let r = (i.wrapping_mul(37) % 251) as u32;
+                    let g = (i.wrapping_mul(73) % 251) as u32;
+                    let b = (i.wrapping_mul(113) % 251) as u32;
+                    r | (g << 8) | (b << 16)
+                })
+                .collect();
+            let (oh, ow) = (h / 2, w / 2);
+            let ohw = oh * ow;
+            let mut got = vec![0u32; n * 3 * ohw];
+            pack_rgb0_to_spd12_c4(&rgb0, n, h, w, &mut got);
+
+            let mut want = vec![0u32; n * 3 * ohw];
+            for img in 0..n {
+                let src = &rgb0[img * h * w..(img + 1) * h * w];
+                let dst = &mut want[img * 3 * ohw..(img + 1) * 3 * ohw];
+                let (g0, rest) = dst.split_at_mut(ohw);
+                let (g1, g2) = rest.split_at_mut(ohw);
+                for oy in 0..oh {
+                    for ox in 0..ow {
+                        let p_tl = src[(2 * oy) * w + 2 * ox];
+                        let p_tr = src[(2 * oy) * w + 2 * ox + 1];
+                        let p_bl = src[(2 * oy + 1) * w + 2 * ox];
+                        let p_br = src[(2 * oy + 1) * w + 2 * ox + 1];
+                        let idx = oy * ow + ox;
+                        g0[idx] = (p_tl & 0x00FF_FFFF) | (p_tr << 24);
+                        g1[idx] = ((p_tr >> 8) & 0x0000_FFFF) | (p_bl << 16);
+                        g2[idx] = ((p_bl >> 16) & 0x0000_00FF) | (p_br << 8);
+                    }
+                }
+            }
+            assert_eq!(got, want, "pack_rgb0_to_spd12_c4 mismatch for ({n}, {h}, {w})");
+
+            // Also test `space_to_depth2_c4` for c = 12 (3 C4 groups).
+            let c = 12usize;
+            let groups = c / 4;
+            let hw = h * w;
+            let src_c4: Vec<u32> =
+                (0..n * groups * hw).map(|i| (i as u32).wrapping_mul(2654435761) ^ 0xA55A_3C17).collect();
+            let pool = Rc::new(RefCell::new(ScratchPool::default()));
+            let u = QActU8::new(
+                &pool,
+                src_c4.clone(),
+                [n, c, h, w],
+                GridOwner::Borrowed(BoundaryGrids::pixel_12()),
+            );
+            let mut got_s2d = vec![0u32; n * 4 * groups * ohw];
+            {
+                let p = pool.borrow();
+                space_to_depth2_c4(&u, p.slice(u.buf.slot()), &mut got_s2d);
+            }
+            let mut want_s2d = vec![0u32; n * 4 * groups * ohw];
+            let part_words = groups * ohw;
+            for img in 0..n {
+                let dst_img = &mut want_s2d[img * 4 * part_words..(img + 1) * 4 * part_words];
+                for g in 0..groups {
+                    let sp = &src_c4[img * groups * hw + g * hw..][..hw];
+                    for oy in 0..oh {
+                        for ox in 0..ow {
+                            let idx = g * ohw + oy * ow + ox;
+                            dst_img[idx] = sp[(2 * oy) * w + 2 * ox];
+                            dst_img[part_words + idx] = sp[(2 * oy) * w + 2 * ox + 1];
+                            dst_img[2 * part_words + idx] = sp[(2 * oy + 1) * w + 2 * ox];
+                            dst_img[3 * part_words + idx] = sp[(2 * oy + 1) * w + 2 * ox + 1];
+                        }
+                    }
+                }
+            }
+            assert_eq!(got_s2d, want_s2d, "space_to_depth2_c4 mismatch for ({n}, {c}, {h}, {w})");
+        }
+    }
 }

@@ -7,13 +7,15 @@
 //! a single FNV-1a table with precomputed half-split hashes and per-part max scales; each conv's packed weights
 //! (and direct `u8` stem) are kept with its weight tensor ([`Tensor::derived_f32`]) until written.
 
+mod act;
 mod plan;
 mod v2;
 
+pub use act::QAct;
 pub use plan::Int8Plan;
 pub use v2::{features_v2, features_v2_rgb0_u8};
 
-use std::cell::{OnceCell, RefCell};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -22,6 +24,7 @@ use folo_core::cpu::q8::{self, C4, Grid, QConv, QOut, QStem};
 use folo_nn::{ConvBnAct, Error, Result};
 use rayon::prelude::*;
 
+use self::act::{QActF32, QActRepr, QActU8};
 use self::plan::GridOwner;
 use super::cache::{PartKeyRef, load_qconv_view, load_qstem};
 use super::calib::conv_f32;
@@ -32,230 +35,36 @@ use crate::model::blocks::Attention;
 use crate::model::v2::{FullPadGate, HyperContext, StemV2, WsQARepConv3x3};
 use crate::model::{FoloModel, attn_simd};
 
-/// A materialised u8 C4 activation (or a channel slice of one) backed by a pooled [`SlotHandle`].
-#[derive(Clone)]
-pub(super) struct QActU8<'a> {
-    pub(super) buf: SlotHandle,
-    pub(super) offset: usize,
-    pub(super) img_stride: usize,
-    pub(super) dims: [usize; 4],
-    pub(super) bg: GridOwner<'a>,
-    pub(super) grid_offset: usize,
-    pub(super) grids_hash: u64,
-    pub(super) max_scale: f32,
-}
-
-impl<'a> QActU8<'a> {
-    #[inline]
-    pub(super) fn grids(&self) -> &[Grid] {
-        &self.bg.as_ref().grids[self.grid_offset..self.grid_offset + self.dims[1]]
-    }
-
-    #[inline]
-    pub(super) fn zeros(&self) -> &[u8] {
-        &self.bg.as_ref().zeros[self.grid_offset..self.grid_offset + self.dims[1]]
-    }
-
-    #[inline]
-    pub(super) fn view<'p>(&self, pool: &'p ScratchPool) -> C4<'p> {
-        C4 {
-            data: pool.slice(self.buf.slot()),
-            offset: self.offset,
-            img_stride: self.img_stride,
-            c: self.dims[1],
-            zero: self.zeros().first().copied().unwrap_or(0),
-        }
-    }
-
-    pub(super) fn new(
-        pool: &Rc<RefCell<ScratchPool>>,
-        buf: Vec<u32>,
-        dims: [usize; 4],
-        bg: GridOwner<'a>,
-    ) -> Self {
-        let img_stride = dims[1] / 4 * dims[2] * dims[3];
-        let (grids_hash, max_scale) = {
-            let r = bg.as_ref();
-            (r.hash, r.max_scale)
-        };
-        QActU8 {
-            buf: SlotHandle::new(pool, buf),
-            offset: 0,
-            img_stride,
-            dims,
-            bg,
-            grid_offset: 0,
-            grids_hash,
-            max_scale,
-        }
-    }
-
-    pub(super) fn from_f32(
-        pool: &Rc<RefCell<ScratchPool>>,
-        x: &Tensor,
-        bg: GridOwner<'a>,
-        grid_offset: usize,
-        grids_hash: u64,
-        max_scale: f32,
-    ) -> Result<Self> {
-        let (n, c, h, w) = x.dims4()?;
-        if !c.is_multiple_of(4) {
-            return Err(Error::Invalid(format!("int8: {c} channels is not a multiple of 4")));
-        }
-        let mut out = pool.borrow_mut().take_buf(n, c, h * w);
-        let res = {
-            let slice = &bg.as_ref().grids[grid_offset..grid_offset + c];
-            x.with_f32_slice(|v| q8::quantize_per_channel(v, n, c, h * w, slice, &mut out))
-        };
-        if let Err(e) = res {
-            pool.borrow_mut().return_buf(out);
-            return Err(e.into());
-        }
-        let img_stride = c / 4 * h * w;
-        Ok(QActU8 {
-            buf: SlotHandle::new(pool, out),
-            offset: 0,
-            img_stride,
-            dims: [n, c, h, w],
-            bg,
-            grid_offset,
-            grids_hash,
-            max_scale,
-        })
-    }
-
-    pub(super) fn to_f32(&self) -> Result<Tensor> {
-        let [n, c, h, w] = self.dims;
-        let mut out = folo_core::cpu::take_buffer(n * c * h * w);
-        let pool = self.buf.pool().borrow();
-        q8::dequantize_per_channel(self.view(&pool), n, h * w, self.grids(), &mut out);
-        drop(pool);
-        Ok(Tensor::from_vec(out, [n, c, h, w])?)
-    }
-
-    pub(super) fn narrow_slice(&self, start: usize, len: usize) -> Result<Self> {
-        let [n, c, h, w] = self.dims;
-        if !start.is_multiple_of(4) || !len.is_multiple_of(4) || start + len > c {
-            return Err(Error::Invalid(format!(
-                "int8: channels {start}..{} of {c} are not whole C4 groups",
-                start + len
-            )));
-        }
-        let grid_offset = self.grid_offset + start;
-        let (grids_hash, max_scale) = self.bg.as_ref().slice_meta(grid_offset, len);
-        Ok(QActU8 {
-            buf: self.buf.clone(),
-            offset: self.offset + start / 4 * h * w,
-            img_stride: self.img_stride,
-            dims: [n, len, h, w],
-            bg: self.bg.clone(),
-            grid_offset,
-            grids_hash,
-            max_scale,
-        })
-    }
-}
-
-/// An unquantised `f32` activation with deferred `u8` quantisation (materialised at most once in an inline
-/// [`OnceCell`] if an int8 op consumes it, and passed through directly in `f32` to `f32` convs and the `f32` head).
-pub(super) struct QActF32<'a> {
-    pub(super) tensor: Tensor,
-    pub(super) dims: [usize; 4],
-    pub(super) bg: GridOwner<'a>,
-    pub(super) grid_offset: usize,
-    pub(super) grids_hash: u64,
-    pub(super) max_scale: f32,
-    pub(super) u8_cache: OnceCell<QActU8<'a>>,
-}
-
-pub(super) enum QActRepr<'a> {
-    U8(QActU8<'a>),
-    F32(QActF32<'a>),
-}
-
-/// An activation in the int8 executor: either a materialised u8 C4 buffer or a deferred `f32` tensor carrying
-/// its boundary's per-channel affine grids.
-pub struct QAct<'a> {
-    pub(super) repr: QActRepr<'a>,
-}
-
-impl<'a> QAct<'a> {
-    pub(super) fn new(
-        pool: &Rc<RefCell<ScratchPool>>,
-        buf: Vec<u32>,
-        dims: [usize; 4],
-        bg: GridOwner<'a>,
-    ) -> Self {
-        QAct { repr: QActRepr::U8(QActU8::new(pool, buf, dims, bg)) }
-    }
-
-    pub(super) fn from_f32_lazy(tensor: Tensor, bg: GridOwner<'a>) -> Result<Self> {
-        let (n, c, h, w) = tensor.dims4()?;
-        let (grids_hash, max_scale) = {
-            let r = bg.as_ref();
-            (r.hash, r.max_scale)
-        };
-        Ok(QAct {
-            repr: QActRepr::F32(QActF32 {
-                tensor,
-                dims: [n, c, h, w],
-                bg,
-                grid_offset: 0,
-                grids_hash,
-                max_scale,
-                u8_cache: OnceCell::new(),
-            }),
-        })
-    }
-
-    #[inline]
-    pub(super) fn dims(&self) -> [usize; 4] {
-        match &self.repr {
-            QActRepr::U8(u) => u.dims,
-            QActRepr::F32(f) => f.dims,
-        }
-    }
-
-    pub(super) fn to_f32(&self) -> Result<Tensor> {
-        match &self.repr {
-            QActRepr::U8(u) => u.to_f32(),
-            QActRepr::F32(f) => Ok(f.tensor.clone()),
-        }
-    }
-
-    pub(super) fn as_u8(&self, pool: &Rc<RefCell<ScratchPool>>) -> Result<&QActU8<'a>> {
-        match &self.repr {
-            QActRepr::U8(u) => Ok(u),
-            QActRepr::F32(f) => {
-                if let Some(u) = f.u8_cache.get() {
-                    return Ok(u);
-                }
-                let u = QActU8::from_f32(
-                    pool,
-                    &f.tensor,
-                    f.bg.clone(),
-                    f.grid_offset,
-                    f.grids_hash,
-                    f.max_scale,
-                )?;
-                Ok(f.u8_cache.get_or_init(|| u))
-            }
-        }
-    }
-}
-
 /// The int8 executor of one forward pass.
-pub(super) struct Int8<'a> {
-    pub(super) plan: &'a Int8Plan,
+struct Int8<'a> {
+    plan: &'a Int8Plan,
     /// Optional pre-packed `[n, h, w]` `[R, G, B, 0]` input from `Letterbox::apply_rgb0_u8`.
-    pub(super) rgb0_input: Option<(&'a [u32], [usize; 3])>,
-    /// Per-forward reusable C4 scratch buffer pool.
-    pub(super) pool: Rc<RefCell<ScratchPool>>,
+    rgb0_input: Option<(&'a [u32], [usize; 3])>,
+    /// Per-forward reusable C4 scratch buffer pool and per-step packed-weight cache.
+    pool: Rc<RefCell<ScratchPool>>,
+    conv_step: Cell<usize>,
+    boundary_step: Cell<usize>,
 }
 
 impl<'a> Int8<'a> {
+    /// Cached per-step boundary lookup: hits `plan.boundary_list[slot]` in O(1) without FNV hashing on steady-state
+    /// forwards, falling back to `plan.boundary_for_slot` on miss.
+    fn boundary_for(&self, name: &str, c: usize) -> Result<(GridOwner<'a>, bool)> {
+        let step = self.boundary_step.get();
+        self.boundary_step.set(step + 1);
+        if let Some(slot) = self.pool.borrow().boundary_slot(step)
+            && let Some(hit) = self.plan.boundary_at_slot(slot, name, c)
+        {
+            return Ok(hit);
+        }
+        let (bg, is_f32, slot) = self.plan.boundary_for_slot(name, c)?;
+        if let Some(slot) = slot {
+            self.pool.borrow_mut().store_boundary_slot(step, slot);
+        }
+        Ok((bg, is_f32))
+    }
     /// `conv`'s packed weights for inputs `parts` (cached on `conv.conv.weight`).
-    pub(super) fn qconv_view(&self, conv: ConvView<'_>, parts: &[&QActU8<'a>]) -> Result<Arc<QConv>> {
+    fn qconv_view(&self, conv: ConvView<'_>, parts: &[&QActU8<'a>]) -> Result<Arc<QConv>> {
         fn to_ref<'b, 'a>(a: &'b QActU8<'a>) -> PartKeyRef<'b> {
             PartKeyRef {
                 grids_arc: &a.bg.as_ref().grids,
@@ -409,8 +218,9 @@ impl<'a> Int8<'a> {
         [wrap(out1), wrap(out2), wrap(out3)]
     }
 
-    /// Execute the int8 conv into `out`, borrowing all input C4 views from `self.pool` simultaneously.
-    pub(super) fn run_view(
+    /// Execute the int8 conv into `out`, borrowing all input C4 views and the cached [`QConv`] from `self.pool`
+    /// simultaneously with zero mutex locks or `Arc` refcount traffic on steady-state cache hit.
+    fn run_view(
         &self,
         name: &str,
         conv: ConvView<'_>,
@@ -422,9 +232,30 @@ impl<'a> Int8<'a> {
         if parts.iter().any(|a| a.dims[0] != n || a.dims[2] != h || a.dims[3] != w) {
             return Err(Error::Invalid(format!("int8 {name}: parts of different shapes")));
         }
-        let qc = self.qconv_view(conv, parts)?;
-        let (oh, ow) = qc.out_hw(h, w);
+        let allow_decouple = self.plan.cal.version >= VERSION_V2;
+        let step = self.conv_step.get();
+        self.conv_step.set(step + 1);
+        let ensure_cached = |pkeys: &[(&Arc<[Grid]>, usize, usize)]| -> Result<()> {
+            if !self.pool.borrow().conv_hit(step, conv, pkeys, allow_decouple) {
+                let qc = self.qconv_view(conv, parts)?;
+                self.pool.borrow_mut().store_conv(step, conv, pkeys, allow_decouple, qc);
+            }
+            Ok(())
+        };
+        if parts.len() <= 8 {
+            let p0 = (&parts[0].bg.as_ref().grids, parts[0].grid_offset, parts[0].dims[1]);
+            let mut pk = [p0; 8];
+            for (i, a) in parts.iter().enumerate().skip(1) {
+                pk[i] = (&a.bg.as_ref().grids, a.grid_offset, a.dims[1]);
+            }
+            ensure_cached(&pk[..parts.len()])?;
+        } else {
+            let pk: Vec<_> = parts.iter().map(|a| (&a.bg.as_ref().grids, a.grid_offset, a.dims[1])).collect();
+            ensure_cached(&pk)?;
+        }
         let pool = self.pool.borrow();
+        let qc = pool.conv_at(step);
+        let (oh, ow) = qc.out_hw(h, w);
         let res = res.map(|r| (r.view(&pool), r.grids()));
         if parts.len() <= 8 {
             let mut v_arr = [parts[0].view(&pool); 8];
@@ -433,11 +264,11 @@ impl<'a> Int8<'a> {
                 v_arr[i] = a.view(&pool);
                 z_arr[i] = a.zeros();
             }
-            q8::conv_per_channel(&v_arr[..parts.len()], &z_arr[..parts.len()], n, h, w, &qc, res, out);
+            q8::conv_per_channel(&v_arr[..parts.len()], &z_arr[..parts.len()], n, h, w, qc, res, out);
         } else {
             let views: Vec<C4<'_>> = parts.iter().map(|a| a.view(&pool)).collect();
             let zeros: Vec<&[u8]> = parts.iter().map(|a| a.zeros()).collect();
-            q8::conv_per_channel(&views, &zeros, n, h, w, &qc, res, out);
+            q8::conv_per_channel(&views, &zeros, n, h, w, qc, res, out);
         }
         Ok([n, qc.out_channels(), oh, ow])
     }
@@ -518,7 +349,7 @@ impl<'a> Exec for Int8<'a> {
     fn stem(&mut self, name: &str, conv: &ConvBnAct, x: &Tensor) -> Result<QAct<'a>> {
         use folo_nn::Forward;
         let o = conv.conv.config().out_channels;
-        let (bg, is_f32) = self.plan.boundary_for(name, o)?;
+        let (bg, is_f32) = self.boundary_for(name, o)?;
         let (n, c, h, w) = match self.rgb0_input {
             Some((_, [n, h, w])) => (n, 3, h, w),
             None => x.dims4()?,
@@ -527,15 +358,19 @@ impl<'a> Exec for Int8<'a> {
             && !is_f32
             && let Some((oh, ow)) = stem_int8_able(conv, [n, c, h, w])
         {
-            let qs = self.qstem(conv)?;
+            if !self.pool.borrow().stem_hit(conv) {
+                let qs = self.qstem(conv)?;
+                self.pool.borrow_mut().store_stem(conv, qs);
+            }
             let mut out = self.pool.borrow_mut().take_buf(n, o, oh * ow);
             if let Some((rgb0, _)) = self.rgb0_input {
+                let pool = self.pool.borrow();
                 q8::stem_u8(
                     rgb0,
                     n,
                     h,
                     w,
-                    &qs,
+                    pool.stem(),
                     QOut::U8PerChannel { data: &mut out, grids: &bg.as_ref().grids },
                 );
             } else {
@@ -547,14 +382,17 @@ impl<'a> Exec for Int8<'a> {
                     p.return_buf(out);
                     return Err(e.into());
                 }
-                q8::stem_u8(
-                    &rgb0,
-                    n,
-                    h,
-                    w,
-                    &qs,
-                    QOut::U8PerChannel { data: &mut out, grids: &bg.as_ref().grids },
-                );
+                {
+                    let pool = self.pool.borrow();
+                    q8::stem_u8(
+                        &rgb0,
+                        n,
+                        h,
+                        w,
+                        pool.stem(),
+                        QOut::U8PerChannel { data: &mut out, grids: &bg.as_ref().grids },
+                    );
+                }
                 self.pool.borrow_mut().return_buf(rgb0);
             }
             return Ok(QAct::new(&self.pool, out, [n, o, oh, ow], bg));
@@ -582,7 +420,7 @@ impl<'a> Exec for Int8<'a> {
         let [n, _, h, w] = parts[0].dims();
         let c = parts.iter().map(|a| a.dims()[1]).sum();
         let o = conv.conv.config().out_channels;
-        let (bg, is_f32) = self.plan.boundary_for(name, o)?;
+        let (bg, is_f32) = self.boundary_for(name, o)?;
         let able = (!is_f32)
             .then(|| {
                 parts
@@ -623,7 +461,7 @@ impl<'a> Exec for Int8<'a> {
         let [n, _, h, w] = parts[0].dims();
         let c = parts.iter().map(|a| a.dims()[1]).sum();
         let o = conv.conv.config().out_channels;
-        let (bg, is_f32) = self.plan.boundary_for(name, o)?;
+        let (bg, is_f32) = self.boundary_for(name, o)?;
         let able = (!is_f32)
             .then(|| {
                 parts
@@ -671,7 +509,7 @@ impl<'a> Exec for Int8<'a> {
         let [n, _, h, w] = parts[0].dims();
         let c = parts.iter().map(|a| a.dims()[1]).sum();
         let o = conv.conv.config().out_channels;
-        let (_, is_f32) = self.plan.boundary_for(name, o)?;
+        let (_, is_f32) = self.boundary_for(name, o)?;
         let able = (!is_f32)
             .then(|| {
                 parts
@@ -703,7 +541,7 @@ impl<'a> Exec for Int8<'a> {
         let proj_runs_int8 =
             !out_f32 && c.is_multiple_of(4) && int8_able(&a.proj, [b, c, h, w], Some(res_dims)).is_some();
         if proj_runs_int8 {
-            let (bg, _) = self.plan.boundary_for(pin_name, c)?;
+            let (bg, _) = self.boundary_for(pin_name, c)?;
             let mut out = self.pool.borrow_mut().take_buf(b, c, h * w);
             match a.attend_and_pe_into_c4(qkv, b, h, w, &bg.as_ref().grids, &mut out) {
                 Ok(true) => return Ok(QAct::new(&self.pool, out, [b, c, h, w], bg)),
@@ -764,7 +602,7 @@ impl<'a> Exec for Int8<'a> {
 
     fn quantize(&mut self, name: &str, x: &Tensor) -> Result<QAct<'a>> {
         let c = x.dims4()?.1;
-        let (bg, _) = self.plan.boundary_for(name, c)?;
+        let (bg, _) = self.boundary_for(name, c)?;
         QAct::from_f32_lazy(x.clone(), bg)
     }
 
@@ -905,7 +743,13 @@ fn run_walk(
     let pool = plan.checkout_scratch();
     let prev_stats = pool.stats();
     let pool_rc = Rc::new(RefCell::new(pool));
-    let mut exec = Int8 { plan, rgb0_input, pool: Rc::clone(&pool_rc) };
+    let mut exec = Int8 {
+        plan,
+        rgb0_input,
+        pool: Rc::clone(&pool_rc),
+        conv_step: Cell::new(0),
+        boundary_step: Cell::new(0),
+    };
     let res = walk::features(model, &mut exec, x);
     drop(exec);
     if let Ok(cell) = Rc::try_unwrap(pool_rc) {
@@ -961,7 +805,13 @@ mod tests {
         };
         let plan = Int8Plan::new(cal);
         let pool = Rc::new(RefCell::new(ScratchPool::default()));
-        let exec = Int8 { plan: &plan, rgb0_input: None, pool: Rc::clone(&pool) };
+        let exec = Int8 {
+            plan: &plan,
+            rgb0_input: None,
+            pool: Rc::clone(&pool),
+            conv_step: Cell::new(0),
+            boundary_step: Cell::new(0),
+        };
 
         // Aliased conv (`bias` is a view into `weight`'s own storage).
         let mut conv = Init::new(&mut rng).conv(8, 8, 3, 1);
@@ -982,5 +832,62 @@ mod tests {
         let s1 = exec.qstem(&stem).unwrap();
         let s2 = exec.qstem(&stem).unwrap();
         assert!(Arc::ptr_eq(&s1, &s2), "second qstem call must hit cache");
+    }
+
+    /// Per-step `ScratchPool` conv and stem caches must invalidate immediately when a weight or bias tensor is
+    /// mutated in place (`storage_version` advances), never returning stale packed outputs.
+    #[test]
+    fn scratch_pool_step_cache_invalidates_on_in_place_weight_mutation() {
+        let mut rng = Rng::seed(123);
+        let cal = Calibration {
+            version: VERSION_V2,
+            method: Method::MinMax,
+            images: 1,
+            ranges: BTreeMap::new(),
+            channel_ranges: BTreeMap::new(),
+            u8_stem: true,
+            f32_convs: Vec::new(),
+            weights: None,
+        };
+        let plan = Int8Plan::new(cal);
+        let pool = Rc::new(RefCell::new(ScratchPool::default()));
+        let mut conv = Init::new(&mut rng).conv(8, 8, 1, 1);
+        conv.fuse_().unwrap();
+        let g = Grid::from_range(-1.0, 1.0);
+        let bg = Arc::new(BoundaryGrids::new(vec![g; 8]));
+
+        let run_once = || -> Vec<f32> {
+            let exec = Int8 {
+                plan: &plan,
+                rgb0_input: None,
+                pool: Rc::clone(&pool),
+                conv_step: Cell::new(0),
+                boundary_step: Cell::new(0),
+            };
+            let x = Tensor::full([1, 8, 4, 4], 0.5);
+            let act =
+                QActU8::from_f32(&pool, &x, GridOwner::Owned(Arc::clone(&bg)), 0, bg.hash, bg.max_scale)
+                    .unwrap();
+            let mut out = vec![0.0f32; 8 * 16];
+            exec.run_view("c", ConvView::from_cba(&conv), &[&act], None, QOut::F32 { data: &mut out })
+                .unwrap();
+            out
+        };
+
+        let y1 = run_once();
+        let y2 = run_once(); // hits ScratchPool step cache
+        assert_eq!(y1, y2);
+
+        // Mutate weight in place: storage_version bumps, so the next forward must re-pack.
+        conv.conv.weight.copy_from(&Tensor::full([8, 8, 1, 1], 0.0)).unwrap();
+        let y3 = run_once();
+        assert_ne!(y1, y3, "in-place weight mutation must invalidate per-step QConv cache");
+
+        // Mutate bias in place: storage_version bumps again.
+        if let Some(bias) = &conv.conv.bias {
+            bias.copy_from(&Tensor::full([8], 2.0)).unwrap();
+            let y4 = run_once();
+            assert_ne!(y3, y4, "in-place bias mutation must invalidate per-step QConv cache");
+        }
     }
 }

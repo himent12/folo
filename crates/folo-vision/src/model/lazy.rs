@@ -164,9 +164,10 @@ impl FoloModel {
     }
 
     /// Candidate-first prediction reading a pre-packed `[b, h, w]` `u32` `[R, G, B, 0]` canvas directly into the
-    /// int8 `u8` stem (zero `f32` image materialisation).
-    pub(crate) fn predict_candidates_rgb0_u8(
+    /// int8 `u8` stem using an already-validated [`super::quant::Int8Plan`] (zero `f32` image materialisation).
+    pub(crate) fn predict_candidates_rgb0_u8_with_plan(
         &self,
+        plan: &super::quant::Int8Plan,
         rgb0: &[u32],
         b: usize,
         h: usize,
@@ -179,9 +180,6 @@ impl FoloModel {
                     .into(),
             ));
         }
-        let plan = self.active_int8().ok_or_else(|| {
-            folo_nn::Error::Invalid("predict_candidates_rgb0_u8 requires an int8 plan".into())
-        })?;
         folo_core::cpu::in_pool(|| {
             let _g = no_grad();
             self.check_hw(b, h, w)?;
@@ -391,7 +389,14 @@ impl FoloModel {
                 .enumerate()
                 .map(|(i, v)| {
                     let rg = &rg[i * per..(i + 1) * per];
-                    let mut bins = vec![0f32; rm];
+                    let mut stack_bins = [0f32; 16];
+                    let mut heap_bins = Vec::new();
+                    let bins: &mut [f32] = if rm <= 16 {
+                        &mut stack_bins[..rm]
+                    } else {
+                        heap_bins.resize(rm, 0.0);
+                        &mut heap_bins
+                    };
                     let mut out = ImageCandidates {
                         cands: Vec::with_capacity(v.len()),
                         precisions: wants.side.then(|| Vec::with_capacity(v.len())),
@@ -402,7 +407,7 @@ impl FoloModel {
                     for &(j, class, score) in v {
                         let (j, k) = (j as usize, offset + j as usize);
                         let point = [(j % w) as f32 + 0.5, (j / w) as f32 + 0.5];
-                        let (bbox, p, bp, ent) = dfl_box(&mut bins, |r| rg[r * hw + j], point, st, wants);
+                        let (bbox, p, bp, ent) = dfl_box(bins, |r| rg[r * hw + j], point, st, wants);
                         out.cands.push(Candidate { anchor: k as u32, class, score, bbox });
                         out.precisions.iter_mut().zip(p).for_each(|(v, p)| v.push(p));
                         out.bin_precisions.iter_mut().zip(bp).for_each(|(v, p)| v.push(p));

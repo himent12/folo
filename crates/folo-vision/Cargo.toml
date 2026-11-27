@@ -96,3 +96,7 @@ harness = false
 [[bench]]
 name = "gpu_trainer"
 harness = false
+
+[[bench]]
+name = "sahi_tta"
+harness = false

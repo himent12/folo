@@ -379,11 +379,11 @@ impl Detector {
         }
     }
 
-    /// Whether CPU int8 inference with the direct `u8` stem is active.
-    pub(crate) fn int8_u8_stem_active(&self) -> bool {
+    /// Active int8 plan when CPU direct `u8` stem inference applies (validating the weight stamp once).
+    pub(crate) fn int8_u8_stem_plan(&self) -> Option<std::sync::Arc<quant::Int8Plan>> {
         match self {
-            Detector::V1(m) => m.int8_u8_stem_active(),
-            Detector::V2(m) => m.int8_u8_stem_active(),
+            Detector::V1(m) => m.int8_u8_stem_plan(),
+            Detector::V2(m) => m.int8_u8_stem_plan(),
         }
     }
 
