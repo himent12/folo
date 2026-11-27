@@ -31,13 +31,16 @@ pub type TileF32 = [[f32; NR]; MR];
 /// `rows[p] + col`.
 pub(crate) type QKernel = unsafe fn(usize, *const i32, *const *const u32, usize, &mut Tile);
 
-/// The kernel in use: AVX-VNNI, AVX-512 VNNI (256-bit VL), exact AVX2 (`vpmaddwd`), Wasm SIMD128
-/// (`i32x4_dot_i16x8`), or portable scalar.
+/// The kernel in use: 512-bit AVX-512 VNNI, AVX-VNNI, AVX-512 VNNI (256-bit VL), exact AVX2 (`vpmaddwd`),
+/// Wasm SIMD128 (`i32x4_dot_i16x8`), or portable scalar.
 pub(crate) fn kernel() -> QKernel {
     static K: OnceLock<QKernel> = OnceLock::new();
     *K.get_or_init(|| {
         #[cfg(target_arch = "x86_64")]
         {
+            if uses_avx512_vnni_zmm() {
+                return kernel_avx512vnni_zmm_entry as QKernel;
+            }
             if uses_avx_vnni() {
                 return kernel_vnni_entry as QKernel;
             }
@@ -56,11 +59,14 @@ pub(crate) fn kernel() -> QKernel {
     })
 }
 
-/// Human-readable name of the active int8 micro-kernel (`"AVX-VNNI"`, `"AVX-512 VNNI"`, `"AVX2"`,
-/// `"Wasm SIMD128"`, or `"portable"`).
+/// Human-readable name of the active int8 micro-kernel (`"AVX-512 VNNI (512-bit)"`, `"AVX-VNNI"`,
+/// `"AVX-512 VNNI"`, `"AVX2"`, `"Wasm SIMD128"`, or `"portable"`).
 pub fn kernel_name() -> &'static str {
     #[cfg(target_arch = "x86_64")]
     {
+        if uses_avx512_vnni_zmm() {
+            return "AVX-512 VNNI (512-bit)";
+        }
         if uses_avx_vnni() {
             return "AVX-VNNI";
         }
@@ -85,18 +91,34 @@ pub(crate) fn uses_wasm_simd() -> bool {
     *V.get_or_init(|| std::env::var_os("FOLO_Q8_SCALAR").is_none())
 }
 
-/// True when the int8 kernels run on hardware VNNI (`vpdpbusd` via AVX-VNNI or AVX-512 VNNI VL).
+/// True when the int8 kernels run on hardware VNNI (`vpdpbusd` via AVX-512 VNNI or AVX-VNNI).
 pub fn uses_vnni() -> bool {
     static V: OnceLock<bool> = OnceLock::new();
     *V.get_or_init(|| {
         #[cfg(target_arch = "x86_64")]
         {
-            uses_avx_vnni() || uses_avx512_vnni()
+            uses_avx512_vnni_zmm() || uses_avx_vnni() || uses_avx512_vnni()
         }
         #[cfg(not(target_arch = "x86_64"))]
         {
             false
         }
+    })
+}
+
+#[cfg(target_arch = "x86_64")]
+pub(super) fn uses_avx512_vnni_zmm() -> bool {
+    static V: OnceLock<bool> = OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var_os("FOLO_Q8_SCALAR").is_none()
+            && std::env::var_os("FOLO_Q8_NO_VNNI").is_none()
+            && std::env::var_os("FOLO_Q8_NO_AVX512").is_none()
+            && std::is_x86_feature_detected!("avx2")
+            && std::is_x86_feature_detected!("fma")
+            && std::is_x86_feature_detected!("avx512f")
+            && std::is_x86_feature_detected!("avx512bw")
+            && std::is_x86_feature_detected!("avx512vl")
+            && std::is_x86_feature_detected!("avx512vnni")
     })
 }
 
@@ -168,6 +190,18 @@ pub(crate) unsafe fn kernel_scalar(
 }
 
 #[cfg(target_arch = "x86_64")]
+unsafe fn kernel_avx512vnni_zmm_entry(
+    ks: usize,
+    a: *const i32,
+    rows: *const *const u32,
+    col: usize,
+    acc: &mut Tile,
+) {
+    // SAFETY: selected only after detecting avx2, fma, avx512f, avx512bw, avx512vl, and avx512vnni.
+    unsafe { super::vnni512::kernel_avx512vnni_zmm(ks, a, rows, col, acc) }
+}
+
+#[cfg(target_arch = "x86_64")]
 unsafe fn kernel_vnni_entry(ks: usize, a: *const i32, rows: *const *const u32, col: usize, acc: &mut Tile) {
     // SAFETY: selected only after detecting avx2 and avxvnni; the pointer contract is forwarded.
     unsafe { kernel_vnni(ks, a, rows, col, acc) }
@@ -191,27 +225,32 @@ unsafe fn kernel_avx2_entry(ks: usize, a: *const i32, rows: *const *const u32, c
     unsafe { kernel_avx2(ks, a, rows, col, acc) }
 }
 
-/// The AVX-VNNI kernel: 12 ymm accumulators, 3 B loads and 4 weight broadcasts per K step.
+/// The AVX-VNNI kernel: 12 ymm accumulators, 2× K-unrolled, 3 B loads and 4 weight broadcasts per K step.
 ///
 /// # Safety
 /// As [`kernel_scalar`], and the CPU supports AVX2 and AVX-VNNI.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,avxvnni")]
-unsafe fn kernel_vnni(ks: usize, a: *const i32, rows: *const *const u32, col: usize, acc: &mut Tile) {
+pub(crate) unsafe fn kernel_vnni(
+    ks: usize,
+    a: *const i32,
+    rows: *const *const u32,
+    col: usize,
+    acc: &mut Tile,
+) {
     use std::arch::x86_64::*;
     let z = _mm256_setzero_si256();
     let (mut c00, mut c01, mut c02) = (z, z, z);
     let (mut c10, mut c11, mut c12) = (z, z, z);
     let (mut c20, mut c21, mut c22) = (z, z, z);
     let (mut c30, mut c31, mut c32) = (z, z, z);
-    // SAFETY: the caller guarantees `ks · MR` words at `a` and `col + NR` words at every row.
-    unsafe {
-        for p in 0..ks {
-            let bp = (*rows.add(p)).add(col) as *const __m256i;
+    macro_rules! step {
+        ($p:expr) => {
+            let bp = (*rows.add($p)).add(col) as *const __m256i;
             let b0 = _mm256_loadu_si256(bp);
             let b1 = _mm256_loadu_si256(bp.add(1));
             let b2 = _mm256_loadu_si256(bp.add(2));
-            let ap = a.add(p * MR);
+            let ap = a.add(($p) * MR);
             let w0 = _mm256_set1_epi32(*ap);
             c00 = _mm256_dpbusd_avx_epi32(c00, b0, w0);
             c01 = _mm256_dpbusd_avx_epi32(c01, b1, w0);
@@ -228,6 +267,18 @@ unsafe fn kernel_vnni(ks: usize, a: *const i32, rows: *const *const u32, col: us
             c30 = _mm256_dpbusd_avx_epi32(c30, b0, w3);
             c31 = _mm256_dpbusd_avx_epi32(c31, b1, w3);
             c32 = _mm256_dpbusd_avx_epi32(c32, b2, w3);
+        };
+    }
+    // SAFETY: the caller guarantees `ks · MR` words at `a` and `col + NR` words at every row.
+    unsafe {
+        let mut p = 0;
+        while p + 2 <= ks {
+            step!(p);
+            step!(p + 1);
+            p += 2;
+        }
+        if p < ks {
+            step!(p);
         }
         let out = acc.as_mut_ptr() as *mut __m256i;
         for (i, v) in [c00, c01, c02, c10, c11, c12, c20, c21, c22, c30, c31, c32].into_iter().enumerate() {
@@ -237,27 +288,32 @@ unsafe fn kernel_vnni(ks: usize, a: *const i32, rows: *const *const u32, col: us
 }
 
 /// The AVX-512 VNNI VL 256-bit kernel (Zen 4/5, Ice Lake, Cascade Lake, Sapphire Rapids): identical integer
-/// arithmetic to [`kernel_vnni`] via EVEX `vpdpbusd` on ymm registers.
+/// arithmetic to [`kernel_vnni`] via 2× K-unrolled EVEX `vpdpbusd` on ymm registers.
 ///
 /// # Safety
 /// As [`kernel_scalar`], and the CPU supports AVX-512 VNNI and AVX-512 VL.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,avx512vnni,avx512vl")]
-unsafe fn kernel_avx512vnni(ks: usize, a: *const i32, rows: *const *const u32, col: usize, acc: &mut Tile) {
+pub(crate) unsafe fn kernel_avx512vnni(
+    ks: usize,
+    a: *const i32,
+    rows: *const *const u32,
+    col: usize,
+    acc: &mut Tile,
+) {
     use std::arch::x86_64::*;
     let z = _mm256_setzero_si256();
     let (mut c00, mut c01, mut c02) = (z, z, z);
     let (mut c10, mut c11, mut c12) = (z, z, z);
     let (mut c20, mut c21, mut c22) = (z, z, z);
     let (mut c30, mut c31, mut c32) = (z, z, z);
-    // SAFETY: the caller guarantees `ks · MR` words at `a` and `col + NR` words at every row.
-    unsafe {
-        for p in 0..ks {
-            let bp = (*rows.add(p)).add(col) as *const __m256i;
+    macro_rules! step {
+        ($p:expr) => {
+            let bp = (*rows.add($p)).add(col) as *const __m256i;
             let b0 = _mm256_loadu_si256(bp);
             let b1 = _mm256_loadu_si256(bp.add(1));
             let b2 = _mm256_loadu_si256(bp.add(2));
-            let ap = a.add(p * MR);
+            let ap = a.add(($p) * MR);
             let w0 = _mm256_set1_epi32(*ap);
             c00 = _mm256_dpbusd_epi32(c00, b0, w0);
             c01 = _mm256_dpbusd_epi32(c01, b1, w0);
@@ -274,6 +330,18 @@ unsafe fn kernel_avx512vnni(ks: usize, a: *const i32, rows: *const *const u32, c
             c30 = _mm256_dpbusd_epi32(c30, b0, w3);
             c31 = _mm256_dpbusd_epi32(c31, b1, w3);
             c32 = _mm256_dpbusd_epi32(c32, b2, w3);
+        };
+    }
+    // SAFETY: the caller guarantees `ks · MR` words at `a` and `col + NR` words at every row.
+    unsafe {
+        let mut p = 0;
+        while p + 2 <= ks {
+            step!(p);
+            step!(p + 1);
+            p += 2;
+        }
+        if p < ks {
+            step!(p);
         }
         let out = acc.as_mut_ptr() as *mut __m256i;
         for (i, v) in [c00, c01, c02, c10, c11, c12, c20, c21, c22, c30, c31, c32].into_iter().enumerate() {

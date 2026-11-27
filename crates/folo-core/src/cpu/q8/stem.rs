@@ -28,10 +28,10 @@ pub struct QStem {
     /// K steps: `k * k`.
     ks: usize,
     /// `[o / 4][ks][MR]` words of `[w_r, w_g, w_b, 0]` s8 weights.
-    a: Vec<i32>,
+    pub(super) a: Vec<i32>,
     /// Per output channel: weight scale with `1 / 255` folded in.
-    scale: Vec<f32>,
-    bias: Vec<f32>,
+    pub(super) scale: Vec<f32>,
+    pub(super) bias: Vec<f32>,
 }
 
 impl QStem {

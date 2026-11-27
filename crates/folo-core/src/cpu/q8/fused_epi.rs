@@ -5,7 +5,9 @@
 
 use std::arch::x86_64::*;
 
-use super::kernel::{MR, NR, Tile, TileF32, uses_avx_vnni, uses_avx2, uses_avx512_vnni};
+use super::kernel::{
+    MR, NR, Tile, TileF32, uses_avx_vnni, uses_avx2, uses_avx512_vnni, uses_avx512_vnni_zmm,
+};
 use super::silu::silu_q8_avx2_x2;
 
 /// Maximum number of concatenated input parts handled by [`BMode::Pointwise1x1Parts`] with zero heap
@@ -26,6 +28,7 @@ pub(super) enum BMode<'a> {
 /// Active fused x86-64 ISA tier (requires AVX2 + FMA for the fused epilogue).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum FusedIsa {
+    Avx512Vnni512,
     AvxVnni,
     Avx512Vnni,
     Avx2,
@@ -36,6 +39,9 @@ pub(super) enum FusedIsa {
 pub(super) fn active_isa() -> Option<FusedIsa> {
     if !uses_avx2() {
         return None;
+    }
+    if uses_avx512_vnni_zmm() {
+        return Some(FusedIsa::Avx512Vnni512);
     }
     if uses_avx_vnni() {
         return Some(FusedIsa::AvxVnni);

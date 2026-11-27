@@ -15,17 +15,17 @@ use super::{C4, Grid, recycle};
 /// One independently-quantised K-slice of a [`QConv`] (1 part for ordinary convs; `P` parts when concatenated
 /// branches have disparate activation scales and are decoupled to preserve full 7-bit weight precision).
 #[derive(Debug, Clone)]
-struct PartWeights {
+pub(super) struct PartWeights {
     /// K steps of this part: `c_p / 4 · k · k`.
-    ks: usize,
+    pub(super) ks: usize,
     /// Offset in `Rows::rows` where this part's K-rows start.
-    row_offset: usize,
+    pub(super) row_offset: usize,
     /// `[o / 4][ks][MR]` words of four s8 weights.
-    a: Vec<i32>,
+    pub(super) a: Vec<i32>,
     /// `Σ_{k ∈ part} q[o, k] · zero(k)` per output channel.
-    corr: Vec<i32>,
+    pub(super) corr: Vec<i32>,
     /// Per output channel weight scale for this part (input scales folded in).
-    scale: Vec<f32>,
+    pub(super) scale: Vec<f32>,
 }
 
 /// A conv's weights, quantised and packed for the int8 kernel: symmetric s8 per output channel after each
@@ -50,8 +50,8 @@ pub struct QConv {
     /// Total K steps: `c / 4 · k · k`.
     pub(super) ks: usize,
     /// One part normally, or `P` decoupled parts for multi-branch concats with mismatched activation scales.
-    parts: Vec<PartWeights>,
-    bias: Vec<f32>,
+    pub(super) parts: Vec<PartWeights>,
+    pub(super) bias: Vec<f32>,
 }
 
 /// Longest reduction (`c · k²`) of a [`QConv`]: `|Σ q · x|` and `|Σ q · zero|` are each at most
