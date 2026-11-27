@@ -41,6 +41,21 @@ export const inFilter = (img: LabelImage, show: Show) =>
       ? img.status === 'labeled' && !!img.reviewed === (show === 'reviewed')
       : img.status === show);
 
+/** Truthful empty-state copy for a status filter that matches zero images in a non-empty job. */
+export function emptyFilterDescription(
+  show: Show,
+  c: { pending: number; review: number; reviewed: number; failed: number },
+): string {
+  if (show === 'failed') return 'No images have failed.';
+  if (show === 'review') {
+    return c.reviewed > 0 ? 'Every labeled image is reviewed.' : 'No labeled images yet: run an agent or open an image to label it.';
+  }
+  if (show === 'reviewed') {
+    return 'No image is reviewed yet: open one and press Enter when its labels look right.';
+  }
+  return c.failed > 0 ? 'No images waiting to be labeled. Check Failed to retry the rest.' : 'Every image has labels.';
+}
+
 export interface ImagesAreaProps {
   jobId: string;
   classes: readonly string[];
@@ -292,15 +307,7 @@ export default function ImagesArea(props: ImagesAreaProps) {
           <EmptyState
             icon={ImageOff}
             title="No images here"
-            description={
-              props.show === 'failed'
-                ? 'The agent labeled every image it was given.'
-                : props.show === 'review'
-                  ? 'Every labeled image is reviewed.'
-                  : props.show === 'reviewed'
-                    ? 'No image is reviewed yet: open one and press Enter when its labels look right.'
-                    : 'Every image has labels.'
-            }
+            description={emptyFilterDescription(props.show, counts.get())}
             actions={() => <Button onclick={() => props.onshow('all')}>Show all</Button>}
           />
         </Panel>

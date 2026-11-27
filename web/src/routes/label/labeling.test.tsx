@@ -15,6 +15,7 @@ import LabelJobPage from '../LabelJob';
 import LabelJobs from '../LabelJobs';
 import AddImagesDialog from './AddImagesDialog';
 import DatasetDialog, { type DatasetDialogProps } from './DatasetDialog';
+import { emptyFilterDescription } from './ImagesArea';
 import JobDialog, { type JobDialogProps } from './JobDialog';
 import { whyNothingAdded, type Uploads } from './uploads';
 
@@ -467,6 +468,42 @@ describe('the job page', () => {
     await page('/datasets/label/lb_none');
     expect(text()).toMatch(/Labeling job not found/);
     expect(document.querySelector('a[href="#/datasets/label"]')).toBeTruthy();
+  });
+  it('keeps filter empty-state copy truthful on an idle unlabeled job and when failed images remain (R16)', async () => {
+    const job = (await hub.api.labelJobs())[0]!;
+    const imgs = (await hub.api.labelImages(job.id, { limit: 10 })).images.slice(0, 4).map((im) => ({
+      ...im,
+      status: 'pending' as const,
+      boxes: [],
+      reviewed: false,
+      error: null,
+    }));
+    vi.spyOn(hub.api, 'labelJob').mockResolvedValue({
+      ...job,
+      run: null,
+      counts: { ...job.counts, images: imgs.length, pending: imgs.length, labeled: 0, failed: 0, boxes: 0 },
+    });
+    vi.spyOn(hub.api, 'labelImages').mockResolvedValue({ images: imgs, total: imgs.length });
+
+    await page(`/datasets/label/${job.id}`);
+    const tab = (label: string) =>
+      [...document.querySelectorAll<HTMLButtonElement>('[aria-label="Filter images by status"] [role="radio"]')].find((b) =>
+        b.textContent?.startsWith(label),
+      )!;
+
+    tab('Failed').click();
+    flushSync();
+    expect(document.querySelector('.empty .desc')?.textContent).toBe('No images have failed.');
+    expect(text()).not.toMatch(/The agent labeled every image it was given/i);
+
+    tab('To review').click();
+    flushSync();
+    expect(document.querySelector('.empty .desc')?.textContent).toMatch(/No labeled images yet/);
+    expect(text()).not.toMatch(/Every labeled image is reviewed/i);
+
+    expect(emptyFilterDescription('review', { pending: 0, review: 0, reviewed: 3, failed: 0 })).toBe('Every labeled image is reviewed.');
+    expect(emptyFilterDescription('pending', { pending: 0, review: 2, reviewed: 0, failed: 1 })).toMatch(/Check Failed/);
+    expect(emptyFilterDescription('pending', { pending: 0, review: 2, reviewed: 2, failed: 0 })).toBe('Every image has labels.');
   });
 });
 
