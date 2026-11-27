@@ -11,6 +11,8 @@ export interface RailProps {
   resetButton: () => JSX.Element;
   /** What is drawn on the image (Labels, Scores, Ground truth); none before an image is in. */
   toggles: (() => JSX.Element) | null;
+  /** Optional A/B comparison summary shown above Detections in Compare mode. */
+  compareSummary?: (() => JSX.Element) | null;
   detections: () => JSX.Element;
   timing: () => JSX.Element;
   /** Where the last prediction ran ("server", "browser · WebGPU"), after the Timing heading. */
@@ -33,6 +35,14 @@ export default function Rail(props: RailProps) {
       {props.toggles ? (
         <section class="sec show" role="group" aria-label="Show on the image">
           {props.toggles}
+        </section>
+      ) : null}
+      {props.compareSummary ? (
+        <section class="sec" aria-labelledby="pg-compare-summary">
+          <div class="sec-head">
+            <h2 id="pg-compare-summary">A/B Summary</h2>
+          </div>
+          {props.compareSummary}
         </section>
       ) : null}
       <section class="sec det">{props.detections}</section>

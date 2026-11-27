@@ -8,7 +8,8 @@ import type { Prediction } from '$lib/api/types';
 import { router } from '$lib/router';
 import { toast } from '$lib/ui/toast';
 import { DEFAULTS } from './predict';
-import { findImage, fromUrl, keep, playgroundPath, restore, session, type FromUrl, type ImageRef } from './session';
+import type { CompareViewMode } from './compare';
+import { compareFromUrl, findImage, fromUrl, keep, playgroundPath, restore, session, type FromUrl, type ImageRef } from './session';
 import type { Source } from './source';
 
 /** How long the URL waits after the last change before it is written. */
@@ -25,6 +26,11 @@ export interface Kept {
   scores: Signal<boolean>;
   truth: Signal<boolean>;
   hidden: Signal<Set<number>>;
+  /** Optional Compare A/B state synced into the URL only when Compare is active. */
+  compare?: Signal<boolean>;
+  modelB?: () => string | null;
+  pickModelB?: (id: string) => void;
+  compareView?: Signal<CompareViewMode>;
   /** Sets a new image (clearing the result). */
   setSource: (s: Source) => void;
   /**
@@ -50,6 +56,12 @@ const sourceKey = (s: Source) => (s.kind === 'file' ? `file:${s.name}:${s.file.s
 export function keepSession(k: Kept): (model: string, s: Source, runOn: string) => boolean {
   const saved = session.get();
   const url = fromUrl(router.route.query);
+  const cmpUrl = compareFromUrl(router.route.query);
+  if (k.compare) {
+    if (cmpUrl.compare) k.compare.set(true);
+    if (cmpUrl.modelB && k.pickModelB) k.pickModelB(cmpUrl.modelB);
+    if (cmpUrl.view && k.compareView) k.compareView.set(cmpUrl.view);
+  }
   if (saved) {
     k.labels.set(saved.labels);
     k.scores.set(saved.scores);
@@ -121,8 +133,14 @@ export function keepSession(k: Kept): (model: string, s: Source, runOn: string) 
    * A URL changed while the page is open: what it names replaces what is shown. A threshold it leaves out is the
    * default (playgroundPath writes only the others); a model or image it leaves out stays.
    */
-  function apply(u: FromUrl, skipModel = false) {
+  function apply(u: FromUrl, q: URLSearchParams, skipModel = false) {
     if (!skipModel && u.model) k.pickModel(u.model);
+    if (k.compare) {
+      const c = compareFromUrl(q);
+      k.compare.set(c.compare);
+      if (c.modelB && k.pickModelB) k.pickModelB(c.modelB);
+      if (k.compareView) k.compareView.set(c.view ?? 'side-by-side');
+    }
     k.conf.set(u.conf ?? DEFAULTS.conf);
     k.iou.set(u.iou ?? DEFAULTS.iou);
     k.maxDet.set(u.maxDet ?? DEFAULTS.maxDet);
@@ -156,7 +174,7 @@ export function keepSession(k: Kept): (model: string, s: Source, runOn: string) 
     seen = qs;
     const own = `${r.path}${qs ? `?${qs}` : ''}` === wrote;
     wrote = null;
-    if (!own) untrack(() => apply(fromUrl(r.query), skipModel));
+    if (!own) untrack(() => apply(fromUrl(r.query), r.query, skipModel));
   }
   k.onModelUrl?.((id) => {
     // Apply any pending external route change first (followVanished can run before our route effect).
@@ -164,7 +182,17 @@ export function keepSession(k: Kept): (model: string, s: Source, runOn: string) 
     // Check router.location (not router.route) so a lazy destination chunk holding the displayed route is never cancelled.
     const loc = router.location;
     if (loc.name !== 'playground') return;
-    const path = playgroundPath({ model: id, source: k.source.peek(), imageRef: activeImageRef(true), conf: k.conf.peek(), iou: k.iou.peek(), maxDet: k.maxDet.peek() });
+    const path = playgroundPath({
+      model: id,
+      source: k.source.peek(),
+      imageRef: activeImageRef(true),
+      conf: k.conf.peek(),
+      iou: k.iou.peek(),
+      maxDet: k.maxDet.peek(),
+      compare: k.compare?.peek(),
+      modelB: k.modelB ? untrack(() => k.modelB!()) : null,
+      view: k.compareView?.peek(),
+    });
     const qs = String(loc.query);
     if (`${loc.path}${qs ? `?${qs}` : ''}` === path) return;
     wrote = path;
@@ -194,6 +222,7 @@ export function keepSession(k: Kept): (model: string, s: Source, runOn: string) 
   // Into the URL, once the changes stop for a moment; never after the page is left (including while a destination chunk loads).
   effect(() => {
     const liveLink = linking.get();
+    const cmpOn = k.compare ? k.compare.get() : false;
     const path = playgroundPath({
       model: k.model(),
       source: k.source.get(),
@@ -201,6 +230,9 @@ export function keepSession(k: Kept): (model: string, s: Source, runOn: string) 
       conf: k.conf.get(),
       iou: k.iou.get(),
       maxDet: k.maxDet.get(),
+      compare: cmpOn,
+      modelB: cmpOn && k.modelB ? k.modelB() : null,
+      view: cmpOn && k.compareView ? k.compareView.get() : undefined,
     });
     if (liveLink?.live()) return;
     const timer = setTimeout(

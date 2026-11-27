@@ -45,6 +45,8 @@ export interface ResultsPanelProps {
   selectedIdx: number | null;
   hover?: Det | null;
   picked?: Det | null;
+  onHover?: (b: Det | null) => void;
+  onPick?: (b: Det | null) => void;
   onrowkey: (e: KeyboardEvent, k: number) => void;
 }
 
@@ -54,6 +56,14 @@ export default function ResultsPanel(props: ResultsPanelProps) {
   const tbody = bindable(props, 'tbody') as Signal<HTMLTableSectionElement | undefined>;
   const hover = bindable(props, 'hover');
   const picked = bindable(props, 'picked');
+  const setHover = (b: Det | null) => {
+    hover.set(b);
+    props.onHover?.(b);
+  };
+  const setPicked = (b: Det | null) => {
+    picked.set(b);
+    props.onPick?.(b);
+  };
   /** The view shown: Classes is the rail's tab only (a panel under the image has its own Classes panel). */
   const view = () => (!props.rail && tab.get() === 'classes' ? 'detections' : tab.get());
   // Leaving the rail (the window narrowed below 1024 px) on Classes selects Detections, so the tab list always has its
@@ -291,11 +301,11 @@ export default function ResultsPanel(props: ResultsPanelProps) {
                           aria-label={`${b().name}, score ${score(b().score)}, ${px(b().x2 - b().x1)} by ${px(b().y2 - b().y1)} pixels`}
                           onpointerenter={(e) => {
                             // A tap is not a hover: on touch the selection alone marks the row.
-                            if (e.pointerType !== 'touch') hover.set(b());
+                            if (e.pointerType !== 'touch') setHover(b());
                           }}
-                          onpointerleave={() => hover.set(null)}
-                          onfocus={() => picked.set(b())}
-                          onclick={() => picked.set(b())}
+                          onpointerleave={() => setHover(null)}
+                          onfocus={() => setPicked(b())}
+                          onclick={() => setPicked(b())}
                           onkeydown={(e) => props.onrowkey(e, k())}
                         >
                           {props.rail ? null : <td class="r idx faint">{i() + 1}</td>}

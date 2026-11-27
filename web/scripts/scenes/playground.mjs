@@ -50,6 +50,26 @@ export const playgroundScenes = [
   // Tablet: the model and Run on in a toolbar row under the title, the rail a two-column block under the image.
   { name: 'playground-result', path: '/playground?model=m_hard_s', viewports: ['desktop', 'wide', 'laptop', 'tablet', 'mobile'], setup: playgroundResult },
   {
+    name: 'playground-compare-side',
+    path: '/playground?model=m_hard_s&compare=1&modelB=m_shapes_n',
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
+    setup: async (page) => {
+      await playgroundResult(page);
+      await until(page, '[data-compare-view="side-by-side"]');
+      await page.clock.runFor(500);
+    },
+  },
+  {
+    name: 'playground-compare-split',
+    path: '/playground?model=m_hard_s&compare=1&modelB=m_shapes_n&view=split',
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
+    setup: async (page) => {
+      await playgroundResult(page);
+      await until(page, '[data-compare-view="split"] .split-divider');
+      await page.clock.runFor(500);
+    },
+  },
+  {
     // A browser without WebGPU: the option is off and the header says why, and what is left.
     name: 'playground-no-webgpu',
     path: '/playground?model=m_hard_s',

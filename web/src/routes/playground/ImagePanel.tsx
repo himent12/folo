@@ -4,8 +4,6 @@
  * or popover (tablets). Beside the rail (`rail`, from 1024 px) there is no footer: the 40 px header holds the file,
  * the count shown and the time, and the rail the thresholds.
  */
-import FileUp from '$icons/file-up';
-import TriangleAlert from '$icons/triangle-alert';
 import ChevronUp from '$icons/chevron-up';
 import ChevronDown from '$icons/chevron-down';
 import ImageIcon from '$icons/image';
@@ -13,7 +11,7 @@ import ImageOff from '$icons/image-off';
 import Images from '$icons/images';
 import Upload from '$icons/upload';
 import X from '$icons/x';
-import { bindable, css, Key, Show, type Signal } from 'fw';
+import { bindable, css, Show, type Signal } from 'fw';
 import { hub } from '$lib/api/index';
 import type { Dataset, DatasetImage as Img, Model, Prediction } from '$lib/api/types';
 import { classColor } from '$lib/design/tokens';
@@ -23,11 +21,11 @@ import { ms, num } from '$lib/format';
 import SheetHandle from '$lib/ui/SheetHandle';
 import { sheetDrag } from '$lib/ui/sheetDrag';
 import Button from '$lib/ui/Button';
-import ErrorState from '$lib/ui/ErrorState';
 import Panel from '$lib/ui/Panel';
 import Segmented from '$lib/ui/Segmented';
 import Slider from '$lib/ui/Slider';
 import DropZone from './DropZone';
+import NoticeStrip from './NoticeStrip';
 import { BACKEND_NAME, DEFAULTS, px, score } from './predict';
 import { sourceImageKey, type Source } from './source';
 import Swatch from './Swatch';
@@ -109,6 +107,12 @@ export interface ImagePanelProps {
   resetButton: () => JSX.Element;
   /** The sheet's and the popover's settings. */
   moreBody: () => JSX.Element;
+  /** Optional Compare A/B stage replacing the single-model canvas when Compare mode is active. */
+  compareStage?: (() => JSX.Element) | null;
+  /** Compact comparison summary shown in the desktop viewer header when Compare mode is active. */
+  compareFacts?: { countA: number; countB: number; deltaText: string } | null;
+  /** Opens the local video frame / camera capture dialog. */
+  onCapture?: () => void;
 }
 
 const SOURCES: { value: Seg; label: string; icon: typeof ImageIcon }[] = [
@@ -142,88 +146,22 @@ export default function ImagePanel(props: ImagePanelProps) {
     moreOpen.set(false);
   }
 
-  // What went wrong and the ways out, in one block above the image, where the result would be, at every width: the
-  // image stays whole, and the failure and its recovery are in the first screen.
   const noticeStrip = () => (
-    <>
-      {props.notice ? (
-        <Key when={props.notice}>
-          <div class="notice cta-row" ref={noticeEl}>
-            {props.notice === 'file' ? (
-              <div class="need-file" class:bad={!!props.badFile} role="alert">
-                {/* A file that failed says so through its icon; the title stays ink (DESIGN_DIRECTION §2.6). */}
-                {props.badFile ? <TriangleAlert size={16} strokeWidth={1.75} aria-hidden="true" /> : <FileUp size={16} strokeWidth={1.75} aria-hidden="true" />}
-                <div class="nf-body">
-                  {props.badFile ? (
-                    <>
-                      <p class="n-title">
-                        {props.badFile.why ? `${props.badFile.name} could not be loaded` : `${props.badFile.name} is not a .folo weights file`}
-                      </p>
-                      <p class="nf-text">
-                        {props.badFile?.why ? <>{props.badFile?.why} </> : null}Choose {props.model?.name}'s <span class="mono">weights/best.folo</span> from its run's folder, or run it on the server.
-                      </p>
-                    </>
-                  ) : (
-                    <>
-                      <p class="n-title">This server cannot send model files yet</p>
-                      <p class="nf-text">
-                        To run {props.model?.name} in the browser, choose its <span class="mono">.folo</span> file (<span class="mono">weights/best.folo</span> in the run's folder), or run it on the server.
-                      </p>
-                    </>
-                  )}
-                  <div class="nf-actions cta-stack">
-                    <Button size="sm" variant="primary" icon={FileUp} onclick={props.chooseWeights}>
-                      Choose .folo file
-                    </Button>
-                    <Button size="sm" onclick={() => runOn.set('server')}>
-                      Run on the server
-                    </Button>
-                  </div>
-                </div>
-              </div>
-            ) : (
-              <ErrorState
-                error={props.error}
-                title="Prediction failed"
-                retry={() => retryTick.set((t) => t + 1)}
-                compact
-                hint={
-                  !props.oom
-                    ? undefined
-                    : props.browserOff
-                      ? props.smaller
-                        ? 'Use a smaller model.'
-                        : undefined
-                      : props.smaller
-                        ? 'Run it in this browser, or use a smaller model.'
-                        : 'Run it in this browser instead.'
-                }
-                actions={() => (
-                  <>
-                    {props.oom && !props.browserOff ? (
-                      <>
-                        <Button size="sm" variant="primary" onclick={() => runOn.set(props.localBackend)}>
-                          Run in this browser
-                        </Button>
-                        {props.smaller ? (
-                          <Button
-                            size="sm"
-                            title={`${props.smaller?.name} is ${props.smaller?.arch}: a smaller model of the same classes`}
-                            onclick={() => props.smaller && props.chooseModel(props.smaller.id)}
-                          >
-                            Use {props.smaller?.name}
-                          </Button>
-                        ) : null}
-                      </>
-                    ) : null}
-                  </>
-                )}
-              />
-            )}
-          </div>
-        </Key>
-      ) : null}
-    </>
+    <NoticeStrip
+      notice={props.notice}
+      bind:noticeEl={noticeEl}
+      badFile={props.badFile}
+      model={props.model}
+      chooseWeights={props.chooseWeights}
+      bind:runOn={runOn}
+      error={props.error}
+      bind:retryTick={retryTick}
+      oom={props.oom}
+      browserOff={props.browserOff}
+      smaller={props.smaller}
+      localBackend={props.localBackend}
+      chooseModel={props.chooseModel}
+    />
   );
 
   return (
@@ -254,7 +192,17 @@ export default function ImagePanel(props: ImagePanelProps) {
                 // hidden, the time the prediction took; or, with no result, which model failed where, or what it waits
                 // for. The thresholds are the rail's, the re-filter time its Timing section's.
                 <span class="vb-facts num" class:gives={!props.result && props.notice === 'error'}>
-                  {props.result ? (
+                  {props.compareFacts ? (
+                    <>
+                      <span class="fi">
+                        A <b>{props.compareFacts.countA}</b>
+                      </span>
+                      <span class="fi">
+                        B <b>{props.compareFacts.countB}</b>
+                      </span>
+                      <span class="fi">Δ {props.compareFacts.deltaText}</span>
+                    </>
+                  ) : props.result ? (
                     <>
                       <span class="fi">
                         <b>{props.rows.length}</b> shown of {num(props.pred?.boxes.length)}
@@ -294,13 +242,14 @@ export default function ImagePanel(props: ImagePanelProps) {
           ) : null}
         </div>
         {noticeStrip()}
-        <div class="stage" class:empty={!props.source} style={{ '--ar': props.dims ? `${props.dims.width} / ${props.dims.height}` : undefined }}>
+        <div class="stage" class:empty={!props.source} class:compare={!!props.compareStage} style={{ '--ar': props.dims ? `${props.dims.width} / ${props.dims.height}` : undefined }}>
           {!props.source ? (
             <DropZone
               dragging={props.dragging}
               samples={props.samples}
               onbrowse={() => props.browse()}
               onpick={() => pickerOpen.set(true)}
+              oncapture={props.onCapture}
               onsample={(ds, img) => props.setSource({ kind: 'dataset', ds, img })}
             />
           ) : props.dims ? (
@@ -315,6 +264,8 @@ export default function ImagePanel(props: ImagePanelProps) {
                     </Button>
                   ) : null}
                 </div>
+              ) : props.compareStage ? (
+                props.compareStage()
               ) : (
                 <ZoomStage resetKey={sourceImageKey(props.source)}>
                   <DetectionView
@@ -338,12 +289,12 @@ export default function ImagePanel(props: ImagePanelProps) {
               )}
               {/* A failed prediction: the image steps back and says, in its own frame, why it has no boxes (the notice
                   above has the cause and the ways out), so it never reads as "nothing found". */}
-              {props.notice === 'error' && !props.imageError ? (
+              {!props.compareStage && props.notice === 'error' && !props.imageError ? (
                 <div class="failed-veil">
                   <span>No boxes: the prediction failed</span>
                 </div>
               ) : null}
-              {props.predicting ? (
+              {!props.compareStage && props.predicting ? (
                 <>
                   <div class="scan" aria-hidden="true">
                     <span></span>
@@ -609,46 +560,6 @@ css`
     box-shadow: var(--shadow-md);
     font-size: var(--type-sm-size);
     color: var(--text-secondary);
-  }
-  /* A strip between the toolbar and the image: the image stays whole, the notice reads on the panel, not a photo. */
-  .notice {
-    padding: 0 var(--space-4);
-    border-bottom: 1px solid var(--line-subtle);
-  }
-  .need-file {
-    display: flex;
-    align-items: flex-start;
-    gap: var(--space-3);
-    padding: var(--space-3) 0;
-  }
-  .need-file > :global(svg) {
-    flex-shrink: 0;
-    margin-top: 2px;
-    color: var(--text-tertiary);
-  }
-  .need-file.bad > :global(svg) {
-    color: var(--danger-text);
-  }
-  .nf-body {
-    display: grid;
-    gap: 2px;
-    min-width: 0;
-  }
-  .n-title {
-    font-weight: var(--weight-medium);
-  }
-  .n-title:focus,
-  .notice :global(.title:focus) {
-    outline: none;
-  }
-  .nf-text {
-    color: var(--text-secondary);
-  }
-  .nf-actions {
-    display: flex;
-    flex-wrap: wrap;
-    gap: var(--space-2);
-    margin-top: var(--space-2);
   }
   .image-failed {
     position: absolute;
@@ -977,6 +888,12 @@ css`
       height: auto;
       aspect-ratio: var(--ar, 4 / 3);
       max-height: 70vh;
+    }
+    .stage.compare,
+    :global(.layout.fit) .stage.compare {
+      aspect-ratio: auto;
+      max-height: none;
+      height: 440px;
     }
     /* Full bleed: the image inset by the boxes' halo, so a box on its edge keeps its outer stroke on screen. */
     .stage:not(.empty) {

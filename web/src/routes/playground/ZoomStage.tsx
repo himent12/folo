@@ -10,78 +10,41 @@ import Plus from '$icons/plus';
 import { computed, css, effect, onCleanup, onWindow, signal, untrack } from 'fw';
 import Button from '$lib/ui/Button';
 import { tooltip } from '$lib/ui/tooltip';
+import { clampNormPan, clampPan, createZoomState, MAX_ZOOM, MIN_ZOOM, zoomToward, type ZoomState } from './zoomState';
+
+export { clampPan, createZoomState, MAX_ZOOM, MIN_ZOOM, zoomToward, type ZoomState };
 
 export interface ZoomStageProps {
   /** Changing this key resets zoom and pan back to Fit (e.g. when a new image is loaded). */
   resetKey: string | null;
+  /** Optional external zoom state shared across synchronized Compare A/B panes. */
+  zoom?: ZoomState;
+  /** Hide this pane's HUD when another synchronized pane (or wrapper) renders the shared HUD. */
+  hideHud?: boolean;
   children?: JSX.Element;
 }
 
-export const MIN_ZOOM = 1;
-export const MAX_ZOOM = 8;
 const ZOOM_STEP = 1.5;
 const DBLCLICK_ZOOM = 2;
 const CLICK_SLOP = 4;
 const CLIP_FALLBACK_MS = 220;
 
-/** Clamps a center-relative pan offset so the zoomed canvas never pulls away from the stage edge. */
-export function clampPan(offset: number, size: number, scale: number): number {
-  if (!Number.isFinite(offset) || !Number.isFinite(size) || !Number.isFinite(scale) || scale <= 1.001 || size <= 0) return 0;
-  const limit = (size * (scale - 1)) / 2;
-  return Math.max(-limit, Math.min(limit, offset));
-}
-
-/** Computes the next (scale, tx, ty) when zooming around a viewport-local point `(px, py)`. */
-export function zoomToward(
-  current: { z: number; tx: number; ty: number },
-  factor: number,
-  px: number,
-  py: number,
-  width: number,
-  height: number,
-): { z: number; tx: number; ty: number } {
-  const cz = Number.isFinite(current.z) && current.z > 0 ? Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, current.z)) : MIN_ZOOM;
-  if (!Number.isFinite(factor) || factor <= 0) {
-    return { z: cz, tx: clampPan(current.tx, width, cz), ty: clampPan(current.ty, height, cz) };
-  }
-  const nz = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, cz * factor));
-  if (nz <= 1.001) return { z: 1, tx: 0, ty: 0 };
-  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0 || !Number.isFinite(px) || !Number.isFinite(py)) {
-    return { z: nz, tx: 0, ty: 0 };
-  }
-  const curTx = clampPan(current.tx, width, cz);
-  const curTy = clampPan(current.ty, height, cz);
-  const dx = px - width / 2;
-  const dy = py - height / 2;
-  const ux = (dx - curTx) / cz;
-  const uy = (dy - curTy) / cz;
-  return {
-    z: nz,
-    tx: clampPan(dx - ux * nz, width, nz),
-    ty: clampPan(dy - uy * nz, height, nz),
-  };
-}
-
 export default function ZoomStage(props: ZoomStageProps) {
+  const state = props.zoom ?? createZoomState();
+  const { z, nx, ny, glide, clipping } = state;
   const viewport = signal<HTMLDivElement | undefined>(undefined);
   const hud = signal<HTMLDivElement | undefined>(undefined);
   const vw = signal(0);
   const vh = signal(0);
-  const z = signal(1);
-  const tx = signal(0);
-  const ty = signal(0);
-  const glide = signal(false);
   const panning = signal(false);
-  /** Keeps overflow clipped during the eased return transition back to Fit so scaled content never flashes outside. */
-  const clipping = signal(false);
 
   const zoomed = computed(() => z.get() > 1.001);
   const zoomLabel = computed(() => (zoomed.get() ? `${Math.round(z.get() * 100)}%` : 'Fit'));
   const canvasStyle = computed(() => {
     const scale = z.get();
     if (scale <= 1.001) return undefined;
-    const x = clampPan(tx.get(), vw.get(), scale);
-    const y = clampPan(ty.get(), vh.get(), scale);
+    const x = clampPan(nx.get() * vw.get(), vw.get(), scale);
+    const y = clampPan(ny.get() * vh.get(), vh.get(), scale);
     return { transform: `translate(${x}px, ${y}px) scale(${scale})` };
   });
 
@@ -223,8 +186,8 @@ export default function ZoomStage(props: ZoomStageProps) {
     }
     glide.set(eased);
     z.set(1);
-    tx.set(0);
-    ty.set(0);
+    nx.set(0);
+    ny.set(0);
     keepHudFocus('in');
   }
 
@@ -235,7 +198,11 @@ export default function ZoomStage(props: ZoomStageProps) {
     const ax = px ?? width / 2;
     const ay = py ?? height / 2;
     const next = zoomToward(
-      { z: scale, tx: clampPan(tx.peek(), width, scale), ty: clampPan(ty.peek(), height, scale) },
+      {
+        z: scale,
+        tx: clampPan(nx.peek() * width, width, scale),
+        ty: clampPan(ny.peek() * height, height, scale),
+      },
       factor,
       ax,
       ay,
@@ -254,8 +221,8 @@ export default function ZoomStage(props: ZoomStageProps) {
     }
     glide.set(eased);
     z.set(next.z);
-    tx.set(next.tx);
-    ty.set(next.ty);
+    nx.set(width > 0 ? clampNormPan(next.tx / width, next.z) : 0);
+    ny.set(height > 0 ? clampNormPan(next.ty / height, next.z) : 0);
     if (next.z <= 1.001) keepHudFocus('in');
     else if (next.z >= MAX_ZOOM - 0.001) keepHudFocus('out');
   }
@@ -270,8 +237,8 @@ export default function ZoomStage(props: ZoomStageProps) {
       if (r.height > 0) vh.set(r.height);
       const scale = z.peek();
       if (scale > 1.001) {
-        tx.set(clampPan(tx.peek(), vw.peek(), scale));
-        ty.set(clampPan(ty.peek(), vh.peek(), scale));
+        nx.set(clampNormPan(nx.peek(), scale));
+        ny.set(clampNormPan(ny.peek(), scale));
       }
     };
     sync();
@@ -335,15 +302,15 @@ export default function ZoomStage(props: ZoomStageProps) {
   function onpointerdown(e: PointerEvent) {
     clearCanceledPointer();
     if (drag || e.button !== 0 || z.peek() <= 1.001) return;
-    if (e.target instanceof Element && e.target.closest('.zoom-hud, button, a')) return;
+    if (e.target instanceof Element && e.target.closest('.zoom-hud, .split-divider, button, a')) return;
     const { width, height } = stageSize();
     const scale = z.peek();
     drag = {
       id: e.pointerId,
       x: e.clientX,
       y: e.clientY,
-      startTx: clampPan(tx.peek(), width, scale),
-      startTy: clampPan(ty.peek(), height, scale),
+      startTx: clampPan(nx.peek() * width, width, scale),
+      startTy: clampPan(ny.peek() * height, height, scale),
       moved: false,
       captured: false,
     };
@@ -378,12 +345,12 @@ export default function ZoomStage(props: ZoomStageProps) {
     }
     const { width, height } = stageSize();
     const scale = z.peek();
-    tx.set(clampPan(drag.startTx + dx, width, scale));
-    ty.set(clampPan(drag.startTy + dy, height, scale));
+    nx.set(width > 0 ? clampNormPan(clampPan(drag.startTx + dx, width, scale) / width, scale) : 0);
+    ny.set(height > 0 ? clampNormPan(clampPan(drag.startTy + dy, height, scale) / height, scale) : 0);
   }
 
   function ondblclick(e: MouseEvent) {
-    if (e.target instanceof Element && e.target.closest('.zoom-hud, button, a')) return;
+    if (e.target instanceof Element && e.target.closest('.zoom-hud, .split-divider, button, a')) return;
     if (z.peek() > 1.001) {
       reset(true);
       return;
@@ -417,51 +384,53 @@ export default function ZoomStage(props: ZoomStageProps) {
       <div class="zoom-canvas" class:glide={glide.get()} style={canvasStyle.get()} ontransitionend={oncanvastransitionend}>
         {props.children}
       </div>
-      <div class="zoom-hud" ref={hud} role="group" aria-label="Image zoom">
-        <span use:tooltip={'Zoom out'}>
-          <Button
-            size="sm"
-            variant="ghost"
-            icon={Minus}
-            data-zoom="out"
-            aria-label="Zoom out"
-            disabled={!zoomed.get()}
-            onclick={() => zoomAt(1 / ZOOM_STEP)}
-          />
-        </span>
-        <span class="zoom-tip" use:tooltip={zoomed.get() ? 'Reset zoom (double-click)' : 'Double-click image to zoom'}>
-          <button
-            type="button"
-            class="zoom-pct num"
-            disabled={!zoomed.get()}
-            aria-label={zoomed.get() ? `Zoom ${Math.round(z.get() * 100)}%, reset to fit` : 'Zoom 100%, fitted'}
-            onclick={() => reset(true)}
-          >
-            {zoomLabel.get()}
-          </button>
-        </span>
-        <span use:tooltip={'Zoom in'}>
-          <Button
-            size="sm"
-            variant="ghost"
-            icon={Plus}
-            data-zoom="in"
-            aria-label="Zoom in"
-            disabled={z.get() >= MAX_ZOOM - 0.001}
-            onclick={() => zoomAt(ZOOM_STEP)}
-          />
-        </span>
-        <span use:tooltip={'Reset zoom (double-click)'}>
-          <Button
-            size="sm"
-            variant="ghost"
-            icon={Maximize}
-            aria-label="Reset zoom"
-            disabled={!zoomed.get()}
-            onclick={() => reset(true)}
-          />
-        </span>
-      </div>
+      {props.hideHud ? null : (
+        <div class="zoom-hud" ref={hud} role="group" aria-label="Image zoom">
+          <span use:tooltip={'Zoom out'}>
+            <Button
+              size="sm"
+              variant="ghost"
+              icon={Minus}
+              data-zoom="out"
+              aria-label="Zoom out"
+              disabled={!zoomed.get()}
+              onclick={() => zoomAt(1 / ZOOM_STEP)}
+            />
+          </span>
+          <span class="zoom-tip" use:tooltip={zoomed.get() ? 'Reset zoom (double-click)' : 'Double-click image to zoom'}>
+            <button
+              type="button"
+              class="zoom-pct num"
+              disabled={!zoomed.get()}
+              aria-label={zoomed.get() ? `Zoom ${Math.round(z.get() * 100)}%, reset to fit` : 'Zoom 100%, fitted'}
+              onclick={() => reset(true)}
+            >
+              {zoomLabel.get()}
+            </button>
+          </span>
+          <span use:tooltip={'Zoom in'}>
+            <Button
+              size="sm"
+              variant="ghost"
+              icon={Plus}
+              data-zoom="in"
+              aria-label="Zoom in"
+              disabled={z.get() >= MAX_ZOOM - 0.001}
+              onclick={() => zoomAt(ZOOM_STEP)}
+            />
+          </span>
+          <span use:tooltip={'Reset zoom (double-click)'}>
+            <Button
+              size="sm"
+              variant="ghost"
+              icon={Maximize}
+              aria-label="Reset zoom"
+              disabled={!zoomed.get()}
+              onclick={() => reset(true)}
+            />
+          </span>
+        </div>
+      )}
     </div>
   );
 }
