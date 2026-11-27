@@ -5,12 +5,12 @@
 
 use std::collections::{HashMap, HashSet};
 
-use folo_core::cpu::q8::{PIXEL_SCALE, should_decouple_parts};
+use folo_core::cpu::q8::{PIXEL_SCALE, should_decouple_parts, silu_q8};
 use folo_core::{Tensor, TensorId};
 use folo_nn::{ConvBnAct, Forward, Result};
 
 use super::walk::{self, Exec};
-use super::{Calibration, QParam, int8_able, quantize_weights, stem_int8_able};
+use super::{Calibration, QParam, int8_able, quantize_weights, static_int8_able, stem_int8_able};
 use crate::model::FoloModel;
 
 /// A fake-quantised activation: its values (on the grid, or raw `f32` until an int8 consumer reads it) and its
@@ -225,7 +225,14 @@ impl<'a> FakeQuant<'a> {
             }
             Tensor::from_vec(rv, [n, oc_n, oh, ow])?
         };
-        Ok((conv.act.forward(&acc)?, false))
+        let out = if conv.act == folo_nn::Activation::Silu {
+            let d = acc.dims().to_vec();
+            let v: Vec<f32> = acc.to_vec::<f32>()?.into_iter().map(silu_q8).collect();
+            Tensor::from_vec(v, d)?
+        } else {
+            conv.act.forward(&acc)?
+        };
+        Ok((out, false))
     }
 }
 
@@ -273,20 +280,48 @@ fn quantized_folded_weight(
 impl Exec for FakeQuant<'_> {
     type A = Fq;
 
+    fn wants_f32(&self, name: &str, conv: &ConvBnAct) -> bool {
+        self.cal.is_f32(name) || !static_int8_able(conv)
+    }
+
     fn stem(&mut self, name: &str, conv: &ConvBnAct, x: &Tensor) -> Result<Fq> {
         let q = self.cal.param(name)?;
         let o = conv.conv.config().out_channels;
         let grids = self.cal.channel_params(name, o)?;
         if self.cal.u8_stem && !self.cal.is_f32(name) && stem_int8_able(conv, dims4(x)).is_some() {
+            // Compute in the exact integer-code domain `(u8_pixel * s8_weight).round_ties_even() * s_o + bias`
+            // followed by `silu_q8` (matching `q8::stem_u8`'s exact `i32` sums and epilogue).
             let xq_vec: Vec<f32> = x
                 .to_vec::<f32>()?
                 .into_iter()
-                .map(|v| (v * 255.0).clamp(0.0, 255.0).round_ties_even() * PIXEL_SCALE)
+                .map(|v| (v * 255.0).clamp(0.0, 255.0).round_ties_even())
                 .collect();
             let xq = Tensor::from_vec(xq_vec, x.dims().to_vec())?;
-            let w = fake_weights(&conv.conv.weight, &[PIXEL_SCALE; 3])?;
+            let orig_w = conv.conv.weight.to_vec::<f32>()?;
+            let taps = conv.conv.config().kernel * conv.conv.config().kernel;
+            let pixel_grids = [QParam { scale: PIXEL_SCALE, zero: 0 }; 3];
+            let (qw, sc) = quantized_folded_weight(&orig_w, o, 3, taps, 0, &pixel_grids)?;
+            let bias_v: Vec<f32> = match &conv.conv.bias {
+                Some(b) => b.to_vec::<f32>()?,
+                None => vec![0.0; o],
+            };
             let p = conv.conv.config().params();
-            let y = Tensor::conv2d_act_cat(&[&xq], &w, conv.conv.bias.as_ref(), &p, conv.act.unary_op())?;
+            let raw = Tensor::conv2d_act_cat(&[&xq], &qw, None, &p, None)?;
+            let (n, oc_n, oh, ow) = raw.dims4()?;
+            let hw = oh * ow;
+            let mut rv = raw.to_vec::<f32>()?;
+            let is_silu = conv.act == folo_nn::Activation::Silu;
+            for img in 0..n {
+                for oc in 0..oc_n {
+                    let (s, b) = (sc[oc], bias_v[oc]);
+                    let base = (img * oc_n + oc) * hw;
+                    for v in &mut rv[base..base + hw] {
+                        let y = v.round_ties_even().mul_add(s, b);
+                        *v = if is_silu { silu_q8(y) } else { y };
+                    }
+                }
+            }
+            let y = Tensor::from_vec(rv, [n, oc_n, oh, ow])?;
             let t = fake_quantize_per_channel(&y, &grids)?;
             Ok(self.wrap_u8(t, q, grids))
         } else {
@@ -317,6 +352,22 @@ impl Exec for FakeQuant<'_> {
             let t = fake_quantize_per_channel(&y, &grids)?;
             Ok(self.wrap_u8(t, q, grids))
         }
+    }
+
+    fn conv_f32_out(&mut self, name: &str, conv: &ConvBnAct, parts: &[&Fq], res: Option<&Fq>) -> Result<Fq> {
+        let (y, ran_f32) = self.run(name, conv, parts, res)?;
+        let q = self.cal.param(name)?;
+        let grids = self.cal.channel_params(name, y.dims()[1])?;
+        let y = match res {
+            Some(r) if ran_f32 => r.t.add(&y)?,
+            Some(r) => {
+                let rg = self.grids_of(r);
+                let rt = self.as_quantized_tensor(r, &rg)?;
+                rt.add(&y)?
+            }
+            None => y,
+        };
+        Ok(self.wrap_f32(y, q, grids))
     }
 
     fn conv_f32(&mut self, name: &str, conv: &ConvBnAct, x: &Fq) -> Result<Tensor> {

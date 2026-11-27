@@ -141,6 +141,21 @@ impl Calibration {
         }
         self
     }
+
+    /// Selects and appends sensitivity-ranked `f32_convs` under `policy` (folded/unfolded weight SQNR vs MAC
+    /// budget with residual bottleneck pairing, deduplicated).
+    pub fn with_sensitivity_f32(
+        mut self,
+        model: &FoloModel,
+        policy: super::SensitivityPolicy,
+    ) -> Result<Self> {
+        for name in super::select_f32_convs(model, &self, policy)? {
+            if !self.is_f32(&name) {
+                self.f32_convs.push(name);
+            }
+        }
+        Ok(self)
+    }
 }
 
 /// Sensitivity + cost-model default `f32_convs`: the P5 neck tail (`neck.out5.*`), which both has the lowest
@@ -468,8 +483,9 @@ where
 }
 
 /// [`calibrate`] on `images` images of `part` drawn at random by `seed` (all of them when it has fewer), letterboxed
-/// to `imgsz` as validation does, in batches of `batch` read by `workers` threads (`folo quantize`). Includes the
-/// P5-tail sensitivity `f32_convs` default (`neck.out5.*`). Returns the calibration and the number of images.
+/// to `imgsz` as validation does, in batches of `batch` read by `workers` threads (`folo quantize`). Applies the
+/// sensitivity-aware selective-`f32` policy ([`Calibration::with_sensitivity_f32`] with
+/// [`super::SensitivityPolicy::default`]). Returns the calibration and the number of images.
 pub fn calibrate_sample(
     model: &FoloModel,
     part: &folo_data::FileDataset,
@@ -496,7 +512,9 @@ pub fn calibrate_sample(
             Ok(Tensor::from_vec(std::mem::take(&mut b.images), b.shape)?)
         })
     };
-    Ok((calibrate(model, batches, method)?.with_p5_tail_f32(model), n))
+    let cal = calibrate(model, batches, method)?
+        .with_sensitivity_f32(model, super::SensitivityPolicy::default())?;
+    Ok((cal, n))
 }
 
 #[cfg(test)]
