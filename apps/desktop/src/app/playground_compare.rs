@@ -417,11 +417,22 @@ impl FoloApp {
             side_b.as_ref(),
         );
         let fname = export_filename(image_name, model_a_name, Some(model_b_name), "json");
-        let summary = format!(
-            "A {} · B {}",
-            cmp.count_a.map_or("—".to_string(), |n| n.to_string()),
-            cmp.count_b.map_or("—".to_string(), |n| n.to_string()),
-        );
+        let summary = if cmp.count_a.is_some() && cmp.count_b.is_some() {
+            format!(
+                "A {} · B {} · {} both, {} only A, {} only B",
+                cmp.count_a.unwrap_or(0),
+                cmp.count_b.unwrap_or(0),
+                cmp.shared_classes.len(),
+                cmp.only_a_classes.len(),
+                cmp.only_b_classes.len(),
+            )
+        } else {
+            format!(
+                "A {} · B {}",
+                cmp.count_a.map_or("—".to_string(), |n| n.to_string()),
+                cmp.count_b.map_or("—".to_string(), |n| n.to_string()),
+            )
+        };
         Some(json.map(|s| (s, fname, summary)))
     }
 
@@ -469,6 +480,8 @@ impl FoloApp {
                 return;
             }
         };
+        let title =
+            if self.play_compare.enabled { "Exported A/B compare JSON" } else { "Exported detections JSON" };
         let dir = export_default_dir();
         let rx = cx.prompt_for_new_path(&dir, Some(&suggested));
         cx.spawn(async move |this, cx| {
@@ -484,7 +497,7 @@ impl FoloApp {
                     let shown = display_path(&path.to_string_lossy());
                     this.toast_with(
                         Tone::Success,
-                        "Exported detections JSON",
+                        title,
                         Some(format!("{shown} · {summary}").into()),
                         Some(("Show in folder".into(), act(move |_, _, cx| cx.reveal_path(&reveal)))),
                         cx,
@@ -698,11 +711,11 @@ enum PngExportJob {
     },
 }
 
-pub(super) fn export_default_dir() -> PathBuf {
+pub(crate) fn export_default_dir() -> PathBuf {
     std::env::current_dir().unwrap_or_default()
 }
 
-pub(super) fn picked_save(
+pub(crate) fn picked_save(
     this: &folo_ui::WeakEntity<FoloApp>,
     answer: Result<anyhow::Result<Option<PathBuf>>, folo_ui::oneshot::Canceled>,
     cx: &mut folo_ui::AsyncApp,

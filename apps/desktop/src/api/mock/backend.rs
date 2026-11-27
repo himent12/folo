@@ -87,6 +87,7 @@ impl Backend for MockBackend {
         ];
         if self.benches.enabled {
             features.push(folo_api::FEATURE_VISION_BENCH.into());
+            features.push(FEATURE_BENCH_GENERATED_SOURCE.into());
             features.push(folo_api::FEATURE_AGENT_LABELING.into());
         }
         self.hold_point("system");
@@ -779,6 +780,10 @@ impl Backend for MockBackend {
     fn create_bench(&self, req: &CreateBench) -> ApiResult<Bench> {
         self.check()?;
         self.benches.create(req, &self.datasets, &self.models)
+    }
+    fn create_generated_bench(&self, req: &CreateGeneratedBench) -> ApiResult<Bench> {
+        self.check()?;
+        self.benches.create_generated(req, &self.datasets, &self.models)
     }
 
     fn update_bench(&self, id: &str, req: &UpdateBench) -> ApiResult<Bench> {

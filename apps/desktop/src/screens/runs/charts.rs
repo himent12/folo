@@ -24,18 +24,20 @@ const FIRST_CHART: &str = CHARTS[0];
 /// two front ends show the same smoothed loss.
 const LOSS_EMA: f32 = 0.98;
 
-/// User display toggles for the run charts.
+/// User display toggles for the run charts and checkpoint CLI quick-copy block.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RunChartOpts {
     /// Smooth the training loss curves with EMA (`LOSS_EMA`); `false` plots raw per-step loss.
     pub loss_smooth: bool,
     /// Use a logarithmic y-axis on Training loss; `false` uses a linear y-axis from 0.
     pub loss_log_y: bool,
+    /// Active command tab (`Validate` vs `Predict`) in the Run Detail Checkpoint CLI panel.
+    pub ckpt_cli_mode: super::export::CheckpointCliMode,
 }
 
 impl Default for RunChartOpts {
     fn default() -> Self {
-        Self { loss_smooth: true, loss_log_y: true }
+        Self { loss_smooth: true, loss_log_y: true, ckpt_cli_mode: super::export::CheckpointCliMode::Val }
     }
 }
 

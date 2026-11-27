@@ -83,11 +83,13 @@ impl LogFilterCache {
 
 impl FoloApp {
     /// The log panel. `beside`: it sits beside Config, so its scrollback takes the row's height
-    /// (at least its usual 372 px); stacked, it is 372 px tall.
+    /// (at least its usual 372 px, or 220 px when sharing the column with Checkpoint CLI); stacked,
+    /// it is 372 px tall.
     pub(super) fn logs_panel(
         &mut self,
         r: &Run,
         beside: bool,
+        with_ckpt_cli: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -214,7 +216,9 @@ impl FoloApp {
                                 cx.notify();
                             }))
                             .flex_1()
-                            .when(beside, |d| d.flex_basis(px(0.)).min_h(px(LOG_H)))
+                            .when(beside, |d| {
+                                d.flex_basis(px(0.)).min_h(px(if with_ckpt_cli { 220. } else { LOG_H }))
+                            })
                             .when(!beside, |d| d.h(px(LOG_H)))
                             .overflow_y_scroll()
                             .track_scroll(&self.log_scroll)

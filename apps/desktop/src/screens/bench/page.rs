@@ -3,7 +3,7 @@
 use folo_ui::prelude::FluentBuilder;
 use folo_ui::{AnyElement, Context, IntoElement, ParentElement, Styled, Window, div, px};
 
-use super::format::source_line;
+use super::format::{is_generated_bench, source_line};
 use crate::api::time;
 use crate::app::{FoloApp, act};
 use crate::bench::BenchTab;
@@ -52,6 +52,9 @@ impl FoloApp {
             .gap(px(10.))
             .min_w_0()
             .child(text(ty::XL, t.text_primary).min_w_0().ellipsis().child(b.name.clone()))
+            .when(is_generated_bench(&b), |d| {
+                d.child(div().flex_none().child(badge(&t, "Generated", Tone::Info)))
+            })
             .when(b.active, |d| {
                 d.child(div().flex_none().child(status_badge_of(
                     &t,

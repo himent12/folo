@@ -119,6 +119,7 @@ impl FoloApp {
     /// are asked for its classes by name).
     pub fn bench_contenders(&self, b: &Bench) -> Vec<Contender> {
         let dataset = match &b.source {
+            _ if super::create::is_generated_source(&b.source) => None,
             BenchSource::Dataset { dataset_id, .. } => Some(dataset_id.as_str()),
             BenchSource::LabelJob { .. } => None,
         };

@@ -8,7 +8,7 @@ use crate::api::*;
 use crate::synth::hash;
 
 use super::images::{count_class_boxes, resolve_source, sample_source};
-use super::{BenchFixture, MockBench, find_bench, find_bench_mut, snapshot_bench};
+use super::{BenchFixture, BenchImgSource, MockBench, find_bench, find_bench_mut, snapshot_bench};
 
 impl MockBench {
     pub fn list(&self, datasets: &[DatasetFixture], models: &[Model]) -> ApiResult<Vec<Bench>> {
@@ -83,6 +83,101 @@ impl MockBench {
                 BenchFixture {
                     bench,
                     images: sampled,
+                    entries: Vec::new(),
+                    loops: Vec::new(),
+                    loop_live: HashMap::new(),
+                },
+            );
+            Ok(out)
+        })
+    }
+
+    pub fn create_generated(
+        &self,
+        req: &CreateGeneratedBench,
+        datasets: &[DatasetFixture],
+        models: &[Model],
+    ) -> ApiResult<Bench> {
+        let name = req.name.trim();
+        if name.is_empty() || name.len() > 100 {
+            return Err(ApiError::new("invalid_body", "Benchmark name must be 1 to 100 characters."));
+        }
+        if req.description.len() > 4000 {
+            return Err(ApiError::new("invalid_body", "Description must be at most 4,000 characters."));
+        }
+        let spec = folo_bench::GeneratedSourceSpec {
+            images: req.source.images,
+            classes: req.source.classes.clone(),
+            imgsz: req.source.imgsz,
+            seed: req.source.seed,
+            vary_aspect: req.source.vary_aspect,
+        };
+        let cfg = spec.to_synthetic_config().map_err(|m| ApiError::new("invalid_body", m))?;
+        let plan = match &req.plan {
+            Some(p) => folo_bench::check_plan(p).map_err(|m| ApiError::new("invalid_body", m))?,
+            None => folo_bench::default_plan(),
+        };
+        let classes = cfg.class_names().to_vec();
+        let n_classes = classes.len() as u32;
+        let source_name = spec.display_name();
+        const ASPECTS: [(u32, u32); 5] = [(1, 1), (4, 3), (3, 4), (16, 9), (3, 2)];
+        let imgs: Vec<BenchImgSource> = (0..spec.images)
+            .map(|i| {
+                let (w, h) = if spec.vary_aspect {
+                    let (aw, ah) = ASPECTS[(i as usize) % ASPECTS.len()];
+                    if aw >= ah {
+                        (spec.imgsz, ((spec.imgsz * ah) / aw).max(32))
+                    } else {
+                        (((spec.imgsz * aw) / ah).max(32), spec.imgsz)
+                    }
+                } else {
+                    (spec.imgsz, spec.imgsz)
+                };
+                let s = spec.seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ (i as u64).wrapping_mul(0x517C_C1B7);
+                let scene = crate::synth::Scene::generate(s, n_classes, 6, i % 20 == 0);
+                BenchImgSource {
+                    id: (i + 1).to_string(),
+                    file: format!("{i:06}.jpg"),
+                    width: w,
+                    height: h,
+                    boxes: scene.boxes(w, h),
+                    seed: s,
+                    classes: n_classes,
+                    max_objects: 6,
+                    small: i % 20 == 0,
+                }
+            })
+            .collect();
+        self.with(datasets, models, |d, _, now| {
+            d.seq += 1;
+            let id = format!("bn_{:012x}", hash(&format!("bn-gen-{}-{name}", d.seq)) & 0xFFFF_FFFF_FFFF);
+            let class_boxes = count_class_boxes(&imgs, classes.len());
+            let total_boxes = class_boxes.iter().sum();
+            let fp = fingerprint_of(spec.seed, &classes, imgs.len(), &plan);
+            let bench = Bench {
+                id,
+                name: name.to_string(),
+                description: req.description.trim().to_string(),
+                classes,
+                created: time::format(now),
+                source: BenchSource::Dataset { dataset_id: GENERATED_BENCH_SOURCE_ID.into(), split: None },
+                source_name,
+                images: imgs.len() as u64,
+                boxes: total_boxes,
+                class_boxes,
+                plan,
+                seed: spec.seed,
+                fingerprint: fp,
+                entries: 0,
+                best: None,
+                active: false,
+            };
+            let out = bench.clone();
+            d.benches.insert(
+                0,
+                BenchFixture {
+                    bench,
+                    images: imgs,
                     entries: Vec::new(),
                     loops: Vec::new(),
                     loop_live: HashMap::new(),

@@ -10,7 +10,10 @@ use folo_ui::{
     StatefulInteractiveElement, Styled, Window, div, px, relative,
 };
 
-use super::compare::{CompareSideTab, format_latency_comparison, format_signed_delta, summarize_comparison};
+use super::compare::{
+    CompareClassFilter, CompareClassStatus, CompareSideTab, format_latency_comparison, format_signed_delta,
+    summarize_comparison,
+};
 use crate::api::{Model, PredictResponse};
 use crate::app::{FoloApp, act};
 use crate::controls::Btn;
@@ -126,6 +129,19 @@ impl FoloApp {
     ) -> AnyElement {
         let has_image = self.play_image.is_some();
         let has_json = self.has_play_export_json();
+        let compare_on = self.play_compare.enabled && self.store.models.ready().is_none_or(|m| !m.is_empty());
+        let json_label = if compare_on { "Export A/B JSON" } else { "Export JSON" };
+        let json_tip = if compare_on {
+            "Save A/B comparison, per-class diff (Both / Only A / Only B), and detections as JSON"
+        } else {
+            "Save detections payload as formatted JSON"
+        };
+        let copy_label = if compare_on { "Copy A/B JSON" } else { "Copy JSON" };
+        let copy_tip = if compare_on {
+            "Copy A/B comparison and per-class diff as JSON"
+        } else {
+            "Copy visible detections as JSON"
+        };
         let png_btn = if has_image {
             self.button(
                 "play-export-png",
@@ -153,19 +169,19 @@ impl FoloApp {
         let json_btn = if has_json {
             self.button(
                 "play-export-json",
-                "Export JSON",
+                json_label,
                 Btn::Secondary,
                 Some("icons/file-text.svg"),
                 window,
                 cx,
                 act(|this, _, cx| this.export_play_json(cx)),
             )
-            .tooltip(crate::controls::tip("Save detections payload as formatted JSON", None))
+            .tooltip(crate::controls::tip(json_tip, None))
             .into_any_element()
         } else {
             self.button_disabled(
                 "play-export-json",
-                "Export JSON",
+                json_label,
                 Btn::Secondary,
                 Some("icons/file-text.svg"),
                 "Run a prediction first",
@@ -177,19 +193,19 @@ impl FoloApp {
         let copy_btn = if has_json {
             self.button(
                 "play-copy-json",
-                "Copy JSON",
+                copy_label,
                 Btn::Secondary,
                 Some("icons/copy.svg"),
                 window,
                 cx,
                 act(|this, _, cx| this.copy_play_json(cx)),
             )
-            .tooltip(crate::controls::tip("Copy visible detections as JSON", None))
+            .tooltip(crate::controls::tip(copy_tip, None))
             .into_any_element()
         } else {
             self.button_disabled(
                 "play-copy-json",
-                "Copy JSON",
+                copy_label,
                 Btn::Secondary,
                 Some("icons/copy.svg"),
                 "Run a prediction first",
@@ -478,9 +494,15 @@ impl FoloApp {
             t.text_secondary
         };
 
-        let class_rows: Vec<AnyElement> = summary
-            .classes
-            .iter()
+        let active_filter = self.play_compare.class_filter;
+        let both_ready = summary.count_a.is_some() && summary.count_b.is_some();
+        let shown_classes = if both_ready {
+            summary.filtered_classes(active_filter)
+        } else {
+            summary.classes.iter().collect()
+        };
+        let class_rows: Vec<AnyElement> = shown_classes
+            .into_iter()
             .map(|row| {
                 let d_str = format_signed_delta(row.delta);
                 let d_color = match row.delta {
@@ -488,32 +510,82 @@ impl FoloApp {
                     Some(d) if d < 0 => t.warning_text,
                     _ => t.text_tertiary,
                 };
+                let status_pill = row.status.map(|st| {
+                    let tone = match st {
+                        CompareClassStatus::Both => Tone::Neutral,
+                        CompareClassStatus::OnlyA => Tone::Accent,
+                        CompareClassStatus::OnlyB => Tone::Info,
+                    };
+                    badge(t, st.label(), tone)
+                });
                 div()
-                    .h(px(26.))
-                    .px(px(8.))
+                    .h(px(28.))
+                    .px(px(6.))
                     .flex()
                     .items_center()
                     .gap(px(6.))
                     .child(class_swatch(t, row.color_class, 8.))
                     .child(text(ty::SM, t.text_primary).flex_1().min_w_0().ellipsis().child(row.name.clone()))
+                    .children(status_pill)
                     .child(
                         text(ty::SM, t.text_secondary)
                             .tnum()
-                            .w(px(28.))
+                            .w(px(24.))
                             .text_right()
                             .child(row.count_a.map_or("—".to_string(), |n| n.to_string())),
                     )
                     .child(
                         text(ty::SM, t.text_secondary)
                             .tnum()
-                            .w(px(28.))
+                            .w(px(24.))
                             .text_right()
                             .child(row.count_b.map_or("—".to_string(), |n| n.to_string())),
                     )
-                    .child(text(ty::SM, d_color).tnum().w(px(32.)).text_right().child(d_str))
+                    .child(text(ty::SM, d_color).tnum().w(px(28.)).text_right().child(d_str))
                     .into_any_element()
             })
             .collect();
+        let class_filter_bar = both_ready.then(|| {
+            let mut mk = |key: &'static str, label: String, bucket: CompareClassFilter| {
+                self.chip(
+                    key,
+                    label,
+                    active_filter == bucket,
+                    None,
+                    None,
+                    window,
+                    cx,
+                    act(move |this, _, cx| {
+                        this.play_compare.class_filter = bucket;
+                        cx.notify();
+                    }),
+                )
+            };
+            div()
+                .flex()
+                .flex_wrap()
+                .gap(px(5.))
+                .child(mk(
+                    "play-cmp-cls-all",
+                    format!("All {}", summary.classes.len()),
+                    CompareClassFilter::All,
+                ))
+                .child(mk(
+                    "play-cmp-cls-both",
+                    format!("Both {}", summary.shared_classes.len()),
+                    CompareClassFilter::Both,
+                ))
+                .child(mk(
+                    "play-cmp-cls-a",
+                    format!("Only A {}", summary.only_a_classes.len()),
+                    CompareClassFilter::OnlyA,
+                ))
+                .child(mk(
+                    "play-cmp-cls-b",
+                    format!("Only B {}", summary.only_b_classes.len()),
+                    CompareClassFilter::OnlyB,
+                ))
+        });
 
         let err_a = self.play_pred.error().cloned();
         let err_b = self.play_compare.pred_b.error().cloned();
@@ -622,17 +694,7 @@ impl FoloApp {
                             .child(text(ty::SM, t.text_tertiary).tnum().child(format!("B: {lat_b}"))),
                     ),
             )
-            .when(summary.count_a.is_some() && summary.count_b.is_some(), |d| {
-                d.child(
-                    div()
-                        .flex()
-                        .flex_wrap()
-                        .gap(px(6.))
-                        .child(badge(t, format!("Shared {}", summary.shared_classes.len()), Tone::Neutral))
-                        .child(badge(t, format!("A only {}", summary.only_a_classes.len()), Tone::Accent))
-                        .child(badge(t, format!("B only {}", summary.only_b_classes.len()), Tone::Info)),
-                )
-            })
+            .children(class_filter_bar)
             .child(
                 div()
                     .flex()
@@ -642,14 +704,14 @@ impl FoloApp {
                         d.child(
                             div()
                                 .h(px(20.))
-                                .px(px(8.))
+                                .px(px(6.))
                                 .flex()
                                 .items_center()
                                 .gap(px(6.))
                                 .child(th(t, "Class").flex_1())
-                                .child(th(t, "A").w(px(28.)).text_right())
-                                .child(th(t, "B").w(px(28.)).text_right())
-                                .child(th(t, "Δ").w(px(32.)).text_right()),
+                                .child(th(t, "A").w(px(24.)).text_right())
+                                .child(th(t, "B").w(px(24.)).text_right())
+                                .child(th(t, "Δ").w(px(28.)).text_right()),
                         )
                     })
                     .children(class_rows)
@@ -660,7 +722,21 @@ impl FoloApp {
                             "No detections above the confidence threshold on either model."
                         };
                         d.child(text(ty::SM, t.text_tertiary).whitespace_normal().px(px(4.)).child(msg))
-                    }),
+                    })
+                    .when(
+                        !summary.classes.is_empty()
+                            && both_ready
+                            && summary.filtered_classes(active_filter).is_empty(),
+                        |d| {
+                            let msg = match active_filter {
+                                CompareClassFilter::Both => "No classes detected by both models.",
+                                CompareClassFilter::OnlyA => "No classes detected only by Model A.",
+                                CompareClassFilter::OnlyB => "No classes detected only by Model B.",
+                                CompareClassFilter::All => "No classes detected.",
+                            };
+                            d.child(text(ty::SM, t.text_tertiary).whitespace_normal().px(px(4.)).child(msg))
+                        },
+                    ),
             )
             .into_any_element()
     }

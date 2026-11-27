@@ -7,6 +7,7 @@ pub(crate) mod compare_data;
 mod compare_table;
 mod config;
 mod detail;
+pub(crate) mod export;
 mod list;
 mod logs;
 mod per_class;
@@ -19,6 +20,7 @@ pub(crate) use compare::compare_legend_scope;
 pub(crate) use compare_data::RunCompareState;
 #[cfg(test)]
 pub(crate) use compare_table::compare_best_badge_label;
+pub(crate) use export::CheckpointCliMode;
 #[cfg(test)]
 pub(crate) use list::filter_runs;
 pub(crate) use logs::LogFilterCache;
