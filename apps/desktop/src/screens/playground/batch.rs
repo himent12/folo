@@ -10,7 +10,7 @@ use folo_ui::{
     StatefulInteractiveElement, Styled, Window, div, px,
 };
 
-use super::thresholds::{filter_detections_with_per_class, min_active_conf};
+use super::thresholds::{filter_detections_with_per_class, thresholds_match};
 use crate::api::{ApiError, ApiResult, PredictResponse};
 use crate::app::{FoloApp, act};
 use crate::controls::Btn;
@@ -77,6 +77,7 @@ pub struct BatchItemResult {
     pub iou_bits: u32,
     pub target: Option<crate::local::Target>,
     pub floor: f32,
+    pub per_class_conf: BTreeMap<u32, f32>,
     /// Content hash of file bytes used for inference (`None` for server dataset images).
     pub content_hash: Option<u64>,
 }
@@ -89,12 +90,13 @@ impl BatchItemResult {
         iou: f32,
         target: Option<crate::local::Target>,
         conf: f32,
+        per_class: &BTreeMap<u32, f32>,
         e2e: bool,
     ) -> bool {
         self.model_id == model_id
             && self.target == target
             && (e2e || self.iou_bits == iou.to_bits())
-            && conf >= self.floor - 1e-6
+            && thresholds_match(&self.per_class_conf, self.floor, conf, per_class)
     }
 }
 
@@ -258,11 +260,12 @@ impl PlayBatchState {
         }
     }
 
-    /// Marks any completed item whose fetched confidence floor is above `conf` back to `Pending`.
-    pub fn invalidate_below_conf(&mut self, conf: f32) {
+    /// Marks any completed item whose fetched confidence floor or per-class map no longer matches
+    /// `(conf, per_class)` back to `Pending`.
+    pub fn invalidate_for_thresholds(&mut self, conf: f32, per_class: &BTreeMap<u32, f32>) {
         for item in &mut self.items {
             if let BatchItemStatus::Done(res) = &item.status
-                && conf < res.floor - 1e-6
+                && !thresholds_match(&res.per_class_conf, res.floor, conf, per_class)
             {
                 item.status = BatchItemStatus::Pending;
             }
@@ -270,6 +273,7 @@ impl PlayBatchState {
     }
 
     /// Returns the fresh `BatchItemResult` for item `idx` if it matches current Playground params.
+    #[allow(clippy::too_many_arguments)]
     pub fn fresh_result(
         &self,
         idx: usize,
@@ -277,11 +281,16 @@ impl PlayBatchState {
         iou: f32,
         target: Option<crate::local::Target>,
         conf: f32,
+        per_class: &BTreeMap<u32, f32>,
         e2e: bool,
     ) -> Option<&BatchItemResult> {
         let item = self.items.get(idx)?;
         match &item.status {
-            BatchItemStatus::Done(res) if res.matches_current(model_id, iou, target, conf, e2e) => Some(res),
+            BatchItemStatus::Done(res)
+                if res.matches_current(model_id, iou, target, conf, per_class, e2e) =>
+            {
+                Some(res)
+            }
             _ => None,
         }
     }
@@ -298,14 +307,13 @@ impl PlayBatchState {
         class_filter: Option<u32>,
         e2e: bool,
     ) -> BatchSummary {
-        let min_conf = min_active_conf(conf, per_class);
         let mut s = BatchSummary { total: self.items.len(), ..Default::default() };
         for item in &self.items {
             match &item.status {
                 BatchItemStatus::Running => s.running += 1,
                 BatchItemStatus::Failed(_) => s.failed += 1,
                 BatchItemStatus::Done(res) => {
-                    if model_id.is_some_and(|m| res.matches_current(m, iou, target, min_conf, e2e)) {
+                    if model_id.is_some_and(|m| res.matches_current(m, iou, target, conf, per_class, e2e)) {
                         s.done += 1;
                         s.total_detections +=
                             filter_detections_with_per_class(&res.pred.boxes, conf, per_class, class_filter)
@@ -644,9 +652,15 @@ impl FoloApp {
                             (t.danger_solid, "!".to_string(), format!("Failed: {err}"))
                         }
                         BatchItemStatus::Done(res) => {
-                            let min_conf = self.play_min_conf();
                             let fresh = model_id.as_deref().is_some_and(|m| {
-                                res.matches_current(m, self.play_iou, self.play_target, min_conf, e2e)
+                                res.matches_current(
+                                    m,
+                                    self.play_iou,
+                                    self.play_target,
+                                    self.play_conf,
+                                    &self.play_thresholds.per_class,
+                                    e2e,
+                                )
                             });
                             if fresh {
                                 let n = filter_detections_with_per_class(
@@ -805,6 +819,7 @@ mod tests {
             iou_bits: iou.to_bits(),
             target: None,
             floor,
+            per_class_conf: BTreeMap::new(),
             content_hash: None,
         }
     }
@@ -848,12 +863,18 @@ mod tests {
                 ScoredBox { class: 1, name: "square".into(), score: 0.2, x1: 60., y1: 10., x2: 90., y2: 40. },
             ],
         );
-        assert!(res.matches_current("m_1", 0.7, None, 0.25, false));
-        assert!(!res.matches_current("m_2", 0.7, None, 0.25, false));
-        assert!(!res.matches_current("m_1", 0.5, None, 0.25, false));
-        assert!(res.matches_current("m_1", 0.5, None, 0.25, true), "e2e ignores IoU");
-        assert!(!res.matches_current("m_1", 0.7, Some(crate::local::Target::Cpu), 0.25, false));
-        assert!(!res.matches_current("m_1", 0.7, None, 0.02, false), "below fetched floor");
+        let empty = BTreeMap::new();
+        assert!(res.matches_current("m_1", 0.7, None, 0.25, &empty, false));
+        assert!(!res.matches_current("m_2", 0.7, None, 0.25, &empty, false));
+        assert!(!res.matches_current("m_1", 0.5, None, 0.25, &empty, false));
+        assert!(res.matches_current("m_1", 0.5, None, 0.25, &empty, true), "e2e ignores IoU");
+        assert!(!res.matches_current("m_1", 0.7, Some(crate::local::Target::Cpu), 0.25, &empty, false));
+        assert!(!res.matches_current("m_1", 0.7, None, 0.02, &empty, false), "below fetched floor");
+        let ov = BTreeMap::from([(0u32, 0.8f32)]);
+        assert!(
+            !res.matches_current("m_1", 0.7, None, 0.25, &ov, false),
+            "per-class overrides invalidate scalar cache"
+        );
     }
 
     #[test]

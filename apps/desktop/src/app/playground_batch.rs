@@ -617,7 +617,15 @@ impl FoloApp {
         let e2e = self.play_shown_model().is_some_and(|m| self.model_e2e(m));
         let cached = self.play_model.as_deref().and_then(|m| {
             self.play_batch
-                .fresh_result(idx, m, self.play_iou, self.play_target, self.play_min_conf(), e2e)
+                .fresh_result(
+                    idx,
+                    m,
+                    self.play_iou,
+                    self.play_target,
+                    self.play_conf,
+                    &self.play_thresholds.per_class,
+                    e2e,
+                )
                 .filter(|res| res.content_hash == img_hash)
                 .cloned()
         });
@@ -660,6 +668,7 @@ impl FoloApp {
                     iou_bits: meta.iou_bits,
                     target: meta.target,
                     floor: meta.floor,
+                    per_class_conf: meta.per_class_conf.clone(),
                     content_hash,
                 });
             }
@@ -698,10 +707,17 @@ impl FoloApp {
     }
 
     fn next_pending_batch_index(&self, from: usize, model_id: &str, e2e: bool) -> Option<usize> {
-        let min_conf = self.play_min_conf();
         (from..self.play_batch.items.len()).find(|&i| {
             self.play_batch
-                .fresh_result(i, model_id, self.play_iou, self.play_target, min_conf, e2e)
+                .fresh_result(
+                    i,
+                    model_id,
+                    self.play_iou,
+                    self.play_target,
+                    self.play_conf,
+                    &self.play_thresholds.per_class,
+                    e2e,
+                )
                 .is_none()
         })
     }
@@ -721,7 +737,9 @@ impl FoloApp {
         item.status = BatchItemStatus::Running;
         let source = item.source.clone();
         let name = item.name.to_string();
-        let floor = self.play_min_conf().min(PLAY_CONF_FLOOR);
+        let per_class = self.play_thresholds.per_class.clone();
+        let has_overrides = !per_class.is_empty();
+        let floor = if has_overrides { self.play_conf } else { self.play_conf.min(PLAY_CONF_FLOOR) };
         let iou = self.play_iou;
         let iou_bits = iou.to_bits();
         let target = self.play_target;
@@ -770,8 +788,15 @@ impl FoloApp {
                         }
                     }
                 };
-                let req =
-                    PredictRequest { model_id: model_req.clone(), input, conf: floor, iou, max_det: 300 };
+                let req = PredictRequest {
+                    model_id: model_req.clone(),
+                    input,
+                    conf: floor,
+                    iou,
+                    max_det: 300,
+                    per_class_conf: has_overrides.then(|| per_class.clone()),
+                    conf_inclusive: has_overrides,
+                };
                 let mut pred = match target {
                     Some(t) => crate::local::predict(api, &req, t, local_gen, &ticket)?,
                     None => api.predict(&req)?,
@@ -790,6 +815,7 @@ impl FoloApp {
                     iou_bits,
                     target,
                     floor,
+                    per_class_conf: per_class,
                     content_hash,
                 })
             },
@@ -832,11 +858,13 @@ impl FoloApp {
                         iou_bits: res.iou_bits,
                         target: res.target,
                         floor: res.floor,
+                        per_class_conf: res.per_class_conf.clone(),
                     };
                     self.play_compare.pred_a_meta = Some(meta);
                     self.play_pred = Load::Ready(res.pred.clone());
                     self.play_pred_for = Some((self.play_image_gen, res.model_id.clone()));
                     self.play_fetched_floor = res.floor;
+                    self.play_fetched_per_class = res.per_class_conf.clone();
                     self.clear_play_hover();
                 }
                 self.play_batch.items[idx].status = BatchItemStatus::Done(res);

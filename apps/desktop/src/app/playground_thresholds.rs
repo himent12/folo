@@ -7,8 +7,8 @@ use folo_ui::{Context, Window};
 
 use crate::screens::playground::{
     MAX_THRESHOLDS_JSON_BYTES, calibration_to_overrides, export_calibration_json, export_filename,
-    export_thresholds_json, fmt_threshold, map_per_class_to_classes, min_active_conf, parse_thresholds_json,
-    round_conf, write_export_bytes,
+    export_thresholds_json, fmt_threshold, map_per_class_to_classes, parse_thresholds_json, round_conf,
+    thresholds_match, write_export_bytes,
 };
 use crate::store::Load;
 use crate::ui::*;
@@ -18,11 +18,6 @@ use super::playground_compare::{export_default_dir, picked_save};
 use super::{FoloApp, Route, act};
 
 impl FoloApp {
-    /// Lowest active confidence threshold for Model A (global `play_conf` or any per-class override).
-    pub(crate) fn play_min_conf(&self) -> f32 {
-        min_active_conf(self.play_conf, &self.play_thresholds.per_class)
-    }
-
     /// Model B's effective per-class confidence overrides mapped from Model A's class list by name.
     pub(crate) fn play_per_class_b(&self) -> BTreeMap<u32, f32> {
         if self.play_thresholds.per_class.is_empty() {
@@ -33,11 +28,6 @@ impl FoloApp {
         map_per_class_to_classes(&self.play_thresholds.per_class, from, to)
     }
 
-    /// Lowest active confidence threshold for Model B (global `play_conf` or any mapped override).
-    pub(crate) fn play_min_conf_b(&self) -> f32 {
-        min_active_conf(self.play_conf, &self.play_per_class_b())
-    }
-
     /// Remaps `play_thresholds.per_class` cleanly when Model A switches from `from_classes` to
     /// `to_model_id` so stale overrides never silently leak across incompatible class lists.
     pub(crate) fn remap_play_thresholds_for_model(
@@ -45,6 +35,7 @@ impl FoloApp {
         from_classes: Option<Vec<String>>,
         to_model_id: Option<&str>,
     ) {
+        self.play_thresh_import_seq += 1;
         self.play_thresholds.clear_feedback();
         if self.play_thresholds.per_class.is_empty() {
             return;
@@ -59,20 +50,31 @@ impl FoloApp {
         };
     }
 
-    /// Reconciles hover, batch QA, and confidence fetch floors after any per-class threshold edit.
+    /// Reconciles hover, batch QA, and threshold cache state after any per-class threshold edit.
     fn after_play_thresholds_changed(&mut self, cx: &mut Context<Self>) {
-        let min_a = self.play_min_conf();
-        let min_b = self.play_min_conf_b();
+        let per_b = self.play_per_class_b();
         self.cancel_play_batch();
-        self.play_batch.invalidate_below_conf(min_a);
+        self.play_batch.invalidate_for_thresholds(self.play_conf, &self.play_thresholds.per_class);
         self.clear_play_hover();
         self.play_compare.clear_hover();
         let switched = self.reconcile_play_batch_active(cx);
         if !switched {
-            if min_a < self.play_fetched_floor - 1e-6 {
+            if !thresholds_match(
+                &self.play_fetched_per_class,
+                self.play_fetched_floor,
+                self.play_conf,
+                &self.play_thresholds.per_class,
+            ) {
                 self.run_predict(cx);
             }
-            if self.play_compare.enabled && min_b < self.play_compare.fetched_floor_b - 1e-6 {
+            if self.play_compare.enabled
+                && !thresholds_match(
+                    &self.play_compare.fetched_per_class_b,
+                    self.play_compare.fetched_floor_b,
+                    self.play_conf,
+                    &per_b,
+                )
+            {
                 self.run_predict_b(cx);
             }
         }
@@ -116,6 +118,7 @@ impl FoloApp {
 
     /// Parses and applies `ThresholdCalibration` or `{ class: conf }` JSON into Playground.
     pub fn apply_play_thresholds_json(&mut self, raw: &str, cx: &mut Context<Self>) -> bool {
+        self.play_thresh_import_seq += 1;
         let classes: Vec<String> = self.play_shown_model().map(|m| m.classes.clone()).unwrap_or_default();
         match parse_thresholds_json(raw, &classes) {
             Ok(parsed) => {
@@ -153,6 +156,10 @@ impl FoloApp {
 
     /// Prompts for a `.json` threshold file on disk and imports it into Playground.
     pub fn pick_play_thresholds_file(&mut self, cx: &mut Context<Self>) {
+        self.play_thresh_import_seq += 1;
+        let seq = self.play_thresh_import_seq;
+        let backend_gen = self.backend_gen;
+        let active_model = self.play_model.clone();
         let rx = cx.prompt_for_paths(folo_ui::PathPromptOptions {
             files: true,
             directories: false,
@@ -177,14 +184,22 @@ impl FoloApp {
                         .map_err(|e| format!("Could not read {}: {e}", path.display()))
                 })
                 .await;
-            this.update(cx, |this, cx| match read {
-                Ok(text) => {
-                    this.apply_play_thresholds_json(&text, cx);
+            this.update(cx, |this, cx| {
+                if this.play_thresh_import_seq != seq
+                    || this.backend_gen != backend_gen
+                    || this.play_model != active_model
+                {
+                    return;
                 }
-                Err(msg) => {
-                    this.play_thresholds.import_error = Some(msg);
-                    this.play_thresholds.import_note = None;
-                    cx.notify();
+                match read {
+                    Ok(text) => {
+                        this.apply_play_thresholds_json(&text, cx);
+                    }
+                    Err(msg) => {
+                        this.play_thresholds.import_error = Some(msg);
+                        this.play_thresholds.import_note = None;
+                        cx.notify();
+                    }
                 }
             })
             .ok();
@@ -273,51 +288,67 @@ impl FoloApp {
     ) {
         self.play_pred = Load::Idle;
         self.navigate(Route::Playground, window, cx);
-        self.pick_play_model(model_id.clone(), cx);
-        if !apply_calibrated {
-            return;
-        }
-        let classes = self.store.model(&model_id).map(|m| m.classes.clone()).unwrap_or_default();
-        if let Some(cal) = self.store.calibrations.get(&model_id).and_then(|l| l.ready()).cloned() {
-            let (global, per_class) = calibration_to_overrides(&cal, &classes);
-            if let Some(g) = global {
-                self.play_conf = g;
+        self.select_play_model(model_id.clone());
+        if apply_calibrated {
+            let classes = self.store.model(&model_id).map(|m| m.classes.clone()).unwrap_or_default();
+            if let Some(cal) = self
+                .store
+                .calibrations
+                .get(&model_id)
+                .and_then(|l| l.ready())
+                .filter(|c| !c.is_empty())
+                .cloned()
+            {
+                let (global, per_class) = calibration_to_overrides(&cal, &classes);
+                if let Some(g) = global {
+                    self.play_conf = g;
+                }
+                self.play_thresholds.per_class = per_class;
+                self.play_thresholds.expanded = !self.play_thresholds.per_class.is_empty();
+                let note = format!(
+                    "Loaded calibrated thresholds (global {}, {}).",
+                    fmt_threshold(self.play_conf),
+                    counted(self.play_thresholds.per_class.len() as u64, "class override", "class overrides"),
+                );
+                self.play_thresholds.import_error = None;
+                self.play_thresholds.import_note = Some(note.clone());
+                self.toast(Tone::Success, "Opened with calibrated thresholds", Some(note.into()), cx);
+            } else {
+                // Fallback: carry the model or evaluation's best-F1 operating point when valid.
+                let ev_conf = self
+                    .store
+                    .evals
+                    .get(&model_id)
+                    .and_then(|l| l.ready())
+                    .and_then(|ev| ev.best_f1_conf)
+                    .filter(|c| c.is_finite() && (0.0..=1.0).contains(c));
+                let model_conf = self
+                    .store
+                    .model(&model_id)
+                    .and_then(|m| m.metrics.as_ref())
+                    .and_then(|mm| operating_conf(mm.best_f1_conf, mm.precision, mm.recall));
+                if let Some(best) = model_conf.or(ev_conf) {
+                    self.play_conf = round_conf(best);
+                    self.play_thresholds.per_class.clear();
+                    let note = format!("Applied optimal F1 threshold ({}).", fmt_threshold(self.play_conf));
+                    self.play_thresholds.import_error = None;
+                    self.play_thresholds.import_note = Some(note.clone());
+                    self.toast(Tone::Success, "Opened at best F1 threshold", Some(note.into()), cx);
+                }
             }
-            self.play_thresholds.per_class = per_class;
-            self.play_thresholds.expanded = !self.play_thresholds.per_class.is_empty();
-            let note = format!(
-                "Loaded calibrated thresholds (global {}, {}).",
-                fmt_threshold(self.play_conf),
-                counted(self.play_thresholds.per_class.len() as u64, "class override", "class overrides"),
-            );
-            self.play_thresholds.import_error = None;
-            self.play_thresholds.import_note = Some(note.clone());
-            self.toast(Tone::Success, "Opened with calibrated thresholds", Some(note.into()), cx);
-            self.after_play_thresholds_changed(cx);
-            return;
+            self.cancel_play_batch();
+            self.play_batch.invalidate_for_thresholds(self.play_conf, &self.play_thresholds.per_class);
+            self.clear_play_hover();
+            self.play_compare.clear_hover();
         }
-        // Fallback: carry the model or evaluation's best-F1 operating point when valid.
-        let ev_conf = self
-            .store
-            .evals
-            .get(&model_id)
-            .and_then(|l| l.ready())
-            .and_then(|ev| ev.best_f1_conf)
-            .filter(|c| c.is_finite() && (0.0..=1.0).contains(c));
-        let model_conf = self
-            .store
-            .model(&model_id)
-            .and_then(|m| m.metrics.as_ref())
-            .and_then(|mm| operating_conf(mm.best_f1_conf, mm.precision, mm.recall));
-        if let Some(best) = model_conf.or(ev_conf) {
-            self.play_conf = round_conf(best);
-            self.play_thresholds.per_class.clear();
-            let note = format!("Applied optimal F1 threshold ({}).", fmt_threshold(self.play_conf));
-            self.play_thresholds.import_error = None;
-            self.play_thresholds.import_note = Some(note.clone());
-            self.toast(Tone::Success, "Opened at best F1 threshold", Some(note.into()), cx);
-            self.after_play_thresholds_changed(cx);
+        let switched = self.reconcile_play_batch_active(cx);
+        if !switched {
+            self.run_predict(cx);
+            if self.play_compare.enabled {
+                self.run_predict_b(cx);
+            }
         }
+        cx.notify();
     }
 
     /// Runs `POST /api/val` to compute calibrated per-class confidence thresholds for `model_id`.
@@ -336,26 +367,46 @@ impl FoloApp {
         self.fetch(
             cx,
             move |api| api.val_thresholds(&mid, &dataset_id, split),
-            move |this, r, cx| match r {
-                Ok(Some(cal)) => {
-                    let summary = format!(
-                        "Global {} · macro F1 {:.3} · {}",
-                        fmt_threshold(cal.global.best_conf),
-                        cal.macro_f1,
-                        counted(cal.per_class.len() as u64, "class", "classes"),
-                    );
-                    this.store.calibrations.insert(model_id, Load::Ready(cal));
-                    this.toast(Tone::Success, "Thresholds calibrated", Some(summary.into()), cx);
+            move |this, r, cx| {
+                if this.store.model(&model_id).is_none()
+                    || !matches!(this.store.calibrations.get(&model_id), Some(Load::Loading))
+                {
+                    return;
                 }
-                Ok(None) => {
-                    let err = crate::api::ApiError::new(
-                        "not_supported",
-                        "This server did not return calibrated thresholds from /api/val.",
-                    );
-                    this.store.calibrations.insert(model_id, Load::Failed(err));
-                }
-                Err(err) => {
-                    this.store.calibrations.insert(model_id, Load::Failed(err));
+                match r {
+                    Ok(Some(cal)) => {
+                        let empty = cal.is_empty();
+                        let summary = format!(
+                            "Global {} · macro F1 {:.3} · {}",
+                            fmt_threshold(cal.global.best_conf),
+                            cal.macro_f1,
+                            counted(cal.per_class.len() as u64, "class", "classes"),
+                        );
+                        this.store.calibrations.insert(model_id, Load::Ready(cal));
+                        if empty {
+                            this.toast(
+                                Tone::Neutral,
+                                "No ground-truth boxes to calibrate",
+                                Some(
+                                    "This split has no labeled objects to derive per-class thresholds."
+                                        .into(),
+                                ),
+                                cx,
+                            );
+                        } else {
+                            this.toast(Tone::Success, "Thresholds calibrated", Some(summary.into()), cx);
+                        }
+                    }
+                    Ok(None) => {
+                        let err = crate::api::ApiError::new(
+                            "not_supported",
+                            "This server did not return calibrated thresholds from /api/val.",
+                        );
+                        this.store.calibrations.insert(model_id, Load::Failed(err));
+                    }
+                    Err(err) => {
+                        this.store.calibrations.insert(model_id, Load::Failed(err));
+                    }
                 }
             },
         );

@@ -214,10 +214,16 @@ impl FoloApp {
         let cal_dataset = ev.dataset_id.clone().or_else(|| {
             m.run_id.as_deref().and_then(|rid| self.store.run(rid)).map(|r| r.config.dataset_id.clone())
         });
-        let cal_split = ev.split.unwrap_or(Split::Val);
+        let cal_split = ev.split.unwrap_or_else(|| {
+            cal_dataset
+                .as_deref()
+                .and_then(|id| self.store.dataset_summary(id))
+                .filter(|d| d.splits.val == 0)
+                .map_or(Split::Val, |_| Split::Train)
+        });
         let cal_state = self.store.calibrations.get(&m.id).cloned();
         let cal_loading = matches!(cal_state, Some(Load::Loading));
-        let cal_ready = matches!(cal_state, Some(Load::Ready(_)));
+        let cal_ready = matches!(&cal_state, Some(Load::Ready(cal)) if !cal.is_empty());
         let can_calibrate = self.store.supports_threshold_calibration() && cal_dataset.is_some();
 
         let cal_btn = can_calibrate.then(|| {
@@ -279,6 +285,23 @@ impl FoloApp {
         };
 
         let cal_bar: Option<AnyElement> = match cal_state {
+            Some(Load::Ready(cal)) if cal.is_empty() => Some(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .px(px(16.))
+                    .py(px(8.))
+                    .border_b_1()
+                    .border_color(t.line_subtle)
+                    .bg(t.bg_raised)
+                    .child(
+                        text(ty::SM, t.text_tertiary)
+                            .whitespace_normal()
+                            .child("No ground-truth boxes in this split to calibrate per-class thresholds."),
+                    )
+                    .into_any_element(),
+            ),
             Some(Load::Ready(cal)) => {
                 let mid_copy = m.id.clone();
                 let copy_btn = self.button(

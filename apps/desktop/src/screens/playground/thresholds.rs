@@ -78,10 +78,29 @@ pub fn effective_conf(global_conf: f32, per_class: &BTreeMap<u32, f32>, class_id
     per_class.get(&class_id).copied().unwrap_or(global_conf)
 }
 
-/// Lowest active confidence threshold across `global_conf` and all `per_class` overrides.
-/// Predictions must be fetched at or below this floor so no low per-class override is clipped.
-pub fn min_active_conf(global_conf: f32, per_class: &BTreeMap<u32, f32>) -> f32 {
-    per_class.values().copied().filter(|v| v.is_finite()).fold(global_conf, f32::min)
+/// True when a cached prediction fetched with `(cached_floor, cached_per_class)` can safely serve
+/// `(current_conf, current_per_class)` without risking `max_det` truncation mismatches.
+///
+/// - When neither side has per-class overrides, any `current_conf >= cached_floor` is valid (so
+///   dragging the global slider filters locally without extra inference calls).
+/// - Whenever either side has per-class overrides, both the override map and global threshold must
+///   match so per-class filtering always runs before the engine's `max_det` cap.
+pub fn thresholds_match(
+    cached_per_class: &BTreeMap<u32, f32>,
+    cached_floor: f32,
+    current_conf: f32,
+    current_per_class: &BTreeMap<u32, f32>,
+) -> bool {
+    if cached_per_class.is_empty() && current_per_class.is_empty() {
+        current_conf >= cached_floor - 1e-6
+    } else {
+        (current_conf - cached_floor).abs() <= 1e-6
+            && cached_per_class.len() == current_per_class.len()
+            && cached_per_class
+                .iter()
+                .zip(current_per_class.iter())
+                .all(|((ka, va), (kb, vb))| ka == kb && (va - vb).abs() <= 1e-6)
+    }
 }
 
 /// Filters `boxes` by effective per-class confidence thresholds (`score >= effective_conf`) and
@@ -144,30 +163,44 @@ pub fn map_per_class_to_classes(
 /// Exports the active global and per-class thresholds as pretty-printed JSON compatible with:
 /// - `folo_vision::ThresholdCalibration` / `folo predict --thresholds` (`global`, `macro_f1`, `per_class`)
 /// - Studio Playground (`folo.thresholds.v1`, `default_conf`, `global.best_conf`, `per_class[{class, name, best_conf}]`)
+///
+/// When no per-class overrides are active, populates `per_class` with every class in `classes` at
+/// `global_conf` so `folo predict --thresholds` (`ThresholdCalibration::is_empty() == false`)
+/// honors `global_conf` instead of silently falling back to the CLI's default `0.25`.
 pub fn export_thresholds_json(
     global_conf: f32,
     per_class: &BTreeMap<u32, f32>,
     classes: &[String],
 ) -> anyhow::Result<String> {
     let g = round_conf(global_conf);
-    let per: Vec<Value> = per_class
-        .iter()
-        .filter(|(_, v)| v.is_finite() && (0.0..=1.0).contains(*v))
-        .map(|(&cid, &val)| {
-            let mut obj = serde_json::Map::new();
-            obj.insert("class".into(), json!(cid));
-            if let Some(name) = classes.get(cid as usize) {
-                obj.insert("name".into(), json!(name));
-            }
-            obj.insert("best_conf".into(), json!(round_conf(val)));
-            obj.insert("best_f1".into(), json!(0.0));
-            obj.insert("precision".into(), json!(0.0));
-            obj.insert("recall".into(), json!(0.0));
-            obj.insert("truths".into(), json!(0));
-            obj.insert("preds".into(), json!(0));
-            Value::Object(obj)
-        })
-        .collect();
+    let make_entry = |cid: u32, val: f32| {
+        let mut obj = serde_json::Map::new();
+        obj.insert("class".into(), json!(cid));
+        if let Some(name) = classes.get(cid as usize) {
+            obj.insert("name".into(), json!(name));
+        }
+        obj.insert("best_conf".into(), json!(round_conf(val)));
+        obj.insert("best_f1".into(), json!(0.0));
+        obj.insert("precision".into(), json!(0.0));
+        obj.insert("recall".into(), json!(0.0));
+        obj.insert("truths".into(), json!(0));
+        obj.insert("preds".into(), json!(0));
+        Value::Object(obj)
+    };
+    let per: Vec<Value> = if !per_class.is_empty() {
+        per_class
+            .iter()
+            .filter(|(_, v)| v.is_finite() && (0.0..=1.0).contains(*v))
+            .map(|(&cid, &val)| make_entry(cid, val))
+            .collect()
+    } else if !classes.is_empty() {
+        (0..classes.len() as u32).map(|cid| make_entry(cid, g)).collect()
+    } else {
+        anyhow::bail!(
+            "Select a model before exporting thresholds JSON (or pass --conf {} on CLI).",
+            fmt_threshold(g)
+        );
+    };
     let payload = json!({
         "schema": "folo.thresholds.v1",
         "default_conf": g,
@@ -450,6 +483,16 @@ pub fn parse_thresholds_json(raw: &str, classes: &[String]) -> Result<ParsedThre
                 );
             }
         }
+        // Uniform full-class global-only export from `folo.thresholds.v1`: restore the global
+        // cutoff without cluttering Playground with redundant per-class overrides equal to global.
+        if let Some(g) = global_conf
+            && root.get("schema").and_then(Value::as_str) == Some("folo.thresholds.v1")
+            && !classes.is_empty()
+            && per_class.len() == classes.len()
+            && per_class.values().all(|&v| (v - g).abs() <= 1e-6)
+        {
+            per_class.clear();
+        }
         return Ok(ParsedThresholds { global_conf, per_class, warnings });
     }
 
@@ -509,10 +552,15 @@ fn parse_class_map(
 }
 
 /// Converts a `ThresholdCalibration` into `(global_conf, per_class_map)` filtered to `classes`.
+/// Returns `(None, empty)` for an empty calibration (`cal.is_empty()`), matching `folo-vision`'s
+/// `Predictor::apply_calibrated_thresholds` no-op semantics so empty splits never drop conf to `0.0`.
 pub fn calibration_to_overrides(
     cal: &ThresholdCalibration,
     classes: &[String],
 ) -> (Option<f32>, BTreeMap<u32, f32>) {
+    if cal.is_empty() {
+        return (None, BTreeMap::new());
+    }
     let global = if cal.global.best_conf.is_finite() && (0.0..=1.0).contains(&cal.global.best_conf) {
         Some(round_conf(cal.global.best_conf))
     } else {
@@ -546,7 +594,10 @@ mod tests {
         assert_eq!(effective_conf(0.25, &overrides, 0), 0.70);
         assert_eq!(effective_conf(0.25, &overrides, 1), 0.02);
         assert_eq!(effective_conf(0.25, &overrides, 2), 0.25);
-        assert!((min_active_conf(0.25, &overrides) - 0.02).abs() < 1e-6);
+        assert!(thresholds_match(&BTreeMap::new(), 0.05, 0.25, &BTreeMap::new()));
+        assert!(!thresholds_match(&BTreeMap::new(), 0.05, 0.25, &overrides));
+        assert!(thresholds_match(&overrides, 0.25, 0.25, &overrides));
+        assert!(!thresholds_match(&overrides, 0.25, 0.30, &overrides));
 
         let boxes = vec![
             sbox(0, "circle", 0.50),

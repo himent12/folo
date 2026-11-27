@@ -197,6 +197,8 @@ impl FoloApp {
         self.play_labels = true;
         self.play_class = None;
         self.play_thresholds.reset_for_backend();
+        self.play_fetched_per_class.clear();
+        self.play_thresh_import_seq += 1;
         self.play_thresh_json.update(cx, |i, cx| i.set_text("", cx));
         self.play_thresh_filter.update(cx, |i, cx| i.set_text("", cx));
         self.play_compare.reset_for_backend();

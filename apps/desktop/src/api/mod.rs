@@ -92,6 +92,11 @@ pub struct PredictRequest {
     pub conf: f32,
     pub iou: f32,
     pub max_det: u32,
+    /// Optional per-class confidence overrides (`class_id -> conf`) enforced before `max_det`
+    /// truncation on both `folo serve` and local `folo-vision` predictors.
+    pub per_class_conf: Option<std::collections::BTreeMap<u32, f32>>,
+    /// Inclusive final-score thresholding (`score >= conf`), matching calibrated thresholds.
+    pub conf_inclusive: bool,
 }
 
 /// Feature flag advertised on `/api/system` when `POST /api/bench/benchmarks` accepts

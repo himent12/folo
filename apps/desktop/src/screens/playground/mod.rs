@@ -39,5 +39,5 @@ pub(crate) use samples::pick_val_samples;
 pub use thresholds::{
     MAX_THRESHOLDS_JSON_BYTES, PlayThresholdsState, calibration_to_overrides, effective_conf,
     export_calibration_json, export_thresholds_json, filter_detections_with_per_class, fmt_threshold,
-    map_per_class_to_classes, min_active_conf, parse_thresholds_json, round_conf,
+    map_per_class_to_classes, parse_thresholds_json, round_conf, thresholds_match,
 };

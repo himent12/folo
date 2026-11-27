@@ -483,26 +483,54 @@ fn resolve_quant_output_arg(
     (Some(format!("<model-{suffix}.folo>")), None)
 }
 
-/// Derives a consistent thresholds JSON path (`<stem>-thresholds.json` or `<id>-thresholds.json`
-/// or `thresholds.json`) shared by `folo val --save-thresholds` and `folo predict --thresholds`.
+/// Derives a consistent, precision- and checkpoint-scoped thresholds JSON path shared by
+/// `folo val --save-thresholds` and `folo predict --thresholds` so f32, f16, and different INT8
+/// quantization variants never silently overwrite or load each other's thresholds.
 /// Returns `(arg_token, unquotable_raw_path)`.
-pub(super) fn derive_thresholds_path(m: &Model) -> (String, Option<String>) {
-    if let Some(path) = m.path.as_deref().filter(|p| !p.trim().is_empty()) {
-        let stem = strip_ascii_suffix_ignore_case(path, b".folo").unwrap_or(path);
-        let candidate =
-            if stem.is_empty() { "thresholds.json".to_string() } else { format!("{stem}-thresholds.json") };
-        return match folo_api::json::quote_path(&candidate) {
-            Some(quoted) => (quoted, None),
-            None => ("<thresholds.json>".to_string(), Some(candidate)),
+pub(super) fn derive_thresholds_path(
+    m: &Model,
+    precision: PredictPrecision,
+    use_quantized_output: bool,
+    method: QuantMethod,
+    policy: QuantF32Policy,
+    macs: QuantF32MacBudget,
+) -> (String, Option<String>) {
+    let is_int8 = precision == PredictPrecision::Int8;
+    let suffix = format_int8_suffix(method, policy, macs);
+    let stem: String = if let Some(path) = m.path.as_deref().filter(|p| !p.trim().is_empty()) {
+        let resolved = if is_int8 && use_quantized_output {
+            derive_quant_output_path(path, method, policy, macs)
+        } else {
+            path.to_string()
         };
-    }
-    if m.source == Some(ModelSource::Published) {
-        let candidate = format!("{}-thresholds.json", m.id);
-        if let Some(quoted) = folo_api::json::quote_path(&candidate) {
-            return (quoted, None);
+        strip_ascii_suffix_ignore_case(&resolved, b".folo").unwrap_or(&resolved).to_string()
+    } else if m.source == Some(ModelSource::Published) {
+        if is_int8 && use_quantized_output { format!("{}-{suffix}", m.id) } else { m.id.clone() }
+    } else if is_int8 && use_quantized_output {
+        format!("model-{suffix}")
+    } else {
+        String::new()
+    };
+    let prec_tag = match precision {
+        PredictPrecision::F32 => "",
+        PredictPrecision::F16 => "-f16",
+        PredictPrecision::Int8 => {
+            if !use_quantized_output && !is_int8_model_path(&format!("{stem}.folo")) {
+                "-int8"
+            } else {
+                ""
+            }
         }
+    };
+    let candidate = if stem.is_empty() {
+        format!("thresholds{prec_tag}.json")
+    } else {
+        format!("{stem}{prec_tag}-thresholds.json")
+    };
+    match folo_api::json::quote_path(&candidate) {
+        Some(quoted) => (quoted, None),
+        None => ("<thresholds.json>".to_string(), Some(candidate)),
     }
-    ("thresholds.json".to_string(), None)
 }
 
 /// Formats a threshold rounded to 2 decimal places (`0.25`, `0.70`).
@@ -718,7 +746,14 @@ pub fn build_model_cli_with_arch(
                 PredictPrecision::Int8 => parts.push("--precision int8".into()),
             }
             if state.val_save_thresholds {
-                let (thresh_arg, unquoted_thresh) = derive_thresholds_path(m);
+                let (thresh_arg, unquoted_thresh) = derive_thresholds_path(
+                    m,
+                    state.predict_precision,
+                    use_quantized_output,
+                    state.quant_method,
+                    state.quant_f32_policy,
+                    state.quant_f32_macs,
+                );
                 if let Some(raw) = unquoted_thresh {
                     unquoted_notes.push(format!(
                         "Replace <thresholds.json> with this path, quoted for your shell: {raw}"
@@ -727,7 +762,20 @@ pub fn build_model_cli_with_arch(
                 parts.push("--save-thresholds".into());
                 parts.push(thresh_arg);
             }
-            let hint = Some(if state.val_save_thresholds {
+            let hint = Some(if state.predict_precision == PredictPrecision::Int8 {
+                let target_note = if effective_target == PredictInt8Target::Current {
+                    "Validates this checkpoint as-is on CPU int8 (requires an int8-calibrated .folo file)."
+                } else {
+                    "Validates the `--output` file written by `folo quantize` for the selected calibration method and selective-f32 policy (CPU only)."
+                };
+                if state.val_save_thresholds {
+                    format!(
+                        "{target_note} Sweeps per-class F1 thresholds and saves JSON matching `folo predict --thresholds`."
+                    )
+                } else {
+                    target_note.to_string()
+                }
+            } else if state.val_save_thresholds {
                 "Sweeps per-class optimal F1 confidence thresholds and saves JSON compatible with `folo predict --thresholds` and Playground Import."
                     .into()
             } else {
@@ -744,7 +792,14 @@ pub fn build_model_cli_with_arch(
             let mut parts: Vec<String> = vec!["folo predict".into(), "--model".into(), model_arg];
             parts.push("<images>".into());
             if state.predict_use_thresholds {
-                let (thresh_arg, unquoted_thresh) = derive_thresholds_path(m);
+                let (thresh_arg, unquoted_thresh) = derive_thresholds_path(
+                    m,
+                    state.predict_precision,
+                    use_quantized_output,
+                    state.quant_method,
+                    state.quant_f32_policy,
+                    state.quant_f32_macs,
+                );
                 if let Some(raw) = unquoted_thresh {
                     unquoted_notes.push(format!(
                         "Replace <thresholds.json> with this path, quoted for your shell: {raw}"

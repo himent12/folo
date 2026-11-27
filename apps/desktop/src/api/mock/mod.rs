@@ -987,6 +987,8 @@ mod tests {
             conf: 0.5,
             iou: 0.7,
             max_det: 300,
+            per_class_conf: None,
+            conf_inclusive: false,
         };
         let p = m.predict(&req).unwrap();
         assert!(p.boxes.iter().all(|b| b.score >= 0.5));

@@ -15,11 +15,13 @@ pub enum SpotRecoveryState {
     Recovering,
     /// One or more preemption recoveries succeeded and training resumed (or finished cleanly).
     Recovered,
+    /// Replacement worker failed during provisioning, boot, or sync before training resumed.
+    RecoveryFailed,
     /// Run failed after exhausting all automatic checkpoint resume attempts.
     Exhausted,
-    /// Run failed after preemption because no synced checkpoint (`weights/last.folo`) existed yet.
+    /// Run failed after preemption because no resumable synced checkpoint (`weights/last.folo`) existed.
     NoCheckpoint,
-    /// Run was stopped while preemption recovery was in progress.
+    /// Run was stopped (by user or time limit) while preemption recovery was in progress.
     StoppedDuringRecovery,
     /// Active run on a provisioning provider with a synced checkpoint ready for auto-resume.
     Armed,
@@ -35,11 +37,11 @@ pub enum SpotRecoveryState {
 #[derive(Clone, Debug, PartialEq)]
 pub struct SpotRecoveryStatus {
     pub state: SpotRecoveryState,
-    /// Number of preemption recovery attempts observed (from logs and/or replaced ledger instances).
+    /// Number of preemption recovery attempts observed in the current run attempt.
     pub retries: u32,
     /// Maximum automatic retry budget (parsed from server messages when available, else default 3).
     pub max_retries: u32,
-    /// Count of prior replaced instances for this run in `/api/cloud/instances`.
+    /// Count of prior replaced instances for this run attempt in `/api/cloud/instances`.
     pub replaced_instances: u32,
     /// Checkpoint epoch being resumed from, when reported by `folo-server` logs.
     pub resume_epoch: Option<u32>,
@@ -65,6 +67,10 @@ impl SpotRecoveryStatus {
             SpotRecoveryState::Recovered => {
                 let used = self.retries.max(1);
                 format!("Recovered · {used}/{} used", self.max_retries)
+            }
+            SpotRecoveryState::RecoveryFailed => {
+                let used = self.retries.max(1);
+                format!("Recovery failed · {used}/{}", self.max_retries)
             }
             SpotRecoveryState::Exhausted => {
                 let used = self.retries.max(self.max_retries);
@@ -97,15 +103,20 @@ impl SpotRecoveryStatus {
                 self.retries.max(1),
                 self.max_retries
             ),
+            SpotRecoveryState::RecoveryFailed => format!(
+                "Replacement instance failed before training resumed (attempt {}/{}). Synced checkpoint weights remain on disk — use Resume to continue manually.",
+                self.retries.max(1),
+                self.max_retries
+            ),
             SpotRecoveryState::Exhausted => format!(
                 "Automatic checkpoint resume used all {} retry attempt(s). Synced weights are preserved on disk — use Resume to continue manually.",
                 self.max_retries
             ),
             SpotRecoveryState::NoCheckpoint => {
-                "Worker was preempted before the first checkpoint copy (weights/last.folo) completed, so automatic resume could not continue.".into()
+                "Worker was preempted without a resumable synced checkpoint (weights/last.folo), so automatic resume could not continue.".into()
             }
             SpotRecoveryState::StoppedDuringRecovery => {
-                "Run was stopped while automatic preemption recovery was underway; the last synced checkpoint stays on disk.".into()
+                "Run ended while automatic preemption recovery was underway; the last synced checkpoint stays on disk.".into()
             }
             SpotRecoveryState::Armed => format!(
                 "A synced checkpoint is on disk; if the spot instance is preempted, folo serve auto-resumes up to {} times.",
@@ -115,9 +126,7 @@ impl SpotRecoveryStatus {
                 "Auto-resume (up to {} retries) activates once the first checkpoint copies back to this server.",
                 self.max_retries
             ),
-            SpotRecoveryState::NotUsed => {
-                "No spot preemption occurred during this run.".into()
-            }
+            SpotRecoveryState::NotUsed => "No spot preemption occurred during this run.".into(),
             SpotRecoveryState::Unsupported => {
                 "Remote FOLO servers do not provision replacement instances automatically.".into()
             }
@@ -137,6 +146,11 @@ impl SpotRecoveryStatus {
                 format!("Spot recovered ({}/{})", self.retries.max(1), self.max_retries),
                 Tone::Info,
             )),
+            SpotRecoveryState::RecoveryFailed => Some((
+                "icons/triangle-alert.svg",
+                format!("Spot recovery failed ({}/{})", self.retries.max(1), self.max_retries),
+                Tone::Danger,
+            )),
             SpotRecoveryState::Exhausted => Some((
                 "icons/triangle-alert.svg",
                 format!(
@@ -151,7 +165,7 @@ impl SpotRecoveryStatus {
     }
 
     /// Optional status banner rendered inside the Cloud Run panel when preemption recovery is
-    /// active, completed, or failed.
+    /// active, completed, stopped, or failed.
     pub fn banner(&self) -> Option<(&'static str, String, Tone)> {
         let ep_note = self.resume_epoch.map_or(String::new(), |ep| format!(" from epoch {ep}"));
         let backoff_note =
@@ -195,6 +209,17 @@ impl SpotRecoveryStatus {
                     Tone::Info,
                 ))
             }
+            SpotRecoveryState::RecoveryFailed => {
+                let used = self.retries.max(1);
+                Some((
+                    "icons/triangle-alert.svg",
+                    format!(
+                        "Spot preemption recovery failed (attempt {used}/{}): replacement worker did not reach training{cause_note}. Synced checkpoint weights stay on disk — resume the run to try again.{replaced_note}",
+                        self.max_retries
+                    ),
+                    Tone::Danger,
+                ))
+            }
             SpotRecoveryState::Exhausted => Some((
                 "icons/triangle-alert.svg",
                 format!(
@@ -207,7 +232,7 @@ impl SpotRecoveryStatus {
             SpotRecoveryState::NoCheckpoint => Some((
                 "icons/triangle-alert.svg",
                 format!(
-                    "Worker was preempted{cause_note} before any checkpoint synced (weights/last.folo unavailable), so automatic resume could not continue."
+                    "Worker was preempted{cause_note} without a resumable synced checkpoint (weights/last.folo unavailable), so automatic resume could not continue."
                 ),
                 Tone::Warning,
             )),
@@ -230,12 +255,16 @@ impl SpotRecoveryStatus {
     /// Targeted hint shown in Run Detail's failure banner when a cloud run failed due to preemption.
     pub fn failure_hint(&self) -> Option<String> {
         match self.state {
+            SpotRecoveryState::RecoveryFailed => Some(
+                "Replacement instance provisioning or startup failed during automatic spot recovery. Synced weights stay on disk — click Resume to try again."
+                    .into(),
+            ),
             SpotRecoveryState::Exhausted => Some(format!(
                 "Automatic spot recovery exhausted its {}-retry budget. Synced weights stay on disk — click Resume to launch a fresh instance from the last checkpoint.",
                 self.max_retries
             )),
             SpotRecoveryState::NoCheckpoint => Some(
-                "The spot instance was lost before the first checkpoint synced back. Use New run from this config to start again, or pick an on-demand offer."
+                "The spot instance was lost without a resumable synced checkpoint. Use New run from this config to start again, or pick an on-demand offer."
                     .into(),
             ),
             _ => None,
@@ -251,9 +280,19 @@ struct ParsedPreemptLog {
     backoff_s: Option<f32>,
     reason: Option<String>,
     restarted_during_recovery: bool,
+    /// True once a replacement worker confirmed starting training after the latest preemption event.
+    confirmed_resumed_after_preempt: bool,
+    /// True when the current run attempt logged a stop or deadline expiry during recovery.
+    stopped_during_recovery_log: bool,
+    /// Timestamp (`RFC3339` string) of the latest manual resume marker (`resuming from weights/last.folo`
+    /// or `no epoch finished before; starting over`) so ledger rows from earlier attempts are excluded.
+    manual_resume_t: Option<String>,
 }
 
-/// Parses `folo-server`'s preemption auto-resume warning lines (`crates/folo-server/src/cloud/executor/mod.rs`).
+const PREEMPT_SPLIT: &str = "); auto-resuming from synced checkpoint";
+
+/// Parses `folo-server`'s preemption auto-resume warning lines (`crates/folo-server/src/cloud/executor/mod.rs`),
+/// resetting state at manual-resume markers so an earlier attempt's warnings never bleed into a new attempt.
 fn parse_preempt_logs(logs: &[LogLine]) -> ParsedPreemptLog {
     let mut out = ParsedPreemptLog::default();
     for line in logs {
@@ -261,26 +300,40 @@ fn parse_preempt_logs(logs: &[LogLine]) -> ParsedPreemptLog {
             continue;
         }
         let msg = line.message.as_str();
-        if msg.contains("server restarted during preemption recovery") {
-            out.restarted_during_recovery = true;
+        // Manual resume (`POST /api/runs` with `resume_run_id`) resets preemption history for the new attempt.
+        if msg == "resuming from weights/last.folo" || msg == "no epoch finished before; starting over" {
+            out = ParsedPreemptLog { manual_resume_t: Some(line.t.clone()), ..Default::default() };
             continue;
         }
-        if msg.contains("auto-resuming from synced checkpoint") {
-            if let Some(after_open) = msg.strip_prefix("worker preempted or lost (")
-                && let Some((why, _)) = after_open.split_once(");")
-            {
+        if msg.contains("server restarted during preemption recovery") {
+            out.restarted_during_recovery = true;
+            out.confirmed_resumed_after_preempt = false;
+            continue;
+        }
+        let lower = msg.to_ascii_lowercase();
+        if lower.contains("during preemption recovery")
+            || lower.contains("before a replacement worker could launch")
+            || lower.contains("ended the run after worker preemption")
+        {
+            out.stopped_during_recovery_log = true;
+            continue;
+        }
+        if let Some((prefix, suffix)) = msg.split_once(PREEMPT_SPLIT) {
+            out.confirmed_resumed_after_preempt = false;
+            out.stopped_during_recovery_log = false;
+            if let Some(why) = prefix.strip_prefix("worker preempted or lost (") {
                 let trimmed = why.trim();
                 if !trimmed.is_empty() {
                     out.reason = Some(trimmed.to_string());
                 }
             }
-            if let Some((_, rest)) = msg.split_once("epoch ") {
+            if let Some((_, rest)) = suffix.split_once("epoch ") {
                 let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
                 if let Ok(ep) = digits.parse::<u32>() {
                     out.resume_epoch = Some(ep);
                 }
             }
-            if let Some((_, rest)) = msg.split_once("attempt ") {
+            if let Some((_, rest)) = suffix.split_once("attempt ") {
                 let a_str: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
                 if let Ok(a) = a_str.parse::<u32>() {
                     out.attempt = Some(out.attempt.map_or(a, |prev| prev.max(a)));
@@ -294,7 +347,7 @@ fn parse_preempt_logs(logs: &[LogLine]) -> ParsedPreemptLog {
                     }
                 }
             }
-            if let Some((_, rest)) = msg.split_once("after ") {
+            if let Some((_, rest)) = suffix.split_once("after ") {
                 let num: String = rest.chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
                 if let Ok(s) = num.parse::<f32>()
                     && s.is_finite()
@@ -304,6 +357,13 @@ fn parse_preempt_logs(logs: &[LogLine]) -> ParsedPreemptLog {
             } else {
                 out.backoff_s = None;
             }
+            continue;
+        }
+        // A replacement worker reaching training confirms recovery succeeded for this preemption.
+        if (out.attempt.is_some() || out.restarted_during_recovery)
+            && (msg.starts_with("the worker took the run as ") || msg.starts_with("epoch "))
+        {
+            out.confirmed_resumed_after_preempt = true;
         }
     }
     out
@@ -337,13 +397,15 @@ pub fn spot_recovery_status(
         };
     }
 
+    let parsed = logs.map(parse_preempt_logs).unwrap_or_default();
+    let attempt_floor = parsed.manual_resume_t.as_deref();
     let replaced_instances = instances.map_or(0, |list| {
         list.iter()
             .filter(|i| i.run_id.as_deref() == Some(r.id.as_str()))
             .filter(|i| c.instance_id.as_deref() != Some(i.id.as_str()))
+            .filter(|i| attempt_floor.is_none_or(|t| i.created.as_str() >= t))
             .count() as u32
     });
-    let parsed = logs.map(parse_preempt_logs).unwrap_or_default();
     let err = r.error.as_deref().unwrap_or("");
     let err_lower = err.to_ascii_lowercase();
     let exhausted_max = parse_exhausted_max(&err_lower);
@@ -353,25 +415,30 @@ pub fn spot_recovery_status(
     let err_exhausted = r.status == RunStatus::Failed
         && (exhausted_max.is_some() || err_lower.contains("automatic checkpoint resume exhausted"));
     let err_no_ckpt = r.status == RunStatus::Failed
-        && err_lower.contains("no synced checkpoint")
-        && err_lower.contains("auto-resume");
-    let stopped_in_recovery = r.status == RunStatus::Stopped
-        && (err_lower.contains("during preemption recovery")
-            || logs.is_some_and(|ls| {
-                ls.iter().any(|l| {
-                    let m = l.message.to_ascii_lowercase();
-                    m.contains("stopped during preemption recovery")
-                        || m.contains("stop requested during preemption recovery")
-                })
-            }));
-
+        && ((err_lower.contains("no synced checkpoint") && err_lower.contains("auto-resume"))
+            || err_lower.contains("no incomplete training state to auto-resume")
+            || err_lower.contains("no incomplete weights/last.folo"));
     let has_recovery_activity = retries > 0 || parsed.restarted_during_recovery;
+    let ended_before_training = c.ended_in.is_some_and(|p| p < CloudPhase::Training);
+    let stopped_in_recovery = r.status == RunStatus::Stopped
+        && (parsed.stopped_during_recovery_log
+            || err_lower.contains("during preemption recovery")
+            || (has_recovery_activity && ended_before_training));
+    let failed_in_recovery = r.status == RunStatus::Failed
+        && has_recovery_activity
+        && (ended_before_training
+            || (logs.is_some()
+                && (parsed.attempt.is_some() || parsed.restarted_during_recovery)
+                && !parsed.confirmed_resumed_after_preempt));
+
     let state = if err_exhausted {
         SpotRecoveryState::Exhausted
     } else if err_no_ckpt {
         SpotRecoveryState::NoCheckpoint
     } else if stopped_in_recovery {
         SpotRecoveryState::StoppedDuringRecovery
+    } else if failed_in_recovery {
+        SpotRecoveryState::RecoveryFailed
     } else if has_recovery_activity {
         if r.status.is_active() && c.phase < CloudPhase::Training {
             SpotRecoveryState::Recovering
@@ -412,29 +479,29 @@ mod tests {
         LogLine { t: "2026-11-08T07:20:00Z".into(), level, message: message.into() }
     }
 
+    fn log_at(t: &str, level: LogLevel, message: &str) -> LogLine {
+        LogLine { t: t.into(), level, message: message.into() }
+    }
+
     #[test]
     fn armed_waiting_and_unsupported_states_follow_checkpoint_and_provider() {
         let (mut r, mut c) = cloud_run_fixture();
-        // Remote provider (`provisions == false`) does not support spot replacement.
         let remote = spot_recovery_status(&r, &c, false, None, None);
         assert_eq!(remote.state, SpotRecoveryState::Unsupported);
         assert_eq!(remote.fact_value(), "Not applicable");
         assert!(remote.banner().is_none() && remote.header_badge().is_none());
 
-        // Active with synced checkpoint -> Armed.
         c.synced = Some("2026-11-08T07:20:00Z".into());
         let armed = spot_recovery_status(&r, &c, true, Some(&[]), Some(&[]));
         assert_eq!(armed.state, SpotRecoveryState::Armed);
         assert_eq!(armed.fact_value(), "Armed · 0/3 used");
         assert!(armed.banner().is_none());
 
-        // Active without synced checkpoint -> WaitingForCheckpoint.
         c.synced = None;
         let waiting = spot_recovery_status(&r, &c, true, Some(&[]), Some(&[]));
         assert_eq!(waiting.state, SpotRecoveryState::WaitingForCheckpoint);
         assert!(waiting.fact_value().contains("0/3"));
 
-        // Completed without preemption -> NotUsed.
         r.status = RunStatus::Completed;
         c.phase = CloudPhase::Released;
         let done = spot_recovery_status(&r, &c, true, Some(&[]), Some(&[]));
@@ -443,13 +510,12 @@ mod tests {
     }
 
     #[test]
-    fn parses_server_preemption_logs_for_recovering_and_recovered_states() {
+    fn parses_server_preemption_logs_ignoring_keywords_inside_provider_reason() {
         let (mut r, mut c) = cloud_run_fixture();
         let logs = vec![log(
             LogLevel::Warn,
-            "worker preempted or lost (spot instance reclaimed); auto-resuming from synced checkpoint weights/last.folo (epoch 14, attempt 2/3 after 10.0s backoff)",
+            "worker preempted or lost (attempt 9/9 after 99s epoch 999); auto-resuming from synced checkpoint weights/last.folo (epoch 14, attempt 2/3 after 10.0s backoff)",
         )];
-        // Currently re-provisioning/syncing -> Recovering.
         r.status = RunStatus::Queued;
         c.phase = CloudPhase::Syncing;
         let st = spot_recovery_status(&r, &c, true, Some(&logs), None);
@@ -458,16 +524,12 @@ mod tests {
         assert_eq!(st.max_retries, 3);
         assert_eq!(st.resume_epoch, Some(14));
         assert_eq!(st.backoff_s, Some(10.0));
-        assert_eq!(st.reason.as_deref(), Some("spot instance reclaimed"));
+        assert_eq!(st.reason.as_deref(), Some("attempt 9/9 after 99s epoch 999"));
         assert!(
             st.header_badge()
                 .is_some_and(|(_, label, tone)| label == "Auto-resuming 2/3" && tone == Tone::Warning)
         );
-        assert!(
-            st.banner().is_some_and(|(_, msg, _)| msg.contains("epoch 14") && msg.contains("10.0s backoff"))
-        );
 
-        // Training resumed -> Recovered.
         r.status = RunStatus::Running;
         c.phase = CloudPhase::Training;
         let rec = spot_recovery_status(&r, &c, true, Some(&logs), None);
@@ -480,9 +542,78 @@ mod tests {
     }
 
     #[test]
-    fn detects_exhausted_no_checkpoint_stopped_and_ledger_only_replacement() {
+    fn failed_or_deadline_stopped_replacement_never_reads_as_recovered_and_manual_resume_resets() {
         let (mut r, mut c) = cloud_run_fixture();
-        // Exhausted retries error from folo-server.
+        let logs = vec![log_at(
+            "2026-11-08T06:00:00Z",
+            LogLevel::Warn,
+            "worker preempted or lost (spot reclaimed); auto-resuming from synced checkpoint weights/last.folo (epoch 12, attempt 1/3 after 10.0s backoff)",
+        )];
+
+        // 1. Replacement failed while provisioning -> RecoveryFailed (never Recovered!).
+        r.status = RunStatus::Failed;
+        r.error_code = Some("cloud_provider_error".into());
+        r.error = Some("RunPod out of stock".into());
+        c.phase = CloudPhase::Released;
+        c.ended_in = Some(CloudPhase::Provisioning);
+        let failed_rec = spot_recovery_status(&r, &c, true, Some(&logs), None);
+        assert_eq!(failed_rec.state, SpotRecoveryState::RecoveryFailed);
+        assert!(failed_rec.header_badge().is_some_and(|(_, _, tone)| tone == Tone::Danger));
+        assert!(failed_rec.failure_hint().is_some());
+
+        // 2. Time limit expired during preemption recovery -> StoppedDuringRecovery (never Recovered!).
+        r.status = RunStatus::Stopped;
+        r.error = None;
+        c.ended_in = Some(CloudPhase::Provisioning);
+        let mut deadline_logs = logs.clone();
+        deadline_logs.push(log_at(
+            "2026-11-08T06:01:00Z",
+            LogLevel::Warn,
+            "the time limit of 4 h ended the run during preemption recovery",
+        ));
+        let stopped_dl = spot_recovery_status(&r, &c, true, Some(&deadline_logs), None);
+        assert_eq!(stopped_dl.state, SpotRecoveryState::StoppedDuringRecovery);
+
+        // 3. Server restart with no incomplete checkpoint -> NoCheckpoint.
+        r.status = RunStatus::Failed;
+        r.error = Some(
+            "server restarted during preemption recovery, but no incomplete weights/last.folo is available to resume from"
+                .into(),
+        );
+        let no_inc = spot_recovery_status(&r, &c, true, Some(&logs), None);
+        assert_eq!(no_inc.state, SpotRecoveryState::NoCheckpoint);
+
+        // 4. Manual resume resets prior attempt's preemption logs and excludes older ledger instances.
+        let (mut r3, mut c3) = cloud_run_fixture();
+        r3.status = RunStatus::Queued;
+        c3.phase = CloudPhase::Provisioning;
+        c3.synced = Some("2026-11-08T06:00:00Z".into());
+        let mut resumed_logs = logs.clone();
+        resumed_logs.push(log_at("2026-11-08T07:00:00Z", LogLevel::Info, "resuming from weights/last.folo"));
+        let old_instance = CloudInstance {
+            id: "ci_old_attempt".into(),
+            connection_id: c3.connection_id.clone(),
+            provider: c3.provider.clone(),
+            provider_ref: Some("pod-old".into()),
+            name: "folo-old".into(),
+            run_id: Some(r3.id.clone()),
+            offer: c3.offer.clone(),
+            status: CloudInstanceStatus::Terminated,
+            created: "2026-11-08T05:30:00Z".into(),
+            ended: Some("2026-11-08T06:00:00Z".into()),
+            deadline: None,
+            cost_usd: Some(0.50),
+            error: None,
+        };
+        let fresh_attempt = spot_recovery_status(&r3, &c3, true, Some(&resumed_logs), Some(&[old_instance]));
+        assert_eq!(fresh_attempt.state, SpotRecoveryState::Armed);
+        assert_eq!(fresh_attempt.retries, 0);
+        assert_eq!(fresh_attempt.replaced_instances, 0);
+    }
+
+    #[test]
+    fn detects_exhausted_no_checkpoint_and_ledger_only_replacement() {
+        let (mut r, mut c) = cloud_run_fixture();
         r.status = RunStatus::Failed;
         r.error_code = Some("cloud_instance_lost".into());
         r.error = Some(
@@ -494,34 +625,13 @@ mod tests {
         assert_eq!(ex.state, SpotRecoveryState::Exhausted);
         assert_eq!(ex.retries, 4);
         assert_eq!(ex.max_retries, 4);
-        assert!(ex.failure_hint().is_some_and(|h| h.contains("4-retry budget")));
 
-        // No synced checkpoint error.
         r.error = Some(
-            "spot reclaimed; no synced checkpoint (weights/last.folo) is available to auto-resume from"
-                .into(),
+            "spot reclaimed; the synced weights/last.folo has no incomplete training state to auto-resume from".into(),
         );
         let no_ckpt = spot_recovery_status(&r, &c, true, None, None);
         assert_eq!(no_ckpt.state, SpotRecoveryState::NoCheckpoint);
-        assert!(no_ckpt.failure_hint().is_some_and(|h| h.contains("before the first checkpoint")));
 
-        // Stopped during recovery.
-        r.status = RunStatus::Stopped;
-        r.error = None;
-        let stop_logs = vec![
-            log(
-                LogLevel::Warn,
-                "worker preempted or lost (pod vanished); auto-resuming from synced checkpoint weights/last.folo (epoch 7, attempt 1/3)",
-            ),
-            log(
-                LogLevel::Warn,
-                "stopped during preemption recovery; synced checkpoint weights/last.folo kept",
-            ),
-        ];
-        let stopped = spot_recovery_status(&r, &c, true, Some(&stop_logs), None);
-        assert_eq!(stopped.state, SpotRecoveryState::StoppedDuringRecovery);
-
-        // Ledger-only replacement before logs load still surfaces recovery count.
         let (r2, c2) = cloud_run_fixture();
         let replaced = CloudInstance {
             id: "ci_old_spot".into(),

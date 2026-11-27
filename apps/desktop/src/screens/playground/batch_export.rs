@@ -213,10 +213,17 @@ impl FoloApp {
         }
         let Some(model_id) = self.play_model.as_deref() else { return false };
         let e2e = self.play_shown_model().is_some_and(|m| self.model_e2e(m));
-        let min_conf = self.play_min_conf();
         (0..self.play_batch.items.len()).any(|i| {
             self.play_batch
-                .fresh_result(i, model_id, self.play_iou, self.play_target, min_conf, e2e)
+                .fresh_result(
+                    i,
+                    model_id,
+                    self.play_iou,
+                    self.play_target,
+                    self.play_conf,
+                    &self.play_thresholds.per_class,
+                    e2e,
+                )
                 .is_some()
         })
     }
@@ -231,12 +238,17 @@ impl FoloApp {
         let model_name = shown.map(|m| m.name.as_str()).unwrap_or(model_id);
         let e2e = shown.is_some_and(|m| self.model_e2e(m));
         let eff_class = self.play_batch.effective_class(self.play_class);
-        let min_conf = self.play_min_conf();
         let mut owned = Vec::new();
         for (i, item) in self.play_batch.items.iter().enumerate() {
-            if let Some(res) =
-                self.play_batch.fresh_result(i, model_id, self.play_iou, self.play_target, min_conf, e2e)
-            {
+            if let Some(res) = self.play_batch.fresh_result(
+                i,
+                model_id,
+                self.play_iou,
+                self.play_target,
+                self.play_conf,
+                &self.play_thresholds.per_class,
+                e2e,
+            ) {
                 let boxes = filter_detections_with_per_class(
                     &res.pred.boxes,
                     self.play_conf,
@@ -328,9 +340,15 @@ impl FoloApp {
             let filename = batch_tile_label(item.name.as_ref()).to_string();
             match &item.status {
                 BatchItemStatus::Done(res) => {
-                    let min_conf = self.play_min_conf();
                     let fresh = model_id.is_some_and(|m| {
-                        res.matches_current(m, self.play_iou, self.play_target, min_conf, e2e)
+                        res.matches_current(
+                            m,
+                            self.play_iou,
+                            self.play_target,
+                            self.play_conf,
+                            &self.play_thresholds.per_class,
+                            e2e,
+                        )
                     });
                     if fresh {
                         let vis = filter_detections_with_per_class(

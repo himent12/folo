@@ -267,6 +267,7 @@ fn playground_batch_qa_filter_stepping_and_summary_csv_respect_active_filter() {
             iou_bits: 0.7_f32.to_bits(),
             target: None,
             floor: 0.05,
+            per_class_conf: Default::default(),
             content_hash: None,
         })
     };
@@ -445,6 +446,7 @@ fn playtest_r16_playground_byclass_syncs_stage_rail_compare_confidence_and_focus
             iou_bits: 0.7_f32.to_bits(),
             target: None,
             floor: 0.05,
+            per_class_conf: Default::default(),
             content_hash: None,
         })
     };

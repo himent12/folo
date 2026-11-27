@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use folo_ui::{AnyElement, Context, IntoElement, ParentElement, Styled, Window, div, px};
 
 use super::batch::{BatchItemStatus, PlayBatchState};
-use super::thresholds::{effective_conf, filter_detections_with_per_class, min_active_conf};
+use super::thresholds::{effective_conf, filter_detections_with_per_class};
 use crate::app::{FoloApp, act};
 use crate::theme::Theme;
 
@@ -66,8 +66,7 @@ impl PlayBatchState {
             return idx < self.items.len();
         }
         let Some(mid) = model_id else { return false };
-        let min_conf = min_active_conf(conf, per_class);
-        let Some(res) = self.fresh_result(idx, mid, iou, target, min_conf, e2e) else {
+        let Some(res) = self.fresh_result(idx, mid, iou, target, conf, per_class, e2e) else {
             return false;
         };
         match filter {
@@ -127,12 +126,11 @@ impl PlayBatchState {
         e2e: bool,
         model_classes: &[String],
     ) -> BatchQaCounts {
-        let min_conf = min_active_conf(conf, per_class);
         let mut counts = BatchQaCounts { all: self.items.len(), ..Default::default() };
         let mut class_imgs: BTreeMap<u32, (String, usize)> = BTreeMap::new();
         for item in &self.items {
             let BatchItemStatus::Done(res) = &item.status else { continue };
-            if !model_id.is_some_and(|m| res.matches_current(m, iou, target, min_conf, e2e)) {
+            if !model_id.is_some_and(|m| res.matches_current(m, iou, target, conf, per_class, e2e)) {
                 continue;
             }
             if filter_detections_with_per_class(&res.pred.boxes, conf, per_class, play_class).is_empty() {
@@ -439,6 +437,7 @@ mod tests {
                 iou_bits: 0.7_f32.to_bits(),
                 target: None,
                 floor: 0.05,
+                per_class_conf: BTreeMap::new(),
                 content_hash: None,
             }),
         }

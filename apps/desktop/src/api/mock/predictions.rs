@@ -265,7 +265,14 @@ impl MockBackend {
                 (w, h, p, seed)
             }
         };
-        let mut boxes: Vec<ScoredBox> = raw.into_iter().filter(|b| b.score >= req.conf).collect();
+        let mut boxes: Vec<ScoredBox> = raw
+            .into_iter()
+            .filter(|b| {
+                let thresh =
+                    req.per_class_conf.as_ref().and_then(|m| m.get(&b.class).copied()).unwrap_or(req.conf);
+                if req.conf_inclusive { b.score >= thresh } else { b.score > thresh }
+            })
+            .collect();
         boxes.sort_by(|a, b| b.score.total_cmp(&a.score));
         boxes.truncate(req.max_det as usize);
         let scale = match m.arch.as_str() {

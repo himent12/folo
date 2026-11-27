@@ -510,4 +510,46 @@ fn validate_save_thresholds_and_predict_thresholds_share_path_and_exclude_conf()
         p_pub.command,
         "folo predict --model folo-n-coco-v5 <images> --thresholds folo-n-coco-v5-thresholds.json"
     );
+
+    // Distinct precisions & INT8 quantization variants derive non-colliding threshold paths shared
+    // identically between Validate and Predict.
+    let mut vm = sample_model();
+    vm.path = Some("D:/models/best.folo".into());
+    st.predict_precision = PredictPrecision::F16;
+    st.mode = ModelCliMode::Validate;
+    st.val_save_thresholds = true;
+    let v_f16 = build_model_cli(&vm, Some("D:/data/shapes"), &st);
+    assert!(
+        v_f16.command.ends_with("--precision f16 --save-thresholds D:/models/best-f16-thresholds.json"),
+        "{}",
+        v_f16.command
+    );
+    st.mode = ModelCliMode::Predict;
+    let p_f16 = build_model_cli(&vm, None, &st);
+    assert!(p_f16.command.contains("--thresholds D:/models/best-f16-thresholds.json"), "{}", p_f16.command);
+
+    st.predict_precision = PredictPrecision::Int8;
+    st.quant_method = QuantMethod::Mse;
+    st.quant_f32_policy = QuantF32Policy::P5Tail;
+    st.predict_int8_target = Some(PredictInt8Target::QuantizedOutput);
+    st.mode = ModelCliMode::Validate;
+    let v_int8 = build_model_cli(&vm, Some("D:/data/shapes"), &st);
+    assert_eq!(
+        v_int8.command,
+        "folo val --model D:/models/best-int8-mse-p5-tail.folo --data D:/data/shapes --precision int8 --save-thresholds D:/models/best-int8-mse-p5-tail-thresholds.json"
+    );
+    st.mode = ModelCliMode::Predict;
+    let p_int8 = build_model_cli(&vm, None, &st);
+    assert_eq!(
+        p_int8.command,
+        "folo predict --model D:/models/best-int8-mse-p5-tail.folo <images> --thresholds D:/models/best-int8-mse-p5-tail-thresholds.json --precision int8"
+    );
+
+    // Custom-named INT8 checkpoint targeting Current gets `-int8-thresholds.json` so it never collides with f32.
+    st.predict_int8_target = Some(PredictInt8Target::Current);
+    let p_cur_int8 = build_model_cli(&vm, None, &st);
+    assert_eq!(
+        p_cur_int8.command,
+        "folo predict --model D:/models/best.folo <images> --thresholds D:/models/best-int8-thresholds.json --precision int8"
+    );
 }

@@ -180,12 +180,14 @@ impl FoloApp {
             iou_bits: res.iou_bits,
             target: res.target,
             floor: res.floor,
+            per_class_conf: res.per_class_conf.clone(),
         };
         self.play_pred = Load::Ready(res.pred);
         self.play_pred_pending = false;
         self.play_pred_dim = false;
         self.play_pred_for = Some((self.play_image_gen, res.model_id));
         self.play_fetched_floor = res.floor;
+        self.play_fetched_per_class = res.per_class_conf;
         self.play_compare.pred_a_meta = Some(meta);
         self.clear_play_hover();
         self.clear_play_pred_b();
@@ -306,10 +308,9 @@ impl FoloApp {
         .detach();
     }
 
-    /// Playground uses model `id` (picked from its list, or a model's Try in Playground) and runs it on
-    /// the image on stage. The person's choice takes a ticket: an Open image or a drop asked for before
-    /// it is dropped when it answers, image and page model together (the newest action wins whole).
-    pub fn pick_play_model(&mut self, id: String, cx: &mut Context<Self>) {
+    /// Updates Playground's active model without triggering prediction yet (used by callers that
+    /// also adjust thresholds before running a single prediction).
+    pub(super) fn select_play_model(&mut self, id: String) {
         self.play_open_seq += 1;
         if self.play_model.as_deref() != Some(id.as_str()) {
             let prev_classes = self.play_shown_model().map(|m| m.classes.clone());
@@ -321,6 +322,13 @@ impl FoloApp {
         }
         self.play_model_run = self.store.model(&id).and_then(|m| m.run_id.clone());
         self.play_model = Some(id);
+    }
+
+    /// Playground uses model `id` (picked from its list, or a model's Try in Playground) and runs it on
+    /// the image on stage. The person's choice takes a ticket: an Open image or a drop asked for before
+    /// it is dropped when it answers, image and page model together (the newest action wins whole).
+    pub fn pick_play_model(&mut self, id: String, cx: &mut Context<Self>) {
+        self.select_play_model(id);
         self.run_predict(cx);
     }
 
@@ -389,6 +397,8 @@ impl FoloApp {
         self.play_class = None;
         self.play_thresholds.per_class.clear();
         self.play_thresholds.clear_feedback();
+        self.play_fetched_per_class.clear();
+        self.play_thresh_import_seq += 1;
     }
 
     /// Predict again from scratch, showing "Detecting…" meanwhile (Retry, or another device). A plain
@@ -420,16 +430,28 @@ impl FoloApp {
         if changed {
             self.play_thresholds.clear_feedback();
             self.cancel_play_batch();
-            self.play_batch.invalidate_below_conf(self.play_min_conf());
+            self.play_batch.invalidate_for_thresholds(self.play_conf, &self.play_thresholds.per_class);
         }
         self.clear_play_hover();
         self.play_compare.clear_hover();
         let switched = changed && self.reconcile_play_batch_active(cx);
         if !switched {
-            if self.play_min_conf() < self.play_fetched_floor - 1e-6 {
+            if !crate::screens::playground::thresholds_match(
+                &self.play_fetched_per_class,
+                self.play_fetched_floor,
+                self.play_conf,
+                &self.play_thresholds.per_class,
+            ) {
                 self.run_predict(cx);
             }
-            if self.play_compare.enabled && self.play_min_conf_b() < self.play_compare.fetched_floor_b - 1e-6
+            let per_b = self.play_per_class_b();
+            if self.play_compare.enabled
+                && !crate::screens::playground::thresholds_match(
+                    &self.play_compare.fetched_per_class_b,
+                    self.play_compare.fetched_floor_b,
+                    self.play_conf,
+                    &per_b,
+                )
             {
                 self.run_predict_b(cx);
             }
@@ -458,18 +480,24 @@ impl FoloApp {
 
     pub fn run_predict(&mut self, cx: &mut Context<Self>) {
         let (Some(model), Some(img)) = (self.play_model.clone(), self.play_image.as_ref()) else { return };
-        // Fetch everything above the lowest threshold once; the conf slider filters locally. The
-        // floor is 0.05, or lower when the threshold is (a model's best-F1 confidence can be), so
-        // local filtering never claims a threshold the fetch cut off.
-        let floor = self.play_min_conf().min(PLAY_CONF_FLOOR);
+        // When per-class overrides are active, pass the exact global threshold + per-class map
+        // with inclusive thresholding directly to the engine so strict classes never crowd out
+        // lower-threshold classes before `max_det = 300` truncation. Without per-class overrides,
+        // fetch at the low scalar floor so dragging the confidence slider filters locally.
+        let per_class = self.play_thresholds.per_class.clone();
+        let has_overrides = !per_class.is_empty();
+        let floor = if has_overrides { self.play_conf } else { self.play_conf.min(PLAY_CONF_FLOOR) };
         let req = PredictRequest {
             model_id: model.clone(),
             input: img.predict_input(self.play_target.is_some()),
             conf: floor,
             iou: self.play_iou,
             max_det: 300,
+            per_class_conf: has_overrides.then(|| per_class.clone()),
+            conf_inclusive: has_overrides,
         };
         self.play_fetched_floor = floor;
+        self.play_fetched_per_class = per_class.clone();
         let key = (self.play_image_gen, model.clone());
         let meta = crate::screens::playground::PlayPredMeta {
             image_gen: self.play_image_gen,
@@ -477,6 +505,7 @@ impl FoloApp {
             iou_bits: self.play_iou.to_bits(),
             target: self.play_target,
             floor,
+            per_class_conf: per_class,
         };
         // Same image and model (an IoU change): keep showing the old boxes until the new ones land.
         if self.play_pred_for.as_ref() != Some(&key) {

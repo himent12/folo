@@ -70,12 +70,12 @@ impl FoloApp {
                 }
             }),
         );
-        // The range widens to an applied threshold below the usual floor (a best-F1 confidence).
+        // The range widens to an applied threshold outside the usual slider band (e.g. calibrated thresholds).
         let conf = self.slider(
             "play-conf",
             self.play_conf,
             crate::app::PLAY_CONF_FLOOR.min(self.play_conf),
-            0.95,
+            0.95f32.max(self.play_conf),
             0.01,
             window,
             cx,

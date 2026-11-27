@@ -175,9 +175,11 @@ impl FoloApp {
                 None,
                 window,
                 cx,
-                act(|this, _, cx| {
+                act(|this, w, cx| {
                     let raw = this.play_thresh_json.read(cx).text();
-                    this.apply_play_thresholds_json(&raw, cx);
+                    if this.apply_play_thresholds_json(&raw, cx) {
+                        this.focus_key("play-thr-import", w, cx);
+                    }
                 }),
             );
             let load_file = self.button(
@@ -196,9 +198,10 @@ impl FoloApp {
                 None,
                 window,
                 cx,
-                act(|this, _, cx| {
+                act(|this, w, cx| {
                     this.play_thresholds.import_open = false;
                     this.play_thresholds.import_error = None;
+                    this.focus_key("play-thr-import", w, cx);
                     cx.notify();
                 }),
             );
@@ -289,32 +292,52 @@ impl FoloApp {
                         this.set_play_class_conf(cid, next, cx);
                     }),
                 );
-                let inc = self.bind(
+                let at_max = eff >= 1.0 - 1e-6;
+                let inc: AnyElement = if at_max {
                     div()
                         .id(SharedString::from(inc_key.clone()))
                         .size(px(20.))
                         .rounded(px(radius::SM))
                         .bg(t.bg_raised)
                         .border_1()
-                        .border_color(t.line_control)
-                        .cursor_pointer()
-                        .hover(|s| s.bg(t.bg_hover))
-                        .active(|s| s.bg(t.bg_active))
+                        .border_color(t.line_subtle)
+                        .opacity(0.45)
+                        .cursor_not_allowed()
                         .flex()
                         .items_center()
                         .justify_center()
-                        .tooltip(crate::controls::tip(format!("Raise {name} threshold (+0.05)"), None))
-                        .child(text(ty::XS, t.text_primary).child("+")),
-                    &inc_key,
-                    radius::SM,
-                    window,
-                    cx,
-                    act(move |this, _, cx| {
-                        let cur = effective_conf(this.play_conf, &this.play_thresholds.per_class, cid);
-                        let next = round_conf((cur + 0.05).min(0.95));
-                        this.set_play_class_conf(cid, next, cx);
-                    }),
-                );
+                        .tooltip(crate::controls::tip("Already at maximum threshold (1.00)", None))
+                        .child(text(ty::XS, t.text_tertiary).child("+"))
+                        .into_any_element()
+                } else {
+                    self.bind(
+                        div()
+                            .id(SharedString::from(inc_key.clone()))
+                            .size(px(20.))
+                            .rounded(px(radius::SM))
+                            .bg(t.bg_raised)
+                            .border_1()
+                            .border_color(t.line_control)
+                            .cursor_pointer()
+                            .hover(|s| s.bg(t.bg_hover))
+                            .active(|s| s.bg(t.bg_active))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .tooltip(crate::controls::tip(format!("Raise {name} threshold (+0.05)"), None))
+                            .child(text(ty::XS, t.text_primary).child("+")),
+                        &inc_key,
+                        radius::SM,
+                        window,
+                        cx,
+                        act(move |this, _, cx| {
+                            let cur = effective_conf(this.play_conf, &this.play_thresholds.per_class, cid);
+                            let next = round_conf((cur + 0.05).min(1.0));
+                            this.set_play_class_conf(cid, next, cx);
+                        }),
+                    )
+                    .into_any_element()
+                };
                 let rst = overridden.then(|| {
                     self.bind(
                         div()

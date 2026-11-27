@@ -33,7 +33,8 @@ impl FoloApp {
                 model_id,
                 self.play_iou,
                 self.play_target,
-                self.play_min_conf(),
+                self.play_conf,
+                &self.play_thresholds.per_class,
                 e2e,
             ),
             // Legacy/test direct `Load::Ready` injection without meta: still check `play_pred_for` if set.
@@ -44,20 +45,22 @@ impl FoloApp {
     }
 
     /// True when Model B's `Load::Ready` prediction matches the current image, model, device, IoU,
-    /// and confidence floor (and is not superseded by an in-flight rerun).
+    /// and threshold configuration (and is not superseded by an in-flight rerun).
     pub(crate) fn pred_b_is_fresh(&self) -> bool {
         if self.play_compare.pred_b_pending || self.play_compare.pred_b.ready().is_none() {
             return false;
         }
         let Some(model_id) = self.play_compare.model_b.as_deref() else { return false };
         let e2e = self.play_shown_model_b().is_some_and(|m| self.model_e2e(m));
+        let per_b = self.play_per_class_b();
         self.play_compare.pred_b_meta.as_ref().is_some_and(|meta| {
             meta.matches_current(
                 self.play_image_gen,
                 model_id,
                 self.play_iou,
                 self.play_target,
-                self.play_min_conf_b(),
+                self.play_conf,
+                &per_b,
                 e2e,
             )
         })
@@ -282,15 +285,20 @@ impl FoloApp {
         let (Some(model), Some(img)) = (self.play_compare.model_b.clone(), self.play_image.as_ref()) else {
             return;
         };
-        let floor = self.play_min_conf_b().min(PLAY_CONF_FLOOR);
+        let per_b = self.play_per_class_b();
+        let has_overrides = !per_b.is_empty();
+        let floor = if has_overrides { self.play_conf } else { self.play_conf.min(PLAY_CONF_FLOOR) };
         let req = PredictRequest {
             model_id: model.clone(),
             input: img.predict_input(self.play_target.is_some()),
             conf: floor,
             iou: self.play_iou,
             max_det: 300,
+            per_class_conf: has_overrides.then(|| per_b.clone()),
+            conf_inclusive: has_overrides,
         };
         self.play_compare.fetched_floor_b = floor;
+        self.play_compare.fetched_per_class_b = per_b.clone();
         let key = (self.play_image_gen, model.clone());
         let meta = PlayPredMeta {
             image_gen: self.play_image_gen,
@@ -298,6 +306,7 @@ impl FoloApp {
             iou_bits: self.play_iou.to_bits(),
             target: self.play_target,
             floor,
+            per_class_conf: per_b,
         };
         if self.play_compare.pred_b_for.as_ref() != Some(&key) {
             self.play_compare.pred_b = Load::Loading;

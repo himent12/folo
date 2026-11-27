@@ -52,17 +52,30 @@ impl HttpBackend {
     /// [`Backend::predict`]'s answer.
     pub(super) fn predict_for(&self, req: &PredictRequest) -> ApiResult<PredictResponse> {
         match &req.input {
-            PredictInput::Dataset { dataset_id, image_id } => self.post(
-                "/predict",
-                &folo_api::PredictRequest {
-                    model_id: req.model_id.clone(),
-                    dataset_id: dataset_id.clone(),
-                    image_id: image_id.clone(),
-                    conf: req.conf,
-                    iou: req.iou,
-                    max_det: req.max_det,
-                },
-            ),
+            PredictInput::Dataset { dataset_id, image_id } => {
+                #[derive(serde::Serialize)]
+                struct JsonPredictBody<'a> {
+                    #[serde(flatten)]
+                    base: folo_api::PredictRequest,
+                    #[serde(skip_serializing_if = "Option::is_none")]
+                    per_class_conf: Option<&'a std::collections::BTreeMap<u32, f32>>,
+                    #[serde(skip_serializing_if = "std::ops::Not::not")]
+                    conf_inclusive: bool,
+                }
+                let body = JsonPredictBody {
+                    base: folo_api::PredictRequest {
+                        model_id: req.model_id.clone(),
+                        dataset_id: dataset_id.clone(),
+                        image_id: image_id.clone(),
+                        conf: req.conf,
+                        iou: req.iou,
+                        max_det: req.max_det,
+                    },
+                    per_class_conf: req.per_class_conf.as_ref().filter(|m| !m.is_empty()),
+                    conf_inclusive: req.conf_inclusive,
+                };
+                self.post("/predict", &body)
+            }
             PredictInput::File { name, bytes } => {
                 let boundary = format!("folo-{:016x}", crate::synth::hash(name) ^ bytes.len() as u64);
                 let mut body = Vec::with_capacity(bytes.len() + 1024);
@@ -78,6 +91,14 @@ impl HttpBackend {
                 field(&mut body, "conf", &req.conf.to_string());
                 field(&mut body, "iou", &req.iou.to_string());
                 field(&mut body, "max_det", &req.max_det.to_string());
+                if let Some(map) = req.per_class_conf.as_ref().filter(|m| !m.is_empty())
+                    && let Ok(encoded) = serde_json::to_string(map)
+                {
+                    field(&mut body, "per_class_conf", &encoded);
+                }
+                if req.conf_inclusive {
+                    field(&mut body, "conf_inclusive", "true");
+                }
                 let safe_name = name.replace(['"', '\r', '\n'], "_");
                 body.extend_from_slice(
                     format!(

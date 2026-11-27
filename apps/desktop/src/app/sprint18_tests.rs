@@ -48,7 +48,8 @@ fn playground_per_class_thresholds_drive_overlays_compare_batch_and_remap_on_mod
     drive(&mut app, window, |this, _, _| {
         assert_eq!(this.play_thresholds.per_class.get(&0), Some(&0.85));
         assert_eq!(this.play_thresholds.per_class.get(&1), Some(&0.20));
-        assert!((this.play_min_conf() - 0.20).abs() < 1e-6);
+        assert_eq!(this.play_fetched_per_class.get(&0), Some(&0.85));
+        assert_eq!(this.play_fetched_per_class.get(&1), Some(&0.20));
         let keys: Vec<String> = this.focus.borrow().keys().map(|k| k.to_string()).collect();
         for expected in [
             "play-per-class-toggle",
@@ -162,7 +163,8 @@ fn playground_per_class_thresholds_drive_overlays_compare_batch_and_remap_on_mod
             model_id: "m_44c0".into(),
             iou_bits: 0.70f32.to_bits(),
             target: None,
-            floor: 0.05,
+            floor: 0.40,
+            per_class_conf: per_class.clone(),
             content_hash: None,
         }),
     });
@@ -189,7 +191,8 @@ fn playground_per_class_thresholds_drive_overlays_compare_batch_and_remap_on_mod
             model_id: "m_44c0".into(),
             iou_bits: 0.70f32.to_bits(),
             target: None,
-            floor: 0.05,
+            floor: 0.40,
+            per_class_conf: per_class.clone(),
             content_hash: None,
         }),
     });
@@ -220,6 +223,21 @@ fn playground_per_class_thresholds_drive_overlays_compare_batch_and_remap_on_mod
         assert_eq!(parsed_bj["images"][0]["detections"][0]["name"], "square");
         let summary_csv = this.build_play_batch_summary_csv().unwrap().0;
         assert!(summary_csv.contains("square") && !summary_csv.contains("circle"), "{summary_csv}");
+    });
+
+    // 4b. Global-only export stays active for `folo predict --thresholds` and round-trips cleanly.
+    drive(&mut app, window, |this, _, cx| {
+        this.play_conf = 0.70;
+        this.reset_all_play_class_conf(cx);
+        let exported = this.build_play_thresholds_export().unwrap().0;
+        let cal: folo_vision::ThresholdCalibration = serde_json::from_str(&exported).unwrap();
+        cal.validate().unwrap();
+        assert!(!cal.is_empty(), "global-only export must remain active for CLI --thresholds");
+        assert!((cal.global.best_conf - 0.70).abs() < 1e-4);
+        assert!((cal.threshold_for(0) - 0.70).abs() < 1e-4);
+        assert!(this.apply_play_thresholds_json(&exported, cx));
+        assert!((this.play_conf - 0.70).abs() < 1e-4);
+        assert!(this.play_thresholds.per_class.is_empty());
     });
 
     // 5. Switching to a model with an incompatible class list clears stale overrides (no silent leak!).
@@ -316,6 +334,18 @@ fn models_calibration_cli_and_playground_handoff_carry_calibrated_thresholds() {
             !this.play_thresholds.per_class.is_empty(),
             "calibrated per-class overrides carried into Playground"
         );
+    });
+
+    // 4. An empty calibration (no GT boxes on split) must never set `play_conf` to 0.0.
+    drive(&mut app, window, |this, w, cx| {
+        this.play_conf = 0.35;
+        this.play_thresholds.per_class.clear();
+        this.store
+            .calibrations
+            .insert(mid.clone(), crate::store::Load::Ready(folo_vision::ThresholdCalibration::default()));
+        this.open_model_in_playground(mid.clone(), true, w, cx);
+        assert!(this.play_conf > 0.05, "empty calibration must not set play_conf to 0: {}", this.play_conf);
+        assert!(this.play_thresholds.per_class.is_empty());
     });
 }
 
