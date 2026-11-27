@@ -253,14 +253,23 @@ impl ModelConfig {
         if self.num_classes == 0 {
             bad.push("num_classes must be at least 1".into());
         }
-        if self.in_channels != 3 {
-            bad.push(format!("in_channels {} (requires 3)", self.in_channels));
+        if self.is_v2() {
+            if self.in_channels == 0 {
+                bad.push("in_channels must be at least 1".into());
+            }
+            if self.reg_max < 2 {
+                bad.push(format!("reg_max {} (requires >= 2)", self.reg_max));
+            }
+        } else {
+            if self.in_channels != 3 {
+                bad.push(format!("in_channels {} (requires 3)", self.in_channels));
+            }
+            if self.reg_max != 16 {
+                bad.push(format!("reg_max {} (requires 16)", self.reg_max));
+            }
         }
         if self.strides != [8, 16, 32] {
             bad.push(format!("strides {:?} (requires [8, 16, 32])", self.strides));
-        }
-        if self.reg_max != 16 {
-            bad.push(format!("reg_max {} (requires 16)", self.reg_max));
         }
         match self.head.as_str() {
             "o2m" | "o2o" => {}

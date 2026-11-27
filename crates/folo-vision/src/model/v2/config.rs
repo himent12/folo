@@ -8,6 +8,10 @@ use crate::model::HeadMode;
 /// Focal classification bias prior `ln(0.01 / 0.99) = -4.59512`, coupled strictly to MAL-trained runs.
 pub const MAL_CLS_BIAS_PRIOR: f32 = -4.595_12;
 
+fn default_true() -> bool {
+    true
+}
+
 /// Configuration of a [`super::FoloV2Model`].
 ///
 /// Defaults build the locked `FOLO v2-Iso` architecture:
@@ -32,17 +36,22 @@ pub struct FoloV2Config {
     pub head: HeadMode,
     /// Enable the opt-in separate `iou_out: Conv1×1(c_box → 1)` localization-quality head branch.
     /// Keeps `box.out` strictly `4 * reg_max = 64` channels (`% 16 == 0`).
+    #[serde(default)]
     pub iou_head: bool,
     /// Use lossless `SPD(2×2) + Conv1×1(4·in_channels → c0)` stem (`true`) or standard `Conv3×3 s=2`
     /// stem (`false`, pairing with CPU `u8-stem`).
+    #[serde(default = "default_true")]
     pub spd_stem: bool,
     /// High-capacity `v2-Plus` tier (`+1` `WS-QARepConv3x3` in `stage3/4/5` and `neck.out3` for `n`/`s`).
+    #[serde(default)]
     pub plus: bool,
     /// Enable relocated `FullPAD-Lite` global-context FiLM gates on `P3` and `P4` head inputs only
     /// (applied after `neck.down3`/`neck.down4` taps so the neck stays contiguous int8).
+    #[serde(default = "default_true")]
     pub fullpad: bool,
     /// Initialise `cls.out.bias` to [`MAL_CLS_BIAS_PRIOR`] (`-4.595`, `p0 = 0.01`, for MAL runs) instead
     /// of FOLO v1's per-level `cls_bias_prior` (for plain-BCE runs).
+    #[serde(default)]
     pub mal_bias_prior: bool,
     /// BatchNorm epsilon (default `1e-3`).
     pub bn_eps: f64,

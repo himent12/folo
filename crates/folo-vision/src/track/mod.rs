@@ -509,7 +509,7 @@ impl Predictor {
             self.config().conf,
             track_cfg.low_thresh,
             self.config().score,
-            self.model().head_mode(),
+            self.detector().head_mode(),
         );
         let imgsz = self.config().imgsz;
         let rect = self.config().rect;

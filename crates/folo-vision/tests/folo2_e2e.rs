@@ -18,13 +18,14 @@ use folo_test_support::TestDir;
 use folo_vision::metrics::EvalConfig;
 use folo_vision::model::HeadMode;
 use folo_vision::tile::TileConfig;
+use folo_vision::track::TrackConfig;
 use folo_vision::train::{
     AutoBatchRequest, DEFAULT_AUTO_BATCH_UTILIZATION, EpochHook, OptimizerChoice, ResumeOverrides,
     TrainConfig, TrainData, TrainOptions, Trainer, auto_batch_plan, estimate_training_footprint,
 };
 use folo_vision::tta::{PredictOptions, TtaConfig};
 use folo_vision::val::{ValConfig, validate_detector, validate_v2};
-use folo_vision::{Detector, FoloV2Config, FoloV2Model, Precision, PredictConfig, Predictor};
+use folo_vision::{Detector, FoloModel, FoloV2Config, FoloV2Model, Precision, PredictConfig, Predictor};
 
 const MIB: u64 = 1 << 20;
 const GIB: u64 = 1 << 30;
@@ -323,10 +324,43 @@ fn folo2_o2o_training_export_transfer_and_predictor_sahi_tta() {
         predictor.predict_with_options(&img0, &PredictOptions { tta: Some(tta_cfg), tile: None }).unwrap();
     assert_eq!(opts_res.detections.len(), tta_single.detections.len());
 
+    // ByteTrack multi-frame sequence tracking works cleanly on folo2-* (no v1 unwrap panic).
+    let seq = predictor.predict_sequence(&[img0.clone(), img1.clone()], &TrackConfig::default()).unwrap();
+    assert_eq!(seq.len(), 2);
+
     // Also test o2m evaluation mode override via Predictor::new_v2 on the same o2o model.
     let loaded_v2 = FoloV2Model::open(&exp_f32).unwrap();
     let pred_o2m = Predictor::new_v2(loaded_v2, PredictConfig { head: Some(HeadMode::O2m), ..pcfg }).unwrap();
     let _ = pred_o2m.predict(&img0).unwrap();
+
+    // FoloModel (v1) explicitly rejects folo2 configs and files instead of building a malformed v1 graph.
+    let v2_mc = ModelConfig::new_v2("n", 2).unwrap();
+    let err_new = FoloModel::new(v2_mc).err().expect("FoloModel::new must reject folo2 config");
+    assert!(err_new.to_string().contains("folo2"), "unexpected error: {err_new}");
+    let err_file = FoloModel::from_file(&mf32, folo_nn::io::Purpose::Inference)
+        .err()
+        .expect("FoloModel::from_file must reject folo2 file");
+    assert!(err_file.to_string().contains("folo2"), "unexpected error: {err_file}");
+
+    // Non-default FoloV2Config (`reg_max = 8`, `in_channels = 1`) round-trips cleanly through `.folo`,
+    // and spec-2 JSON with omitted optional flags deserializes into FoloV2Config with defaults.
+    let mut custom_cfg = FoloV2Config::new("n", 2).unwrap();
+    custom_cfg.reg_max = 8;
+    custom_cfg.in_channels = 1;
+    let custom_model = FoloV2Model::new(custom_cfg.clone()).unwrap();
+    let custom_path = dir.join("custom_v2.folo");
+    custom_model.save(&custom_path).unwrap();
+    let custom_back = FoloV2Model::open(&custom_path).unwrap();
+    assert_eq!(custom_back.config(), &custom_cfg);
+    let omitted_json = r#"{"scale":"n","num_classes":2,"in_channels":3,"reg_max":16,"strides":[8,16,32],"head":"o2m","bn_eps":0.001,"bn_momentum":0.03}"#;
+    let parsed_cfg: FoloV2Config = serde_json::from_str(omitted_json).unwrap();
+    assert!(
+        !parsed_cfg.iou_head
+            && parsed_cfg.spd_stem
+            && !parsed_cfg.plus
+            && parsed_cfg.fullpad
+            && !parsed_cfg.mal_bias_prior
+    );
 }
 
 #[test]
@@ -430,6 +464,33 @@ fn folo2_iou_head_supervision_validation_diagnostics_and_prediction() {
         .to_vec::<f32>()
         .unwrap();
     assert_ne!(iou_w_before, iou_w_after, "iou_quality_loss must supervise and update iou_out weights");
+
+    // Fresh fine-tuning via `Trainer::new` with `--weights` inherits `iou_head = true` from the source file.
+    let (mut ft_opts, _) = options(None);
+    ft_opts.weights = Some(iou_path);
+    let mut ft_trainer = Trainer::new(train_cfg, data(&ds_cfg), ft_opts).unwrap();
+    assert!(
+        ft_trainer.model_v2().unwrap().config().iou_head,
+        "transfer from iou_head weights must preserve iou_head"
+    );
+    let ft_w_before = ft_trainer.model_v2().unwrap().head.levels[0]
+        .box_branch
+        .iou_out
+        .as_ref()
+        .unwrap()
+        .weight
+        .to_vec::<f32>()
+        .unwrap();
+    assert_eq!(ft_trainer.run().unwrap().status, RunStatus::Completed);
+    let ft_w_after = ft_trainer.model_v2().unwrap().head.levels[0]
+        .box_branch
+        .iou_out
+        .as_ref()
+        .unwrap()
+        .weight
+        .to_vec::<f32>()
+        .unwrap();
+    assert_ne!(ft_w_before, ft_w_after, "fine-tuned iou_head run must update iou_out weights");
 }
 
 #[test]
@@ -480,6 +541,14 @@ fn auto_batch_folo2_param_count_and_plan_parity_across_all_scales() {
 #[test]
 fn folo2_gpu_amp_train_and_f16_predict_smoke() {
     folo_gpu::request_tensor_cores();
+    let Ok(ctx) = folo_gpu::GpuContext::shared() else {
+        eprintln!("skipping folo2_gpu_amp_train_and_f16_predict_smoke: no GPU adapter");
+        return;
+    };
+    if ctx.summary().device_type == "Cpu" && std::env::var("FOLO_GPU_TEST_SOFTWARE").is_err() {
+        eprintln!("skipping folo2_gpu_amp_train_and_f16_predict_smoke: software adapter");
+        return;
+    }
     let Ok(dev) = folo_gpu::init() else {
         eprintln!("skipping folo2_gpu_amp_train_and_f16_predict_smoke: no GPU adapter");
         return;

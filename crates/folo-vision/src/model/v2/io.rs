@@ -25,12 +25,11 @@ impl FoloV2Model {
         save_weights(path, &self.metadata()?, self)
     }
 
-    /// Export a fused `.folo` weights file at `dtype`: folds all `WS-QARepConv3x3` multi-branch kernels and
-    /// BatchNorms on a detached `F32` clone (leaving `self` untouched), casts to `dtype`, and writes atomically.
+    /// Export a fused `.folo` weights file at `dtype`: copies weights once to CPU `F32`, folds all
+    /// `WS-QARepConv3x3` multi-branch kernels and BatchNorms on a detached `F32` clone (leaving `self`
+    /// untouched), casts once to `dtype`, and writes atomically.
     pub fn export(&self, path: impl AsRef<Path>, dtype: FloatDType) -> Result<()> {
-        let mut fused = self.fused_eval_clone()?;
-        fused.to_device(Device::Cpu)?;
-        fused.to_dtype(DType::F32)?;
+        let fused = self.fused_cpu_f32_clone()?;
         export_module(path, &fused.metadata()?, &fused, dtype)
     }
 

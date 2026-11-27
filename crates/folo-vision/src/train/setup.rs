@@ -77,10 +77,37 @@ impl Trainer {
         let weights = opts.weights.clone();
         // Stored with the run (`folo.train`), so a resume resolves `auto` as this run started (§8.2, rule 5).
         let cfg = TrainConfig { transfer: weights.is_some(), ..cfg };
-        let mut t = Self::build(cfg, data, opts, false, None)?;
+        cfg.validate()?;
+        let opened_weights = match &weights {
+            Some(w) => Some((w.clone(), ModelFile::open(w)?)),
+            None => None,
+        };
+        // When fine-tuning a `folo2-*` run from `--weights` of a matching `folo2-<scale>` file, carry forward its
+        // architectural v2 flags (`iou_head`, `spd_stem`, `plus`, `fullpad`) so optional branches like `iou_out`
+        // are not silently dropped on transfer.
+        let inherited_v2_mconf = opened_weights.as_ref().and_then(|(_, file)| {
+            if !cfg.is_v2() {
+                return None;
+            }
+            let src = &file.metadata().config;
+            let want_scale = cfg.scale().ok()?;
+            if !src.is_v2() || src.scale != want_scale {
+                return None;
+            }
+            let mut mc = ModelConfig::new_v2(want_scale, data.classes.len()).ok()?;
+            mc.head = cfg.head.as_str().into();
+            mc.iou_head = src.iou_head;
+            mc.spd_stem = src.spd_stem;
+            mc.plus = src.plus;
+            mc.fullpad = src.fullpad;
+            if cfg.loss.mal_gamma > 0.0 {
+                mc.mal_bias_prior = Some(true);
+            }
+            Some(mc)
+        });
+        let mut t = Self::build(cfg, data, opts, false, inherited_v2_mconf.as_ref())?;
         t.warnings = schedule_warnings(&t.cfg, &t.sched, t.data.train.len(), weights.is_none());
-        if let Some(w) = weights {
-            let file = ModelFile::open(&w)?;
+        if let Some((w, file)) = opened_weights {
             let report = t.model.transfer_from(&file)?;
             if t.cfg.gauge_norm {
                 let gn = super::gauge::apply_floor_gauge_norm(&t.model)?;

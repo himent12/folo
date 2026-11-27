@@ -39,7 +39,7 @@ pub struct TrainConfig {
     /// How `dataset` is read (informational, like `dataset`: `folo train --resume` reopens it so, and a folder that
     /// holds both YOLO and COCO labels reads the same). Missing in configs from before it: `auto`.
     pub data_format: folo_data::Format,
-    /// Architecture, `folo-n` … `folo-x`.
+    /// Architecture, `folo-n` … `folo-x` or `folo2-n` … `folo2-x`.
     pub arch: String,
     /// Epochs, `1..=10000`.
     pub epochs: u32,

@@ -188,6 +188,7 @@ impl Trainer {
                 iou_finite = v.is_finite();
                 if iou_finite {
                     loss.total = loss.total.add(&l_iou)?;
+                    loss.total_value += v;
                 }
             }
             let kd = kd.map(|kd| [kd.cls, kd.dfl]);

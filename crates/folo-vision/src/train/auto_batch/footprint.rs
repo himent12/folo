@@ -1,10 +1,11 @@
-//! Analytic GPU training and validation memory footprint estimator for [`crate::model::FoloModel`].
+//! Analytic GPU training and validation memory footprint estimator for [`crate::model::FoloModel`] and
+//! [`crate::model::v2::FoloV2Model`].
 //!
-//! Walks the exact stage widths, repeats, and head branches of `FoloModel::with_rng` without allocating tensors,
-//! accounting for `f32`/`amp` dtypes (including `F32` autocast attention softmax), `o2m`/`o2o` heads, EMA,
-//! optimizer states (`SGD`, `MuSGD` momentum + Muon conv buffers, `AdamW`), frozen distillation teachers
-//! (weights, retained outputs, and eval/forward-plan intermediates), and `folo-gpu` convolution backward
-//! weight-gradient split-K scratch buffers.
+//! Walks the exact stage widths, repeats, and head branches of `FoloModel::with_rng` / `FoloV2Model::with_rng`
+//! without allocating tensors, accounting for `f32`/`amp` dtypes (including `F32` autocast attention softmax),
+//! `o2m`/`o2o` heads, EMA, optimizer states (`SGD`, `MuSGD` momentum + Muon conv buffers, `AdamW`), frozen
+//! distillation teachers (weights, retained outputs, and eval/forward-plan intermediates), and `folo-gpu`
+//! convolution backward weight-gradient split-K scratch buffers.
 
 use folo_nn::io::ModelConfig;
 use folo_nn::optim::OptimKind;
@@ -755,6 +756,23 @@ fn analyze_folo_v2_model(cfg: &FoloV2Config, imgsz: usize, amp: bool, record_con
             st.params = st.params.saturating_add(cfg.num_classes as u64); // PeakSuppress::alpha_raw
             st.max_weight_elems = st.max_weight_elems.max(cfg.num_classes as u64);
         }
+        // Under default `o2o_detach == true`, `LazyAlignHead::forward_o2o` re-runs the shared box branch
+        // (`forward_box_only`) on detached features during training: zero extra parameters or eval memory,
+        // but a second set of box-branch autograd activations.
+        let saved_params = st.params;
+        let saved_conv_weights = st.conv_weight_params;
+        let saved_bn_buffers = st.bn_buffers;
+        let saved_convs_len = st.convs.len();
+        for (&cin, &stride) in chs.iter().zip(&strides) {
+            let hw = imgsz / stride;
+            st.ws_qarep_3x3(cin, s.c_box, hw, hw);
+            st.ws_qarep_3x3(s.c_box, s.c_box, hw, hw);
+            st.conv2d_bias(s.c_box, 4 * cfg.reg_max, 1, hw, hw);
+        }
+        st.params = saved_params;
+        st.conv_weight_params = saved_conv_weights;
+        st.bn_buffers = saved_bn_buffers;
+        st.convs.truncate(saved_convs_len);
         st.eval_forward_bytes = saved_eval;
     }
 

@@ -42,7 +42,7 @@ const MAX_VAL_BATCH: usize = 4096;
 /// [`probe_batch_size`].
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AutoBatchRequest {
-    /// Detector architecture (`"folo-n"` … `"folo-x"`, or scale letter `"n"` … `"x"`).
+    /// Detector architecture (`"folo-n"` … `"folo-x"`, `"folo2-n"` … `"folo2-x"`, or scale letter `"n"` … `"x"`).
     pub arch: String,
     /// Square training image size (multiple of 32 in `64..=4096`).
     pub imgsz: u32,
@@ -69,7 +69,8 @@ pub struct AutoBatchRequest {
     /// Requested validation batch size (`0` = default `2 * chosen_batch`, clamped against `F32` eval limits).
     #[serde(default)]
     pub val_batch: usize,
-    /// Optional frozen distillation teacher architecture (`"folo-n"` … `"folo-x"` or scale letter `"n"` … `"x"`).
+    /// Optional frozen distillation teacher architecture (`"folo-n"` … `"folo-x"`, `"folo2-n"` … `"folo2-x"`, or
+    /// scale letter `"n"` … `"x"`).
     pub teacher_arch: Option<String>,
     /// Detection head of the frozen distillation teacher (`o2m` by default; `o2o` includes both resident branches).
     #[serde(default)]

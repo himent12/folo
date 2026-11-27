@@ -300,6 +300,12 @@ impl FoloModel {
     /// Build the model of `config`, drawing the initial weights from `rng` in canonical order.
     pub fn with_rng(config: ModelConfig, rng: &mut Rng) -> Result<Self> {
         config.validate()?;
+        if config.is_v2() {
+            return Err(Error::Metadata(format!(
+                "FoloModel requires family `folo`, got `{}` (use FoloV2Model or Detector)",
+                config.family
+            )));
+        }
         let s = Scaling::of(&config);
         let mut init = Init { rng, bn_eps: config.bn_eps, bn_momentum: config.bn_momentum };
         let i = &mut init;
