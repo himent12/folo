@@ -16,7 +16,7 @@ import EmptyState from '$lib/ui/EmptyState';
 import ErrorState from '$lib/ui/ErrorState';
 import Panel from '$lib/ui/Panel';
 
-import ComparePickers from './playground/ComparePickers';
+import BatchFilmstrip from './playground/BatchFilmstrip';
 import CompareStage from './playground/CompareStage';
 import CompareSummaryPanel from './playground/CompareSummary';
 import DatasetPicker from './playground/DatasetPicker';
@@ -24,10 +24,10 @@ import LiveMediaCanvas from './playground/LiveMediaCanvas';
 import MediaBar from './playground/MediaBar';
 import MediaInputs from './playground/MediaInputs';
 import PlaygroundActions from './playground/PlaygroundActions';
+import PlaygroundPickers from './playground/PlaygroundPickers';
 import PlaygroundTiming from './playground/PlaygroundTiming';
 import { formatCompareTimingMeta, formatSignedDelta } from './playground/compare';
 import { holdNoticeFocus } from './playground/noticeFocus';
-import ModelPickers from './playground/ModelPickers';
 import ImagePanel from './playground/ImagePanel';
 import ResultsPanel from './playground/ResultsPanel';
 import ClassList from './playground/ClassList';
@@ -41,11 +41,13 @@ import { keepSession } from './playground/keepSession';
 import { sampleImages } from './playground/samples';
 import { playgroundPath } from './playground/session';
 import { createCompareController } from './playground/useCompare';
+import { useBatchSession } from './playground/useBatchSession';
 import { usePlaygroundExport } from './playground/useExport';
 import { useLocalWeights } from './playground/useLocalWeights';
 import { useMediaSession } from './playground/useMediaSession';
 import { useModelCatalog } from './playground/useModelCatalog';
 import { usePlaygroundSelection } from './playground/useSelection';
+import { usePlaygroundSheet } from './playground/useSheetState';
 import { useSinglePredict } from './playground/useSinglePredict';
 import { usePlaygroundSource } from './playground/useSource';
 import { useWasmAvailability } from './playground/useWasmProbe';
@@ -70,10 +72,6 @@ export default function Playground() {
 
   const phone = new MediaQuery(media.phone, false);
   const narrow = new MediaQuery(media.upToLaptop, false);
-  const tablet = computed(() => narrow.current && !phone.current);
-  const moreOpen = signal(false);
-  const sheetEl = signal<HTMLElement>();
-  const moreBtn = signal<HTMLElement>();
   const pickerOpen = signal(false);
   let fileInput!: HTMLInputElement;
   let videoInput!: HTMLInputElement;
@@ -107,6 +105,8 @@ export default function Playground() {
   let syncModelUrl: ((id: string) => void) | null = null;
   let clearCompare: () => void = () => {};
   let stopMedia: () => void = () => {};
+  let clearBatch: () => void = () => {};
+  let loadBatchFiles: (files: File[]) => void = () => {};
   let loadVideoFile: (f: File) => void = () => {};
   let startWebcamFn: () => void = () => {};
   let isLiveStreamFn: () => boolean = () => false;
@@ -137,9 +137,10 @@ export default function Playground() {
     retryImage,
     choose,
     setSource,
+    setBatchFrame,
     prepareMediaSource,
     setLiveFrame,
-    setFile,
+    setFiles,
     clear,
     onSeg,
     onpaste,
@@ -160,37 +161,27 @@ export default function Playground() {
       hidden.set(new Set());
       clearCompare();
     },
+    onResetForBatchFrame: (cached, frameKey) => {
+      pred.set(cached);
+      predSourceKey.set(frameKey);
+      error.set(null);
+      weightsMissing.set(false);
+      hover.set(null);
+      picked.set(null);
+      clearCompare();
+    },
     onClearExtra: () => moreOpen.set(false),
     onDropVideo: (videoFile) => loadVideoFile(videoFile),
     onOpenVideo: () => videoInput.click(),
     onStartWebcam: () => startWebcamFn(),
     onSwitchAwayFromMedia: () => stopMedia(),
+    onClearBatch: () => clearBatch(),
+    onLoadBatch: (files) => loadBatchFiles(files),
     openFilePicker: () => fileInput.click(),
     pickerOpen,
   });
 
-  const sheetShown = computed(() => moreOpen.get() && narrow.current && !!source.get());
-  const sheetTitle = computed(() => (tablet.get() ? 'More settings' : 'Thresholds'));
-
-  effect(() => {
-    if (sheetShown.get()) sheetEl.get()?.focus();
-  });
-  effect(() => {
-    if (!narrow.current) untrack(() => moreOpen.set(false));
-  });
-  effect(() => {
-    if (!sheetShown.get() || !tablet.get()) return;
-    const away = (e: PointerEvent) => {
-      const t = e.target as Node;
-      if (!sheetEl.peek()?.contains(t) && !moreBtn.peek()?.contains(t)) moreOpen.set(false);
-    };
-    document.addEventListener('pointerdown', away);
-    return () => document.removeEventListener('pointerdown', away);
-  });
-  function closeSheet() {
-    moreOpen.set(false);
-    moreBtn.peek()?.querySelector<HTMLElement>('button')?.focus({ preventScroll: true });
-  }
+  const { tablet, moreOpen, sheetEl, moreBtn, sheetShown, sheetTitle, closeSheet } = usePlaygroundSheet(narrow, phone, () => !!source.get());
 
   let getModelBId: () => string | null = () => null;
   const { localWeights, weightsMissing, weightsTarget, badFile, badFileB, pickWeights, dropLocal } = useLocalWeights({
@@ -314,6 +305,41 @@ export default function Playground() {
     if (id !== null) lastModelId = id;
   });
 
+  let cancelSinglePredict: () => void = () => {};
+  const batch = useBatchSession({
+    engine,
+    model: () => model.peek(),
+    modelId: () => modelId.get(),
+    runOn,
+    localWeights,
+    compare: cmp.compare,
+    o2o: () => o2o.get(),
+    conf,
+    iou,
+    maxDet,
+    hidden,
+    classes: () => classes.peek(),
+    source,
+    pred,
+    predSourceKey,
+    predicting,
+    error,
+    weightsMissing,
+    hover,
+    picked,
+    choose,
+    cancelSinglePredict: () => cancelSinglePredict(),
+    onSingleFile: (s) => setSource(s),
+    onActivateFrame: (s, cached, bump) => setBatchFrame(s, cached, bump),
+    onEnterBatch: () => {
+      stopMedia();
+      hidden.set(new Set());
+    },
+    dropLocal: (id, f, e) => dropLocal(id, f, e, badFile),
+  });
+  clearBatch = batch.clear;
+  loadBatchFiles = (files) => void batch.loadFiles(files);
+
   const cut = useSinglePredict({
     modelId: () => modelId.get(),
     source,
@@ -334,6 +360,12 @@ export default function Playground() {
     engine,
     dropLocal: (id, f, e) => dropLocal(id, f, e, badFile),
     isLiveStream: () => mediaSession.liveStreaming.get(),
+    isBatchRunningAll: () => batch.runningAll.get(),
+    getCachedBatchPred: batch.getCachedPred,
+    wasBatchStopped: batch.wasStoppedFor,
+    onBatchResult: batch.recordSingleResult,
+    onBatchBusy: batch.recordSingleBusy,
+    onRegisterAbort: (fn) => (cancelSinglePredict = fn),
   });
 
   // Out of GPU memory on the server (507): this browser has its own device, and a smaller model of the same classes
@@ -634,48 +666,34 @@ export default function Playground() {
     );
   };
   const mediaBar = () => <MediaBar media={mediaSession} predicting={predicting.get() || (cmp.compare.get() && cmp.predictingB.get())} />;
+  const batchBar = () => <BatchFilmstrip batch={batch} hasModel={!!modelId.get()} />;
 
   const intro = () => <span>Run a model on any image, video, or live camera. Thresholds re-filter instantly in the browser.</span>;
 
   // The model and where it runs: the rail's first section from 1024 px up, a toolbar row under the title below that.
-  const pickers = (inRail: boolean) =>
-    cmp.compare.get() ? (
-      <ComparePickers
-        rail={inRail}
-        toolbar={!inRail}
-        ranked={ranked.get()}
-        choices={choices.get()}
-        modelAId={modelId.get()}
-        modelBId={cmp.modelBId.get()}
-        modelA={model.get()}
-        modelB={cmp.modelB.get()}
-        metaA={pickedMeta.get()}
-        metaB={cmp.metaB.get()}
-        chooseModelA={chooseModel}
-        chooseModelB={(id) => cmp.pickedModelB.set(id)}
-        swapModels={cmp.swapModels}
-        bind:runOnA={runOn}
-        bind:runOnB={cmp.runOnB}
-        bind:compareView={cmp.compareView}
-        webgpu={webgpu}
-        browserOff={browserOff.get()}
-      />
-    ) : (
-      <ModelPickers
-        rail={inRail}
-        toolbar={!inRail}
-        ranked={ranked.get()}
-        modelId={modelId.get()}
-        choices={choices.get()}
-        chooseModel={chooseModel}
-        model={model.get()}
-        pickedMeta={pickedMeta.get()}
-        bind:runOn={runOn}
-        webgpu={webgpu}
-        browserOff={browserOff.get()}
-        runOnNote={runOnNote.get()}
-      />
-    );
+  const pickers = (inRail: boolean) => (
+    <PlaygroundPickers
+      compare={cmp.compare.get()}
+      inRail={inRail}
+      ranked={ranked.get()}
+      choices={choices.get()}
+      modelAId={modelId.get()}
+      modelBId={cmp.modelBId.get()}
+      modelA={model.get()}
+      modelB={cmp.modelB.get()}
+      metaA={pickedMeta.get()}
+      metaB={cmp.metaB.get()}
+      chooseModelA={chooseModel}
+      chooseModelB={(id) => cmp.pickedModelB.set(id)}
+      swapModels={cmp.swapModels}
+      runOnA={runOn}
+      runOnB={cmp.runOnB}
+      compareView={cmp.compareView}
+      webgpu={webgpu}
+      browserOff={browserOff.get()}
+      runOnNote={runOnNote.get()}
+    />
+  );
 
   const compareSummary = (inRail: boolean) => (
     <CompareSummaryPanel
@@ -729,7 +747,7 @@ export default function Playground() {
         onFileRef={(e) => (fileInput = e)}
         onVideoRef={(e) => (videoInput = e)}
         onPickWeights={pickWeights}
-        onPickFile={(f) => void setFile(f)}
+        onPickFiles={setFiles}
         onPickVideo={loadVideoFile}
       />
 
@@ -804,6 +822,7 @@ export default function Playground() {
                 mediaLabel={mediaSession.mode.get() === 'webcam' ? 'Live camera' : mediaSession.videoName.get()}
                 liveStage={useLiveCanvas.get() ? liveStage : null}
                 mediaBar={mediaSession.mode.get() !== 'none' ? mediaBar : null}
+                batchBar={batch.active.get() ? batchBar : null}
                 zoomResetKey={zoomResetKey.get()}
                 keepPrevious={mediaSession.mode.get() !== 'none'}
                 onOpenVideo={() => videoInput.click()}

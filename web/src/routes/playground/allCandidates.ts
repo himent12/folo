@@ -11,6 +11,26 @@ const KEY = 'all-candidates';
 
 /** Answers that hold every candidate: module-wide, as the session keeps an answer when the page is left. */
 const complete = new WeakSet<Prediction>();
+/** Capped answers whose full-candidate completion already failed once (suppresses automatic replay until Retry). */
+const completionFailed = new WeakSet<Prediction>();
+
+/** Marks a prediction as holding every candidate (fetched with `ALL`). */
+export function markPredictionComplete(p: Prediction): void {
+  completionFailed.delete(p);
+  complete.add(p);
+}
+
+/** Marks a capped prediction's `ALL` completion as failed so the stage does not automatically replay it. */
+export function markCompletionFailed(p: Prediction): void {
+  completionFailed.add(p);
+}
+
+/** True when `p` hit `FETCH.max_det` and its candidate floor is at or above `conf`, so lower boxes may be missing. */
+export function isPredictionCutAt(p: Prediction | null, conf: number): boolean {
+  if (!p || complete.has(p)) return false;
+  const f = candidateFloor(p);
+  return f !== null && conf <= f;
+}
 
 /**
  * A busy image's answer stops at FETCH.max_det candidates and is exact only above the lowest score among them. When the
@@ -30,6 +50,8 @@ export function askAllWhenCut(o: {
   engine: BrowserEngine;
   /** In the browser, the server cannot send the model's file (`noServerWeights`) and none was picked. */
   weightsMissing: () => void;
+  /** Optional hook called when full-candidate completion upgrades `pred`, so batch caches stay in sync. */
+  onCompleted?: (source: Source, model: string, runOn: RunOn, next: Prediction) => void;
 }): () => boolean {
   const floor = computed(() => {
     const p = o.pred.get();
@@ -53,13 +75,18 @@ export function askAllWhenCut(o: {
   effect(() => takeBack);
   // The model, image, backend and file are tracked too: a kept answer restored before the model list has loaded asks
   // once the model is known. Never while another prediction runs (a new backend or file): its answer comes next.
+  let lastRetry = 0;
   effect(() => {
     const p = short.get();
     const id = o.model();
     const s = o.source();
     const on = o.runOn();
-    void retry.get();
+    const retryTick = retry.get();
+    const explicitRetry = retryTick !== lastRetry;
+    lastRetry = retryTick;
     if (!p || !id || !s || p.model_id !== id || o.busy()) return;
+    if (!explicitRetry && completionFailed.has(p)) return;
+    completionFailed.delete(p);
     const file = o.file(id);
     const ctrl = new AbortController();
     ask({ api: hub.api, engine: o.engine, model: id, source: s, on, file, options: ALL, signal: ctrl.signal }).then(
@@ -69,6 +96,7 @@ export function askAllWhenCut(o: {
         complete.add(next);
         takeBack();
         o.pred.set(next);
+        o.onCompleted?.(s, id, on, next);
       },
       // The first answer stays: it is still right above its lowest score, and the count still says "1,000+".
       (e: unknown) => {

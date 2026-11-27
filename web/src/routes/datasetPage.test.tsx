@@ -373,4 +373,13 @@ describe('Dataset page history', () => {
       hold();
     }
   });
+
+  it('moves keyboard focus to the Statistics tab when activating the DatasetInsights Stats shortcut', async () => {
+    open('/datasets/ds_shapes_hard');
+    const statsBtn = await until(() => target.querySelector<HTMLButtonElement>('[data-dataset-insights] .stats-link'), 'insights Stats button');
+    statsBtn.focus();
+    statsBtn.click();
+    await until(() => router.route.query.get('tab') === 'stats', 'switched to stats tab');
+    await until(() => document.activeElement?.id === 'ds-tab-stats', 'focus moved to Statistics tab');
+  });
 });

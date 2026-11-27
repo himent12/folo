@@ -31,6 +31,18 @@ export interface SinglePredictInput {
   dropLocal: (id: string, f: File, e: unknown) => void;
   /** True while streaming live video/webcam frames (skips secondary full-candidate re-fetches). */
   isLiveStream?: () => boolean;
+  /** True while batch Run All is driving sequential inference (suppresses duplicate single-image requests). */
+  isBatchRunningAll?: () => boolean;
+  /** Returns a cached batch prediction for `(model, source, runOn)` if already computed. */
+  getCachedBatchPred?: (model: string, s: Source, runOn: RunOn) => Prediction | null;
+  /** True when the user stopped Run All on this unrun batch item (prevents instant auto-restart). */
+  wasBatchStopped?: (s: Source) => boolean;
+  /** Mirrors single-image completion/error into the active batch item so filmstrip badges update live. */
+  onBatchResult?: (s: Source, model: string, runOn: RunOn, pred: Prediction | null, error: unknown) => void;
+  /** Mirrors single-image running state into the active batch item. */
+  onBatchBusy?: (s: Source, busy: boolean) => void;
+  /** Receives a synchronous abort callback so `Run all` cancels any in-flight single request before dispatching batch work. */
+  onRegisterAbort?: (abort: () => void) => void;
 }
 
 export function useSinglePredict(o: SinglePredictInput): () => boolean {
@@ -42,27 +54,61 @@ export function useSinglePredict(o: SinglePredictInput): () => boolean {
     return o.localWeights.get().get(id) ?? null;
   });
 
+  let lastRetry = 0;
+  let activeCtrl: AbortController | null = null;
+  o.onRegisterAbort?.(() => {
+    activeCtrl?.abort();
+    activeCtrl = null;
+  });
   effect(() => {
     const id = o.modelId();
     const s = o.source.get();
     const on = o.runOn.get();
     const file = activeFile.get();
-    void o.retryTick.get();
+    const retry = o.retryTick.get();
+    const batchRunning = !!o.isBatchRunningAll?.();
+    const explicitRetry = retry !== lastRetry;
+    lastRetry = retry;
+    if (batchRunning) return;
     if (!id || !s || untrack(() => o.restored(id, s, on) || !!o.consumeReuse?.(id, s, on))) {
       untrack(() => {
-        if (s && o.pred.peek()) o.predSourceKey.set(sourceImageKey(s));
+        const curPred = o.pred.peek();
+        if (s && curPred) {
+          o.predSourceKey.set(sourceImageKey(s));
+          if (id) o.onBatchResult?.(s, id, on, curPred, null);
+        }
         o.predicting.set(false);
         o.error.set(null);
         o.weightsMissing.set(false);
       });
       return;
     }
+    const cached = !explicitRetry ? untrack(() => o.getCachedBatchPred?.(id, s, on) ?? null) : null;
+    if (cached) {
+      untrack(() => {
+        const sameDisplayed = o.pred.peek() === cached;
+        o.pred.set(cached);
+        o.predSourceKey.set(sourceImageKey(s));
+        o.predicting.set(false);
+        // Preserve batch-halting error / missing-weights notices if re-entering solely because Run All ended.
+        if (!sameDisplayed) {
+          o.error.set(null);
+          o.weightsMissing.set(false);
+        }
+      });
+      return;
+    }
+    if (!explicitRetry && untrack(() => !!o.wasBatchStopped?.(s))) {
+      untrack(() => o.predicting.set(false));
+      return;
+    }
     const frameKey = sourceImageKey(s);
-    const ctrl = new AbortController();
+    const ctrl = (activeCtrl = new AbortController());
     untrack(() => {
       o.predicting.set(true);
       o.error.set(null);
       o.weightsMissing.set(false);
+      o.onBatchBusy?.(s, true);
       // Results belong to a model and backend: never show another model's or backend's boxes while (or if) this one fails.
       const p = o.pred.get();
       if (p && (p.model_id !== id || (p.backend ?? 'server') !== on)) {
@@ -77,20 +123,24 @@ export function useSinglePredict(o: SinglePredictInput): () => boolean {
     run.then(
       (p) => {
         if (ctrl.signal.aborted) return;
+        if (activeCtrl === ctrl) activeCtrl = null;
         o.pred.set(p);
         o.predSourceKey.set(frameKey);
         o.hover.set(null);
         o.picked.set(null);
         o.predicting.set(false);
+        o.onBatchResult?.(s, id, on, p, null);
       },
       (e: unknown) => {
         if (ctrl.signal.aborted) return;
+        if (activeCtrl === ctrl) activeCtrl = null;
         o.predicting.set(false);
         if (file && on !== 'server' && isDetectorLoadError(e)) {
           o.pred.set(null);
           o.predSourceKey.set(null);
           o.hover.set(null);
           o.picked.set(null);
+          o.onBatchBusy?.(s, false);
           o.dropLocal(id, file, e);
           return;
         }
@@ -100,6 +150,7 @@ export function useSinglePredict(o: SinglePredictInput): () => boolean {
           o.hover.set(null);
           o.picked.set(null);
           o.weightsMissing.set(true);
+          o.onBatchBusy?.(s, false);
           return;
         }
         o.pred.set(null);
@@ -107,9 +158,14 @@ export function useSinglePredict(o: SinglePredictInput): () => boolean {
         o.hover.set(null);
         o.picked.set(null);
         o.error.set(e);
+        o.onBatchResult?.(s, id, on, null, e);
       },
     );
-    return () => ctrl.abort();
+    return () => {
+      ctrl.abort();
+      if (activeCtrl === ctrl) activeCtrl = null;
+      untrack(() => o.onBatchBusy?.(s, false));
+    };
   });
 
   return askAllWhenCut({
@@ -119,8 +175,9 @@ export function useSinglePredict(o: SinglePredictInput): () => boolean {
     source: () => o.source.get(),
     runOn: () => o.runOn.get(),
     file: () => activeFile.peek(),
-    busy: () => o.predicting.get() || !!o.isLiveStream?.(),
+    busy: () => o.predicting.get() || !!o.isLiveStream?.() || !!o.isBatchRunningAll?.(),
     engine: o.engine,
     weightsMissing: () => o.weightsMissing.set(true),
+    onCompleted: (s, id, on, next) => o.onBatchResult?.(s, id, on, next, null),
   });
 }

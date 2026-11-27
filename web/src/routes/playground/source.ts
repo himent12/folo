@@ -3,7 +3,9 @@ import { hub } from '$lib/api/index';
 import type { Dataset, DatasetImage as Img } from '$lib/api/types';
 
 /** Where the Playground's image comes from: a file (picked, dropped or pasted) or a dataset's image. */
-export type Source = { kind: 'file'; file: Blob; name: string; url: string; width: number; height: number } | { kind: 'dataset'; ds: Dataset; img: Img; at?: number };
+export type Source =
+  | { kind: 'file'; file: Blob; name: string; url: string; width: number; height: number; /** When true, object URL lifetime is managed by the batch session rather than `usePlaygroundSource`. */ sharedUrl?: boolean }
+  | { kind: 'dataset'; ds: Dataset; img: Img; at?: number };
 
 /** A stable identity per file blob so browser inference can cache decoded pixels across re-runs. */
 const blobIds = new WeakMap<Blob, number>();

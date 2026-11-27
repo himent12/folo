@@ -7,7 +7,7 @@ import type { BrowserEngine } from '$lib/inference/browser';
 import { toast } from '$lib/ui/toast';
 import { droppedImages, takeImage } from './intake';
 import { isVideoFile } from './media';
-import type { Source } from './source';
+import { sourceImageKey, type Source } from './source';
 
 export type Seg = 'file' | 'dataset' | 'video' | 'webcam';
 
@@ -20,6 +20,9 @@ export interface UseSourceInput {
   onOpenVideo: () => void;
   onStartWebcam: () => void;
   onSwitchAwayFromMedia: () => void;
+  onClearBatch?: () => void;
+  onLoadBatch?: (files: File[]) => void;
+  onResetForBatchFrame?: (cached: import('$lib/api/types').Prediction | null, frameKey: string | null) => void;
   openFilePicker: () => void;
   pickerOpen: Signal<boolean>;
 }
@@ -68,17 +71,32 @@ export function usePlaygroundSource(input: UseSourceInput) {
     return () => seq === decodeSeq && !destroyed;
   }
 
+  function revokeOwned(s: Source | null) {
+    if (s?.kind === 'file' && !s.sharedUrl) URL.revokeObjectURL(s.url);
+  }
+
   function setSource(s: Source) {
     decodeSeq++;
     toast.clear('image');
+    input.onClearBatch?.();
     input.onSwitchAwayFromMedia();
-    const old = source.peek();
-    if (old?.kind === 'file') URL.revokeObjectURL(old.url);
+    revokeOwned(source.peek());
     input.engine.clearImageCache();
     source.set(s);
     imageRetry.set(0);
     seg.set(s.kind);
     input.onResetState();
+  }
+
+  /** Activates one image from the active multi-image batch without revoking batch-owned URLs or resetting hidden classes. */
+  function setBatchFrame(s: Extract<Source, { kind: 'file' }>, cached: import('$lib/api/types').Prediction | null, bumpChoice = true) {
+    if (bumpChoice) decodeSeq++;
+    toast.clear('image');
+    revokeOwned(source.peek());
+    source.set(s);
+    imageRetry.set(0);
+    seg.set('file');
+    input.onResetForBatchFrame?.(cached, cached ? sourceImageKey(s) : null);
   }
 
   /**
@@ -88,8 +106,8 @@ export function usePlaygroundSource(input: UseSourceInput) {
   function prepareMediaSource(segKind: 'video' | 'webcam') {
     decodeSeq++;
     toast.clear('image');
-    const old = source.peek();
-    if (old?.kind === 'file') URL.revokeObjectURL(old.url);
+    input.onClearBatch?.();
+    revokeOwned(source.peek());
     input.engine.clearImageCache();
     source.set(null);
     imageRetry.set(0);
@@ -103,8 +121,7 @@ export function usePlaygroundSource(input: UseSourceInput) {
    */
   function setLiveFrame(blob: Blob, name: string, width: number, height: number, segKind: 'video' | 'webcam') {
     toast.clear('image');
-    const old = source.peek();
-    if (old?.kind === 'file') URL.revokeObjectURL(old.url);
+    revokeOwned(source.peek());
     source.set({ kind: 'file', file: blob, name, url: URL.createObjectURL(blob), width, height });
     imageRetry.set(0);
     seg.set(segKind);
@@ -125,12 +142,38 @@ export function usePlaygroundSource(input: UseSourceInput) {
     setSource({ kind: 'file', file: t.file, name, url: URL.createObjectURL(t.file), width: t.width, height: t.height });
   }
 
+  /** Routes 1 file into single-image/video intake and 2+ image files into the batch filmstrip. */
+  function setFiles(files: readonly File[]) {
+    if (!files.length) return;
+    if (files.length === 1) {
+      void setFile(files[0]!);
+      return;
+    }
+    const nonVideos = files.filter((f) => !isVideoFile(f));
+    const imageCandidates = nonVideos.filter((f) => !f.type || f.type.startsWith('image/'));
+    if (imageCandidates.length === 0) {
+      const videoFile = files.find((f) => isVideoFile(f));
+      if (videoFile) {
+        input.onDropVideo(videoFile);
+        return;
+      }
+      const [first] = droppedImages(files);
+      if (first) void setFile(first);
+      return;
+    }
+    if (imageCandidates.length >= 2 && input.onLoadBatch) {
+      input.onLoadBatch(imageCandidates);
+      return;
+    }
+    void setFile(imageCandidates[0]!);
+  }
+
   function clear() {
     decodeSeq++;
     toast.clear('image');
+    input.onClearBatch?.();
     input.onSwitchAwayFromMedia();
-    const old = source.peek();
-    if (old?.kind === 'file') URL.revokeObjectURL(old.url);
+    revokeOwned(source.peek());
     input.engine.clearImageCache();
     source.set(null);
     imageRetry.set(0);
@@ -142,8 +185,7 @@ export function usePlaygroundSource(input: UseSourceInput) {
   onCleanup(() => {
     destroyed = true;
     decodeSeq++;
-    const old = source.peek();
-    if (old?.kind === 'file') URL.revokeObjectURL(old.url);
+    revokeOwned(source.peek());
   });
 
   function onSeg(v: Seg, activeMedia: 'none' | 'video' | 'webcam' = 'none') {
@@ -174,18 +216,7 @@ export function usePlaygroundSource(input: UseSourceInput) {
   function ondrop(e: DragEvent) {
     e.preventDefault();
     dragging.set(false);
-    const allFiles = [...(e.dataTransfer?.files ?? [])];
-    const videoFile = allFiles.find((f) => isVideoFile(f));
-    if (videoFile && !allFiles.some((f) => f.type.startsWith('image/'))) {
-      input.onDropVideo(videoFile);
-      return;
-    }
-    const [file, ...rest] = droppedImages(e.dataTransfer?.files);
-    if (!file) return;
-    void setFile(file);
-    if (rest.length) {
-      toast.info(`Using ${file.name}`, `The Playground runs one image at a time, so the other ${rest.length === 1 ? 'image was' : `${rest.length} images were`} left out.`);
-    }
+    setFiles([...(e.dataTransfer?.files ?? [])]);
   }
 
   function ondragover(e: DragEvent) {
@@ -209,9 +240,11 @@ export function usePlaygroundSource(input: UseSourceInput) {
     retryImage,
     choose,
     setSource,
+    setBatchFrame,
     prepareMediaSource,
     setLiveFrame,
     setFile,
+    setFiles,
     clear,
     onSeg,
     onpaste,

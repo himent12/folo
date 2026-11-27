@@ -37,6 +37,7 @@ import { toast } from '$lib/ui/toast';
 import ToggleButton from '$lib/ui/ToggleButton';
 import ClassFilterStrip from './dataset/ClassFilterStrip';
 import ClassPicker from './dataset/ClassPicker';
+import DatasetInsights from './dataset/DatasetInsights';
 import DisplayMenu from './dataset/DisplayMenu';
 import { findingCount, findingLabel, healthChecks, imageCount, noTraining } from './dataset/health';
 import { datasetProblem, missingError, readDataset } from './datasets/problem';
@@ -527,6 +528,22 @@ export default function Dataset() {
                       counts={dd().stats!.class_counts}
                       value={cls.get()}
                       onchange={(c) => setFilter({ class: c === undefined ? null : String(c) })}
+                    />
+                  ) : null}
+
+                  {dd().stats ? (
+                    <DatasetInsights
+                      dataset={dd()}
+                      stats={dd().stats!}
+                      counts={counts.get()}
+                      activeClass={cls.get()}
+                      activeSplit={split.get()}
+                      onSelectClass={(c) => setFilter({ class: c === undefined ? null : String(c) })}
+                      onSelectSplit={(s) => setFilter({ split: s === 'all' ? null : s })}
+                      onOpenStats={() => {
+                        setQuery({ tab: 'stats', image: null });
+                        queueMicrotask(() => document.getElementById('ds-tab-stats')?.focus({ preventScroll: true }));
+                      }}
                     />
                   ) : null}
 

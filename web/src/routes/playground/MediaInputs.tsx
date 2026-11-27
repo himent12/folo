@@ -12,7 +12,7 @@ export interface MediaInputsProps {
   onFileRef: (el: HTMLInputElement) => void;
   onVideoRef: (el: HTMLInputElement) => void;
   onPickWeights: (e: Event & { currentTarget: HTMLInputElement }) => void;
-  onPickFile: (f: File) => void;
+  onPickFiles: (files: File[]) => void;
   onPickVideo: (f: File) => void;
 }
 
@@ -33,12 +33,13 @@ export default function MediaInputs(props: MediaInputsProps) {
         ref={props.onFileRef}
         type="file"
         accept={PLAYGROUND_ACCEPT}
+        multiple
         class="sr-only"
         tabindex={-1}
         aria-hidden="true"
         onchange={(e) => {
-          const f = e.currentTarget.files?.[0];
-          if (f) props.onPickFile(f);
+          const files = [...(e.currentTarget.files ?? [])];
+          if (files.length) props.onPickFiles(files);
           e.currentTarget.value = '';
         }}
       />
