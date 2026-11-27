@@ -144,6 +144,32 @@ fn stage_two_low_confidence_occlusion_recovery_and_dynamic_names() {
 }
 
 #[test]
+fn discarded_boxes_cannot_relabel_tracks_and_same_frame_labels_are_order_independent() {
+    let mut trk = Tracker::default();
+    let t1 = trk.update(&[ibox(20.0, 20.0, 80.0, 80.0, 0.9, 0, Some("person"))]);
+    assert_eq!((t1.len(), t1[0].name.as_str()), (1, "person"));
+
+    // Degenerate, NaN, and sub-low_thresh detections carrying bogus names must NOT overwrite "person".
+    let t2 = trk.update(&[
+        ibox(22.0, 20.0, 82.0, 80.0, 0.9, 0, None),
+        ibox(80.0, 20.0, 20.0, 80.0, 0.95, 0, Some("degenerate")),
+        ibox(20.0, 20.0, 80.0, 80.0, f32::NAN, 0, Some("nan_score")),
+        ibox(20.0, 20.0, 80.0, 80.0, 0.05, 0, Some("too_low")),
+    ]);
+    assert_eq!((t2.len(), t2[0].track_id, t2[0].name.as_str()), (1, 1, "person"));
+
+    // Conflicting eligible labels in one frame resolve deterministically independent of input order.
+    let a = ibox(10.0, 10.0, 60.0, 60.0, 0.95, 3, Some("truck"));
+    let b = ibox(100.0, 100.0, 150.0, 150.0, 0.80, 3, Some("van"));
+    let mut fwd = Tracker::default();
+    let mut rev = Tracker::default();
+    let out_fwd = fwd.update(&[a.clone(), b.clone()]);
+    let out_rev = rev.update(&[b, a]);
+    assert_eq!(out_fwd, out_rev);
+    assert!(out_fwd.iter().all(|t| t.name == "truck"));
+}
+
+#[test]
 fn min_hits_class_agnostic_degenerate_filtering_and_json_contract() {
     // min_hits = 2 delays emission until second consecutive match and ignores degenerate/NaN boxes.
     let mut trk =

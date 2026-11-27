@@ -259,6 +259,27 @@ pub(crate) fn parse_track_options(v: Option<&JsValue>) -> Result<TrackerOptions,
         .map_err(|e| js_err(format!("invalid options: {e}")))
 }
 
+/// Validate parsed JSON box entries (each must be a JSON object, and every float field must remain finite when
+/// narrowed to `f32`) before deserializing into [`TrackInputBox`]. Prevents positional arrays or `f64` overflows
+/// like `1e39` (which narrow to `f32::INFINITY`) from silently passing validation and advancing tracker state.
+pub(crate) fn parse_track_boxes_json(items: Vec<serde_json::Value>) -> Result<Vec<TrackInputBox>, String> {
+    for (i, item) in items.iter().enumerate() {
+        let Some(map) = item.as_object() else {
+            return Err(format!("update: boxes[{i}] must be an object"));
+        };
+        for key in ["score", "x1", "y1", "x2", "y2"] {
+            if let Some(v) = map.get(key)
+                && let Some(f) = v.as_f64()
+                && (!f.is_finite() || !(f as f32).is_finite())
+            {
+                return Err(format!("update: boxes[{i}].{key} overflows f32 range, got {f}"));
+            }
+        }
+    }
+    serde_json::from_value(serde_json::Value::Array(items))
+        .map_err(|e| format!("update: invalid detection boxes: {e}"))
+}
+
 /// Parse a JS array of detection boxes (`FoloTrackInputBox[]`) for `FoloTracker.update`.
 pub(crate) fn parse_track_boxes(v: &JsValue) -> Result<Vec<TrackInputBox>, JsValue> {
     if !v.is_object() || !is_js_array(v)? {
@@ -267,8 +288,7 @@ pub(crate) fn parse_track_boxes(v: &JsValue) -> Result<Vec<TrackInputBox>, JsVal
     let Some(serde_json::Value::Array(items)) = js_to_json_value(v, "boxes", 0)? else {
         return Err(js_err("update: expected an array of detection boxes"));
     };
-    serde_json::from_value(serde_json::Value::Array(items))
-        .map_err(|e| js_err(format!("update: invalid detection boxes: {e}")))
+    parse_track_boxes_json(items).map_err(js_err)
 }
 
 pub(crate) fn to_js(v: &impl serde::Serialize) -> Result<JsValue, JsValue> {
@@ -341,7 +361,8 @@ pub(crate) fn bytes_of(v: &JsValue, what: &str) -> Result<Vec<u8>, JsValue> {
 
 #[cfg(test)]
 mod tests {
-    use super::{validate_option_f64_ranges, validate_track_option_f64_ranges};
+    use super::{parse_track_boxes_json, validate_option_f64_ranges, validate_track_option_f64_ranges};
+    use crate::tracker::Tracker;
 
     fn parse_map(s: &str) -> serde_json::Map<String, serde_json::Value> {
         match serde_json::from_str::<serde_json::Value>(s).unwrap() {
@@ -379,5 +400,36 @@ mod tests {
             validate_track_option_f64_ranges(&parse_map(r#"{"highThresh":0.5,"newTrackThresh":0.49999999}"#))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn parse_track_boxes_rejects_positional_arrays_and_f32_overflow_without_advancing_tracker() {
+        let mut trk = Tracker::default();
+        let valid: serde_json::Value = serde_json::from_str(
+            r#"[{"class":0,"name":"person","score":0.9,"x1":10,"y1":10,"x2":50,"y2":60}]"#,
+        )
+        .unwrap();
+        let parsed = parse_track_boxes_json(valid.as_array().unwrap().clone()).unwrap();
+        let out = trk.update(&parsed);
+        assert_eq!((out.len(), trk.frame_id(), trk.active_tracks()), (1, 1, 1));
+
+        // Positional array must be rejected (not coerced via serde's struct-from-seq).
+        let seq_val: serde_json::Value = serde_json::from_str(r#"[[0,"person",0.9,10,10,50,60]]"#).unwrap();
+        let err = parse_track_boxes_json(seq_val.as_array().unwrap().clone()).unwrap_err();
+        assert!(err.contains("must be an object"), "{err}");
+
+        // Finite f64 overflowing f32 (1e39 -> f32::INFINITY) must be rejected before Tracker::update runs.
+        for bad_json in [
+            r#"[{"class":0,"score":1e39,"x1":10,"y1":10,"x2":50,"y2":60}]"#,
+            r#"[{"class":0,"score":0.9,"x1":10,"y1":10,"x2":1e39,"y2":60}]"#,
+            r#"[{"class":0,"score":0.9,"x1":-1e39,"y1":10,"x2":50,"y2":60}]"#,
+        ] {
+            let v: serde_json::Value = serde_json::from_str(bad_json).unwrap();
+            let err = parse_track_boxes_json(v.as_array().unwrap().clone()).unwrap_err();
+            assert!(err.contains("overflows f32"), "{err}");
+        }
+
+        // Tracker frame_id and active tracks must remain completely untouched after rejected inputs.
+        assert_eq!((trk.frame_id(), trk.active_tracks(), trk.lost_tracks()), (1, 1, 0));
     }
 }

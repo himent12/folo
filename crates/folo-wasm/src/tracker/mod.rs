@@ -239,15 +239,44 @@ impl Tracker {
     /// Process one frame's detection boxes and return all active confirmed [`TrackedBox`]es sorted by ascending
     /// `track_id`.
     ///
-    /// Input box order does not affect output; non-finite scores or non-finite/degenerate boxes are ignored
-    /// cleanly by the underlying [`ByteTracker`].
+    /// Input box order does not affect output (including learned class labels when multiple eligible boxes of the
+    /// same class appear in one frame); non-finite scores, sub-`low_thresh` boxes, and non-finite/degenerate boxes
+    /// are ignored cleanly by both name learning and the underlying [`ByteTracker`].
     pub fn update(&mut self, boxes: &[TrackInputBox]) -> Vec<TrackedBox> {
+        let low_thresh = self.inner.config().low_thresh;
         let mut dets = Vec::with_capacity(boxes.len());
+        let mut best_name: HashMap<u32, (f32, f32, f32, f32, f32, &str)> = HashMap::new();
         for b in boxes {
-            if let Some(name) = b.name.as_deref().filter(|s| !s.is_empty()) {
-                self.seen_names.insert(b.class, name.to_string());
+            let eligible = b.score.is_finite()
+                && b.score >= low_thresh
+                && b.x1.is_finite()
+                && b.y1.is_finite()
+                && b.x2.is_finite()
+                && b.y2.is_finite()
+                && b.x2 > b.x1
+                && b.y2 > b.y1;
+            if eligible && let Some(name) = b.name.as_deref().filter(|s| !s.is_empty()) {
+                let cand = (b.score, b.x1, b.y1, b.x2, b.y2, name);
+                let replace = match best_name.get(&b.class) {
+                    None => true,
+                    Some(prev) => cand
+                        .0
+                        .total_cmp(&prev.0)
+                        .then_with(|| prev.1.total_cmp(&cand.1))
+                        .then_with(|| prev.2.total_cmp(&cand.2))
+                        .then_with(|| prev.3.total_cmp(&cand.3))
+                        .then_with(|| prev.4.total_cmp(&cand.4))
+                        .then_with(|| prev.5.cmp(cand.5))
+                        .is_gt(),
+                };
+                if replace {
+                    best_name.insert(b.class, cand);
+                }
             }
             dets.push(Detection { bbox: Xyxy::new(b.x1, b.y1, b.x2, b.y2), score: b.score, class: b.class });
+        }
+        for (class_id, (_, _, _, _, _, name)) in best_name {
+            self.seen_names.insert(class_id, name.to_string());
         }
         let tracks = self.inner.update(&dets);
         tracks
