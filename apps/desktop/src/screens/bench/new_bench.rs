@@ -303,19 +303,7 @@ impl FoloApp {
                         .collect();
 
                     let note = match &checked {
-                        Ok(spec) => {
-                            let geom = if spec.vary_aspect {
-                                format!("up to {} px (varied aspect)", spec.imgsz)
-                            } else {
-                                format!("{}×{} px", spec.imgsz, spec.imgsz)
-                            };
-                            format!(
-                                "{} deterministic {geom} scenes ({}, seed {}), generated on the server with exact boxes.",
-                                int(spec.images as u64),
-                                plural(spec.classes.len(), "class"),
-                                spec.seed,
-                            )
-                        }
+                        Ok(spec) => generated_preview_note(spec),
                         Err(_) => {
                             "Deterministic procedural scenes (1 to 5,000 images, 1 to 8 classes) generated directly on the server without registering a dataset."
                                 .to_string()
@@ -440,6 +428,22 @@ impl FoloApp {
     }
 }
 
+/// Preview caption for a valid generated benchmark specification (proper singular/plural nouns).
+pub(super) fn generated_preview_note(spec: &folo_bench::GeneratedSourceSpec) -> String {
+    let geom = if spec.vary_aspect {
+        format!("up to {} px (varied aspect)", spec.imgsz)
+    } else {
+        format!("{}×{} px", spec.imgsz, spec.imgsz)
+    };
+    let scene_noun = if spec.images == 1 { "scene" } else { "scenes" };
+    format!(
+        "{} deterministic {geom} {scene_noun} ({}, seed {}), generated on the server with exact boxes.",
+        int(spec.images as u64),
+        counted(spec.classes.len() as u64, "class", "classes"),
+        spec.seed,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use crate::app::Route;
@@ -544,6 +548,41 @@ mod tests {
                 !keys.iter().any(|k| k == "bench-new-kind"),
                 "kind picker shown without feature: {keys:?}"
             );
+        });
+    }
+
+    #[test]
+    fn generated_bench_preview_pluralizes_cleanly_and_invalid_submit_leaves_no_stale_banner() {
+        use super::generated_preview_note;
+
+        let one = validate_generated_bench("1", "0", "circle", 640, false).unwrap();
+        let one_note = generated_preview_note(&one);
+        assert!(one_note.starts_with("1 deterministic 640×640 px scene (1 class, seed 0)"), "{one_note}");
+
+        let many = validate_generated_bench("64", "0", "circle, square, triangle", 640, false).unwrap();
+        let many_note = generated_preview_note(&many);
+        assert!(
+            many_note.starts_with("64 deterministic 640×640 px scenes (3 classes, seed 0)"),
+            "{many_note}"
+        );
+        assert!(!many_note.contains("classs"), "{many_note}");
+
+        // Invalid Enter/submit keeps error inline without populating a stale form banner.
+        let (mut app, window) = open();
+        drive(&mut app, window, |this, w, cx| {
+            this.navigate(Route::Benches, w, cx);
+            this.open_new_bench(w, cx);
+            this.pick_bench_source_kind(BenchSourceKind::Generated, cx);
+            let f = this.bench.new_bench.as_mut().unwrap();
+            f.gen_classes.update(cx, |i, cx| i.set_text("circle, circle", cx));
+            this.submit_new_bench(cx);
+            assert!(this.bench.new_bench.as_ref().unwrap().error.is_none());
+            // Correcting the field leaves no stale banner and restores a valid spec.
+            let f = this.bench.new_bench.as_mut().unwrap();
+            f.gen_classes.update(cx, |i, cx| i.set_text("circle", cx));
+            assert!(f.error.is_none());
+            let cls = f.gen_classes.read(cx).text().to_string();
+            assert!(validate_generated_bench("64", "0", &cls, 640, false).is_ok());
         });
     }
 }

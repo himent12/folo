@@ -550,47 +550,74 @@ impl FoloApp {
                     .into_any_element()
             })
             .collect();
-        let class_filter_bar = both_ready.then(|| {
-            let mut mk = |key: &'static str, label: String, bucket: CompareClassFilter| {
-                self.chip(
-                    key,
-                    label,
-                    active_filter == bucket,
-                    None,
-                    None,
-                    window,
-                    cx,
-                    act(move |this, _, cx| {
-                        this.play_compare.class_filter = bucket;
-                        cx.notify();
-                    }),
-                )
-            };
-            div()
-                .flex()
-                .flex_wrap()
-                .gap(px(5.))
-                .child(mk(
-                    "play-cmp-cls-all",
-                    format!("All {}", summary.classes.len()),
-                    CompareClassFilter::All,
-                ))
-                .child(mk(
-                    "play-cmp-cls-both",
-                    format!("Both {}", summary.shared_classes.len()),
-                    CompareClassFilter::Both,
-                ))
-                .child(mk(
-                    "play-cmp-cls-a",
-                    format!("Only A {}", summary.only_a_classes.len()),
-                    CompareClassFilter::OnlyA,
-                ))
-                .child(mk(
-                    "play-cmp-cls-b",
-                    format!("Only B {}", summary.only_b_classes.len()),
-                    CompareClassFilter::OnlyB,
-                ))
-        });
+        let pending_compare = self.play_pred_pending || self.play_compare.pred_b_pending;
+        let buckets = [
+            ("play-cmp-cls-all", CompareClassFilter::All, "All", summary.classes.len()),
+            ("play-cmp-cls-both", CompareClassFilter::Both, "Both", summary.shared_classes.len()),
+            ("play-cmp-cls-a", CompareClassFilter::OnlyA, "Only A", summary.only_a_classes.len()),
+            ("play-cmp-cls-b", CompareClassFilter::OnlyB, "Only B", summary.only_b_classes.len()),
+        ];
+        let class_filter_bar = if both_ready || pending_compare {
+            for (k, _, _, _) in buckets {
+                let _ = self.passing_stop(k, true, cx);
+            }
+            let chips: Vec<AnyElement> = buckets
+                .into_iter()
+                .map(|(key, bucket, name, count)| {
+                    if both_ready {
+                        self.chip(
+                            key,
+                            format!("{name} {count}"),
+                            active_filter == bucket,
+                            None,
+                            None,
+                            window,
+                            cx,
+                            act(move |this, _, cx| {
+                                this.play_compare.class_filter = bucket;
+                                cx.notify();
+                            }),
+                        )
+                        .into_any_element()
+                    } else {
+                        // Keep chips mounted while an A/B reload is pending so keyboard focus
+                        // stays inside the Compare rail instead of jumping back to the sidebar.
+                        let fh = self.fh(key, cx);
+                        let ring = self.ring(&fh, window);
+                        let (bg, border, ink) = if active_filter == bucket {
+                            (t.accent_muted, t.accent_line, t.accent_text)
+                        } else {
+                            (t.bg_raised, t.line_control, t.text_tertiary)
+                        };
+                        div()
+                            .id(SharedString::from(key))
+                            .relative()
+                            .h(px(26.))
+                            .px(px(10.))
+                            .rounded(px(radius::FULL))
+                            .flex()
+                            .items_center()
+                            .bg(bg)
+                            .border_1()
+                            .border_color(border)
+                            .opacity(0.6)
+                            .track_focus(&fh)
+                            .tooltip(crate::controls::tip("Waiting for both models…", None))
+                            .when(ring, |d| d.child(crate::app::focus_ring(t, radius::FULL)))
+                            .child(text(ty::SM, ink).whitespace_nowrap().child(format!("{name} —")))
+                            .into_any_element()
+                    }
+                })
+                .collect();
+            Some(div().flex().flex_wrap().gap(px(5.)).children(chips).into_any_element())
+        } else {
+            let anchors: Vec<AnyElement> = buckets
+                .into_iter()
+                .filter_map(|(k, _, _, _)| self.passing_stop(k, false, cx))
+                .map(|fh| div().track_focus(&fh).into_any_element())
+                .collect();
+            (!anchors.is_empty()).then(|| div().flex().children(anchors).into_any_element())
+        };
 
         let err_a = self.play_pred.error().cloned();
         let err_b = self.play_compare.pred_b.error().cloned();

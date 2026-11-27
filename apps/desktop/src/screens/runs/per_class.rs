@@ -97,12 +97,7 @@ impl FoloApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let t = theme(cx);
-        let names: Vec<String> = r
-            .dataset
-            .as_ref()
-            .map(|d| d.classes.clone())
-            .or_else(|| self.store.dataset_summary(&r.config.dataset_id).map(|d| d.classes.clone()))
-            .unwrap_or_default();
+        let names = self.run_classes(r);
         let state = per_class_state(self.store.run_data.get(&r.id));
         let epoch = match &state {
             PerClass::NoMetrics(e) | PerClass::Rows(e, _) => Some(*e),
@@ -380,5 +375,63 @@ mod tests {
         assert_eq!(delta_text(-0.013), "▼0.013");
         assert_eq!(delta_text(0.0002), "0.000");
         assert_eq!(delta_text(-0.0004), "0.000");
+    }
+
+    #[test]
+    fn legacy_run_with_empty_dataset_snapshot_resolves_classes_for_table_and_exports() {
+        use crate::app::Route;
+        use crate::app::tests::{drive, open};
+
+        let (mut app, window) = open();
+        let dir = folo_test_support::TestDir::new("desktop-legacy-run-classes");
+        let rid = "run_52e8";
+        drive(&mut app, window, |this, w, cx| {
+            // Simulate a legacy run whose RunDataset snapshot has empty `classes: []`.
+            if let Some(runs) = this.store.runs.ready_mut()
+                && let Some(r) = runs.iter_mut().find(|r| r.id == rid)
+                && let Some(snap) = r.dataset.as_mut()
+            {
+                snap.classes.clear();
+            }
+            this.navigate(Route::Run(rid.into()), w, cx);
+        });
+        for _ in 0..3 {
+            app.frame(window.into());
+            app.run_until_idle();
+        }
+        let pc_path = dir.path().join("legacy-classes.csv");
+        app.platform().answer_prompts(Some(vec![pc_path.clone()]));
+        drive(&mut app, window, |this, _, cx| {
+            let r = this.store.run(rid).unwrap().clone();
+            assert!(r.dataset.as_ref().unwrap().classes.is_empty());
+            let resolved = this.run_classes(&r);
+            assert!(
+                !resolved.is_empty() && !resolved[0].starts_with("class "),
+                "expected real class names from checkpoint/dataset fallback, got {resolved:?}"
+            );
+            this.export_run_per_class_csv(rid, cx);
+        });
+        app.run_until_idle();
+        let pc_csv = std::fs::read_to_string(&pc_path).expect("per-class CSV written");
+        assert!(!pc_csv.contains(",class 0,"), "CSV must not fall back to generic class 0: {pc_csv}");
+        drive(&mut app, window, |this, _, _| {
+            assert!(
+                this.toasts.iter().any(|t| {
+                    t.title == "Exported per-class AP CSV"
+                        && t.body.as_deref().is_some_and(|b| b.contains("classes") && !b.contains("classs"))
+                }),
+                "toast summary must use proper plural 'classes': {:?}",
+                this.toasts.iter().map(|t| (&t.title, &t.body)).collect::<Vec<_>>()
+            );
+        });
+
+        let json_path = dir.path().join("legacy-metrics.json");
+        app.platform().answer_prompts(Some(vec![json_path.clone()]));
+        drive(&mut app, window, |this, _, cx| this.export_run_metrics_json(rid, cx));
+        app.run_until_idle();
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&json_path).unwrap()).unwrap();
+        let first_name = v["latest_per_class"][0]["name"].as_str().unwrap();
+        assert!(!first_name.starts_with("class "), "JSON must use resolved class names: {first_name}");
     }
 }

@@ -91,12 +91,7 @@ impl FoloApp {
         let slider = self.slider("sample-conf", conf, lo, hi, step, window, cx);
         let conf_tip = format!("Minimum confidence · {conf:.2}");
         let conf_ring = self.ring(&self.fh("sample-conf", cx), window);
-        let classes = r
-            .dataset
-            .as_ref()
-            .map(|d| d.classes.clone())
-            .or_else(|| self.store.dataset_summary(&r.config.dataset_id).map(|d| d.classes.clone()))
-            .unwrap_or_default();
+        let classes = self.run_classes(r);
         let refresh_failed =
             latest > 0 && self.sample_epoch.is_none() && self.store.samples_refresh_error.contains_key(&r.id);
         let samples_failed = latest > 0

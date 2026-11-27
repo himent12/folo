@@ -402,12 +402,26 @@ pub fn build_checkpoint_cli(
 }
 
 impl FoloApp {
-    /// Class names for `r` (snapshot on the run, else the loaded dataset summary).
+    /// Class names for `r`: prefers a non-empty run snapshot, then the saved checkpoint's class
+    /// order, then the registered dataset summary (skipping empty legacy snapshots).
     pub(crate) fn run_classes(&self, r: &Run) -> Vec<String> {
         r.dataset
             .as_ref()
+            .filter(|d| !d.classes.is_empty())
             .map(|d| d.classes.clone())
-            .or_else(|| self.store.dataset_summary(&r.config.dataset_id).map(|d| d.classes.clone()))
+            .or_else(|| {
+                r.model_id
+                    .as_deref()
+                    .and_then(|mid| self.store.model(mid))
+                    .filter(|m| !m.classes.is_empty())
+                    .map(|m| m.classes.clone())
+            })
+            .or_else(|| {
+                self.store
+                    .dataset_summary(&r.config.dataset_id)
+                    .filter(|d| !d.classes.is_empty())
+                    .map(|d| d.classes.clone())
+            })
             .unwrap_or_default()
     }
 
@@ -467,7 +481,7 @@ impl FoloApp {
         }
         let csv = build_run_per_class_csv(&epochs, &classes);
         let suggested = run_export_filename(&r, "per-class", "csv");
-        let summary = plural(rows.len(), "class");
+        let summary = counted(rows.len() as u64, "class", "classes");
         self.save_run_export_file(suggested, csv, "Exported per-class AP CSV", summary, cx);
     }
 
@@ -642,8 +656,8 @@ impl FoloApp {
             .into_any_element()
     }
 
-    /// Checkpoint CLI quick-copy panel shown below Per class when the run has a saved checkpoint
-    /// model (mirrors Studio `#790`'s `CheckpointCli` val / predict command block).
+    /// Checkpoint CLI quick-copy panel shown below Logs when the run has a saved checkpoint model
+    /// (mirrors Studio `#790`'s `CheckpointCli` val / predict command block).
     pub(super) fn run_checkpoint_cli_panel(
         &self,
         r: &Run,
@@ -698,8 +712,10 @@ impl FoloApp {
         if mode == CheckpointCliMode::Predict {
             placeholders.push("<images>".to_string());
         }
-        let hint = (!placeholders.is_empty())
-            .then(|| format!("Replace {} with local paths.", placeholders.join(" and ")));
+        let hint = (!placeholders.is_empty()).then(|| {
+            let noun = if placeholders.len() == 1 { "a local path" } else { "local paths" };
+            format!("Replace {} with {noun}.", placeholders.join(" and "))
+        });
         let quote_note = bundle.quote_note(mode);
 
         Some(

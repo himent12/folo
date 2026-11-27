@@ -281,6 +281,7 @@ impl FoloApp {
         }
         self.export_open = false;
         self.model_cli.onnx_head_o2m = false;
+        self.model_cli.predict_int8_target = None;
         self.pr_pin = None;
         self.pr_focus = None;
         self.class_table_sort = None;
