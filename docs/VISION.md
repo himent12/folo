@@ -25,7 +25,7 @@ predict.rs         Predictor
 tile.rs            SAHI tiled inference (TileConfig, compute_tiles, crop_tile, merge_tiled_detections)
 tta.rs             Test-Time Augmentation (TtaConfig, PredictOptions, unflip_xyxy_h, merge_tta_detections)
 track/             ByteTrack multi-object tracking (mod.rs: ByteTracker, TrackConfig, TrackedDetection, Predictor::predict_sequence; kalman.rs; assign.rs)
-export/onnx/       ONNX export: graph.rs, blocks.rs (mirrors forward), decode.rs, proto.rs
+export/onnx/       ONNX export: graph.rs, blocks.rs (v1), v2.rs (FOLO v2-Iso), decode.rs, proto.rs
 precompile.rs      GPU pipeline precompile for a run's kernels
 ```
 
@@ -49,7 +49,8 @@ differentiable, so it works on folo-core tensors.
 
 ### FOLO v2-Iso (`model/v2/`)
 Clean-sheet, hardware-co-designed detector family (`folo2-n/s/m/l/x`) built on standard CPU/GPU autograd primitives and
-ONNX opset-17-expressible ops (`export::onnx` and `model::quant` currently target v1 `FoloModel`):
+ONNX opset-17-expressible ops (exported via `FoloV2Model::to_onnx` / `export::onnx::export_v2`; `model::quant` currently
+targets v1 `FoloModel`):
 - **Config & scaling (`config.rs`):** `FoloV2Config` and `ScalingV2` enforce `ceil16`-aligned widths at every stage
   and lock shared head widths (`c_box = 48`, `c_cls = 64`) across `n` and `s` for zero-adapter CrossKD; `plus = true`
   selects the deeper `v2-Plus` tier.
@@ -307,19 +308,25 @@ and `HeadOutput::detections`, which reads the head outputs in place and extracts
   the box across CPU, int8 (`u8_stem`), GPU, `f16`, and `o2o` models.
 
 ## ONNX export
-- `folo_vision::export::onnx`: `FoloModel::to_onnx` turns a fused model into an opset-17 graph that mirrors `forward`
-  op for op (raw head outputs, or the MODEL.md §6.4 decode in the graph, which for an `o2o` model ends in the §6.6
-  top-k: end-to-end `[B, K, 6]` detections; fixed or dynamic shapes; f32 or f16).
+- `folo_vision::export::onnx`: `FoloModel::to_onnx` and `FoloV2Model::to_onnx` (`export_v2`, `v2.rs`) turn a fused v1
+  or FOLO v2-Iso model into an opset-17 graph that mirrors `forward` op for op (raw head outputs — including `iou_raw`
+  for v2 models with `iou_head = true` — or the MODEL.md §6.4 decode in the graph, fusing `sqrt(p_cls · p_iou)` when
+  `iou_head = true`, which for an `o2o` model ends in the §6.6 top-k: end-to-end `[B, K, 6]` detections; fixed shapes,
+  combined `OnnxOptions::dynamic`, or independent `DynamicAxes { batch, hw }` via `to_onnx_with_axes` /
+  `export_with_axes` / `export_v2_with_axes`; f32 or f16).
 - It is encoded by a small hand-written protobuf writer (`export::onnx::proto`), with the class names and `folo.*`
-  metadata in `metadata_props`.
-- Apart from the head branch the export does not use (`head.o2o.*`, or `head.box.*` / `head.cls.*` for end-to-end),
-  any model tensor no node consumed, or an unfused BatchNorm, is an error naming it.
+  metadata in `metadata_props` (including `folo.onnx.dynamic_batch`, `folo.onnx.dynamic_hw`, and v2 architecture keys).
+- Apart from the head branch the export does not use (`head.o2o.*`, or `head.box.*` / `head.cls.*` for v1 `o2o`, or
+  `head.cls.*` for v2 `o2o` which shares `head.box.*`), any model tensor no node consumed, or an unfused BatchNorm or
+  `WsQARepConv3x3`, is an error naming it.
 - `folo export --format onnx` and `POST /api/models/{id}/export` call `export_file`; parity with onnxruntime is
+  `crates/folo-vision/tests/onnx_export.rs` (independent dynamic axes + `FoloV2Model`) and
   `crates/folo-cli/tests/onnx.rs` + `bench/parity/onnx_check.py` ([CLI.md](CLI.md#onnx-export)).
 - `.folo` export itself lives in folo-nn ([FORMAT.md](FORMAT.md), [NN.md](NN.md)).
 
 ## Tests
 The integration tests in `crates/folo-vision/tests/` are named for what they protect: `model.rs`, `model_v2.rs`,
-`loss_cases.rs`, `assign_cases.rs`, `distill.rs`, `wave7_train_algos.rs`, `nms_reference.rs`, `fusion_reference.rs`,
-`elc_postproc.rs`, `metrics_known.rs`, `coco_parity.rs`, `coco_full.rs`, `train/` (`main.rs`, `ema.rs`), `o2o.rs`, `lazy_head.rs`,
-`int8.rs`, `harden_pipelines.rs`, `tiled_predict.rs`, `tta_predict.rs`, `track_and_eval.rs`, and the GPU ones (`gpu*.rs`).
+`onnx_export.rs`, `loss_cases.rs`, `assign_cases.rs`, `distill.rs`, `wave7_train_algos.rs`, `nms_reference.rs`,
+`fusion_reference.rs`, `elc_postproc.rs`, `metrics_known.rs`, `coco_parity.rs`, `coco_full.rs`, `train/` (`main.rs`,
+`ema.rs`), `o2o.rs`, `lazy_head.rs`, `int8.rs`, `harden_pipelines.rs`, `tiled_predict.rs`, `tta_predict.rs`,
+`track_and_eval.rs`, and the GPU ones (`gpu*.rs`).

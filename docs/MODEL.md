@@ -1717,8 +1717,8 @@ AGPL-3.0: never commit them, any derived file, or the conversion script; gate th
 FOLO v2-Iso (`crates/folo-vision/src/model/v2/`) is a clean-sheet, hardware-co-designed detector family built on
 standard CPU/GPU autograd primitives and ONNX opset-17-expressible ops. `FoloV2Model::forward` returns
 `HeadOutputV2 { box_raw, cls_raw, iou_raw, mode, o2o, anchors, reg_max, num_classes }`, which converts into v1's
-`HeadOutput` via `HeadOutputV2::into_head_output()` (`export::onnx`, `model::quant`, and the v1 `Trainer`/`Predictor`
-CLI paths currently target v1 `FoloModel`).
+`HeadOutput` via `HeadOutputV2::into_head_output()` (`FoloV2Model::to_onnx` / `export::onnx::export_v2` export fused
+v2 models to ONNX opset 17; `model::quant` and the v1 `Trainer`/`Predictor` CLI paths currently target v1 `FoloModel`).
 
 ### 11.1 Scaling and `FoloV2Config`
 
