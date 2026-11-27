@@ -1,7 +1,7 @@
 //! Dataset audit & curation tools: `audit_dataset` (exact + perceptual dHash leakage), `merge_datasets`, and
 //! `filter_dataset`.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use folo_api::{DatasetFormat, RegisterDataset, Split};
@@ -674,23 +674,62 @@ impl Inner {
         let out_name = a.name.clone();
         let target_fmt = out_fmt.1;
         let confine_paths = self.confinement.active().then(|| self.paths.clone());
-        let (out_dir, src_images, src_boxes, kept_images, kept_boxes) =
-            tokio::task::spawn_blocking(move || -> Result<(PathBuf, usize, usize, usize, usize), Error> {
-                let loaded = open_with(&path, &OpenOptions { format: src_fmt, verify_images: true })
-                    .map_err(data_error)?;
-                check_unreadable_splits(&loaded, &path)?;
-                let (src_images, src_boxes) = dataset_counts(&loaded);
-                let filtered = filter_dataset(&loaded, &cfg).map_err(data_error)?;
-                let (kept_images, kept_boxes) = dataset_counts(&filtered);
-                let out_dir = allocate_dataset_dir(&write_root, &out_name, confine_paths.as_ref())?;
-                convert::convert(&filtered, &out_dir, target_fmt).map_err(|e| {
-                    let _ = std::fs::remove_dir_all(&out_dir);
-                    data_error(e)
-                })?;
-                Ok((out_dir, src_images, src_boxes, kept_images, kept_boxes))
-            })
-            .await
-            .map_err(super::join)??;
+        struct FilteredOutput {
+            out_dir: PathBuf,
+            src_images: usize,
+            src_boxes: usize,
+            kept_images: usize,
+            kept_boxes: usize,
+            unmatched: Vec<String>,
+        }
+        let src_id = a.dataset_id.clone();
+        let filtered_out = tokio::task::spawn_blocking(move || -> Result<FilteredOutput, Error> {
+            let loaded = open_with(&path, &OpenOptions { format: src_fmt, verify_images: true })
+                .map_err(data_error)?;
+            check_unreadable_splits(&loaded, &path)?;
+            let known: HashSet<String> =
+                loaded.classes.iter().map(|c| normalize_key(c, cfg.normalize)).collect();
+            let mut seen = HashSet::new();
+            let mut unmatched = Vec::new();
+            for name in cfg.include_classes.iter().flatten().chain(&cfg.exclude_classes) {
+                let key = normalize_key(name, cfg.normalize);
+                if !known.contains(&key) && seen.insert(key) {
+                    unmatched.push(short(name, MAX_NAME_CHARS));
+                }
+            }
+            let (src_images, src_boxes) = dataset_counts(&loaded);
+            let filtered = filter_dataset(&loaded, &cfg).map_err(data_error)?;
+            let (kept_images, kept_boxes) = dataset_counts(&filtered);
+            if kept_images == 0 {
+                let mut hint = "relax the split, class, box, or image dimension filters".to_string();
+                if !unmatched.is_empty() {
+                    hint.push_str(&format!(" (unmatched class filter(s): {})", unmatched.join(", ")));
+                }
+                return Err(Error::new(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_dataset",
+                    format!("no images in '{src_id}' matched the filter (0 of {src_images} kept)"),
+                )
+                .hint(hint));
+            }
+            let out_dir = allocate_dataset_dir(&write_root, &out_name, confine_paths.as_ref())?;
+            convert::convert(&filtered, &out_dir, target_fmt).map_err(|e| {
+                let _ = std::fs::remove_dir_all(&out_dir);
+                data_error(e)
+            })?;
+            Ok(FilteredOutput { out_dir, src_images, src_boxes, kept_images, kept_boxes, unmatched })
+        })
+        .await
+        .map_err(super::join)??;
+
+        let FilteredOutput {
+            out_dir,
+            src_images,
+            src_boxes,
+            kept_images,
+            kept_boxes,
+            unmatched: unmatched_classes,
+        } = filtered_out;
 
         let dataset = self.register_written_dataset(a.name, out_dir, out_fmt.0).await?;
         let dropped_images = src_images.saturating_sub(kept_images);
@@ -709,12 +748,24 @@ impl Inner {
             kept_boxes,
             dropped_images,
             dropped_boxes,
+            unmatched_classes: unmatched_classes.clone(),
         };
-        while json_len(&res) > MAX_RESULT_BYTES && res.classes.pop().is_some() {}
-        let summary = format!(
+        while json_len(&res) > MAX_RESULT_BYTES {
+            if res.unmatched_classes.pop().is_some() {
+                continue;
+            }
+            if res.classes.pop().is_none() {
+                break;
+            }
+        }
+        let mut summary = format!(
             "filtered {} into {} ({}): kept {kept_images}/{src_images} images, {kept_boxes}/{src_boxes} boxes, {} classes",
             a.dataset_id, res.name, res.dataset_id, res.num_classes,
         );
+        if !unmatched_classes.is_empty() {
+            let shown: Vec<&str> = unmatched_classes.iter().take(5).map(String::as_str).collect();
+            summary.push_str(&format!("; warning: unmatched class filter(s): {}", shown.join(", ")));
+        }
         out(&res, summary)
     }
 }

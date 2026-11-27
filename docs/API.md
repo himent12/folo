@@ -94,7 +94,7 @@ CLI's exit code; a test keeps the sources in line with it). Messages that wrap a
   (`path` on `GET /api/label/jobs/{id}/images`; older servers ignore it), `uploads` (`/api/uploads`),
   `run_cursors` (`after_step` / `after_epoch` on `/metrics`, `after` and `total` on `/logs`, `Range` on `/weights`),
   `run_checkpoint` (`checkpoint` on `POST /api/runs`; these three are what a cloud worker needs, docs/CLOUD.md),
-  `cloud` (`/api/cloud`, `TrainConfig.compute`, `Run.cloud` and `cloud` events), `vision_bench` (the `/api/bench` endpoints, Vision benchmarks below), `predict_options` (optional `tile` / `tta` fields on `POST /api/predict`), `val_diagnostics` (optional `diagnostics` / `worst` / `diag_*` fields on `POST /api/val`), and `export_dynamic_axes` (optional independent `dynamic_batch` / `dynamic_hw` fields on `POST /api/models/{id}/export`). `folo mcp --server` refuses the
+  `cloud` (`/api/cloud`, `TrainConfig.compute`, `Run.cloud` and `cloud` events), `vision_bench` (the `/api/bench` endpoints, Vision benchmarks below), `bench_upload_safe` (client-chosen `?entry_id=` on `POST /api/bench/benchmarks/{id}/entries` and conditional `?only_if_open=true` on `POST .../stop`), `predict_options` (optional `tile` / `tta` fields on `POST /api/predict`), `val_diagnostics` (optional `diagnostics` / `worst` / `diag_*` fields on `POST /api/val`), and `export_dynamic_axes` (optional independent `dynamic_batch` / `dynamic_hw` fields on `POST /api/models/{id}/export`). `folo mcp --server` refuses the
   export switches without `export_onnx_switches` (and split dynamic axes without `export_dynamic_axes`, validation diagnostics without `val_diagnostics`, and `tile`/`tta` without `predict_options`).) In real mode `gpus` comes from folo-gpu
   (wgpu): every physical adapter once, through its preferred backend (software adapters are left out), best first,
   so ordinal 0 is the adapter `gpu:0` and `device: auto` use. `memory_bytes` is the adapter's largest device-local
@@ -1229,10 +1229,13 @@ empty `conditions` runs the unchanged images only. Text is trimmed (empty become
   strictly later for each new entry of a benchmark; then by `id`); then every other entry (queued, running, stopping,
   failed, stopped), newest first. `Bench.best` is the first of this order when it is `done` and has the
   benchmark's fingerprint.
-- `POST /api/bench/benchmarks/{id}/entries` body `StartBenchEntry` → `201 BenchEntry`:
+- `POST /api/bench/benchmarks/{id}/entries[?entry_id=<id>]` body `StartBenchEntry` → `201 BenchEntry`:
   `{ "contestant": { "kind": "model", "model_id" } | { "kind": "agent", "agent", "model"?, "effort"? } |
   { "kind": "external", "scored"?: true, "open"?: false, "predictions"?: [BenchPrediction] }, "name"?,
-  "max_images"?, "conditions"? }`. `name` (one line of at most 100 characters) defaults to the model's name, or the agent's and
+  "max_images"?, "conditions"? }`. Optional `entry_id` (`be_` followed by 4–48 lowercase letters or digits;
+  `400 invalid_query` if malformed or already used on this benchmark; requires `bench_upload_safe`) lets a client
+  choose the entry's id upfront so it can look up or clean up an open upload even if the response to the first part
+  is lost. `name` (one line of at most 100 characters) defaults to the model's name, or the agent's and
   its model's (`Claude Code (haiku)`). `max_images` runs the first so many images (at least 1, `400
   invalid_body` for 0; more than the benchmark has runs them all). `progress.total` is the entry's images times
   one plus the plan's (condition, severity) pairs it runs. `409 bench_frozen` when the benchmark's plan changed
@@ -1339,9 +1342,12 @@ empty `conditions` runs the unchanged images only. Text is trimmed (empty become
   graded by an older FOLO took `best_conf` in either case (the `result` of its `entries/<id>.json` has no
   `images_conf`). `worst` puts the images with the most `missed + wrong` first (ties in the benchmark's order); any
   other `sort` is `400 invalid_query`. `409 bench_entry_not_done` as above.
-- `POST /api/bench/benchmarks/{id}/entries/{entry_id}/stop` → `BenchEntry`: a `queued` entry, and an open external
+- `POST /api/bench/benchmarks/{id}/entries/{entry_id}/stop[?only_if_open=true]` → `BenchEntry`: a `queued` entry, and an open external
   one (what it received is dropped), is `stopped` at once; a `running` one is `stopping` until its work ends (checked between batches; agent calls in flight are killed),
-  then `stopped`. `409 bench_entry_not_active` when it has ended.
+  then `stopped`. `409 bench_entry_not_active` when it has ended. With `?only_if_open=true` (requires
+  `bench_upload_safe`), stops the entry atomically **only** while it is still an open external entry collecting
+  parts, returning `409 bench_entry_not_open` without canceling it if it is already being finished/scored or has
+  ended.
 - `DELETE /api/bench/benchmarks/{id}/entries/{entry_id}` → `204`. `409 bench_entry_active` while it is active,
   `409 bench_entry_in_loop` while a loop that is still running uses it.
 

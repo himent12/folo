@@ -109,9 +109,19 @@ impl From<bool> for Fate {
     }
 }
 
+/// True for a request that opens or starts a benchmark entry.
+pub(super) fn starts_entry(line: &str) -> bool {
+    line.starts_with("POST") && (line.contains("/entries ") || line.contains("/entries?"))
+}
+
+/// True for a request that stops a benchmark entry.
+pub(super) fn stops_entry(line: &str) -> bool {
+    line.starts_with("POST") && (line.contains("/stop ") || line.contains("/stop?"))
+}
+
 /// True for a request that stops or deletes something.
 pub(super) fn removes(line: &str) -> bool {
-    line.starts_with("DELETE") || (line.starts_with("POST") && line.contains("/stop "))
+    line.starts_with("DELETE") || stops_entry(line)
 }
 
 /// A request that reads one entry.

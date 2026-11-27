@@ -20,10 +20,11 @@ use folo_api::{BenchContestant, BenchDetection, BenchEntry, BenchEntryStatus, Be
 use folo_bench::score::{self, Map, Sample};
 use folo_bench::{Condition, conditions};
 
+use super::entries::{check_entry_id_free, new_entry_with_id};
 use super::model::{self, write_closed};
 use super::results;
 use super::state::{BenchFile, Slot};
-use super::{add_entry, new_entry, status_name};
+use super::{add_entry, status_name};
 use crate::error::{Error, Result};
 use crate::util::{rfc3339, unix_now};
 
@@ -408,9 +409,13 @@ pub(super) fn start(
     scored: bool,
     open: bool,
     predictions: Vec<BenchPrediction>,
+    requested_id: Option<String>,
 ) -> Result<BenchEntry> {
     let (file, fingerprint) = {
         let state = slot.live()?;
+        if let Some(ref eid) = requested_id {
+            check_entry_id_free(&state, eid)?;
+        }
         (state.file.clone(), state.fingerprint.clone())
     };
     let mut fill = Filling::new(file.clone(), scored);
@@ -425,8 +430,9 @@ pub(super) fn start(
         if state.fingerprint != fingerprint {
             return Err(changed());
         }
-        let mut entry = new_entry(
+        let mut entry = new_entry_with_id(
             &state,
+            requested_id,
             name,
             BenchContestant::External,
             BenchEntryStatus::Running,
@@ -435,7 +441,7 @@ pub(super) fn start(
             scored,
             fill.capacity(),
             Vec::new(),
-        );
+        )?;
         entry.progress.done = fill.received;
         fill.last_event = Some(Instant::now());
         let cancel = Arc::new(AtomicBool::new(false));
@@ -448,8 +454,9 @@ pub(super) fn start(
     if state.fingerprint != fingerprint {
         return Err(changed());
     }
-    let mut entry = new_entry(
+    let mut entry = new_entry_with_id(
         &state,
+        requested_id,
         name,
         BenchContestant::External,
         BenchEntryStatus::Done,
@@ -458,7 +465,7 @@ pub(super) fn start(
         scored,
         0,
         Vec::new(),
-    );
+    )?;
     entry.finished = Some(entry.created.clone());
     done(&mut entry, &finished, &graded, fill.received);
     let cancel = Arc::new(AtomicBool::new(false));

@@ -45,7 +45,7 @@ pub use model::InferenceGuard;
 use crate::error::{Error, Result};
 use crate::store::{SseFrame, Store};
 use crate::util::{parse_rfc3339_millis, rfc3339, unix_now};
-use entries::{add_entry, enqueue_model, new_entry, status_name, stop_entry_in};
+use entries::{add_entry, enqueue_model, status_name, stop_entry_in};
 use model::Engine;
 use state::{Slot, bench_not_found};
 
@@ -488,5 +488,94 @@ mod tests {
         )
         .unwrap();
         assert_eq!(on_disk.entry.status, folo_api::BenchEntryStatus::Failed);
+    }
+
+    /// Client-chosen `entry_id` is validated & deduplicated, and `stop_open_entry` refuses to stop an external
+    /// entry once `finish` has closed its filling buffer (so an in-flight score is never canceled).
+    #[test]
+    fn client_entry_id_and_conditional_stop_protect_scoring_entry() {
+        let dir = TestDir::new("bench-upload-safe");
+        let store = crate::RealStore::open(dir.path().to_path_buf()).device("cpu");
+        let ds = crate::Store::create_synthetic(
+            &store,
+            folo_api::SyntheticDataset {
+                name: "s".into(),
+                images: 10,
+                classes: vec!["cat".into()],
+                imgsz: 32,
+                seed: 1,
+            },
+        )
+        .unwrap();
+        let benches = crate::Store::benches(&store).unwrap();
+        let bench = benches
+            .create(
+                &store,
+                folo_api::CreateBench {
+                    name: "b".into(),
+                    description: String::new(),
+                    source: folo_api::BenchSource::Dataset { dataset_id: ds.id, split: None },
+                    max_images: None,
+                    seed: 0,
+                    plan: Some(folo_api::BenchPlan {
+                        conditions: vec![],
+                        rationale: None,
+                        designed_by: None,
+                    }),
+                },
+            )
+            .unwrap();
+        let mk = |name: &str| folo_api::StartBenchEntry {
+            contestant: folo_api::BenchContestantSpec::External {
+                scored: true,
+                open: true,
+                predictions: vec![folo_api::BenchPrediction {
+                    image: "1".into(),
+                    condition: None,
+                    severity: None,
+                    boxes: vec![],
+                }],
+            },
+            name: Some(name.into()),
+            max_images: None,
+            conditions: None,
+        };
+        // Invalid client entry_ids are rejected upfront.
+        for bad in ["", "be_", "be_123", "be_UPPER12", "be_../x", "xx_12345"] {
+            let err =
+                benches.start_entry_with_id(&store, &bench.id, mk("bad"), Some(bad.into())).unwrap_err();
+            assert_eq!(err.body.code, "invalid_query", "bad id {bad:?}: {err:?}");
+        }
+        // Valid client-chosen id succeeds and duplicates are rejected.
+        let chosen = "be_a1b2c3d4e5f60718";
+        let entry = benches.start_entry_with_id(&store, &bench.id, mk("ext"), Some(chosen.into())).unwrap();
+        assert_eq!(entry.id, chosen);
+        let dup =
+            benches.start_entry_with_id(&store, &bench.id, mk("ext2"), Some(chosen.into())).unwrap_err();
+        assert_eq!(dup.body.code, "invalid_query", "{dup:?}");
+
+        // Simulate an in-flight `finish`: `fill.closed == true` while `entry.status == Running`.
+        let slot = benches.slot(&bench.id).unwrap();
+        {
+            let state = slot.live().unwrap();
+            let fill = state.entry(chosen).unwrap().open.clone().unwrap();
+            fill.lock().unwrap().closed = true;
+        }
+        let err = benches.stop_open_entry(&bench.id, chosen).unwrap_err();
+        assert_eq!(err.body.code, "bench_entry_not_open", "{err:?}");
+        assert_eq!(benches.entry(&bench.id, chosen).unwrap().status, folo_api::BenchEntryStatus::Running);
+
+        // When still actively collecting (`fill.closed == false`), `stop_open_entry` stops it atomically.
+        {
+            let state = slot.live().unwrap();
+            let fill = state.entry(chosen).unwrap().open.clone().unwrap();
+            fill.lock().unwrap().closed = false;
+        }
+        let stopped = benches.stop_open_entry(&bench.id, chosen).unwrap();
+        assert_eq!(stopped.status, folo_api::BenchEntryStatus::Stopped);
+        // Stopping again refuses with `bench_entry_not_open`.
+        let again = benches.stop_open_entry(&bench.id, chosen).unwrap_err();
+        assert_eq!(again.body.code, "bench_entry_not_open", "{again:?}");
+        crate::Store::shutdown(&store);
     }
 }

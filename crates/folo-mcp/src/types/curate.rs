@@ -265,4 +265,7 @@ pub struct FilterDatasetResult {
     pub kept_boxes: usize,
     pub dropped_images: usize,
     pub dropped_boxes: usize,
+    /// Class names from `include_classes` / `exclude_classes` that did not match any class in the source dataset.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unmatched_classes: Vec<String>,
 }
