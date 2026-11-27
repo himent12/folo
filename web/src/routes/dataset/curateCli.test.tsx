@@ -3,9 +3,10 @@
 import { flush as flushSync, signal } from 'fw';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Dataset, DatasetStats } from '$lib/api/types';
+import { toast } from '$lib/ui/toast';
 import { render, type Rendered } from '../../../framework/testing';
 import DatasetInsights from './DatasetInsights';
-import { buildDatasetCurateCli } from './curateCli';
+import { buildDatasetCurateCli, curateCliCopiedMessage } from './curateCli';
 
 const BASE_DATASET: Dataset = {
   id: 'ds_fasteners',
@@ -33,6 +34,7 @@ afterEach(() => {
   mounted?.unmount();
   mounted = undefined;
   target?.remove();
+  for (const t of toast.items) toast.dismiss(t.id);
   vi.restoreAllMocks();
 });
 
@@ -110,6 +112,19 @@ describe('buildDatasetCurateCli', () => {
     expect(badPath.command).toContain('<dataset_path>');
     expect(badPath.command).not.toContain('rm -rf');
     expect(badPath.warning).toContain('Windows PowerShell');
+    // Copy guidance warns about angle-bracket placeholders so users replace them before running in PowerShell (Playtest R24 P3-3)
+    expect(curateCliCopiedMessage(buildDatasetCurateCli(BASE_DATASET, 'check'))).toBe(
+      'Run this audit & dedup command from your terminal.',
+    );
+    expect(curateCliCopiedMessage(buildDatasetCurateCli(BASE_DATASET, 'filter', { stats: BASE_STATS }))).toBe(
+      'Replace <out_dir> before running this filter command.',
+    );
+    expect(curateCliCopiedMessage(buildDatasetCurateCli(BASE_DATASET, 'merge'))).toBe(
+      'Replace <other_dataset> and <out_dir> before running this merge command.',
+    );
+    expect(curateCliCopiedMessage(badPath)).toBe(
+      'Replace <dataset_path> and <out_dir> before running this convert command.',
+    );
   });
 });
 
@@ -161,6 +176,7 @@ describe('DatasetInsights CLI curation integration', () => {
     target.querySelector<HTMLButtonElement>('[data-dataset-curate-cli] button[aria-label="Copy command"]')!.click();
     await Promise.resolve();
     expect(write).toHaveBeenCalledWith(expectedFilter);
+    expect(toast.items.at(-1)?.detail).toBe('Replace <out_dir> before running this filter command.');
 
     // Switching dataset collapses the helper cleanly
     ds.set({ ...BASE_DATASET, id: 'ds_other', name: 'other', splits: { train: 50, val: 0, test: 0 } });

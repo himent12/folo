@@ -152,7 +152,28 @@ export default function BatchFilmstrip(props: BatchFilmstripProps) {
   function resetFilterAndFocus() {
     b.setQaFilter({ kind: 'all' });
     queueMicrotask(() => {
-      barEl.peek()?.querySelector<HTMLButtonElement>('button[data-qa-filter="all"]')?.focus({ preventScroll: true });
+      const next =
+        barEl.peek()?.querySelector<HTMLButtonElement>('button[data-qa-filter="all"]') ??
+        stripEl.peek()?.querySelector<HTMLButtonElement>('button[tabindex="0"]');
+      next?.focus({ preventScroll: true });
+    });
+  }
+
+  function stepWithFocus(delta: -1 | 1, e: MouseEvent) {
+    const btn = e.currentTarget as HTMLButtonElement;
+    const hadFocus = document.activeElement === btn;
+    b.step(delta);
+    if (!hadFocus) return;
+    queueMicrotask(() => {
+      if (!btn.disabled) return;
+      const active = document.activeElement;
+      if (active && active !== document.body && active !== btn) return;
+      const opposite = delta > 0 ? 'Previous image' : 'Next image';
+      const next =
+        stripEl.peek()?.querySelector<HTMLButtonElement>(`button[data-batch-idx="${b.activeIndex.peek()}"]`) ??
+        barEl.peek()?.querySelector<HTMLButtonElement>(`button[aria-label="${opposite}"]:not(:disabled)`) ??
+        stripEl.peek()?.querySelector<HTMLButtonElement>('button[tabindex="0"]');
+      next?.focus({ preventScroll: true });
     });
   }
 
@@ -184,7 +205,7 @@ export default function BatchFilmstrip(props: BatchFilmstripProps) {
             icon={ChevronLeft}
             aria-label="Previous image"
             disabled={!canStepPrev.get()}
-            onclick={() => b.step(-1)}
+            onclick={(e) => stepWithFocus(-1, e)}
           />
           <span class="pos num" data-batch-pos>
             {isFiltered.get()
@@ -197,7 +218,7 @@ export default function BatchFilmstrip(props: BatchFilmstripProps) {
             icon={ChevronRight}
             aria-label="Next image"
             disabled={!canStepNext.get()}
-            onclick={() => b.step(1)}
+            onclick={(e) => stepWithFocus(1, e)}
           />
         </div>
 

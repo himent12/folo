@@ -157,6 +157,7 @@ export default function Editor(props: EditorProps) {
         selected.set(null);
         note.set('');
         asked.set(null);
+        copyNotice = false;
         status.clear();
         elsewhere.set(false);
         leaving.set(null);
@@ -180,6 +181,7 @@ export default function Editor(props: EditorProps) {
       hovered.set(null);
       note.set('');
       asked.set(null);
+      copyNotice = false;
       status.clear();
       elsewhere.set(false);
       untrack(forget);
@@ -196,6 +198,7 @@ export default function Editor(props: EditorProps) {
         if (!sameBoxes(draft.peek(), cur.boxes))
           untrack(() => {
             elsewhere.set(true);
+            copyNotice = false;
             status.show('info', 'Changed elsewhere while you edited', 'Its labels were saved from another tab or window. Save replaces them with yours; Discard shows them.');
           });
       }
@@ -205,9 +208,17 @@ export default function Editor(props: EditorProps) {
   const locked = computed(() => (img.get()?.status === 'labeling' ? 'The agent is labeling this image. You can edit it once it is done.' : null));
 
   // ---------- editing ----------
+  /** True while the dialog status line shows a transient copy-previous notice (cleared on subsequent edit/undo). */
+  let copyNotice = false;
+  function clearCopyNotice() {
+    if (!copyNotice) return;
+    copyNotice = false;
+    status.clear();
+  }
   /** Every edit of the draft goes through here, so it can be undone; `kind` joins a run of like edits into one step. */
   function edit(next: Box[], kind: string | null = null) {
     if (sameBoxes(next, draft.peek())) return;
+    clearCopyNotice();
     history.record(draft.peek(), kind);
     draft.set(next);
     rev.set(rev.peek() + 1);
@@ -216,6 +227,7 @@ export default function Editor(props: EditorProps) {
     if (locked.peek()) return;
     const to = redo ? history.redo(draft.peek()) : history.undo(draft.peek());
     if (!to) return;
+    clearCopyNotice();
     // The selection is a place in the list, and a step (Discard most of all) may put another box there: it goes, so
     // Delete or a class key never lands on a box the user did not pick.
     selected.set(null);
@@ -290,17 +302,20 @@ export default function Editor(props: EditorProps) {
     const prev = prevLabeled.peek();
     if (!prev) {
       status.info('No previous labeled image', 'No earlier image in this job has boxes to copy.');
+      copyNotice = true;
       return;
     }
     const adapted = adaptBoxesToImage(prev.boxes, prev.width, prev.height, cur.width, cur.height, props.job.classes.length);
     if (adapted.length === 0) {
       status.info('No boxes fit this image', `Every box from ${prev.file} was too small or out of range for this image.`);
+      copyNotice = true;
       return;
     }
     const existing = draft.peek();
     const toAdd = adapted.filter((box) => !existing.some((x) => sameBox(x, box)));
     if (toAdd.length === 0) {
       status.info('Already copied', `Every box from ${prev.file} is already on this image.`);
+      copyNotice = true;
       return;
     }
     edit([...existing, ...toAdd]);
@@ -309,6 +324,7 @@ export default function Editor(props: EditorProps) {
       `Copied ${toAdd.length} ${toAdd.length === 1 ? 'box' : 'boxes'} from ${prev.file}`,
       'Undo anytime, or Save when ready.',
     );
+    copyNotice = true;
   }
   /** Arrow keys on the selected box: move it, or with Alt resize it from its bottom-right corner; Shift: ten steps. */
   function arrow(e: KeyboardEvent): boolean {
@@ -348,6 +364,7 @@ export default function Editor(props: EditorProps) {
     // A save ends a run of arrow presses: the next one is a step of its own, back to what was saved.
     history.seal();
     saving.set(true);
+    copyNotice = false;
     status.clear();
     try {
       const saved = await hub.api.updateLabelImage(jobId, id, sent.map(tidy), expect);
@@ -392,6 +409,7 @@ export default function Editor(props: EditorProps) {
     const expect = boxRevision(cur.boxes);
     const mark = props.live.mark();
     reviewing.set(true);
+    copyNotice = false;
     status.clear();
     try {
       const saved = await hub.api.reviewLabelImage(jobId, cur.id, reviewed, expect);
@@ -488,6 +506,7 @@ export default function Editor(props: EditorProps) {
       go(next);
     } else {
       const busy = props.images.some((x) => x.id !== cur.id && x.status === 'labeling');
+      copyNotice = false;
       status.info('No more unlabeled images', busy ? 'Remaining unlabeled images are being labeled by the agent.' : 'Every other image in this filter is labeled.');
     }
   }
@@ -585,6 +604,7 @@ export default function Editor(props: EditorProps) {
     if (!cur || !req || asking.peek()) return;
     const jobId = props.job.id, epoch = hub.epoch, agentName = props.choice.agent?.name ?? 'The agent';
     asking.set(true);
+    copyNotice = false;
     status.clear();
     try {
       const job = await props.live.act(() => hub.api.startLabeling(jobId, { ...req, image_ids: [cur.id], note: note.peek().trim() }));

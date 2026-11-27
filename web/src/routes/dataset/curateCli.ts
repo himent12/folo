@@ -183,3 +183,31 @@ export function buildDatasetCurateCli(
     warning: pathWarning,
   };
 }
+
+/** Extracts unique angle-bracket placeholder tokens (e.g. `<out_dir>`, `<dataset_path>`) in appearance order. */
+export function extractCliPlaceholders(command: string): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const match of command.matchAll(/<[a-z0-9_]+>/g)) {
+    const token = match[0];
+    if (!seen.has(token)) {
+      seen.add(token);
+      out.push(token);
+    }
+  }
+  return out;
+}
+
+/** Formats copy-toast guidance: reminds users to replace placeholders before running so PowerShell never parses `<...>`. */
+export function curateCliCopiedMessage(snippet: Pick<CurateCliCommand, 'label' | 'command'>): string {
+  const placeholders = extractCliPlaceholders(snippet.command);
+  const name = snippet.label.toLowerCase();
+  if (placeholders.length === 0) {
+    return `Run this ${name} command from your terminal.`;
+  }
+  const list =
+    placeholders.length === 1
+      ? placeholders[0]!
+      : `${placeholders.slice(0, -1).join(', ')} and ${placeholders[placeholders.length - 1]!}`;
+  return `Replace ${list} before running this ${name} command.`;
+}

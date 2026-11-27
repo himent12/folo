@@ -192,10 +192,11 @@ describe('Labeling editor: Duplicate box (D) and Copy previous frame boxes (P)',
     expect(boxCount()).toBe(2);
     expect(editor()!.querySelector('[role="status"]')?.textContent).toContain('Already copied');
 
-    // Single Ctrl+Z reverts the entire copied frame back to 0 boxes and clears dirty state
+    // Single Ctrl+Z reverts the entire copied frame back to 0 boxes, clears dirty state, and clears stale "Already copied" status (Playtest R24 P3-2)
     press('z', { ctrlKey: true });
     expect(boxCount()).toBe(0);
     expect(footer()).not.toContain('Unsaved changes');
+    expect(editor()!.querySelector('[role="status"]')?.textContent ?? '').not.toContain('Already copied');
 
     // P key re-copies cleanly
     expect(press('P').defaultPrevented).toBe(true);
