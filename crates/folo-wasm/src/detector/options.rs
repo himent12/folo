@@ -238,8 +238,16 @@ pub struct DetectorInfo {
     pub simd128: bool,
     /// CPU threads (1: the wasm build is single-threaded).
     pub threads: usize,
-    /// Model family and scale, e.g. `folo-n`.
+    /// Model family: `"folo"` (v1) or `"folo2"` (v2-Iso).
+    pub family: String,
+    /// Model family and scale, e.g. `folo-n` or `folo2-n`.
     pub arch: String,
+    /// Active evaluation head mode: `"o2m"` (NMS) or `"o2o"` (NMS-free top-k).
+    pub head_mode: String,
+    /// Whether the loaded model includes a one-to-one (`o2o`) head branch.
+    pub has_o2o: bool,
+    /// Whether the loaded FOLO v2 model includes the `iou_head` localization-quality branch.
+    pub has_iou_head: bool,
     /// Letterbox size.
     pub imgsz: u32,
     /// Class names, indexed by class id.

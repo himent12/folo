@@ -24,10 +24,10 @@ so `web/dist/folo-wasm/` and the Studio embedded in release binaries include it 
 ## JS API
 
 ```js
-import init, { FoloDetector, hasWebGpu, version } from "/folo-wasm/folo_wasm.js";
+import init, { FoloDetector, FoloTracker, hasWebGpu, version } from "/folo-wasm/folo_wasm.js";
 
 await init();                                          // fetches and instantiates folo_wasm_bg.wasm (once)
-// Any .folo bytes; from folo serve: GET /api/models/{id}/weights (docs/API.md), ?format=f16 for the small export.
+// Any .folo bytes (folo-* v1 or folo2-* v2-Iso); from folo serve: GET /api/models/{id}/weights (?format=f16 for small export).
 const bytes = new Uint8Array(await (await fetch("/api/models/m_31aa/weights?format=f16")).arrayBuffer());
 const det = await FoloDetector.load(bytes, { backend: "auto", modelId: "m_31aa" });
 det.backend;                                           // "webgpu" | "cpu"
@@ -37,12 +37,18 @@ const res = await det.detect(imageData, undefined, undefined, { conf: 0.25, iou:
 // or: await det.detect(rgbaBytes, width, height, options)
 const tiled = await det.detectTiled(imageData, undefined, undefined, { tileSize: 640, overlap: 0.2, fullImage: true });
 const tta = await det.detectTta(imageData, undefined, undefined, { hflip: true, scales: [0.83, 1.0, 1.17] });
+
+// Multi-object tracking (ByteTrack) over frame-by-frame detections:
+const tracker = new FoloTracker({ highThresh: 0.5, lowThresh: 0.1, trackBuffer: 30, classes: det.info().classes });
+const tracks = tracker.update(res.boxes);              // FoloTrackedBox[] with persistent track_id, age, hits, state
+tracker.reset();                                       // clears state between videos / streams
+tracker.free();
 det.free();                                            // releases the model (wasm memory, GPU buffers)
 ```
 
 ### `FoloDetector.load(bytes, options?) → Promise<FoloDetector>`
-`bytes` is a `Uint8Array` or `ArrayBuffer` holding a `.folo` file: weights, a checkpoint (its EMA weights are used)
-or an export (`folo export`, F32 or F16), exactly as `Predictor::open` reads them. The model is fused (Conv+BN) on
+`bytes` is a `Uint8Array` or `ArrayBuffer` holding a `.folo` file for either **FOLO v1** (`folo-*`) or **FOLO v2-Iso** (`folo2-*`, including `o2o` and `iou_head` variants): weights, a checkpoint (its EMA weights are used)
+or an export (`folo export`, F32 or F16), exactly as `Predictor::open` reads them. The model is fused (`Conv+BN` and v2 `WS-QARepConv3x3` multi-branch folding) on
 the CPU, then moved to the backend. Options (all optional; unknown fields are ignored):
 
 | option | default | meaning |
@@ -127,11 +133,35 @@ Options extend `FoloDetectOptions` (`conf`, `iou`, `maxDet`):
 | `classAgnostic` | `false` | merge overlapping detections across different classes |
 
 ### `detector.info() → FoloDetectorInfo`
-`{ backend, device, adapter, fallback, precision, precisionFallback, simd128, threads, arch, imgsz, classes, modelId }`:
+`{ backend, device, adapter, fallback, precision, precisionFallback, simd128, threads, family, arch, headMode, hasO2o, hasIouHead, imgsz, classes, modelId }`:
 `adapter` is the GPU adapter's name, or `null` when the browser does not disclose it (Chrome does not); `fallback` is
 why `auto` chose the CPU (`null` otherwise); `precision` is what the model runs in (`"f32"` / `"f16"`) and
 `precisionFallback` why a requested `"f16"` runs in f32 (`null` otherwise); `simd128` is whether the module was built with SIMD128 (always, from the script);
-`threads` is 1 (see Limitations).
+`threads` is 1 (see Limitations); `family` is `"folo"` or `"folo2"`; `arch` is e.g. `"folo-n"` or `"folo2-n"`; `headMode` is `"o2m"` (NMS) or `"o2o"` (NMS-free top-k); `hasO2o` reports whether the model includes a one-to-one head branch; and `hasIouHead` reports whether a FOLO v2 model includes the `iou_head` localization-quality branch.
+
+### `new FoloTracker(options?) → FoloTracker`
+Stateful **ByteTrack** multi-object tracker backed by `folo_vision::ByteTracker` (decoupled 8-state constant-velocity Kalman filter + two-stage IoU Hungarian association) for tracking objects across video or webcam frames in the browser. Call `tracker.free()` when finished.
+
+Options (`FoloTrackOptions`, all optional; unknown fields are ignored):
+
+| option | default | meaning |
+|---|---|---|
+| `highThresh` | `0.5` | minimum score for stage-1 high-confidence association (`0..=1`) |
+| `lowThresh` | `min(0.1, highThresh)` | minimum score for stage-2 low-confidence occlusion recovery (`0..=highThresh`) |
+| `newTrackThresh` | `max(0.6, highThresh)` | minimum score to spawn a new track (`highThresh..=1`) |
+| `matchIou` | `0.2` | minimum IoU for stage-1 association (`0..=1`) |
+| `secondMatchIou` | `0.5` | minimum IoU for stage-2 occlusion recovery (`0..=1`) |
+| `tentativeMatchIou` | `0.3` | minimum IoU for tentative (unconfirmed) tracks (`0..=1`) |
+| `trackBuffer` | `30` | consecutive missed frames a lost track coasts before retiring (`>= 0`) |
+| `minHits` | `1` | consecutive matched detections required before confirming a new track (`>= 1`) |
+| `classAware` | `true` | require matching `class` IDs when associating detections with tracks |
+| `classes` | `[]` | optional class name table indexed by `class` (populates `FoloTrackedBox.name`) |
+
+Methods on `FoloTracker`:
+- `tracker.update(boxes) → FoloTrackedBox[]`: advances the tracker by one frame and returns all active confirmed tracks sorted by ascending `track_id`. Accepts `FoloBox[]` directly (from `det.detect(...).boxes`, with lower `conf` such as `lowThresh` so stage-2 occlusion recovery sees low-score detections) or `{ class, name?, score, x1, y1, x2, y2 }[]`. Each returned `FoloTrackedBox` extends `FoloBox` (`class`, `name`, `score`, `x1`, `y1`, `x2`, `y2`) with `track_id` (starts at `1`), `age`, `hits`, and `state` (`"tracked"`).
+- `tracker.reset()`: clears active, tentative, and lost tracks and resets `frameId` to `0` and the next `track_id` to `1` (retaining the configured options and `classes` table).
+- `tracker.config() → FoloTrackConfig`: returns the resolved validated tracker configuration.
+- `tracker.info() → FoloTrackerInfo`: returns `{ frameId, activeTracks, lostTracks, config }`.
 
 ### Functions
 - `hasWebGpu()`: whether `navigator.gpu` exists. A `true` does not guarantee a usable device; `auto` checks that.
@@ -139,7 +169,8 @@ why `auto` chose the CPU (`null` otherwise); `precision` is what the model runs 
 
 `folo_wasm.d.ts` types all of the above (`FoloLoadOptions`, `FoloDetectOptions`, `FoloTileDetectOptions`,
 `FoloTtaDetectOptions`, `FoloTileMergeMetric`, `FoloBoxFusion`, `FoloDetectResult`, `FoloBox`,
-`FoloDetectorInfo`, `FoloImage`). wasm-bindgen's class declaration uses `Symbol.dispose`, so a strict type check of
+`FoloDetectorInfo`, `FoloImage`, `FoloTracker`, `FoloTrackOptions`, `FoloTrackConfig`, `FoloTrackInputBox`,
+`FoloTrackState`, `FoloTrackedBox`, `FoloTrackerInfo`). wasm-bindgen's class declaration uses `Symbol.dispose`, so a strict type check of
 it needs the `esnext.disposable` lib (or `skipLibCheck`, as Studio has). `crates/folo-wasm/demo/api-check.ts`
 exercises the documented calls; CI runs `tsc -p crates/folo-wasm/demo/tsconfig.json` on it.
 
@@ -150,10 +181,10 @@ and reuse it per image: loading parses and fuses the model and, on WebGPU, compi
 
 ## How it works
 - **Same engine.** folo-core, folo-nn, folo-vision and folo-gpu compile for `wasm32-unknown-unknown` with no forked
-  code paths in the math. `folo-wasm` drives `folo_vision::Predictor`'s steps (`prepare` → `forward` → decode →
-  `finish`), SAHI tiling (`folo_vision::tile`), and TTA (`folo_vision::tta`); `crates/folo-wasm/src/detector/` has
-  no wasm-bindgen types and is tested natively (`cargo test -p folo-wasm`: identical boxes to `Predictor` on the
-  CPU for single-pass, tiled, and TTA, and the GPU paths against the CPU).
+  code paths in the math. `folo-wasm` drives `folo_vision::Predictor`'s steps (`prepare` → `forward_detector` → decode →
+  `finish`) for both `folo-*` (v1) and `folo2-*` (v2-Iso, including `o2o` and `iou_head` score fusion), SAHI tiling (`folo_vision::tile`), TTA (`folo_vision::tta`), and ByteTrack multi-object tracking (`folo_vision::ByteTracker`); `crates/folo-wasm/src/detector/` and `crates/folo-wasm/src/tracker/` have
+  no wasm-bindgen types and are tested natively (`cargo test -p folo-wasm`: identical boxes to `Predictor` on the
+  CPU for single-pass, tiled, and TTA across both `folo` and `folo2`, the GPU paths against the CPU/native GPU `Predictor`, and `Tracker` against `ByteTracker`).
 - **WebGPU.** The browser creates adapters and devices asynchronously and never lets the page's thread block, so
   folo-gpu has async entry points used on every target: `GpuContext::new_async` / `shared_async`,
   `folo_gpu::init_async()` and `folo_gpu::download_async(ctx, tensor)` (a readback that resolves when WebGPU has
