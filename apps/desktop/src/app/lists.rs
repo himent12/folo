@@ -432,17 +432,18 @@ impl FoloApp {
 
     /// Permanent client-side probe errors that should not be retried on every 2 s `/system` refresh.
     fn is_permanent_probe_error(err: &ApiError) -> bool {
-        matches!(
-            err.code.as_str(),
-            "not_found"
-                | "model_not_found"
-                | "run_not_found"
-                | "invalid_config"
-                | "bad_request"
-                | "not_supported"
-                | "method_not_allowed"
-                | "gone"
-        )
+        matches!(err.status, Some(400 | 404 | 405 | 410))
+            || matches!(
+                err.code.as_str(),
+                "not_found"
+                    | "model_not_found"
+                    | "run_not_found"
+                    | "invalid_config"
+                    | "bad_request"
+                    | "not_supported"
+                    | "method_not_allowed"
+                    | "gone"
+            )
     }
 
     /// Lazily resolves `x-folo-arch` (`folo2-*`) headers for one model id on HTTP backends when
@@ -585,7 +586,7 @@ impl FoloApp {
     /// Probes unseen HTTP runs that have no resolved architecture yet (e.g. active, queued, stopped,
     /// or failed before writing a checkpoint) so badges and Clone/Retry reflect `folo2-*`.
     pub(super) fn probe_missing_run_archs(&mut self, cx: &mut Context<Self>) {
-        if self.server_mode == super::ServerMode::Mock || !self.store.supports_folo2() {
+        if self.hold_loading || self.server_mode == super::ServerMode::Mock || !self.store.supports_folo2() {
             return;
         }
         let ids: Vec<String> = self

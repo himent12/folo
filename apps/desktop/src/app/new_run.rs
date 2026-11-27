@@ -149,8 +149,16 @@ impl FoloApp {
             }
             f.prefill_optimizer(config.optimizer);
             f.lr0 = config.lr0;
+            // Short runs created via CLI/API can record the default `close_mosaic = 10` even when
+            // `epochs < 10` (the trainer caps it via `capped_close_mosaic` at runtime). Clamp here
+            // so cloning a valid short run doesn't mark `close_mosaic` invalid and block Start.
+            let close = if config.augment.close_mosaic > config.epochs {
+                capped_close_mosaic(config.augment.close_mosaic, config.epochs)
+            } else {
+                config.augment.close_mosaic
+            };
             let (ei, li) = (f.epochs_input.clone(), f.lr_input.clone());
-            let (ci, cv) = (f.close_input.clone(), config.augment.close_mosaic.to_string());
+            let (ci, cv) = (f.close_input.clone(), close.to_string());
             ci.update(cx, |i, cx| i.set_text(cv, cx));
             let (ev, lv) = (config.epochs.to_string(), format!("{}", config.lr0));
             ei.update(cx, |i, cx| i.set_text(ev, cx));
@@ -158,9 +166,10 @@ impl FoloApp {
             f.mosaic = config.augment.mosaic;
             f.mixup = config.augment.mixup;
             f.fliplr = config.augment.fliplr;
-            f.close_mosaic = config.augment.close_mosaic as f32;
+            f.close_mosaic = close as f32;
+            f.close_invalid = false;
             // That run's default still follows the epochs; a value it set by hand stays.
-            f.close_auto = config.augment.close_mosaic == auto_close_mosaic(config.epochs);
+            f.close_auto = close == auto_close_mosaic(config.epochs);
             f.scale = config.augment.scale;
             f.amp = config.amp;
             f.e2e = config.head == Head::O2o;

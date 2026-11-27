@@ -157,7 +157,10 @@ impl FoloApp {
     pub(crate) fn menu_scroll_handle(&self) -> Option<folo_ui::ScrollHandle> {
         if self.new_run.is_some() || self.synth.is_some() || self.cloud.connect.is_some() {
             Some(self.dialog_scroll.clone())
-        } else if self.modal_open() || matches!(self.route, crate::app::Route::Dataset(_)) {
+        } else if self.modal_open()
+            || (matches!(self.route, crate::app::Route::Dataset(_))
+                && self.ds_tab == crate::app::DsTab::Images)
+        {
             None
         } else if self.route == crate::app::Route::Playground {
             Some(self.play_side_scroll.clone())

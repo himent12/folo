@@ -534,6 +534,9 @@ impl FoloApp {
                     )
                     .into_any_element(),
                     None => text(ty::SM, t.text_tertiary)
+                        .w_full()
+                        .text_right()
+                        .whitespace_normal()
                         .child(format!("not measured for {} yet", model_arch.as_str()))
                         .into_any_element(),
                 },

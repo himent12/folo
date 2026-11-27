@@ -196,7 +196,7 @@ pub(super) fn log_cloud_end_at(f: &mut RunFixture, now: f64) {
     }
 }
 
-pub(super) fn initial_logs(f: &RunFixture, created: i64) -> Vec<LogLine> {
+pub(super) fn initial_logs(f: &RunFixture, model_arch: crate::arch::ModelArch, created: i64) -> Vec<LogLine> {
     let c = &f.run.config;
     // What the run trains with, as the trainer's first log line says: its resolution, or the one a new run gets
     // (`steps_per_epoch` batches of `batch` images; the class count of its dataset).
@@ -204,13 +204,17 @@ pub(super) fn initial_logs(f: &RunFixture, created: i64) -> Vec<LogLine> {
         let classes = f.run.dataset.as_ref().map_or(1, |d| d.classes.len().max(1));
         resolve(c, f.run.steps_per_epoch * c.batch.max(1) as u64, classes)
     });
+    let params_str = {
+        let m = model_arch.params_f64() / 1e6;
+        if m < 10.0 { format!("{m:.2} M") } else { format!("{m:.1} M") }
+    };
     let mut logs = vec![
         (
             0,
             LogLevel::Info,
             format!(
                 "folo train {} on {} ({} epochs, batch {}, imgsz {})",
-                c.arch.as_str(),
+                model_arch.as_str(),
                 c.dataset_id,
                 c.epochs,
                 c.batch,
@@ -223,16 +227,7 @@ pub(super) fn initial_logs(f: &RunFixture, created: i64) -> Vec<LogLine> {
         (
             3,
             LogLevel::Info,
-            format!(
-                "model: {} · {} params · fused BN off (training)",
-                c.arch.as_str(),
-                match c.arch.as_str() {
-                    "folo-n" => "2.63 M",
-                    "folo-s" => "9.42 M",
-                    "folo-m" => "20.1 M",
-                    _ => "43.7 M",
-                }
-            ),
+            format!("model: {} · {} params · fused BN off (training)", model_arch.as_str(), params_str),
         ),
         (
             4,
@@ -484,7 +479,7 @@ impl MockBackend {
             sim.upload_bytes = ds.ds.splits.total() * 180_000;
             f.cloud = Some(sim);
         }
-        f.logs = initial_logs(&f, if f.cloud.is_some() { now } else { now - 5 });
+        f.logs = initial_logs(&f, model_arch, if f.cloud.is_some() { now } else { now - 5 });
         let run = Self::snapshot(&f);
         runs.insert(0, f);
         drop(runs);

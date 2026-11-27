@@ -136,7 +136,11 @@ impl MockBackend {
             f.run.config.compute = None;
             f.run.config.device = "gpu:0".into();
             f.run.device = GPU_DEVICE.into();
-            f.logs = initial_logs(f, time::parse(&f.run.created).unwrap_or(MOCK_NOW));
+            f.logs = initial_logs(
+                f,
+                crate::arch::ModelArch::v1(f.run.config.arch),
+                time::parse(&f.run.created).unwrap_or(MOCK_NOW),
+            );
         }
         drop(runs);
         self

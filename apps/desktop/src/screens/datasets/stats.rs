@@ -198,11 +198,13 @@ impl FoloApp {
             .id("ds-stats")
             .flex_1()
             .overflow_y_scroll()
+            .track_scroll(&self.page_scroll)
             .child(
                 div()
                     .flex()
                     .flex_col()
                     .gap(px(16.))
+                    .pb(px(28.))
                     .child(health)
                     .child(self.dataset_strip_stats(ds, window, cx))
                     .child(

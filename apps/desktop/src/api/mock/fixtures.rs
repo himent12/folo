@@ -192,9 +192,9 @@ impl MockBackend {
                 "folo-n",
                 512,
                 4,
-                2_630_000,
-                4.3,
-                5_400_000,
+                2_850_000,
+                4.4,
+                5_800_000,
                 98.0,
                 "run_d204",
                 [0.661, 0.402, 0.712, 0.584],
@@ -482,7 +482,12 @@ impl MockBackend {
                     logs: Vec::new(),
                     cloud: None,
                 };
-                fixture.logs = initial_logs(&fixture, created);
+                let run_arch = if fixture.run.id == "run_d204" {
+                    crate::arch::ModelArch::v2(fixture.run.config.arch)
+                } else {
+                    crate::arch::ModelArch::v1(fixture.run.config.arch)
+                };
+                fixture.logs = initial_logs(&fixture, run_arch, created);
                 fixture
             })
             .collect::<Vec<RunFixture>>();
@@ -523,7 +528,7 @@ impl MockBackend {
             f.cloud = Some(sim);
             f.live = None;
             f.run.queue_position = None;
-            f.logs = initial_logs(f, t0);
+            f.logs = initial_logs(f, crate::arch::ModelArch::v1(f.run.config.arch), t0);
         }
         // A model's operating point is its run's best epoch's (as `folo serve --mock`'s), so the run and model
         // pages name the same confidence.

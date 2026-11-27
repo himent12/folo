@@ -29,12 +29,16 @@ pub(super) fn nr_label(t: &Theme, s: &str) -> Div {
 
 pub(super) fn nr_field(t: &Theme, name: &str, control: AnyElement, help: Option<String>) -> Div {
     div()
+        .w_full()
+        .min_w_0()
         .flex()
         .flex_col()
         .gap(px(8.))
         .child(nr_label(t, name))
         .child(control)
-        .when_some(help, |d, h| d.child(text(ty::SM, t.text_tertiary).tnum().child(h)))
+        .when_some(help, |d, h| {
+            d.child(text(ty::SM, t.text_tertiary).w_full().min_w_0().tnum().whitespace_normal().child(h))
+        })
 }
 
 pub(super) fn nr_typed(
@@ -474,6 +478,8 @@ impl FoloApp {
         });
         let labelled = |name: &str, help: AnyElement, control: AnyElement| {
             div()
+                .w_full()
+                .min_w_0()
                 .flex()
                 .flex_col()
                 .gap(px(8.))
@@ -554,8 +560,8 @@ impl FoloApp {
                 div()
                     .flex()
                     .gap(px(16.))
-                    .child(div().flex_1().child(nr_field(&t, "Name", name_box, None)))
-                    .child(div().flex_1().child({
+                    .child(div().flex_1().min_w_0().child(nr_field(&t, "Name", name_box, None)))
+                    .child(div().flex_1().min_w_0().child({
                         let summary = ds.as_ref().map(|d| {
                             format!(
                                 "{} · train {} · val {}",
@@ -621,7 +627,7 @@ impl FoloApp {
                 div()
                     .flex()
                     .gap(px(16.))
-                    .child(div().flex_1().child(nr_field(
+                    .child(div().flex_1().min_w_0().child(nr_field(
                         &t,
                         "Architecture",
                         arch_seg,
@@ -629,7 +635,7 @@ impl FoloApp {
                         Some(arch_caption(model_arch, imgsz_val)),
                     )))
                     .child(
-                        div().flex_1().child(match size_help {
+                        div().flex_1().min_w_0().child(match size_help {
                             Some(h) => labelled("Image size", h, size_seg),
                             None => nr_field(
                                 &t,
@@ -646,14 +652,14 @@ impl FoloApp {
                     .flex()
                     .gap(px(16.))
                     .child(
-                        div().flex_1().child(match batch_help {
+                        div().flex_1().min_w_0().child(match batch_help {
                             Some(h) => labelled("Batch size", h, batch_seg),
                             None => nr_field(&t, "Batch size", batch_seg, Some("Images per step".into()))
                                 .into_any_element(),
                         }),
                     )
                     .child(
-                        div().flex_1().child(match (device_fact, device_help) {
+                        div().flex_1().min_w_0().child(match (device_fact, device_help) {
                             (Some(fact), _) => fact,
                             (None, Some(h)) => labelled("Device", h, device_seg),
                             (None, None) => nr_field(

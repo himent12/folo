@@ -266,25 +266,41 @@ impl FoloApp {
                 .when(v == 0., |d| d.border_1().border_color(t.line_subtle))
         };
         let tick = |s: &str| text(ty::SM, t.text_tertiary).tnum().child(s.to_string());
+        // Two explicit non-wrapping rows so the ramp never wraps onto the readout caption below.
         let key = div()
+            .w_full()
+            .min_w_0()
             .flex()
-            .flex_wrap()
-            .items_center()
+            .flex_col()
             .gap(px(6.))
-            .child(text(ty::SM, t.text_tertiary).mr(px(4.)).child("Share of the row"))
-            .child(swatch(0.))
-            .child(tick("0").mr(px(4.)))
-            .children([(0.005, "<1%"), (FLOOR[0], "1%"), (FLOOR[1], "5%")].into_iter().map(|(v, s)| {
-                div().flex().items_center().gap(px(4.)).mr(px(4.)).child(swatch(v)).child(tick(s))
-            }))
-            .child(tick("10%"))
-            .child(div().flex().h(px(10.)).w(px(96.)).rounded(px(2.)).overflow_hidden().children(
-                (0..12).map(|i| {
-                    let v = FLOOR[2] + (1. - FLOOR[2]) * i as f32 / 11.;
-                    div().flex_1().h_full().bg(cell_fill(&t, v))
-                }),
-            ))
-            .child(tick("100%"));
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .child(text(ty::SM, t.text_tertiary).mr(px(4.)).child("Share of the row"))
+                    .child(swatch(0.))
+                    .child(tick("0").mr(px(4.)))
+                    .children([(0.005, "<1%"), (FLOOR[0], "1%"), (FLOOR[1], "5%")].into_iter().map(
+                        |(v, s)| {
+                            div().flex().items_center().gap(px(4.)).mr(px(4.)).child(swatch(v)).child(tick(s))
+                        },
+                    )),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .child(tick("10%"))
+                    .child(div().flex().h(px(10.)).w(px(96.)).rounded(px(2.)).overflow_hidden().children(
+                        (0..12).map(|i| {
+                            let v = FLOOR[2] + (1. - FLOOR[2]) * i as f32 / 11.;
+                            div().flex_1().h_full().bg(cell_fill(&t, v))
+                        }),
+                    ))
+                    .child(tick("100%")),
+            );
         // The cells are one Tab stop: arrows move a cursor cell (the readout follows), Esc clears.
         let rows: Vec<AnyElement> = rows.map(|r| r.into_any_element()).collect();
         let fh = self.fh("cm-grid", cx);
@@ -327,7 +343,9 @@ impl FoloApp {
                 }
             }))
             .children(rows);
-        let matrix = div()
+        // Keep the cell grid's width cap on the matrix itself so a 1-class model's legend and
+        // captions still get the full column width below it.
+        let matrix_table = div()
             .flex()
             .flex_col()
             .gap(px(2.))
@@ -337,17 +355,30 @@ impl FoloApp {
                 div()
                     .flex()
                     .items_center()
-                    .child(text(ty::SM, t.text_tertiary).w(px(LABEL_W)).pr(px(8.)).text_right().child("Actual ↓"))
+                    .child(
+                        text(ty::SM, t.text_tertiary)
+                            .w(px(LABEL_W))
+                            .pr(px(8.))
+                            .text_right()
+                            .child("Actual ↓"),
+                    )
                     .child(text(ty::SM, t.text_tertiary).flex_1().child("Predicted →")),
             )
             .child(header_row)
-            .child(grid)
+            .child(grid);
+        let matrix = div()
+            .flex()
+            .flex_col()
+            .gap(px(2.))
+            .w_full()
+            .min_w_0()
+            .child(matrix_table)
             // The key sits under the matrix, away from the column labels.
-            .child(div().pt(px(10.)).child(key))
+            .child(div().w_full().min_w_0().pt(px(10.)).child(key))
             // The selected cell in words, else what the rows mean.
             .child(div().pt(px(4.)).w_full().min_w_0().child(match readout {
-                Some(r) => text(ty::SM, t.text_primary).tnum().whitespace_normal().child(r),
-                None => text(ty::SM, t.text_tertiary).whitespace_normal().child(if norm {
+                Some(r) => text(ty::SM, t.text_primary).w_full().min_w_0().tnum().whitespace_normal().child(r),
+                None => text(ty::SM, t.text_tertiary).w_full().min_w_0().whitespace_normal().child(if norm {
                     "Rows are actual objects; the bottom row splits false positives by class. Hover or focus a cell to read it."
                 } else {
                     "Counts of objects and unmatched detections. Hover or focus a cell to read it."
@@ -359,14 +390,28 @@ impl FoloApp {
                 self.hint_keys("Arrows move the cell · Home / End row ends · Esc clears");
                 d
             })
-            .child(div().pt(px(4.)).child(text(ty::SM, t.text_tertiary).tnum().child(match &eval_ds {
-                Some((d, split)) => format!("{}{cm_rule}", split_label(d, split, Some(ev.images as u64))),
-                // Unknown dataset: the split isn't known either.
-                None => format!("Evaluation · {}{cm_rule}", counted(ev.images as u64, "image", "images")),
-            })))
+            .child(div().pt(px(4.)).w_full().min_w_0().child(
+                text(ty::SM, t.text_tertiary).w_full().min_w_0().tnum().whitespace_normal().child(
+                    match &eval_ds {
+                        Some((d, split)) => {
+                            format!("{}{cm_rule}", split_label(d, split, Some(ev.images as u64)))
+                        }
+                        // Unknown dataset: the split isn't known either.
+                        None => {
+                            format!("Evaluation · {}{cm_rule}", counted(ev.images as u64, "image", "images"))
+                        }
+                    },
+                ),
+            ))
             // Evaluated on another split than validation: the server's sentence says why.
             .when_some(ev.split_fallback.as_ref(), |d, f| {
-                d.child(text(ty::SM, t.text_secondary).child(f.message.clone()))
+                d.child(
+                    text(ty::SM, t.text_secondary)
+                        .w_full()
+                        .min_w_0()
+                        .whitespace_normal()
+                        .child(f.message.clone()),
+                )
             });
         let stacked = self.content_width(window) < LABEL_W + n as f32 * 48. + RAIL_W + 80.;
         let rail = self.confusion_rail(ev, &labels, window, cx);

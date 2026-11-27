@@ -451,9 +451,14 @@ impl FoloApp {
                 candidates.len(),
                 window,
                 cx,
-                Rc::new(move |this, i, _, cx| {
+                Rc::new(move |this, i, w, cx| {
                     if let Some(mid) = cand_ids.get(i).cloned() {
-                        this.model_compare_add(mid, cx);
+                        let will_unmount =
+                            this.model_compare.ids.len() + 1 >= MODEL_COMPARE_MAX || cand_ids.len() <= 1;
+                        this.model_compare_add(mid.clone(), cx);
+                        if will_unmount {
+                            w.focus(&this.fh(format!("model-cmp-open-{mid}"), cx));
+                        }
                     }
                 }),
             );
