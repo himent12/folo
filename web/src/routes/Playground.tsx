@@ -43,6 +43,7 @@ import { DEFAULTS, type RunOn } from './playground/predict';
 import { keepSession } from './playground/keepSession';
 import { sampleImages } from './playground/samples';
 import { playgroundPath } from './playground/session';
+import { sourceImageKey } from './playground/source';
 import { createCompareController } from './playground/useCompare';
 import { useBatchSession } from './playground/useBatchSession';
 import { usePlaygroundExport } from './playground/useExport';
@@ -257,7 +258,10 @@ export default function Playground() {
     engine, browserOff: () => trackerBrowserOff.get(), mediaMode: () => mediaSession.mode.get(),
     mediaKey: () => `${mediaSession.mode.get()}:${mediaSession.sessionSeq.get()}`,
     frameKey: () => (mediaSession.mode.get() === 'none' ? null : `${mediaSession.mode.get()}:${mediaSession.sessionSeq.get()}:${mediaSession.frameSeq.get()}`),
-    modelId: () => modelId.get(), classes: () => classes.get(), pred: () => pred.get(),
+    frameMeta: () => mediaSession.lastFrameMeta.get(),
+    predMatchesFrame: () => { const s = source.get(); return !s || predSourceKey.get() === sourceImageKey(s); },
+    sourceName: () => (mediaSession.mode.get() === 'video' ? mediaSession.videoName.get() || 'video' : 'webcam'),
+    modelId: () => modelId.get(), modelName: () => model.get()?.name ?? null, classes: () => classes.get(), pred: () => pred.get(),
     conf: () => conf.get(), perClassConf: () => perClassConf.get(), iou: () => iou.get(), maxDet: () => maxDet.get(), o2o: () => o2o.get(),
   }));
   const visibleTrails = computed(() => {

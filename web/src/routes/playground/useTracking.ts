@@ -1,15 +1,28 @@
 // Reactive ByteTrack controller for Playground live video & webcam sessions.
 // Holds one persistent `folo-wasm` `FoloTracker` instance per active media session, resets it on seek, source change,
-// camera restart, model change, or toggle off, avoids double-stepping duplicate/re-filtered frames, and always calls
-// `free()` on exit/unmount (zero WASM memory leaks).
+// camera restart, model change, explicit Clear tracks, or toggle off, records bounded frame-indexed track observations
+// for JSON/CSV trajectory export, avoids double-stepping duplicate/re-filtered frames, and always calls `free()` on
+// exit/unmount (zero WASM memory leaks).
 import { computed, effect, onCleanup, signal, untrack } from 'fw';
 import { ApiError } from '$lib/api/client';
 import type { PredictBox, Prediction } from '$lib/api/types';
 import { effectiveMinConf, filterDetections, thresholdForClass } from '$lib/detect/nms';
 import type { BrowserEngine, Tracker } from '$lib/inference/browser';
 import { toast } from '$lib/ui/toast';
+import { exportTracksCsv as downloadTracksCsv, exportTracksJson as downloadTracksJson } from './export';
 import { perClassConfKey, type PerClassConfMap } from './perClassConf';
-import { trackerOptionsForConf, TrackTrailHistory, type TrackTrail } from './tracking';
+import {
+  buildTrackExportJson,
+  EMPTY_TRACK_SUMMARY,
+  MAX_TRACK_OBSERVATIONS,
+  MAX_TRACK_SUMMARIES,
+  trackerOptionsForConf,
+  TrackHistoryRecorder,
+  TrackTrailHistory,
+  type TrackObservation,
+  type TrackSessionSummary,
+  type TrackTrail,
+} from './tracking';
 import type { MediaMode } from './useMediaSession';
 
 export interface UseTrackingInput {
@@ -20,7 +33,15 @@ export interface UseTrackingInput {
   mediaKey: () => string | null;
   /** Stable key identifying the current unique video/webcam frame (unchanged across Detect-frame retries & candidate completion). */
   frameKey?: () => string | null;
+  /** Frame index and timestamp (ms) for the current captured frame. */
+  frameMeta?: () => { frame: number; timestampMs: number } | null;
+  /** True when `pred()` belongs to the currently active media frame (prevents attaching stale N-1 boxes to frame N). */
+  predMatchesFrame?: () => boolean;
+  /** Human-readable clip or stream name used for trajectory export filenames & metadata. */
+  sourceName?: () => string;
   modelId: () => string | null;
+  /** Display name of the active model used for trajectory export filenames & metadata. */
+  modelName?: () => string | null;
   classes: () => readonly string[];
   pred: () => Prediction | null;
   conf: () => number;
@@ -28,6 +49,8 @@ export interface UseTrackingInput {
   iou: () => number;
   maxDet: () => number;
   o2o: () => boolean;
+  /** Optional upper bound on retained observations (defaults to `MAX_TRACK_OBSERVATIONS`). */
+  maxObservations?: number;
 }
 
 const NO_TRACKER_TIP = 'This folo-wasm build does not include FoloTracker. Rebuild folo-wasm to enable Track IDs.';
@@ -39,6 +62,7 @@ export function useTracking(input: UseTrackingInput) {
   const loadError = signal<string | null>(null);
   const activeCount = signal(0);
   const trails = signal<TrackTrail[]>([]);
+  const summary = signal<TrackSessionSummary>(EMPTY_TRACK_SUMMARY);
   const trackedFrame = signal<{ pred: Prediction; frameKey: string | null; threshKey: string; boxes: PredictBox[] } | null>(null);
   const trackerReadyTick = signal(0);
 
@@ -49,8 +73,10 @@ export function useTracking(input: UseTrackingInput) {
   let alive = true;
   let lastProcessedPred: Prediction | null = null;
   let lastProcessedFrameKey: string | null = null;
+  let fallbackFrame = 0;
   const activeTrackedClasses = new Set<number>();
   const trailHistory = new TrackTrailHistory();
+  const trackHistory = new TrackHistoryRecorder(input.maxObservations ?? MAX_TRACK_OBSERVATIONS, MAX_TRACK_SUMMARIES);
 
   const supported = computed(() => !input.browserOff() && !loadError.get() && input.engine.capabilities.tracker !== false);
   const disabledReason = computed(() => {
@@ -62,9 +88,12 @@ export function useTracking(input: UseTrackingInput) {
 
   function clearOutputs(ignorePred: Prediction | null = null) {
     trailHistory.clear();
+    trackHistory.clear();
     activeTrackedClasses.clear();
+    fallbackFrame = 0;
     trails.set([]);
     activeCount.set(0);
+    summary.set(EMPTY_TRACK_SUMMARY);
     trackedFrame.set(null);
     lastProcessedPred = ignorePred;
     lastProcessedFrameKey = null;
@@ -85,7 +114,7 @@ export function useTracking(input: UseTrackingInput) {
     }
   }
 
-  /** Resets the persistent tracker's tracks & motion trails without reallocating the WASM handle. */
+  /** Resets the persistent tracker's tracks, motion trails, and recorded trajectory history without reallocating WASM. */
   function reset(ignorePred: Prediction | null = untrack(() => input.pred())) {
     clearOutputs(ignorePred);
     if (tracker) {
@@ -216,8 +245,9 @@ export function useTracking(input: UseTrackingInput) {
     const mode = input.mediaMode();
     const p = input.pred();
     const fk = input.frameKey ? input.frameKey() : null;
+    const matchesFrame = input.predMatchesFrame ? input.predMatchesFrame() : true;
     void trackerReadyTick.get();
-    if (!on || mode === 'none' || !p) {
+    if (!on || mode === 'none' || !p || !matchesFrame) {
       untrack(() => {
         if (!p) {
           trackedFrame.set(null);
@@ -273,9 +303,16 @@ export function useTracking(input: UseTrackingInput) {
         y2: t.y2,
         track_id: t.track_id,
       }));
+      const meta = input.frameMeta?.();
+      fallbackFrame++;
+      const frameIndex = meta ? meta.frame : fallbackFrame;
+      const timestampMs = meta ? meta.timestampMs : 0;
+      const nextSummary = trackHistory.record(frameIndex, timestampMs, tracked, cls);
+
       trackedFrame.set({ pred: p, frameKey: fk, threshKey: `${c}|${perClassConfKey(pcc)}`, boxes });
       trails.set(trailHistory.update(tracked));
       activeCount.set(tracked.length);
+      summary.set(nextSummary);
     });
   });
 
@@ -293,6 +330,48 @@ export function useTracking(input: UseTrackingInput) {
     return frame && frame.pred === p && frame.threshKey === curThreshKey ? frame.boxes : null;
   }
 
+  /** Returns a chronological snapshot of recorded frame-indexed track observations. */
+  function getObservations(): TrackObservation[] {
+    return trackHistory.observations();
+  }
+
+  function exportFilenameBase(): string {
+    const mode = untrack(() => input.mediaMode());
+    const rawSource = untrack(() => input.sourceName?.() ?? '') || (mode === 'webcam' ? 'webcam' : 'video');
+    const stem = rawSource.replace(/\.[^.]+$/, '') || 'tracks';
+    const mName = untrack(() => input.modelName?.() ?? input.modelId() ?? '');
+    return mName ? `${stem}-${mName}-tracks` : `${stem}-tracks`;
+  }
+
+  /** Downloads all recorded frame-indexed track observations and session summary as JSON. */
+  function exportTracksJson(): boolean {
+    const mode = untrack(() => input.mediaMode());
+    if (mode === 'none') return false;
+    const obs = trackHistory.observations();
+    if (!obs.length) return false;
+    const payload = buildTrackExportJson({
+      sourceName: untrack(() => input.sourceName?.() ?? '') || mode,
+      mode,
+      modelId: untrack(() => input.modelId()),
+      modelName: untrack(() => input.modelName?.() ?? null),
+      summary: trackHistory.summary(),
+      observations: obs,
+    });
+    return downloadTracksJson(exportFilenameBase(), payload);
+  }
+
+  /** Downloads all recorded frame-indexed track observations as RFC-4180 CSV. */
+  function exportTracksCsv(): boolean {
+    const obs = trackHistory.observations();
+    if (!obs.length) return false;
+    return downloadTracksCsv(exportFilenameBase(), obs);
+  }
+
+  /** Explicitly clears recorded trajectories, trails, and active tracker state without leaving media mode. */
+  function clearTracks() {
+    reset();
+  }
+
   return {
     enabled,
     loading,
@@ -300,9 +379,14 @@ export function useTracking(input: UseTrackingInput) {
     disabledReason,
     activeCount,
     trails,
+    summary,
     setEnabled,
     reset,
+    clearTracks,
     boxesFor,
+    getObservations,
+    exportTracksJson,
+    exportTracksCsv,
   };
 }
 

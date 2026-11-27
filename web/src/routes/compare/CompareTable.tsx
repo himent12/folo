@@ -2,36 +2,27 @@
  * The compared runs side by side: status, best score, precision and recall, then the settings that differ (each read
  * against the baseline run), the identical ones folded. Phones show the baseline and one other run at a time.
  */
-import ChevronRight from '$icons/chevron-right';
-import ChevronLeft from '$icons/chevron-left';
 import ArrowLeftRight from '$icons/arrow-left-right';
+import Check from '$icons/check';
+import ChevronLeft from '$icons/chevron-left';
+import ChevronRight from '$icons/chevron-right';
+import Copy from '$icons/copy';
+import Download from '$icons/download';
 import { bindable, computed, css, effect, For, MediaQuery, signal } from 'fw';
 import { bestMark, bestWord } from '$lib/bestMark';
-import { trainingSeconds } from '$lib/api/progress';
 import type { Resource } from '$lib/api/resource';
 import type { Dataset, Run, RunMetrics } from '$lib/api/types';
-import { conf, count, deviceName, duration, metric } from '$lib/format';
-import { FROM_SCRATCH } from '$lib/lineage';
-import {
-  batchSetting,
-  effectiveBatchSetting,
-  closeMosaicSetting,
-  emaSetting,
-  headSetting,
-  lrSetting,
-  optimizerSetting,
-  precisionSetting,
-  settingText,
-  warmupSetting,
-  type Setting,
-} from '../run/resolved';
+import { conf, count, metric } from '$lib/format';
+import { settingText, type Setting } from '../run/resolved';
 import { pageKeys } from '$lib/shell/pageCommands';
+import Button from '$lib/ui/Button';
 import Panel from '$lib/ui/Panel';
 import Note from '$lib/ui/Note';
 import StatusBadge from '$lib/ui/StatusBadge';
 import { media } from '$lib/design/tokens';
 import Ident from '$lib/ui/Ident';
 import Meta from '$lib/ui/Meta';
+import { buildCompareSettingRows, type CompareSettingRow as Row } from './export';
 
 export interface CompareTableProps {
   chosen: Run[];
@@ -50,9 +41,13 @@ export interface CompareTableProps {
   otherAt?: number;
   /** The baseline run's id; null for the first run. */
   baselineId?: string | null;
+  /** Copies the run comparison report (results and settings) as Markdown. */
+  onCopyMarkdown?: () => void;
+  /** Downloads the run comparison report as CSV. */
+  onDownloadCsv?: () => void;
+  /** True briefly after Copy Markdown succeeds. */
+  copiedMd?: boolean;
 }
-
-type Row = [string, (r: Run) => Setting];
 
 export default function CompareTable(props: CompareTableProps) {
   const showSame = bindable(props, 'showSame', false);
@@ -83,32 +78,7 @@ export default function CompareTable(props: CompareTableProps) {
   // A cell is a Setting (../run/resolved): an architecture or a checkpoint through ui/Ident, as on every other screen
   // (it sets a name in sans and a path or id in mono), prose ("From scratch") and named optimizers ("AdamW") in sans. Where the server resolved a
   // run's config (`Run.resolved`), the optimizer, LR and batch are what it trains with, the request a note beside them.
-  const plain = (value: string): Setting => ({ value });
-  const ident = (value: string): Setting => ({ value, ident: true });
-  const rows = computed((): Row[] => {
-    // Read here, as the Svelte derived did: new datasets or a new `startOf` make new rows.
-    const datasets = props.datasets.data;
-    const startOf = props.startOf;
-    return [
-      ['Dataset', (r) => plain(datasets?.find((d) => d.id === r.config.dataset_id)?.name ?? r.dataset?.name ?? r.config.dataset_id)],
-      ['Model', (r) => ident(r.config.arch)],
-      ['Start from', (r) => (startOf(r) ? ident(startOf(r) ?? '') : plain(FROM_SCRATCH))],
-      ['Epochs', (r) => plain(`${r.epoch}/${r.epochs}`)],
-      ['Batch', (r) => batchSetting(r.config, r.resolved)],
-      ['Effective batch', (r) => (r.resolved ? effectiveBatchSetting(r.resolved) : plain('—'))],
-      ['Image size', (r) => plain(`${r.config.imgsz} px`)],
-      ['Optimizer', (r) => optimizerSetting(r.config, r.resolved)],
-      ['LR', (r) => lrSetting(r.config, r.resolved)],
-      ['Warmup', (r) => (r.resolved ? warmupSetting(r.resolved) : plain('—'))],
-      ['EMA', (r) => (r.resolved ? emaSetting(r.resolved) : null) ?? plain('—')],
-      ['Mosaic / mixup', (r) => plain(`${r.config.augment.mosaic} / ${r.config.augment.mixup}`)],
-      ['Close mosaic', (r) => closeMosaicSetting(r)],
-      ['Precision', (r) => precisionSetting(r.config)],
-      ['Head', (r) => headSetting(r.config)],
-      ['Device', (r) => plain(deviceName(r.device))],
-      ['Duration', (r) => plain(r.started ? duration(trainingSeconds(r)) : '—')],
-    ];
-  });
+  const rows = computed((): Row[] => buildCompareSettingRows(props.datasets.data, props.startOf));
   const differs = (f: (r: Run) => Setting) => new Set(props.chosen.map((r) => settingText(f(r)))).size > 1;
   /** Precision and recall of the epoch Best names (the run's model), with the threshold they were read at. */
   const bestVal = (r: Run) => (r.best ? props.metrics.data?.get(r.id)?.epochs.find((e) => e.epoch === r.best?.epoch)?.val : undefined);
@@ -221,8 +191,31 @@ export default function CompareTable(props: CompareTableProps) {
 
   const rangeText = (t: { first: number; last: number }) => (t.first === t.last ? `Run ${t.first}` : `Runs ${t.first}–${t.last}`);
 
+  const showExport = computed(() => props.chosen.length >= 2 && !!(props.onCopyMarkdown || props.onDownloadCsv));
+
   return (
-    <Panel title="Side by side" meta={sameRows.get().length ? `${count(diffRows.get().length, 'setting')} ${diffRows.get().length === 1 ? 'differs' : 'differ'}` : undefined} pad="none" id="cmp-table">
+    <Panel
+      title="Side by side"
+      meta={sameRows.get().length ? `${count(diffRows.get().length, 'setting')} ${diffRows.get().length === 1 ? 'differs' : 'differ'}` : undefined}
+      pad="none"
+      id="cmp-table"
+      actions={
+        showExport.get() ? (
+          <span class="cmp-export-actions" data-run-compare-export-actions>
+            {props.onCopyMarkdown ? (
+              <Button size="sm" variant="ghost" icon={props.copiedMd ? Check : Copy} data-run-compare-copy-md onclick={props.onCopyMarkdown}>
+                {props.copiedMd ? 'Copied' : 'Copy Markdown'}
+              </Button>
+            ) : null}
+            {props.onDownloadCsv ? (
+              <Button size="sm" variant="ghost" icon={Download} data-run-compare-download-csv onclick={props.onDownloadCsv}>
+                Download CSV
+              </Button>
+            ) : null}
+          </span>
+        ) : undefined
+      }
+    >
       {pairMode.get() && other.get() ? (
         // Phones: the baseline and one run beside it; the pager steps through the others. The pager and the pair's
         // head row (both names, Baseline, Swap) hold under the top bar while the table is in view, so the names
@@ -435,6 +428,12 @@ export default function CompareTable(props: CompareTableProps) {
 }
 
 css`
+  .cmp-export-actions {
+    display: inline-flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2);
+  }
   .t-range {
     display: flex;
     flex-wrap: wrap;

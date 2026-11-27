@@ -77,7 +77,16 @@ export default function DatasetInsights(props: DatasetInsightsProps) {
 
   const isCleanQuality = computed(() => {
     const d = data.get();
-    return d.brokenLabels === 0 && d.imageErrors === 0 && d.emptyImages === 0 && !d.tinyWarn && d.checkErrors === 0 && d.checkWarnings === 0;
+    return (
+      d.brokenLabels === 0 &&
+      d.imageErrors === 0 &&
+      d.emptyImages === 0 &&
+      !d.tinyWarn &&
+      d.checkErrors === 0 &&
+      d.checkWarnings === 0 &&
+      d.duplicateImages === 0 &&
+      d.duplicateLabels === 0
+    );
   });
 
   const curateOpen = signal(false);
@@ -151,9 +160,23 @@ export default function DatasetInsights(props: DatasetInsightsProps) {
             </span>
           ) : null}
           {data.get().tinyWarn ? <span class="fact warn">{Math.round(data.get().tinyBoxPct)}% tiny</span> : null}
-          {data.get().checkWarnings > 0 ? (
+          {data.get().duplicateImages > 0 ? (
+            <span class="fact warn" data-duplicate-images>
+              {num(data.get().duplicateImages)} {data.get().duplicateImages === 1 ? 'duplicate image' : 'duplicate images'}
+            </span>
+          ) : null}
+          {data.get().duplicateLabels > 0 ? (
+            <span class="fact warn" data-duplicate-labels>
+              {num(data.get().duplicateLabels)} {data.get().duplicateLabels === 1 ? 'duplicate label' : 'duplicate labels'}
+            </span>
+          ) : null}
+          {data.get().duplicateImages === 0 && data.get().duplicateLabels === 0 && data.get().checkWarnings > 0 ? (
             <span class="fact warn">
               {num(data.get().checkWarnings)} {data.get().checkWarnings === 1 ? 'warning' : 'warnings'}
+            </span>
+          ) : data.get().otherCheckWarnings > 0 ? (
+            <span class="fact warn">
+              {num(data.get().otherCheckWarnings)} other {data.get().otherCheckWarnings === 1 ? 'warning' : 'warnings'}
             </span>
           ) : null}
         </span>

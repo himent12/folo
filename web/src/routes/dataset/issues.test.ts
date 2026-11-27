@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { DatasetIssue, DatasetIssuesQuery } from '$lib/api/types';
-import { issueCaption, loadIssues, loadKinds } from './issues';
+import { issueAuditTag, issueCaption, kindLabel, loadIssues, loadKinds } from './issues';
 
 // A server with 1,500 empty-image notes first and two errors after them, paged at most 1000 per request.
 const all: DatasetIssue[] = [
@@ -96,5 +96,40 @@ describe('issueCaption', () => {
     expect(issueCaption('warning', 2, 'clipped_box')).toBe('2 clipped box warnings: training still uses these files.');
     expect(issueCaption('info', 1200)).toBe('1,200 notes: nothing to fix.');
     expect(issueCaption('error', 0)).toBeNull();
+  });
+});
+
+describe('issueAuditTag and kindLabel', () => {
+  it('classifies real exact/perceptual duplicate & split-leakage messages and formats unknown kinds cleanly', () => {
+    expect(
+      issueAuditTag({
+        kind: 'duplicate_image',
+        message: 'perceptual split leakage (train, val, dHash max distance 4): near-duplicate of images/train/01.jpg',
+      }),
+    ).toBe('Perceptual leakage');
+    expect(
+      issueAuditTag({
+        kind: 'duplicate_image',
+        message: 'split leakage (train, val): same bytes as images/train/01.jpg',
+      }),
+    ).toBe('Split leakage');
+    expect(
+      issueAuditTag({
+        kind: 'duplicate_image',
+        message: 'perceptual near-duplicate of images/train/01.jpg (dHash max distance 2)',
+      }),
+    ).toBe('Near-duplicate');
+    expect(issueAuditTag({ kind: 'duplicate_image', message: 'same bytes as images/train/01.jpg' })).toBeNull();
+    // Paths containing "split leakage" or "perceptual" / "dhash" must NOT trigger false-positive audit tags.
+    expect(
+      issueAuditTag({
+        kind: 'duplicate_image',
+        message: 'same bytes as images/train/split leakage/perceptual_dhash.jpg',
+      }),
+    ).toBeNull();
+    expect(issueAuditTag({ kind: 'clipped_box', message: 'split leakage (train, val): comment' })).toBeNull();
+    expect(kindLabel('duplicate_image')).toBe('Duplicate image');
+    expect(kindLabel('near_duplicate_image')).toBe('Near duplicate image');
+    expect(kindLabel('toString')).toBe('ToString');
   });
 });

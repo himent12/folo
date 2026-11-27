@@ -89,6 +89,8 @@ export function useMediaSession(input: UseMediaSessionInput) {
   const sessionSeq = signal(0);
   /** Incremented only when a genuinely new video timestamp or webcam frame is captured (dedupes repeat Detect-frame clicks). */
   const frameSeq = signal(0);
+  /** Frame index and media/session timestamp (ms) of the latest captured video or webcam frame. */
+  const lastFrameMeta = signal<{ frame: number; timestampMs: number } | null>(null);
 
   const canCamera = computed(() => typeof navigator !== 'undefined' && !!navigator.mediaDevices?.getUserMedia);
   const liveStreaming = computed(
@@ -99,6 +101,9 @@ export function useMediaSession(input: UseMediaSessionInput) {
   let camSeq = 0;
   let captureSeq = 0;
   let videoSeq = 0;
+  let camStartMs = 0;
+  let camFrameCount = 0;
+  let videoFrameCount = 0;
   let pendingForwardStep = false;
   let lastEmittedVideoTime: number | null = null;
   let containerStepKnown = false;
@@ -202,8 +207,9 @@ export function useMediaSession(input: UseMediaSessionInput) {
     if (m === 'webcam' && (!camActive.peek() || el.readyState < 2)) return false;
 
     const seq = ++captureSeq;
-    // Snapshot media timestamp alongside pixel copy so a seek during async encoding never mislabels the frame.
+    // Snapshot media & wall-clock timestamps alongside pixel copy so async JPEG encoding never skews timestamps.
     const capturedTime = el.currentTime;
+    const capturedPerfMs = performance.now();
     scrubThrottle.beginFlight();
     try {
       const frame = await captureVideoFrame(el, { mime: 'image/jpeg', quality: live ? 0.88 : 0.94 });
@@ -217,10 +223,18 @@ export function useMediaSession(input: UseMediaSessionInput) {
         if (lastEmittedVideoTime === null || Math.abs(capturedTime - lastEmittedVideoTime) > 0.0005) {
           lastEmittedVideoTime = capturedTime;
           frameSeq.set((n) => n + 1);
+          videoFrameCount++;
+          // Monotonic capture index stays strictly increasing even if container/rVFC frame-rate estimates refine mid-playback.
+          lastFrameMeta.set({ frame: videoFrameCount, timestampMs: Math.max(0, Math.round(capturedTime * 1000)) });
         }
       } else {
         camDims.set({ width: frame.width, height: frame.height });
         frameSeq.set((n) => n + 1);
+        camFrameCount++;
+        lastFrameMeta.set({
+          frame: camFrameCount,
+          timestampMs: camStartMs > 0 ? Math.max(0, Math.round(capturedPerfMs - camStartMs)) : 0,
+        });
       }
       const name = m === 'video' ? videoFrameName(videoName.peek(), capturedTime) : 'webcam-live.jpg';
       frameSentAt = performance.now();
@@ -396,6 +410,10 @@ export function useMediaSession(input: UseMediaSessionInput) {
     camErr.set(null);
     const wasActive = mode.peek() !== 'none';
     mode.set('none');
+    lastFrameMeta.set(null);
+    camStartMs = 0;
+    camFrameCount = 0;
+    videoFrameCount = 0;
     sessionSeq.set((n) => n + 1);
     input.onTrackReset?.();
     if (notify && wasActive) input.onStopped?.();
@@ -414,6 +432,8 @@ export function useMediaSession(input: UseMediaSessionInput) {
     videoName.set(file.name);
     videoUrl.set(URL.createObjectURL(file));
     mode.set('video');
+    lastFrameMeta.set(null);
+    videoFrameCount = 0;
     sessionSeq.set((n) => n + 1);
     input.onTrackReset?.();
     void probeVideoFrameStep(file).then((step) => {
@@ -436,6 +456,9 @@ export function useMediaSession(input: UseMediaSessionInput) {
     stopCameraTracksOnly();
     camErr.set(null);
     mode.set('webcam');
+    lastFrameMeta.set(null);
+    camStartMs = 0;
+    camFrameCount = 0;
     sessionSeq.set((n) => n + 1);
     input.onTrackReset?.();
 
@@ -506,6 +529,7 @@ export function useMediaSession(input: UseMediaSessionInput) {
       if (el.videoWidth > 0 && el.videoHeight > 0) {
         camDims.set({ width: el.videoWidth, height: el.videoHeight });
       }
+      camStartMs = performance.now();
       camActive.set(true);
       camPaused.set(false);
       scheduleNextLiveTick();
@@ -552,6 +576,7 @@ export function useMediaSession(input: UseMediaSessionInput) {
       pendingForwardStep = preserveTracks;
       if (!preserveTracks) {
         lastEmittedVideoTime = null;
+        videoFrameCount = 0;
         input.onTrackReset?.();
       }
       if (!autoDetect.peek()) frameSynced.set(false);
@@ -579,6 +604,8 @@ export function useMediaSession(input: UseMediaSessionInput) {
     if (el.paused) {
       if (duration.peek() > 0 && el.currentTime >= duration.peek() - 0.01) {
         pendingForwardStep = false;
+        lastEmittedVideoTime = null;
+        videoFrameCount = 0;
         input.onTrackReset?.();
         el.currentTime = 0;
         currentTime.set(0);
@@ -650,6 +677,7 @@ export function useMediaSession(input: UseMediaSessionInput) {
       pendingForwardStep = false;
       if (!wasForwardStep) {
         lastEmittedVideoTime = null;
+        videoFrameCount = 0;
         input.onTrackReset?.();
       }
       seeking.set(false);
@@ -732,6 +760,7 @@ export function useMediaSession(input: UseMediaSessionInput) {
     latencyMs,
     sessionSeq,
     frameSeq,
+    lastFrameMeta,
     videoEvents,
     loadVideo,
     startWebcam,

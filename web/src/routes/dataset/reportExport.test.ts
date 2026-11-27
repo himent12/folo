@@ -81,12 +81,27 @@ describe('dataset health report export', () => {
     expect(json.health_findings.some((f) => f.id === 'broken')).toBe(true);
     expect(json.health_findings.some((f) => f.id === 'missing')).toBe(true);
     expect(json.health_findings.some((f) => f.id === 'imbalance')).toBe(true);
+    expect(json.check_issues?.duplicate_images).toBe(1);
+    expect(json.check_issues?.duplicate_labels).toBe(0);
     expect(json.check_issues?.by_kind).toEqual([
       { kind: 'broken_label', label: 'Broken label', severity: 'error', count: 2 },
       { kind: 'clipped_box', label: 'Clipped box', severity: 'warning', count: 3 },
       { kind: 'duplicate_image', label: 'Duplicate image', severity: 'warning', count: 1 },
       { kind: 'empty_image', label: 'Empty image', severity: 'info', count: 15 },
     ]);
+
+    // Unknown future by_kind keys preserve count without guessing severity.
+    const futureCounts = {
+      ...SAMPLE_COUNTS,
+      by_kind: { ...SAMPLE_COUNTS.by_kind, future_check: 2 } as unknown as IssueCounts['by_kind'],
+    };
+    const futureJson = buildDatasetHealthReportJson(SAMPLE_DATASET, SAMPLE_STATS, futureCounts);
+    expect(futureJson.check_issues?.by_kind.find((e) => e.kind === 'future_check')).toEqual({
+      kind: 'future_check',
+      label: 'Future check',
+      severity: 'unknown',
+      count: 2,
+    });
   });
 
   it('builds RFC-4180 CSV rows with spreadsheet formula neutralization and triggers CSV/JSON downloads with toast feedback', () => {

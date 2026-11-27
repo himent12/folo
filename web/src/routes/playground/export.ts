@@ -3,12 +3,19 @@
 // then triggers a clean browser download with object-URL revocation and toast feedback.
 import { classChipText, classColor, classHalo } from '$lib/design/tokens';
 import { ms } from '$lib/format';
-import { downloadBlob as downloadBlobShared, downloadText, safeFilename, toJson } from '$lib/tableExport';
+import { downloadBlob as downloadBlobShared, downloadText, exportTableCsv, exportTableJson, safeFilename, toJson } from '$lib/tableExport';
 import { toast } from '$lib/ui/toast';
 import type { ViewBox } from '$lib/detect/DetectionView';
 import type { CompareViewMode } from './compare';
 import { imageBlob, type Source } from './source';
-import { formatBoxChipText, type TrackTrail } from './tracking';
+import {
+  buildTrackExportCsvRows,
+  formatBoxChipText,
+  TRACK_CSV_HEADERS,
+  type TrackExportPayload,
+  type TrackObservation,
+  type TrackTrail,
+} from './tracking';
 
 export interface AnnotatedLayer {
   boxes: readonly ViewBox[];
@@ -71,6 +78,40 @@ export function exportDetectionsJson(filenameBase: string, payload: unknown): bo
     return false;
   }
   return downloadText(content, exportFilename(filenameBase, 'json'), 'application/json;charset=utf-8', 'playground-export');
+}
+
+/** Downloads frame-indexed ByteTrack trajectory observations and summary metadata as pretty-printed JSON. */
+export function exportTracksJson(filenameBase: string, payload: TrackExportPayload): boolean {
+  if (!payload.observations.length) return false;
+  const ok = exportTableJson(filenameBase, payload, 'playground-export');
+  if (ok) {
+    const n = payload.observations.length;
+    const u = new Set(payload.observations.map((o) => o.track_id)).size;
+    toast.success(
+      'Tracks JSON exported',
+      `${u} unique ${u === 1 ? 'track' : 'tracks'} · ${n} ${n === 1 ? 'observation' : 'observations'}.`,
+      undefined,
+      { key: 'playground-export' },
+    );
+  }
+  return ok;
+}
+
+/** Downloads frame-indexed ByteTrack trajectory observations as formula-safe RFC-4180 CSV. */
+export function exportTracksCsv(filenameBase: string, observations: readonly TrackObservation[]): boolean {
+  if (!observations.length) return false;
+  const rows = buildTrackExportCsvRows(observations);
+  const ok = exportTableCsv(filenameBase, TRACK_CSV_HEADERS, rows, 'playground-export');
+  if (ok) {
+    const u = new Set(observations.map((o) => o.track_id)).size;
+    toast.success(
+      'Tracks CSV exported',
+      `${u} unique ${u === 1 ? 'track' : 'tracks'} · ${rows.length} ${rows.length === 1 ? 'row' : 'rows'}.`,
+      undefined,
+      { key: 'playground-export' },
+    );
+  }
+  return ok;
 }
 
 /** Draws ground-truth boxes, predicted boxes, and readable label chips onto `ctx` within `(ox, oy, width, height)`. */

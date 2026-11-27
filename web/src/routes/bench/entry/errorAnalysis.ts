@@ -23,6 +23,8 @@ export interface BoxDiagnostic {
   score: number | null;
   /** Matched IoU for TP, or highest overlapping IoU for FP/FN when overlap >= 0.1, else null. */
   iou: number | null;
+  /** Pixel xyxy bounding box coordinates of this detection or missed ground-truth box. */
+  box: { x1: number; y1: number; x2: number; y2: number };
   /** Concise human-readable diagnosis shown in the inspector sidebar. */
   detail: string;
 }
@@ -99,6 +101,7 @@ export function diagnoseImage(im: BenchEntryImage, classes: readonly string[]): 
         otherCls: null,
         score: sc,
         iou: d.iou,
+        box: { x1: d.det.x1, y1: d.det.y1, x2: d.det.x2, y2: d.det.y2 },
         detail: `TP · IoU ${num(d.iou, 2)}`,
       });
       continue;
@@ -118,6 +121,7 @@ export function diagnoseImage(im: BenchEntryImage, classes: readonly string[]): 
       }
     }
 
+    const detBox = { x1: d.det.x1, y1: d.det.y1, x2: d.det.x2, y2: d.det.y2 };
     if (bestSameIou >= MATCH_IOU) {
       boxes.push({
         key: `d${d.index}`,
@@ -127,6 +131,7 @@ export function diagnoseImage(im: BenchEntryImage, classes: readonly string[]): 
         otherCls: null,
         score: sc,
         iou: bestSameIou,
+        box: detBox,
         detail: `Duplicate · IoU ${num(bestSameIou, 2)}`,
       });
     } else if (bestDiffIou >= OVERLAP_FLOOR && bestDiffCls !== null && bestDiffIou >= bestSameIou) {
@@ -138,6 +143,7 @@ export function diagnoseImage(im: BenchEntryImage, classes: readonly string[]): 
         otherCls: bestDiffCls,
         score: sc,
         iou: bestDiffIou,
+        box: detBox,
         detail: `Class mismatch (GT: ${clsName(classes, bestDiffCls)}) · IoU ${num(bestDiffIou, 2)}`,
       });
     } else if (bestSameIou >= OVERLAP_FLOOR) {
@@ -149,6 +155,7 @@ export function diagnoseImage(im: BenchEntryImage, classes: readonly string[]): 
         otherCls: null,
         score: sc,
         iou: bestSameIou,
+        box: detBox,
         detail: `Localization · IoU ${num(bestSameIou, 2)}`,
       });
     } else {
@@ -160,6 +167,7 @@ export function diagnoseImage(im: BenchEntryImage, classes: readonly string[]): 
         otherCls: null,
         score: sc,
         iou: null,
+        box: detBox,
         detail: 'Background FP',
       });
     }
@@ -180,6 +188,7 @@ export function diagnoseImage(im: BenchEntryImage, classes: readonly string[]): 
         bestDiffCls = fp.det.class;
       }
     }
+    const gtBox = { x1: gt.x1, y1: gt.y1, x2: gt.x2, y2: gt.y2 };
     if (bestDiffIou >= OVERLAP_FLOOR && bestDiffCls !== null && bestDiffIou >= bestSameIou) {
       boxes.push({
         key: `t${idx}`,
@@ -189,6 +198,7 @@ export function diagnoseImage(im: BenchEntryImage, classes: readonly string[]): 
         otherCls: bestDiffCls,
         score: null,
         iou: bestDiffIou,
+        box: gtBox,
         detail: `Missed · pred ${clsName(classes, bestDiffCls)} (IoU ${num(bestDiffIou, 2)})`,
       });
     } else if (bestSameIou >= OVERLAP_FLOOR) {
@@ -200,6 +210,7 @@ export function diagnoseImage(im: BenchEntryImage, classes: readonly string[]): 
         otherCls: null,
         score: null,
         iou: bestSameIou,
+        box: gtBox,
         detail: `Missed · low IoU (${num(bestSameIou, 2)})`,
       });
     } else {
@@ -211,6 +222,7 @@ export function diagnoseImage(im: BenchEntryImage, classes: readonly string[]): 
         otherCls: null,
         score: null,
         iou: null,
+        box: gtBox,
         detail: 'Missed · no detection',
       });
     }

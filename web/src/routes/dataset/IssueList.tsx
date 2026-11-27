@@ -8,7 +8,7 @@ import { bindable, computed, css, defaults, effect, Index, signal, untrack } fro
 import { hub } from '$lib/api/index';
 import { Resource } from '$lib/api/resource';
 import type { DatasetIssue, IssueCounts, IssueKind, IssueSeverity } from '$lib/api/types';
-import { issueCaption, KIND_LABEL, KINDS, loadIssues, loadKinds } from './issues';
+import { issueAuditTag, issueCaption, KIND_LABEL, kindLabel, KINDS, loadIssues, loadKinds } from './issues';
 import { num } from '$lib/format';
 import { quote } from '$lib/trainCli';
 import CommandLine from '$lib/ui/CommandLine';
@@ -125,17 +125,31 @@ export default function IssueList(props: IssueListProps) {
           ) : null}
           <ul>
             <Index each={list.get().slice(0, shown.get())}>
-              {(i) => (
-                <li>
-                  <span class="file mono" title={where(i())}>
-                    {where(i())}
-                  </span>
-                  <span class="msg">
-                    {i().message}
-                    {i().fix ? <span class="fix">Fix: {i().fix}</span> : null}
-                  </span>
-                </li>
-              )}
+              {(i) => {
+                const auditTag = () => issueAuditTag(i());
+                const showKindTag = () => kind.get() === 'all' && kinds.get().length > 1;
+                return (
+                  <li>
+                    <span class="file mono" title={where(i())}>
+                      {where(i())}
+                    </span>
+                    <span class="msg">
+                      {showKindTag() ? (
+                        <span class="tag" data-issue-kind={i().kind}>
+                          {kindLabel(i().kind)}
+                        </span>
+                      ) : null}
+                      {auditTag() ? (
+                        <span class="tag audit" data-issue-audit-tag>
+                          {auditTag()}
+                        </span>
+                      ) : null}
+                      {i().message}
+                      {i().fix ? <span class="fix">Fix: {i().fix}</span> : null}
+                    </span>
+                  </li>
+                );
+              }}
             </Index>
           </ul>
           {list.get().length > shown.get() ? (
@@ -189,6 +203,24 @@ css`
   }
   .msg {
     color: var(--text-secondary);
+  }
+  .tag {
+    display: inline-block;
+    margin-right: 6px;
+    padding: 0 6px;
+    border-radius: var(--radius-xs);
+    border: 1px solid var(--line-subtle);
+    background: var(--bg-inset);
+    color: var(--text-secondary);
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    font-weight: var(--weight-medium);
+    vertical-align: baseline;
+  }
+  .tag.audit {
+    border-color: color-mix(in srgb, var(--warning-solid) 35%, transparent);
+    background: color-mix(in srgb, var(--warning-solid) 14%, transparent);
+    color: var(--warning-text);
   }
   /* What a cleanup would do: a quiet second line under the message. */
   .fix {
