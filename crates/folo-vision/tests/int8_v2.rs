@@ -710,4 +710,37 @@ fn fullpad_gate_fused_dequant_and_hyper_c4_parity() {
             );
         }
     }
+
+    // 3. Concurrent Rayon work-stealing re-entrancy on `HYPER_SCRATCH` at a shape crossing parallel GEMM/quant
+    //    thresholds (`[1, c_in, 16, 16]` across 16 concurrent tasks on a 2-thread pool).
+    use rayon::prelude::*;
+    let hc = &m.backbone.hyper;
+    let c_in = hc.av_proj.conv.config().in_channels;
+    let x_hc = Tensor::rand_uniform([1, c_in, 16, 16], -1.0, 1.0, &mut Rng::seed(102));
+    let (want_y, want_g) = {
+        let _g = no_grad();
+        let (y, g) = hc.forward_with_scene(&x_hc).unwrap();
+        (y.to_vec::<f32>().unwrap(), g.to_vec::<f32>().unwrap())
+    };
+    let pool2 = rayon::ThreadPoolBuilder::new().num_threads(2).build().unwrap();
+    let par_res: Vec<(Vec<f32>, Vec<f32>)> = pool2.install(|| {
+        (0..16)
+            .into_par_iter()
+            .map(|_| {
+                let _g = no_grad();
+                let (y, g) = hc.forward_with_scene(&x_hc).unwrap();
+                (y.to_vec::<f32>().unwrap(), g.to_vec::<f32>().unwrap())
+            })
+            .collect()
+    });
+    for (idx, (gy, gg)) in par_res.iter().enumerate() {
+        assert!(
+            gy.iter().zip(&want_y).all(|(a, b)| a.to_bits() == b.to_bits()),
+            "concurrent HyperContext y {idx} diverged"
+        );
+        assert!(
+            gg.iter().zip(&want_g).all(|(a, b)| a.to_bits() == b.to_bits()),
+            "concurrent HyperContext g_scene {idx} diverged"
+        );
+    }
 }

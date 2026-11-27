@@ -538,18 +538,12 @@ impl Attention {
             return Ok(None);
         };
         let (heads, kd, hd) = (self.heads, self.key_dim, self.head_dim);
-        let scale = (kd as f32).powf(-0.5);
+        let scale = (kd as f64).powf(-0.5) as f32;
         let head_stride = (2 * kd + hd) * n;
         let batch_stride = heads * head_stride;
 
         let mut out = folo_core::cpu::take_buffer(b * c * n);
-        ATTN_SCRATCH.with(|cell| -> Result<()> {
-            let mut scratch = cell.borrow_mut();
-            let o_len = b * c * n;
-            if scratch.len() < o_len {
-                scratch.resize(o_len, 0.0);
-            }
-            let o_bnhd = &mut scratch[..o_len];
+        attn_simd::with_tls_f32_scratch(&ATTN_SCRATCH, b * c * n, MAX_ATTN_TLS_ELEMS, |o_bnhd| {
             self.with_qkv_and_pe(qkv, |qkv_s, pe_w, pe_b| {
                 attn_simd::fused_attn_o_bnhd(qkv_s, b, heads, kd, hd, n, scale, o_bnhd);
                 let write_plane = |(idx, out_plane): (usize, &mut [f32])| {
@@ -569,11 +563,7 @@ impl Attention {
                 } else {
                     out.chunks_mut(n).enumerate().for_each(write_plane);
                 }
-            })?;
-            if scratch.capacity() > MAX_ATTN_TLS_ELEMS {
-                *scratch = Vec::new();
-            }
-            Ok(())
+            })
         })?;
         Ok(Some(Tensor::from_vec(out, [b, c, h, w])?))
     }
@@ -602,18 +592,12 @@ impl Attention {
             return Ok(false);
         }
         let (heads, kd, hd) = (self.heads, self.key_dim, self.head_dim);
-        let scale = (kd as f32).powf(-0.5);
+        let scale = (kd as f64).powf(-0.5) as f32;
         let head_stride = (2 * kd + hd) * n;
         let batch_stride = heads * head_stride;
+        let o_len = b * c * n;
 
-        ATTN_SCRATCH.with(|cell| -> Result<()> {
-            let mut scratch = cell.borrow_mut();
-            let o_len = b * c * n;
-            if scratch.len() < o_len {
-                scratch.resize(o_len, 0.0);
-            }
-            let o_bnhd = &mut scratch[..o_len];
-
+        attn_simd::with_tls_f32_scratch(&ATTN_SCRATCH, o_len, MAX_ATTN_TLS_ELEMS, |o_bnhd| {
             self.with_qkv_and_pe(qkv, |qkv_s, pe_w, pe_b| {
                 attn_simd::fused_attn_o_bnhd(qkv_s, b, heads, kd, hd, n, scale, o_bnhd);
 
@@ -668,11 +652,7 @@ impl Attention {
                         .enumerate()
                         .for_each(|item| fuse_group(&mut buf4, item));
                 }
-            })?;
-            if scratch.capacity() > MAX_ATTN_TLS_ELEMS {
-                *scratch = Vec::new();
-            }
-            Ok(())
+            })
         })?;
         Ok(true)
     }

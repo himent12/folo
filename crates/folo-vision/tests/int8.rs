@@ -871,4 +871,32 @@ fn fused_attention_c4_sppf_and_shared_f32_bottleneck_parity() {
             assert!(exact > 0.99 && worst <= 2.0, "{label} {name}: {:.4} exact, worst {worst} steps", exact);
         }
     }
+
+    // Concurrent Rayon work-stealing re-entrancy on `ATTN_SCRATCH` at a size exceeding both
+    // `work >= 500_000` and `o_len >= 16_384` (would panic on `RefCell::borrow_mut` if a borrow were held
+    // across Rayon dispatches).
+    use folo_nn::Forward;
+    use rayon::prelude::*;
+    let attn = &m.backbone.psa.blocks.items()[0].attn;
+    let c_attn = attn.qkv.conv.config().in_channels;
+    let x_attn = Tensor::rand_uniform([1, c_attn, 16, 16], -1.0, 1.0, &mut Rng::seed(73));
+    let want_attn = {
+        let _g = no_grad();
+        attn.forward(&x_attn).unwrap().to_vec::<f32>().unwrap()
+    };
+    let par_outs: Vec<Vec<f32>> = pool(2).install(|| {
+        (0..16)
+            .into_par_iter()
+            .map(|_| {
+                let _g = no_grad();
+                attn.forward(&x_attn).unwrap().to_vec::<f32>().unwrap()
+            })
+            .collect()
+    });
+    for (idx, got) in par_outs.iter().enumerate() {
+        assert!(
+            got.iter().zip(&want_attn).all(|(a, b)| a.to_bits() == b.to_bits()),
+            "concurrent Attention forward {idx} diverged"
+        );
+    }
 }

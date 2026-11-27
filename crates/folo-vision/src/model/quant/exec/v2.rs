@@ -437,43 +437,49 @@ impl<'a> Int8<'a> {
                 &mut heap_gates
             };
             if gate.gate_values_cpu(g_scene, n, c, gates)? {
-                let hw = h * w;
-                let mut out = folo_core::cpu::take_buffer(n * c * hw);
-                let pool = self.pool.borrow();
-                let view = u.view(&pool);
                 let base_grids = u.grids();
-                const STACK_GRIDS: usize = 512;
-                let mut stack_grids = [Grid { scale: 0.0, zero: 0 }; STACK_GRIDS];
-                let mut heap_grids = Vec::new();
-                let scaled: &mut [Grid] = if c <= STACK_GRIDS {
-                    &mut stack_grids[..c]
-                } else {
-                    heap_grids.resize(c, Grid { scale: 0.0, zero: 0 });
-                    &mut heap_grids
-                };
-                for img in 0..n {
-                    let g_row = &gates[img * c..(img + 1) * c];
-                    for ch in 0..c {
-                        scaled[ch] =
-                            Grid { scale: base_grids[ch].scale * g_row[ch], zero: base_grids[ch].zero };
-                    }
-                    let img_view = C4 {
-                        data: view.data,
-                        offset: view.offset + img * view.img_stride,
-                        img_stride: view.img_stride,
-                        c,
-                        zero: view.zero,
+                // Guard against extreme `[0, f32::MAX]` grids or non-finite gates where folding `scale * gate`
+                // could alter `+Inf`/`NaN` boundary rounding vs separate dequantize + multiply.
+                let can_fold = base_grids.iter().all(|g| g.scale.is_finite() && g.scale.abs() <= 1e35)
+                    && gates.iter().all(|g| g.is_finite());
+                if can_fold {
+                    let hw = h * w;
+                    let mut out = folo_core::cpu::take_buffer(n * c * hw);
+                    let pool = self.pool.borrow();
+                    let view = u.view(&pool);
+                    const STACK_GRIDS: usize = 512;
+                    let mut stack_grids = [Grid { scale: 0.0, zero: 0 }; STACK_GRIDS];
+                    let mut heap_grids = Vec::new();
+                    let scaled: &mut [Grid] = if c <= STACK_GRIDS {
+                        &mut stack_grids[..c]
+                    } else {
+                        heap_grids.resize(c, Grid { scale: 0.0, zero: 0 });
+                        &mut heap_grids
                     };
-                    q8::dequantize_per_channel(
-                        img_view,
-                        1,
-                        hw,
-                        scaled,
-                        &mut out[img * c * hw..(img + 1) * c * hw],
-                    );
+                    for img in 0..n {
+                        let g_row = &gates[img * c..(img + 1) * c];
+                        for ch in 0..c {
+                            scaled[ch] =
+                                Grid { scale: base_grids[ch].scale * g_row[ch], zero: base_grids[ch].zero };
+                        }
+                        let img_view = C4 {
+                            data: view.data,
+                            offset: view.offset + img * view.img_stride,
+                            img_stride: view.img_stride,
+                            c,
+                            zero: view.zero,
+                        };
+                        q8::dequantize_per_channel(
+                            img_view,
+                            1,
+                            hw,
+                            scaled,
+                            &mut out[img * c * hw..(img + 1) * c * hw],
+                        );
+                    }
+                    drop(pool);
+                    return Ok(Tensor::from_vec(out, [n, c, h, w])?);
                 }
-                drop(pool);
-                return Ok(Tensor::from_vec(out, [n, c, h, w])?);
             }
         }
         let raw = x.to_f32()?;

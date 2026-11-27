@@ -4,28 +4,63 @@
 //! Every AVX2+FMA path has a bit-deterministic scalar fallback and preserves IEEE non-finite semantics on
 //! softmax inputs. All helpers are pure slice functions with zero heap allocations.
 
-use std::sync::OnceLock;
+use std::cell::RefCell;
+use std::thread::LocalKey;
 
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
+#[cfg(target_arch = "x86_64")]
+use std::sync::OnceLock;
 
 mod fused;
 pub(crate) use fused::fused_attn_o_bnhd;
 
 /// Runtime check for AVX2 + FMA on x86-64 (cached once).
+#[cfg(target_arch = "x86_64")]
 #[inline]
 pub(crate) fn has_avx2_fma() -> bool {
-    #[cfg(target_arch = "x86_64")]
-    {
-        static DETECT: OnceLock<bool> = OnceLock::new();
-        *DETECT.get_or_init(|| {
-            std::arch::is_x86_feature_detected!("avx2") && std::arch::is_x86_feature_detected!("fma")
-        })
+    static DETECT: OnceLock<bool> = OnceLock::new();
+    *DETECT.get_or_init(|| {
+        std::arch::is_x86_feature_detected!("avx2") && std::arch::is_x86_feature_detected!("fma")
+    })
+}
+
+/// Temporarily take a reusable `Vec<f32>` out of a thread-local [`RefCell`] so no `RefMut` is ever held
+/// across Rayon parallel dispatches (avoiding `BorrowMutError` if Rayon steals a concurrent forward onto the
+/// same worker thread), and restore it via an RAII guard that enforces `max_elems` on every exit path
+/// (normal return, `Err`, or panic).
+pub(crate) fn with_tls_f32_scratch<R>(
+    tls: &'static LocalKey<RefCell<Vec<f32>>>,
+    len: usize,
+    max_elems: usize,
+    f: impl FnOnce(&mut [f32]) -> R,
+) -> R {
+    struct Guard {
+        tls: &'static LocalKey<RefCell<Vec<f32>>>,
+        buf: Vec<f32>,
+        max_elems: usize,
     }
-    #[cfg(not(target_arch = "x86_64"))]
-    {
-        false
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            if self.buf.capacity() <= self.max_elems {
+                let buf = std::mem::take(&mut self.buf);
+                let _ = self.tls.try_with(|cell| {
+                    if let Ok(mut slot) = cell.try_borrow_mut()
+                        && buf.capacity() > slot.capacity()
+                    {
+                        *slot = buf;
+                    }
+                });
+            }
+        }
     }
+
+    let mut buf = tls.with(|cell| std::mem::take(&mut *cell.borrow_mut()));
+    if buf.len() < len {
+        buf.resize(len, 0.0);
+    }
+    let mut guard = Guard { tls, buf, max_elems };
+    f(&mut guard.buf[..len])
 }
 
 const EXP_LO: f32 = -87.336_54;
@@ -248,7 +283,7 @@ pub(super) unsafe fn softmax_row_scaled_avx2(row: &mut [f32], scale: f32) {
 /// Out-of-place unit-scale row softmax: `dst[i] = softmax(src[i])` for `src.len() == dst.len()`.
 #[inline]
 pub(crate) fn softmax_row_copy(src: &[f32], dst: &mut [f32]) {
-    debug_assert_eq!(src.len(), dst.len());
+    assert_eq!(src.len(), dst.len(), "softmax_row_copy: src/dst length mismatch");
     dst.copy_from_slice(src);
     softmax_row_scaled(dst, 1.0);
 }
@@ -266,13 +301,17 @@ pub(crate) fn softmax_cols_row_major(
     mx: &mut [f32],
     sum: &mut [f32],
 ) {
-    debug_assert!(src.len() >= m * n && dst.len() >= m * n && mx.len() >= n && sum.len() >= n);
+    let total = m.checked_mul(n).expect("softmax_cols_row_major: m * n overflow");
+    assert!(
+        src.len() >= total && dst.len() >= total && mx.len() >= n && sum.len() >= n,
+        "softmax_cols_row_major: slice too short for {m}x{n}"
+    );
     if m == 0 || n == 0 {
         return;
     }
     #[cfg(target_arch = "x86_64")]
     if has_avx2_fma() {
-        // SAFETY: AVX2 and FMA verified by `has_avx2_fma()`.
+        // SAFETY: AVX2 and FMA verified by `has_avx2_fma()`; bounds verified by `assert!` above.
         unsafe { softmax_cols_row_major_avx2(src, dst, m, n, mx, sum) };
         return;
     }
@@ -464,10 +503,17 @@ pub(crate) fn fullpad_gate_values_row(
     cols: usize,
     out: &mut [f32],
 ) {
-    debug_assert!(w.len() >= rows * cols && x.len() >= cols && out.len() >= rows);
+    let w_len = rows.checked_mul(cols).expect("fullpad_gate_values_row: rows * cols overflow");
+    assert!(
+        w.len() >= w_len && x.len() >= cols && out.len() >= rows && b.is_none_or(|bs| bs.len() >= rows),
+        "fullpad_gate_values_row: slice too short for {rows}x{cols}"
+    );
+    if rows == 0 {
+        return;
+    }
     #[cfg(target_arch = "x86_64")]
     if has_avx2_fma() {
-        // SAFETY: AVX2 and FMA verified by `has_avx2_fma()`.
+        // SAFETY: AVX2 and FMA verified by `has_avx2_fma()`; bounds verified by `assert!` above.
         unsafe { fullpad_gate_values_row_avx2(w, b, x, rows, cols, out) };
         return;
     }
@@ -526,10 +572,13 @@ fn max4(a: u32, b: u32) -> u32 {
     u32::from_le_bytes([0, 1, 2, 3].map(|t| a[t].max(b[t])))
 }
 
-/// Single C4 plane `k Ã— k` max pool (stride 1, padding `k / 2`), bit-exact with `q8::max_pool`.
+/// Single C4 plane `k x k` max pool (stride 1, padding `k / 2`), bit-exact with `q8::max_pool`.
 pub(crate) fn max_pool_c4_plane(src: &[u32], h: usize, w: usize, r: usize, tmp: &mut [u32], dst: &mut [u32]) {
-    let hw = h * w;
-    debug_assert!(src.len() >= hw && tmp.len() >= hw && dst.len() >= hw);
+    let hw = h.checked_mul(w).expect("max_pool_c4_plane: h * w overflow");
+    assert!(
+        src.len() >= hw && tmp.len() >= hw && dst.len() >= hw,
+        "max_pool_c4_plane: slice too short for {h}x{w}"
+    );
     if hw == 0 {
         return;
     }

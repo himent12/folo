@@ -702,12 +702,7 @@ impl HyperContext {
         let mut y_ctx = folo_core::cpu::take_buffer(b * cg * n);
         let mut g_scene = folo_core::cpu::take_buffer(b * cg);
 
-        HYPER_SCRATCH.with(|cell| -> Result<()> {
-            let mut scratch = cell.borrow_mut();
-            if scratch.len() < work_len {
-                scratch.resize(work_len, 0.0);
-            }
-            let work = &mut scratch[..work_len];
+        attn_simd::with_tls_f32_scratch(&HYPER_SCRATCH, work_len, MAX_HYPER_TLS_ELEMS, |work| {
             self.with_av_and_ffn(av, |av_s, w1, b1, w2, b2| {
                 self.compute_attend_and_scene_slices(
                     av_s,
@@ -721,11 +716,7 @@ impl HyperContext {
                     &mut y_ctx,
                     &mut g_scene,
                 );
-            })?;
-            if scratch.capacity() > MAX_HYPER_TLS_ELEMS {
-                *scratch = Vec::new();
-            }
-            Ok(())
+            })
         })?;
 
         Ok(Some((Tensor::from_vec(y_ctx, [b, cg, h, w])?, Tensor::from_vec(g_scene, [b, cg])?)))
@@ -758,21 +749,13 @@ impl HyperContext {
         let y_len = b * cg * n;
         let mut g_scene = folo_core::cpu::take_buffer(b * cg);
 
-        HYPER_SCRATCH.with(|cell| -> Result<()> {
-            let mut scratch = cell.borrow_mut();
-            if scratch.len() < work_len + y_len {
-                scratch.resize(work_len + y_len, 0.0);
-            }
+        attn_simd::with_tls_f32_scratch(&HYPER_SCRATCH, work_len + y_len, MAX_HYPER_TLS_ELEMS, |scratch| {
             let (work, y_buf) = scratch.split_at_mut(work_len);
             let y_ctx = &mut y_buf[..y_len];
             self.with_av_and_ffn(av, |av_s, w1, b1, w2, b2| {
                 self.compute_attend_and_scene_slices(av_s, w1, b1, w2, b2, b, n, work, y_ctx, &mut g_scene);
                 q8::quantize_per_channel(y_ctx, b, cg, n, grids, out_u32);
-            })?;
-            if scratch.capacity() > MAX_HYPER_TLS_ELEMS {
-                *scratch = Vec::new();
-            }
-            Ok(())
+            })
         })?;
 
         Ok(Some(Tensor::from_vec(g_scene, [b, cg])?))
@@ -921,7 +904,12 @@ impl FullPadGate {
     pub fn forward(&self, feat: &Tensor, g_scene: &Tensor) -> Result<Tensor> {
         let (b, c, h, w) = feat.dims4()?;
         // Fused single-pass CPU F32 path under `no_grad` (zero `proj` tensor allocs or matmul dispatch).
-        if h > 0 && w > 0 && feat.device().is_cpu() && feat.dtype() == DType::F32 {
+        if !folo_core::is_grad_enabled()
+            && h > 0
+            && w > 0
+            && feat.device().is_cpu()
+            && feat.dtype() == DType::F32
+        {
             const STACK_GATES: usize = 512;
             let mut stack_gates = [0.0f32; STACK_GATES];
             let mut heap_gates = Vec::new();

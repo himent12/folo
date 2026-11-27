@@ -28,12 +28,21 @@ pub(crate) fn fused_attn_o_bnhd(
     scale: f32,
     o_bnhd: &mut [f32],
 ) {
-    let total_heads = b * heads;
+    let total_heads = b.checked_mul(heads).expect("fused_attn_o_bnhd: b * heads overflow");
     if total_heads == 0 || n == 0 || hd == 0 {
         return;
     }
-    let head_stride = (2 * kd + hd) * n;
-    let batch_stride = heads * head_stride;
+    let qkv_ch =
+        kd.checked_mul(2).and_then(|v| v.checked_add(hd)).expect("fused_attn_o_bnhd: 2 * kd + hd overflow");
+    let head_stride = qkv_ch.checked_mul(n).expect("fused_attn_o_bnhd: head_stride overflow");
+    let batch_stride = heads.checked_mul(head_stride).expect("fused_attn_o_bnhd: batch_stride overflow");
+    let total_qkv = b.checked_mul(batch_stride).expect("fused_attn_o_bnhd: total_qkv overflow");
+    let head_out_len = n.checked_mul(hd).expect("fused_attn_o_bnhd: n * hd overflow");
+    let total_out = total_heads.checked_mul(head_out_len).expect("fused_attn_o_bnhd: total_out overflow");
+    assert!(
+        qkv_s.len() >= total_qkv && o_bnhd.len() >= total_out,
+        "fused_attn_o_bnhd: input/output slice too short"
+    );
     let tile_q = if n <= 512 { 8 } else { 4 };
 
     #[cfg(target_arch = "x86_64")]
@@ -296,6 +305,9 @@ unsafe fn fused_attn_tile_avx2(
             softmax_row_scaled_avx2(&mut scores[r * n..(r + 1) * n], scale);
         }
     }
+
+    // Re-derive a fresh read pointer after mutable softmax borrows of `scores` (Stacked Borrows soundness).
+    let sp = scores.as_ptr();
 
     // 3. dst_tile[qb, hd] = scores[qb, n] @ V[hd, n]^T
     // 4-row × 2-channel register-blocked dot-product kernel (8 YMM accumulators, 4× reuse of L2-resident V).
