@@ -593,13 +593,17 @@ pub fn coco_annotation_files(path: impl AsRef<Path>) -> Result<Vec<(Split, PathB
     }
 }
 
-/// [`super::detect`] restricted to COCO. When there is no COCO dataset at `path` but a YOLO one, the error says
-/// so (rather than that no dataset was found), so a caller can point at `folo dataset convert`.
+/// [`super::detect`] restricted to COCO. When there is no COCO dataset at `path` but a YOLO or Pascal VOC one,
+/// the error says so (rather than that no dataset was found), so a caller can point at `folo dataset convert`.
 fn detect_coco(path: &Path) -> Result<super::Source> {
-    super::detect(path, Format::Coco).map_err(|e| match (&e, super::detect(path, Format::Yolo)) {
-        (DataError::Format(_), Ok(_)) => {
+    super::detect(path, Format::Coco).map_err(|e| match &e {
+        DataError::Format(_) if super::detect(path, Format::Yolo).is_ok() => {
             DataError::Format(format!("{} is a YOLO dataset, not a COCO one", crate::paths::shown(path)))
         }
+        DataError::Format(_) if super::detect(path, Format::Voc).is_ok() => DataError::Format(format!(
+            "{} is a Pascal VOC dataset, not a COCO one",
+            crate::paths::shown(path)
+        )),
         _ => e,
     })
 }

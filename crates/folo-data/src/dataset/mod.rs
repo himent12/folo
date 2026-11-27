@@ -1,19 +1,22 @@
-//! Datasets: the [`Dataset`] trait, YOLO and COCO readers with format auto-detection, and the load report.
+//! Datasets: the [`Dataset`] trait, YOLO, COCO, and Pascal VOC readers with format auto-detection, and the load report.
 //!
 //! - `yolo.rs`: the YOLO reader (`data.yaml`, `images/` + `labels/`) and [`label_path_for`]; `labels.rs`: YOLO
 //!   label text parsing (boxes and segment polygons).
-//! - `coco.rs`: COCO instances JSON, and the ground-truth reader [`open_coco_ground_truth`].
+//! - `coco/`: COCO instances JSON, and the ground-truth reader [`open_coco_ground_truth`].
+//! - `voc/`: Pascal VOC XML annotations (`Annotations/*.xml`, `JPEGImages/`, `ImageSets/Main/*.txt`).
 //! - `cache/`: the on-disk scan cache (docs/DATA.md, Scan cache).
 //! - This file: [`Dataset`], [`FileDataset`], [`InMemoryDataset`], [`Split`], [`Format`], [`LoadReport`],
 //!   [`open`] / [`open_with`] / [`open_splits`] and [`detect_format`].
 
 pub(crate) mod cache;
 mod coco;
+pub(crate) mod voc;
 
 pub use coco::{
     CocoAnnotation, CocoGroundTruth, CocoImage, coco_annotation_files, open_coco_ground_truth,
     read_coco_ground_truth,
 };
+pub use voc::{VocAnnotation, VocObject, VocOptions, open_voc_with, parse_voc_xml};
 pub(crate) mod labels;
 pub(crate) mod yolo;
 
@@ -70,6 +73,20 @@ pub enum Format {
     Yolo,
     /// COCO instances JSON.
     Coco,
+    /// Pascal VOC XML (`Annotations/*.xml`, `JPEGImages/` or colocated images, optional `ImageSets/Main/*.txt`).
+    Voc,
+}
+
+impl Format {
+    /// Lower-case name (`auto`, `yolo`, `coco`, `voc`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Format::Auto => "auto",
+            Format::Yolo => "yolo",
+            Format::Coco => "coco",
+            Format::Voc => "voc",
+        }
+    }
 }
 
 /// Random access to labelled images.
@@ -286,6 +303,10 @@ impl LoadReport {
     pub(crate) fn push(&mut self, kind: IssueKind, path: impl Into<PathBuf>, message: impl Into<String>) {
         self.issues.push(Issue { kind, path: path.into(), message: message.into() });
     }
+
+    pub(crate) fn record_skipped_label_image(&mut self) {
+        self.skipped_label_images += 1;
+    }
 }
 
 /// Options for [`open_with`].
@@ -351,6 +372,18 @@ impl LoadedDataset {
     pub fn split_sizes(&self) -> [usize; 3] {
         [self.train.len(), self.val.len(), self.test.len()]
     }
+
+    /// Audits this dataset for exact duplicate images, cross-split leakage (`train` <-> `val` / `test`),
+    /// unreadable files, and unused classes. See [`crate::audit::audit_dataset`].
+    pub fn audit(&self) -> crate::audit::AuditReport {
+        crate::audit::audit_dataset(self)
+    }
+
+    /// Re-splits this dataset into deterministic multi-label stratified `train` / `val` / `test` splits.
+    /// See [`crate::split::split_dataset`].
+    pub fn split_stratified(&self, config: &crate::split::SplitConfig) -> Result<LoadedDataset> {
+        crate::split::split_dataset(self, config)
+    }
 }
 
 /// Opens a dataset at `path`, detecting the format. See [`open_with`].
@@ -380,6 +413,7 @@ pub fn open_splits(path: impl AsRef<Path>, opts: &OpenOptions, splits: &[Split])
         Source::Yaml(yaml) => yolo::finish(yolo::scan_yaml(&yaml)?, opts, splits),
         Source::Coco { root, jsons } => coco::open_jsons(&root, jsons, opts, splits),
         Source::YoloDir(root) => yolo::finish(yolo::scan_dir(&root), opts, splits),
+        Source::Voc { root, single_xml } => voc::open_voc(&root, single_xml.as_deref(), opts, splits),
     }
 }
 
@@ -391,12 +425,14 @@ pub(crate) enum Source {
     Coco { root: PathBuf, jsons: Vec<(Split, PathBuf)> },
     /// A YOLO `images/` + `labels/` folder without a YAML.
     YoloDir(PathBuf),
+    /// A Pascal VOC XML directory (or a single `.xml` annotation file).
+    Voc { root: PathBuf, single_xml: Option<PathBuf> },
 }
 
 /// Finds the dataset at `path` (rules of [`open_with`]) without reading any labels or images. A folder a writer has
 /// not finished ([`crate::unfinished`]) is refused: `path` itself when it is a directory (before format detection),
 /// then the YAML's folder (and the root its `path:` gives, `yolo::scan_yaml`), the folder images resolve against, or
-/// a COCO JSON's own folder or the one above it.
+/// a COCO JSON / VOC XML's own folder or the one above it.
 pub(crate) fn detect(path: &Path, format: Format) -> Result<Source> {
     if !path.exists() {
         return Err(DataError::io(
@@ -424,6 +460,14 @@ pub(crate) fn detect(path: &Path, format: Format) -> Result<Source> {
                 crate::unfinished::check(&dir.join(".."))?;
             }
         }
+        Source::Voc { root, single_xml } => {
+            crate::unfinished::check(root)?;
+            if let Some(xml) = single_xml {
+                let dir = crate::paths::parent_dir(xml);
+                crate::unfinished::check(dir)?;
+                crate::unfinished::check(&dir.join(".."))?;
+            }
+        }
     }
     Ok(source)
 }
@@ -442,7 +486,16 @@ fn locate(path: &Path, format: Format) -> Result<Source> {
                     jsons: vec![(coco::guess_split(path), path.to_path_buf())],
                 })
             }
-            // Said in the words people pick the format with ("YOLO", "COCO"), not the enum's.
+            (Format::Auto | Format::Voc, Some("xml")) => {
+                let parent = crate::paths::parent_dir(path);
+                let root = if parent.file_name().is_some_and(|n| n.eq_ignore_ascii_case("annotations")) {
+                    crate::paths::parent_dir(parent)
+                } else {
+                    parent
+                };
+                Ok(Source::Voc { root: root.to_path_buf(), single_xml: Some(path.to_path_buf()) })
+            }
+            // Said in the words people pick the format with ("YOLO", "COCO", "Pascal VOC"), not the enum's.
             (Format::Yolo, Some("json")) => Err(DataError::Format(format!(
                 "{} is a COCO .json file, not YOLO: read it as COCO (or detect the format)",
                 crate::paths::shown(path),
@@ -451,14 +504,31 @@ fn locate(path: &Path, format: Format) -> Result<Source> {
                 "{} is a YOLO data.yaml, not COCO: read it as YOLO (or detect the format)",
                 crate::paths::shown(path),
             ))),
+            (Format::Voc, Some("yaml" | "yml")) => Err(DataError::Format(format!(
+                "{} is a YOLO data.yaml, not Pascal VOC: read it as YOLO (or detect the format)",
+                crate::paths::shown(path),
+            ))),
+            (Format::Voc, Some("json")) => Err(DataError::Format(format!(
+                "{} is a COCO .json file, not Pascal VOC: read it as COCO (or detect the format)",
+                crate::paths::shown(path),
+            ))),
+            (Format::Yolo, Some("xml")) => Err(DataError::Format(format!(
+                "{} is a Pascal VOC .xml file, not YOLO: read it as Pascal VOC (or detect the format)",
+                crate::paths::shown(path),
+            ))),
+            (Format::Coco, Some("xml")) => Err(DataError::Format(format!(
+                "{} is a Pascal VOC .xml file, not COCO: read it as Pascal VOC (or detect the format)",
+                crate::paths::shown(path),
+            ))),
             _ => Err(DataError::Format(format!(
-                "{} is not a data.yaml or a COCO .json file",
+                "{} is not a data.yaml, a COCO .json, or a Pascal VOC .xml file",
                 crate::paths::shown(path),
             ))),
         };
     }
     let want_yolo = matches!(format, Format::Auto | Format::Yolo);
     let want_coco = matches!(format, Format::Auto | Format::Coco);
+    let want_voc = matches!(format, Format::Auto | Format::Voc);
     if want_yolo && let Some(yaml) = yolo::find_yaml(path) {
         return Ok(Source::Yaml(yaml));
     }
@@ -468,11 +538,14 @@ fn locate(path: &Path, format: Format) -> Result<Source> {
             return Ok(Source::Coco { root: path.to_path_buf(), jsons });
         }
     }
+    if want_voc && voc::looks_like_voc_dir(path) {
+        return Ok(Source::Voc { root: path.to_path_buf(), single_xml: None });
+    }
     if want_yolo && yolo::looks_like_yolo_dir(path) {
         return Ok(Source::YoloDir(path.to_path_buf()));
     }
     Err(DataError::Format(format!(
-        "{UNDETECTED} in {}: expected a data.yaml, COCO instances JSON, or images/ + labels/ folders",
+        "{UNDETECTED} in {}: expected a data.yaml, COCO instances JSON, Pascal VOC XML, or images/ + labels/ folders",
         crate::paths::shown(path)
     )))
 }
@@ -480,7 +553,7 @@ fn locate(path: &Path, format: Format) -> Result<Source> {
 /// Start of the [`DataError::Format`] message when no dataset is found at a path (see [`detect_format`]).
 pub const UNDETECTED: &str = "could not detect a dataset";
 
-/// The format of the dataset at `path` without reading it (`format` restricts the search; `Auto` tries both).
+/// The format of the dataset at `path` without reading it (`format` restricts the search; `Auto` tries all).
 /// Fails with [`DataError::Io`] when `path` does not exist, with [`DataError::Unfinished`] when `path` is a folder a
 /// writer has not finished (checked first, whatever the folder holds), and with [`DataError::Format`] (message
 /// starting with [`UNDETECTED`]) when nothing there looks like a dataset.
@@ -488,6 +561,7 @@ pub fn detect_format(path: impl AsRef<Path>, format: Format) -> Result<Format> {
     Ok(match detect(path.as_ref(), format)? {
         Source::Yaml(_) | Source::YoloDir(_) => Format::Yolo,
         Source::Coco { .. } => Format::Coco,
+        Source::Voc { .. } => Format::Voc,
     })
 }
 
@@ -497,6 +571,13 @@ pub(crate) enum LabelSource {
     Yolo(PathBuf),
     /// COCO boxes in pixel `xyxy`, with the size the JSON declares, or a reason the annotations are broken.
     Coco { boxes: Vec<(u32, [f32; 4])>, declared: Option<(u32, u32)>, broken: Option<String>, label: PathBuf },
+    /// Pascal VOC boxes in pixel `xyxy`, with the size the XML declares, or a reason the annotation is broken.
+    Voc {
+        boxes: Vec<(u32, [f32; 4])>,
+        declared: Option<(u32, u32)>,
+        broken: Option<String>,
+        label: Option<PathBuf>,
+    },
 }
 
 pub(crate) struct Candidate {
@@ -514,7 +595,7 @@ pub(crate) fn build_entries(
     let files = candidates.iter().flat_map(|c| {
         let label = match &c.labels {
             LabelSource::Yolo(l) => Some(l.as_path()),
-            LabelSource::Coco { .. } => None,
+            LabelSource::Coco { .. } | LabelSource::Voc { .. } => None,
         };
         std::iter::once(c.image.as_path()).chain(label)
     });
@@ -626,7 +707,11 @@ fn check_candidate(
         issues.push(issue(IssueKind::MissingImage, &c.image, "image file not found".into()));
         return (None, issues, fresh);
     };
-    let need_size = opts.verify_images || matches!(&c.labels, LabelSource::Coco { declared: None, .. });
+    let need_size = opts.verify_images
+        || matches!(
+            &c.labels,
+            LabelSource::Coco { declared: None, .. } | LabelSource::Voc { declared: None, .. }
+        );
     let size = if need_size {
         match probe_image(&c.image, image.stamp, probes, &mut fresh) {
             Ok(s) => Some(s),
@@ -701,6 +786,48 @@ fn check_candidate(
                 ));
             }
             (Some(ImageEntry { image: c.image, label: None, size: Some((w, h)), boxes: out }), issues, fresh)
+        }
+        LabelSource::Voc { boxes, declared, broken, label } => {
+            if let Some(msg) = broken {
+                let report_path = label.as_deref().unwrap_or(&c.image);
+                issues.push(issue(IssueKind::BrokenLabel, report_path, msg));
+                return (None, issues, fresh);
+            }
+            if let (Some(d), Some(s)) = (declared, size)
+                && d != s
+            {
+                issues.push(issue(
+                    IssueKind::Other,
+                    &c.image,
+                    format!(
+                        "XML says {}x{} but the image is {}x{}; using the image size",
+                        d.0, d.1, s.0, s.1
+                    ),
+                ));
+            }
+            let Some((w, h)) = size.or(declared) else {
+                issues.push(issue(IssueKind::CorruptImage, &c.image, "unknown image size".into()));
+                return (None, issues, fresh);
+            };
+            let (fw, fh) = (w as f32, h as f32);
+            let mut out = Vec::with_capacity(boxes.len());
+            let mut dropped = 0;
+            for (class, [x1, y1, x2, y2]) in boxes {
+                let clamped = [x1.clamp(0.0, fw), y1.clamp(0.0, fh), x2.clamp(0.0, fw), y2.clamp(0.0, fh)];
+                if clamped[2] - clamped[0] <= 0.0 || clamped[3] - clamped[1] <= 0.0 {
+                    dropped += 1;
+                    continue;
+                }
+                out.push(BBox::from_pixel_xyxy(class, clamped, w, h));
+            }
+            if dropped > 0 {
+                issues.push(issue(
+                    IssueKind::LabelWarning,
+                    label.as_deref().unwrap_or(&c.image),
+                    format!("{dropped} zero-size box(es) dropped"),
+                ));
+            }
+            (Some(ImageEntry { image: c.image, label, size: Some((w, h)), boxes: out }), issues, fresh)
         }
     }
 }

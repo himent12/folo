@@ -1,7 +1,8 @@
 # folo-data
 
-folo-data reads datasets and turns them into training batches: YOLO and COCO readers, image decoding, letterbox and
-resize, box-aware augmentation, a deterministic multi-threaded data loader and procedural synthetic datasets. It
+folo-data reads datasets and turns them into training batches: YOLO, COCO and Pascal VOC readers, image decoding,
+letterbox and resize, box-aware augmentation, deterministic multi-label stratified splitting, duplicate and
+cross-split leakage auditing, a deterministic multi-threaded data loader and procedural synthetic datasets. It
 depends on no other workspace crate (not even folo-core): it hands out plain buffers (`Vec<f32>` images in `NCHW`
 and `[batch_idx, class, cx, cy, w, h]` target rows) that the trainer wraps in tensors, and it carries its own seeded
 RNG (`src/rng.rs`). folo-vision, folo-bench, folo-server, folo-mcp, folo-cli, folo-wasm and FOLO Desktop
@@ -13,7 +14,7 @@ the determinism rules.
 | Path | What it holds |
 |---|---|
 | `src/lib.rs` | Crate docs with an example, and the re-exports |
-| `src/dataset/` | `mod.rs` (the `Dataset` trait, `Split`, `Format`, `open` / `open_with`, format detection, `LoadReport`), `yolo.rs` and `labels.rs` (YOLO), `coco/` (`mod.rs`, `parse.rs`, `fields.rs`: single-pass streaming COCO instances JSON reader), `cache/` (the on-disk scan cache: `mod.rs`, `probe.rs`, `coco.rs`, `listing.rs`, `tests.rs`) |
+| `src/dataset/` | `mod.rs` (the `Dataset` trait, `Split`, `Format`, `open` / `open_with`, format detection, `LoadReport`), `yolo.rs` and `labels.rs` (YOLO), `coco/` (`mod.rs`, `parse.rs`, `fields.rs`: single-pass streaming COCO instances JSON reader), `voc/` (`mod.rs`, `xml.rs`: zero-dependency Pascal VOC XML reader), `cache/` (the on-disk scan cache: `mod.rs`, `probe.rs`, `coco.rs`, `listing.rs`, `tests.rs`) |
 | `src/image.rs` | `Image`, decoding with EXIF orientation, encoding, `Sample` |
 | `src/bbox.rs` | `BBox`, normalised centre format |
 | `src/letterbox.rs` | Letterbox resize with exact box mapping both ways |
@@ -23,8 +24,10 @@ the determinism rules.
 | `src/loader.rs` | `DataLoader`: worker threads, batches identical for a seed and epoch whatever the worker count |
 | `src/ram_cache.rs` | `--cache ram`: decoded, resized training images kept in memory |
 | `src/synthetic/` | `mod.rs` (the shapes generator, `write_yolo`, `SyntheticDataset`), `raster.rs` (rasteriser, backgrounds), `math.rs` (sine, cosine and powers of two from basic operations), `tests.rs` (golden digests) |
-| `src/check.rs` | `folo dataset check`: one `CheckIssue` per problem |
-| `src/convert.rs` | `folo dataset convert`: writes an opened dataset as YOLO or COCO |
+| `src/audit.rs` | `LoadedDataset::audit()` / `audit_dataset`: streaming 128-bit content-hash duplicate and cross-split (`train`↔`val`/`test`) leakage audit |
+| `src/check.rs` | `folo dataset check`: one `CheckIssue` per problem (including cross-split leakage and VOC diagnostics) |
+| `src/convert.rs` | `folo dataset convert`: writes an opened dataset as YOLO, COCO, or Pascal VOC |
+| `src/split.rs` | `split_dataset`, `split_indices`, `write_split`: seeded multi-label stratified `train`/`val`/`test` splitting |
 | `src/unfinished.rs` | The `.folo-unfinished` marker: `claim`, every writer's first step, makes it in an empty folder; readers refuse it |
 | `src/pack.rs` | A dataset as one tar stream in the canonical YOLO layout, for another FOLO server |
 | `src/stats.rs` | `DatasetStats`, the `stats` object of docs/API.md |
@@ -34,7 +37,7 @@ the determinism rules.
 | `src/paths.rs` | Path helpers shared by `folo dataset check --json` and the server |
 | `src/rng.rs` | xoshiro256++ seeded through SplitMix64 |
 | `src/error.rs` | `DataError` and `Result` |
-| `tests/` | `formats.rs` (YOLO / COCO parsing, detection, EXIF), `augment.rs` (boxes stay on their pixels), `loader.rs` (determinism, shutdown), `golden.rs` (digests of the loader's batches, bit for bit), `pack.rs`, `synthetic.rs`, `tools.rs` (check and convert), `unfinished.rs` (`.folo-unfinished` marker claim and refusal), `guard.rs` (its own binary: a guard stays installed for the process), `fixtures/jpeg/` (JPEG decoder parity fixtures embedded by `src/image.rs` unit tests), `common/` (helpers) |
+| `tests/` | `formats.rs` (YOLO / COCO parsing, detection, EXIF), `voc_split_audit.rs` (Pascal VOC XML, stratified splitting, duplicate & leakage audit), `augment.rs` (boxes stay on their pixels), `loader.rs` (determinism, shutdown), `golden.rs` (digests of the loader's batches, bit for bit), `pack.rs`, `synthetic.rs`, `tools.rs` (check and convert), `unfinished.rs` (`.folo-unfinished` marker claim and refusal), `guard.rs` (its own binary: a guard stays installed for the process), `fixtures/jpeg/` (JPEG decoder parity fixtures embedded by `src/image.rs` unit tests), `common/` (helpers) |
 | `benches/pipeline.rs` | Stage timings and `DataLoader` images/s |
 | `examples/` | `shapes.rs` (the MODEL.md §10.6 shapes dataset), `synth_sheet.rs` (a contact sheet of synthetic images), `aug_stats.rs` (statistics of the training transform's output), `open_time.rs` (times opening a dataset), `loader_profile.rs` (time and allocations of each stage of a training sample) |
 
@@ -54,7 +57,7 @@ the determinism rules.
 |---|---|
 | Add an augmentation | The function in `src/augment/` (a new file gets `mod` and `pub use` in `augment/mod.rs`); its parameter in `AugmentConfig` (`augment/mod.rs`); the step in `TrainTransform` (`augment/pipeline.rs`); a box / pixel check in `tests/augment.rs`; DATA.md (Augmentation) and MODEL.md §8.6. To expose it over the API: `Augment` in `crates/folo-api/src/runs.rs`, `TrainConfig::from_api` in `crates/folo-vision/src/train/config.rs`, and API.md |
 | Change how YOLO or COCO is read | `src/dataset/yolo.rs`, `labels.rs` or `coco.rs`; `tests/formats.rs`; DATA.md (Formats). When a probe or a label parse returns something else, bump `FORMAT` in `src/dataset/cache/mod.rs` |
-| Add a dataset check | `src/check.rs`; `tests/tools.rs`; DATA.md (Validation and conversion) |
+| Add a dataset check | `src/check.rs`; `tests/tools.rs`; DATA.md (Validation, auditing, splitting and conversion) |
 | Add a synthetic shape | `SHAPES` and `shape_prims` in `src/synthetic/mod.rs` (primitives in `raster.rs`); `tests/synthetic.rs`; DATA.md (Synthetic shapes) |
 
 ## Tests and benchmarks

@@ -3,9 +3,10 @@
 //! folo-data does not depend on folo-core. It produces plain buffers (`Vec<f32>` images in `NCHW`, `0..1`, and
 //! `[batch_idx, class, cx, cy, w, h]` targets) that the trainer wraps in tensors.
 //!
-//! - **Datasets** ([`open`]): YOLO (`data.yaml`, `images/` + `labels/`, segment polygons become boxes) and COCO
-//!   instances JSON (category ids remapped to `0..n`), auto-detected. Corrupt images and broken labels are recorded
-//!   in a [`LoadReport`] and skipped; JPEG EXIF orientation is applied. [`DatasetStats`] matches `docs/API.md`.
+//! - **Datasets** ([`open`]): YOLO (`data.yaml`, `images/` + `labels/`, segment polygons become boxes), COCO
+//!   instances JSON (category ids remapped to `0..n`), and Pascal VOC XML (`Annotations/*.xml`, `JPEGImages/`,
+//!   optional `ImageSets/Main/*.txt`), auto-detected. Corrupt images and broken labels are recorded in a
+//!   [`LoadReport`] and skipped; JPEG EXIF orientation is applied. [`DatasetStats`] matches `docs/API.md`.
 //! - **Geometry**: [`letterbox`] with exact box mapping both ways, a fixed-point, row-parallel bilinear
 //!   [`resize`](resize::resize) and [`warp_affine`](warp::warp_affine).
 //! - **Augmentation** ([`augment`]): mosaic, random affine, HSV, flips and mixup, all box-aware and driven by a
@@ -13,8 +14,10 @@
 //! - **Loading** ([`DataLoader`]): worker threads decode and augment ahead; batches are identical for a given seed
 //!   and epoch whatever the number of workers.
 //! - **Synthetic data** ([`synthetic`]): procedural shapes datasets for tests, demos and benchmarks.
-//! - **Tools** ([`check`], [`convert`], [`pack`]): line-level dataset validation, YOLO / COCO conversion, and a
-//!   dataset as one tar stream for another FOLO server. [`unfinished`]: the marker of a folder being written.
+//! - **Tools** ([`audit`], [`check`], [`convert`], [`split`], [`pack`]): duplicate & cross-split leakage auditing,
+//!   line-level dataset validation, YOLO / COCO / Pascal VOC conversion, deterministic multi-label stratified
+//!   splitting, and a dataset as one tar stream for another FOLO server. [`unfinished`]: the marker of a folder being
+//!   written.
 //! - **Support**: [`guard`] (a process-wide read guard, installed by `folo mcp --confine`), [`par`] (row
 //!   parallelism that the loader's workers switch off), [`paths`] (file names shared by `folo dataset check --json`
 //!   and the server), [`CacheMode`] (`--cache ram`) and [`DatasetStats`].
@@ -53,6 +56,7 @@
 //! # }
 //! ```
 
+pub mod audit;
 pub mod augment;
 mod bbox;
 mod buffers;
@@ -71,19 +75,21 @@ mod ram_cache;
 pub mod resize;
 mod rng;
 mod simd;
+pub mod split;
 mod stats;
 pub mod synthetic;
 pub mod unfinished;
 pub mod warp;
 
+pub use audit::{AuditImageRef, AuditReport, DuplicateGroup, SplitLeakage, UnreadableImage, audit_dataset};
 pub use augment::{AugmentConfig, Fetched, TrainTransform, Transformed};
 pub use bbox::BBox;
 pub use dataset::cache::{MIN_FILES as SCAN_CACHE_MIN_FILES, scan_cache_dir, set_scan_cache_dir};
 pub use dataset::{
     CocoAnnotation, CocoGroundTruth, CocoImage, Dataset, FileDataset, Format, ImageEntry, InMemoryDataset,
-    Issue, IssueKind, LoadReport, LoadedDataset, OpenOptions, Split, UNDETECTED, coco_annotation_files,
-    detect_format, label_path_for, open, open_coco_ground_truth, open_splits, open_with,
-    read_coco_ground_truth,
+    Issue, IssueKind, LoadReport, LoadedDataset, OpenOptions, Split, UNDETECTED, VocAnnotation, VocObject,
+    VocOptions, coco_annotation_files, detect_format, label_path_for, open, open_coco_ground_truth,
+    open_splits, open_voc_with, open_with, parse_voc_xml, read_coco_ground_truth,
 };
 pub use error::{DataError, Result};
 pub use image::{
@@ -94,4 +100,8 @@ pub use letterbox::{Letterbox, LetterboxOptions, PAD_VALUE, letterbox, letterbox
 pub use loader::{Batch, DataLoader, EpochIter, ImageMeta, LoaderConfig, Throughput};
 pub use ram_cache::{CacheMode, RAM_CACHE_SHARE, ram_cache_bytes};
 pub use rng::{Rng, mix_seed, splitmix64};
+pub use split::{
+    SplitConfig, SplitIndices, split_dataset, split_file_dataset, split_indices, stratified_indices,
+    write_split,
+};
 pub use stats::{BOX_SIZE_EDGES, BOXES_PER_IMAGE_EDGES, DatasetStats, Histogram};

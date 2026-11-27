@@ -183,6 +183,7 @@ pub fn check(path: impl AsRef<Path>, opts: &CheckOptions) -> Result<CheckReport>
         Source::Yaml(yaml) => check_yolo(yolo::scan_yaml(&yaml)?, opts),
         Source::YoloDir(root) => check_yolo(yolo::scan_dir(&root), opts),
         Source::Coco { .. } => check_coco(path, opts),
+        Source::Voc { .. } => check_voc(path, opts),
     }
 }
 
@@ -221,7 +222,7 @@ fn check_yolo(scan: yolo::YoloScan, opts: &CheckOptions) -> Result<CheckReport> 
             c
         })
         .collect();
-    merge(&mut issues, images.iter().map(|(_, p)| p.as_path()), results, &scan.root);
+    merge(&mut issues, images.iter().map(|(s, p)| (*s, p.as_path())), results, &scan.root);
     issues.extend(orphan_labels(&scan));
     let classes = scan.names.unwrap_or_default();
     Ok(CheckReport { format: Format::Yolo, root: scan.root, classes, splits, issues })
@@ -314,11 +315,11 @@ fn check_coco(path: &Path, opts: &CheckOptions) -> Result<CheckReport> {
     for s in Split::ALL {
         let entries = ds.split(s).entries();
         splits[s as usize] = entries.len();
-        images.extend(entries.iter());
+        images.extend(entries.iter().map(|e| (s, e)));
     }
     let results: Vec<ImageCheck> = images
         .par_iter()
-        .map(|e| {
+        .map(|(_, e)| {
             let mut c = read_image_file(&e.image, opts);
             // Without image verification the loader keeps the JSON's size; boxes were normalised with it.
             if let (Some(declared), Some(actual)) = (e.size, c.size)
@@ -347,35 +348,89 @@ fn check_coco(path: &Path, opts: &CheckOptions) -> Result<CheckReport> {
             c
         })
         .collect();
-    merge(&mut issues, images.iter().map(|e| e.image.as_path()), results, &ds.root);
+    merge(&mut issues, images.iter().map(|(s, e)| (*s, e.image.as_path())), results, &ds.root);
     Ok(CheckReport { format: Format::Coco, root: ds.root, classes: ds.classes, splits, issues })
 }
 
+fn check_voc(path: &Path, opts: &CheckOptions) -> Result<CheckReport> {
+    let ds = open_with(path, &OpenOptions { format: Format::Voc, verify_images: false })?;
+    let mut issues: Vec<CheckIssue> = ds.report.issues.iter().map(from_load_issue).collect();
+    let mut splits = [0usize; 3];
+    let mut images = Vec::new();
+    for s in Split::ALL {
+        let entries = ds.split(s).entries();
+        splits[s as usize] = entries.len();
+        images.extend(entries.iter().map(|e| (s, e)));
+    }
+    let results: Vec<ImageCheck> = images
+        .par_iter()
+        .map(|(_, e)| {
+            let mut c = read_image_file(&e.image, opts);
+            if let (Some(declared), Some(actual)) = (e.size, c.size)
+                && declared != actual
+            {
+                c.issues.push(CheckIssue::new(
+                    CheckKind::Other,
+                    &e.image,
+                    None,
+                    format!(
+                        "XML says {}x{} but the image is {}x{}",
+                        declared.0, declared.1, actual.0, actual.1
+                    ),
+                    Some(format!(
+                        "set <width>{}</width> and <height>{}</height> in the XML",
+                        actual.0, actual.1
+                    )),
+                ));
+            }
+            if e.boxes.is_empty() && c.hash.is_some() {
+                c.issues.push(CheckIssue::new(
+                    CheckKind::EmptyImage,
+                    &e.image,
+                    None,
+                    "no annotations (background image)".into(),
+                    None,
+                ));
+            }
+            c
+        })
+        .collect();
+    merge(&mut issues, images.iter().map(|(s, e)| (*s, e.image.as_path())), results, &ds.root);
+    Ok(CheckReport { format: Format::Voc, root: ds.root, classes: ds.classes, splits, issues })
+}
+
 /// Appends per-image issues in order and flags images whose bytes repeat an earlier image's (named relative to
-/// `root` with `/` separators, as issue files are reported).
+/// `root` with `/` separators, as issue files are reported), calling out cross-split leakage explicitly.
 fn merge<'a>(
     issues: &mut Vec<CheckIssue>,
-    paths: impl Iterator<Item = &'a Path>,
+    paths: impl Iterator<Item = (Split, &'a Path)>,
     results: Vec<ImageCheck>,
     root: &Path,
 ) {
-    let mut seen: HashMap<(u128, u64), &Path> = HashMap::new();
-    for (path, r) in paths.zip(results) {
+    let mut seen: HashMap<(u128, u64), (Split, &Path)> = HashMap::new();
+    for ((split, path), r) in paths.zip(results) {
         issues.extend(r.issues);
         if let Some(key) = r.hash {
             match seen.get(&key) {
-                Some(first) => issues.push(CheckIssue::new(
-                    CheckKind::DuplicateImage,
-                    path,
-                    None,
-                    format!("same bytes as {}", crate::paths::relative_to(first, root)),
-                    Some(format!(
-                        "remove this copy (and its label file); keep {}",
-                        crate::paths::relative_to(first, root)
-                    )),
-                )),
+                Some(&(first_split, first)) => {
+                    let rel = crate::paths::relative_to(first, root);
+                    let (message, fix) = if first_split != split {
+                        (
+                            format!("split leakage ({split} duplicates {first_split}): same bytes as {rel}"),
+                            format!(
+                                "remove this {split} copy (and its label file) to prevent {first_split}/{split} leakage; keep {rel}"
+                            ),
+                        )
+                    } else {
+                        (
+                            format!("same bytes as {rel}"),
+                            format!("remove this copy (and its label file); keep {rel}"),
+                        )
+                    };
+                    issues.push(CheckIssue::new(CheckKind::DuplicateImage, path, None, message, Some(fix)));
+                }
                 None => {
-                    seen.insert(key, path);
+                    seen.insert(key, (split, path));
                 }
             }
         }
@@ -450,7 +505,7 @@ fn read_image_file(image: &Path, opts: &CheckOptions) -> ImageCheck {
     match size {
         Ok(size) => ImageCheck {
             issues: Vec::new(),
-            hash: Some((hash128(&bytes), bytes.len() as u64)),
+            hash: Some((crate::audit::hash128(&bytes), bytes.len() as u64)),
             size: Some(size),
         },
         Err(e) if opts.decode => corrupt(e),
@@ -593,28 +648,10 @@ fn lint_labels(text: &str, nc: Option<usize>) -> (Vec<LineIssue>, usize) {
     (out, kept.len())
 }
 
-/// A fast 128-bit content hash (two independent 64-bit multiply-rotate lanes over 8-byte words).
-fn hash128(bytes: &[u8]) -> u128 {
-    const K1: u64 = 0x9e37_79b9_7f4a_7c15;
-    const K2: u64 = 0xc2b2_ae3d_27d4_eb4f;
-    let (mut a, mut b) = (0x243f_6a88_85a3_08d3_u64 ^ bytes.len() as u64, 0x1319_8a2e_0370_7344_u64);
-    let (words, tail) = bytes.as_chunks::<8>();
-    for w in words {
-        let v = u64::from_le_bytes(*w);
-        a = (a ^ v).wrapping_mul(K1).rotate_left(29);
-        b = (b ^ v.rotate_left(32)).wrapping_mul(K2).rotate_left(31);
-    }
-    let mut last = [0u8; 8];
-    last[..tail.len()].copy_from_slice(tail);
-    let v = u64::from_le_bytes(last) ^ ((tail.len() as u64) << 56);
-    a = crate::splitmix64(&mut (a ^ v));
-    b = crate::splitmix64(&mut (b ^ v.wrapping_mul(K1)));
-    ((a as u128) << 64) | b as u128
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audit::hash128;
 
     #[test]
     fn a_description_problem_says_what_to_edit() {
