@@ -87,6 +87,7 @@ fn train_resume_parity_with_m4_options_musgd_freeze_backbone_power_ema_wiou() {
         batch: 2,
         nbs: 2,
         imgsz: 64,
+        device: "cpu".into(),
         optimizer: OptimizerChoice::Musgd,
         lr0: 0.005,
         warmup_epochs: 0.5,
@@ -130,16 +131,20 @@ fn train_resume_parity_with_m4_options_musgd_freeze_backbone_power_ema_wiou() {
     let ck_split = mf_split.checkpoint().unwrap();
     assert_eq!(ck_full.epoch, ck_split.epoch);
     assert_eq!(ck_full.sched.step, ck_split.sched.step);
-    let (m_full, _) = FoloModel::from_file(&mf_full, Purpose::Inference).unwrap();
-    let (m_split, _) = FoloModel::from_file(&mf_split, Purpose::Inference).unwrap();
-    for (a, b) in m_full.state().iter().zip(m_split.state().iter()) {
-        assert_eq!(a.0, b.0);
-        assert_eq!(
-            a.1.to_vec::<f32>().unwrap().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
-            b.1.to_vec::<f32>().unwrap().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
-            "weight mismatch after resume on {}",
-            a.0
-        );
+    for purpose in [Purpose::Inference, Purpose::Training] {
+        let (m_full, _) = FoloModel::from_file(&mf_full, purpose).unwrap();
+        let (m_split, _) = FoloModel::from_file(&mf_split, purpose).unwrap();
+        let (s_full, s_split) = (m_full.state(), m_split.state());
+        assert_eq!(s_full.len(), s_split.len());
+        for (a, b) in s_full.iter().zip(s_split.iter()) {
+            assert_eq!(a.0, b.0);
+            assert_eq!(
+                a.1.to_vec::<f32>().unwrap().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                b.1.to_vec::<f32>().unwrap().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                "weight mismatch after resume ({purpose:?}) on {}",
+                a.0
+            );
+        }
     }
 }
 
@@ -248,6 +253,7 @@ fn zero_gt_dataset_produces_clean_finite_val_and_train_metrics() {
         batch: 2,
         nbs: 2,
         imgsz: 64,
+        device: "cpu".into(),
         optimizer: OptimizerChoice::Adamw,
         lr0: 1e-3,
         warmup_epochs: 0.0,
@@ -277,6 +283,7 @@ fn single_class_model_works_across_train_val_predict_quantize_and_onnx() {
         batch: 2,
         nbs: 2,
         imgsz: 64,
+        device: "cpu".into(),
         head: HeadMode::O2o,
         optimizer: OptimizerChoice::Adamw,
         lr0: 1e-3,
@@ -339,7 +346,7 @@ fn predictor_handles_tiny_and_extreme_aspect_images_in_f32_int8_and_postproc_rul
         }
         let cfg = PredictConfig {
             imgsz: 64,
-            conf: 0.05,
+            conf: 0.0,
             rect,
             fusion: BoxFusion::Sebf,
             score: ScoreRule::DflCgr,
@@ -349,6 +356,7 @@ fn predictor_handles_tiny_and_extreme_aspect_images_in_f32_int8_and_postproc_rul
         for img in &imgs {
             let p1 = pred.predict(img).unwrap();
             let p2 = pred.predict(img).unwrap();
+            assert!(!p1.detections.is_empty(), "conf=0.0 must exercise non-empty postproc path");
             assert_eq!(p1.detections, p2.detections, "non-deterministic sebf+dfl-cgr");
             assert_eq!((p1.width, p1.height), (img.width, img.height));
             for d in &p1.detections {
@@ -366,7 +374,7 @@ fn predictor_handles_tiny_and_extreme_aspect_images_in_f32_int8_and_postproc_rul
     m_f32.set_int8(None).unwrap();
     let rep_cfg = PredictConfig {
         imgsz: 64,
-        conf: 0.05,
+        conf: 0.0,
         fusion: BoxFusion::Dfl,
         score: ScoreRule::DflRepulse,
         ..PredictConfig::default()
@@ -374,6 +382,7 @@ fn predictor_handles_tiny_and_extreme_aspect_images_in_f32_int8_and_postproc_rul
     let pred_rep = Predictor::new(m_f32, rep_cfg).unwrap();
     let a = pred_rep.predict(&imgs[1]).unwrap();
     let b = pred_rep.predict(&imgs[1]).unwrap();
+    assert!(!a.detections.is_empty(), "conf=0.0 must exercise non-empty dfl-repulse path");
     assert_eq!(a.detections, b.detections, "non-deterministic dfl+dfl-repulse");
 }
 

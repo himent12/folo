@@ -291,6 +291,17 @@ pub struct Calibrator {
     failed: bool,
 }
 
+fn validate_method(method: Method) -> Result<()> {
+    if let Method::Percentile { p } = method
+        && (!p.is_finite() || !(0.0..0.5).contains(&p))
+    {
+        return Err(folo_nn::Error::Invalid(format!(
+            "int8 calibration percentile p must be finite and in [0, 0.5), got {p}"
+        )));
+    }
+    Ok(())
+}
+
 impl Calibrator {
     /// An empty calibrator in its first pass.
     pub fn new() -> Self {
@@ -326,13 +337,7 @@ impl Calibrator {
                 "int8 calibration needs two passes over the same images, at least one (saw {a}, then {b})"
             )));
         }
-        if let Method::Percentile { p } = method
-            && (!p.is_finite() || !(0.0..0.5).contains(&p))
-        {
-            return Err(folo_nn::Error::Invalid(format!(
-                "int8 calibration percentile p must be finite and in [0, 0.5), got {p}"
-            )));
-        }
+        validate_method(method)?;
         let ranges = self.stats.iter().map(|(k, s)| (k.clone(), s.tensor.range(method))).collect();
         let channel_ranges = self
             .stats
@@ -448,6 +453,7 @@ pub fn calibrate<I>(model: &FoloModel, mut batches: impl FnMut() -> I, method: M
 where
     I: Iterator<Item = Result<Tensor>>,
 {
+    validate_method(method)?;
     let mut c = Calibrator::new();
     for x in batches() {
         c.observe(model, &x?)?;

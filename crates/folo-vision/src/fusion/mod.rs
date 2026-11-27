@@ -820,8 +820,8 @@ pub fn fuse_boxes_sebf(
 /// The fused boxes of the `kept` candidates (indices into `boxes` / `scores` / `classes`, the candidates that
 /// entered NMS), in `kept`'s order. Member `j` weighs `scores[j] · precision(j)[side]` on each side, with
 /// `precision` `None` meaning 1 (voting); the sums run in `f64` over the cluster in candidate order. A member side
-/// whose weight is not `> 0` (a zero score, a NaN) or whose edge is not finite is skipped, and a side with no weight
-/// keeps the kept box's edge.
+/// whose weight is not finite and `> 0` (a zero score, a NaN, or `+Inf`) or whose edge is not finite is skipped,
+/// and a side with no finite weight keeps the kept box's edge.
 pub fn fuse_boxes(
     kept: &[usize],
     boxes: &[Xyxy],
