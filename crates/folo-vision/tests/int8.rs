@@ -493,3 +493,334 @@ fn fused_cpu_attention_matches_tensor_reference_and_is_thread_deterministic() {
         assert_eq!(fast_c[ch * 9 + 4], 1.5, "center pixel lost bias on cancelling taps (ch {ch})");
     }
 }
+
+#[test]
+fn scratch_pool_reuses_buffers_across_layers_and_calls() {
+    use rayon::prelude::*;
+
+    let m = model(43);
+    let x = input(1, 64, 96, 44);
+    let cal = calibrated(&m, &x);
+    let plan = Int8Plan::new(cal);
+    let _g = no_grad();
+
+    // First forward populates the pool and already reuses buffers across sequential layers.
+    let y1 = folo_core::cpu::in_pool(|| quant::exec::features(&m, &plan, &x)).unwrap();
+    let s1 = plan.scratch_stats();
+    assert!(s1.allocs > 0 && s1.reuses > s1.allocs, "expected intra-forward reuse: {s1:?}");
+
+    // Second + third forwards settle to zero fresh allocations while reusing every C4 activation buffer.
+    let y2 = folo_core::cpu::in_pool(|| quant::exec::features(&m, &plan, &x)).unwrap();
+    let s2 = plan.scratch_stats();
+    let y3 = folo_core::cpu::in_pool(|| quant::exec::features(&m, &plan, &x)).unwrap();
+    let s3 = plan.scratch_stats();
+    assert_eq!(s3.allocs, s2.allocs, "steady-state forward allocated fresh buffers: {s2:?} -> {s3:?}");
+    assert!(s3.reuses > s2.reuses, "steady-state forward did not record buffer reuses: {s2:?} -> {s3:?}");
+
+    let to_bits = |t: &Tensor| t.to_vec::<f32>().unwrap().into_iter().map(f32::to_bits).collect::<Vec<_>>();
+    for i in 0..3 {
+        assert_eq!(to_bits(&y1[i]), to_bits(&y2[i]), "pooled forward 2 diverged on level {i}");
+        assert_eq!(to_bits(&y1[i]), to_bits(&y3[i]), "pooled forward 3 diverged on level {i}");
+    }
+
+    // Concurrent forwards sharing one `Int8Plan` (as in `Predictor::predict_batch`) must each check out their
+    // own `ScratchPool` and match bit-for-bit.
+    let par_outs: Vec<[Tensor; 3]> = pool(4).install(|| {
+        (0..4)
+            .into_par_iter()
+            .map(|_| {
+                let _g = no_grad();
+                quant::exec::features(&m, &plan, &x).unwrap()
+            })
+            .collect()
+    });
+    for (idx, out) in par_outs.iter().enumerate() {
+        for i in 0..3 {
+            assert_eq!(to_bits(&y1[i]), to_bits(&out[i]), "concurrent forward {idx} diverged on level {i}");
+        }
+    }
+}
+
+#[test]
+fn consumer_aware_f32_out_upsample_sppf_and_narrow_shortcuts_match_fake_quant() {
+    let m = model(47);
+    let x = input(2, 64, 96, 48);
+    let base_cal = Calibration { weights: None, ..calibrated(&m, &x) };
+    // Exercise every consumer-aware boundary shortcut simultaneously:
+    // - `neck.out5.*`: `neck.down4` (int8) writes `QOut::F32` straight into `neck.out5.cv1` (f32).
+    // - `backbone.stage2.block0.cv2` alone: `stage2.block0.cv1` (int8) writes `QOut::F32` straight into `cv2`.
+    // - `backbone.psa.cv2` (f32) into int8 `neck.td4.cv1`: `upsample2_for(&x10, false)` quantises at 2×2 first.
+    // - `backbone.sppf.cv1` (f32) into int8 `sppf.cv2`: `ensure_u8` quantises once before 3× `q8::max_pool`.
+    // - `backbone.stage3.cv1` (f32) into int8 `stage3.cv2`: `ensure_u8` quantises once before `narrow` + `cv2`.
+    let mut mixed = base_cal.with_p5_tail_f32(&m);
+    for name in ["backbone.stage2.block0.cv2", "backbone.psa.cv2", "backbone.sppf.cv1", "backbone.stage3.cv1"]
+    {
+        mixed.f32_convs.push(name.to_string());
+    }
+
+    let _g = no_grad();
+    let want = FakeQuant::new(&mixed).features(&m, &x).unwrap();
+    let plan = Int8Plan::new(mixed.clone());
+    let got = folo_core::cpu::in_pool(|| quant::exec::features(&m, &plan, &x)).unwrap();
+    for (i, name) in ["neck.out3.cv2", "neck.out4.cv2", "neck.out5.cv2"].iter().enumerate() {
+        let s = mixed.param(name).unwrap().scale;
+        let (a, b) = (want[i].to_vec::<f32>().unwrap(), got[i].to_vec::<f32>().unwrap());
+        let steps: Vec<f32> = a.iter().zip(&b).map(|(p, q)| ((p - q) / s).abs().round()).collect();
+        let exact = steps.iter().filter(|&&d| d == 0.0).count() as f64 / steps.len() as f64;
+        let worst = steps.iter().copied().fold(0f32, f32::max);
+        assert!(exact > 0.99 && worst <= 2.0, "shortcut {name}: {:.4} exact, worst {worst} steps", exact);
+    }
+
+    let mut m_det = model(47);
+    m_det.set_int8(Some(mixed)).unwrap();
+    let y1 = pool(1).install(|| {
+        let _g = no_grad();
+        m_det.forward(&x).unwrap()
+    });
+    let y5 = pool(5).install(|| {
+        let _g = no_grad();
+        m_det.forward(&x).unwrap()
+    });
+    for (p, q) in [(&y1.box_raw, &y5.box_raw), (&y1.cls_raw, &y5.cls_raw)] {
+        let (p, q) = (p.to_vec::<f32>().unwrap(), q.to_vec::<f32>().unwrap());
+        assert!(
+            p.iter().zip(&q).all(|(u, v)| u.to_bits() == v.to_bits()),
+            "shortcut graph not deterministic"
+        );
+    }
+}
+
+#[test]
+fn sensitivity_analysis_and_selective_f32_policy_wire_end_to_end() {
+    let mut m = model(53);
+    let x = input(2, 64, 64, 54);
+    let cal = calibrated(&m, &x);
+
+    let ranked = quant::analyze_sensitivity(&m, &cal).unwrap();
+    assert!(ranked.len() >= 50, "expected all int8-eligible convs, got {}", ranked.len());
+    let total_frac: f64 = ranked.iter().map(|e| e.mac_fraction).sum();
+    assert!((total_frac - 1.0).abs() < 1e-6, "MAC fractions should sum to 1.0, got {total_frac}");
+    for pair in ranked.windows(2) {
+        assert!(
+            pair[0].score >= pair[1].score,
+            "sensitivity list not sorted descending: {} ({}) < {} ({})",
+            pair[0].name,
+            pair[0].score,
+            pair[1].name,
+            pair[1].score
+        );
+    }
+    // Residual bottleneck partners must be linked symmetrically.
+    let s2_cv1 = ranked.iter().find(|e| e.name == "backbone.stage2.block0.cv1").unwrap();
+    let s2_cv2 = ranked.iter().find(|e| e.name == "backbone.stage2.block0.cv2").unwrap();
+    assert_eq!(s2_cv1.residual_partner.as_deref(), Some("backbone.stage2.block0.cv2"));
+    assert_eq!(s2_cv2.residual_partner.as_deref(), Some("backbone.stage2.block0.cv1"));
+
+    // Zero budget selects nothing.
+    let empty = quant::select_f32_convs(
+        &m,
+        &cal,
+        quant::SensitivityPolicy { max_f32_mac_fraction: 0.0, ..Default::default() },
+    )
+    .unwrap();
+    assert!(empty.is_empty());
+
+    // Budget cap and atomic residual bottleneck pairing hold.
+    let policy = quant::SensitivityPolicy {
+        max_f32_mac_fraction: 0.05,
+        sqnr_threshold_db: 45.0,
+        include_p5_head_out: true,
+        pair_residual_bottlenecks: true,
+    };
+    let picked = quant::select_f32_convs(&m, &cal, policy).unwrap();
+    assert!(picked.contains(&"neck.out5.cv2".to_string()), "expected neck.out5.cv2 in {picked:?}");
+    let used_macs: f64 =
+        picked.iter().map(|n| ranked.iter().find(|e| &e.name == n).unwrap().mac_fraction).sum();
+    assert!(used_macs <= policy.max_f32_mac_fraction + 1e-9, "exceeded MAC budget: {used_macs}");
+    for name in &picked {
+        if let Some(partner) =
+            ranked.iter().find(|e| &e.name == name).and_then(|e| e.residual_partner.as_ref())
+        {
+            assert!(
+                picked.contains(partner),
+                "residual bottleneck `{name}` promoted without partner `{partner}`: {picked:?}"
+            );
+        }
+    }
+
+    // Wired end-to-end via `Calibration::with_sensitivity_f32` and `FoloModel::set_int8`.
+    let sens_cal = cal.with_sensitivity_f32(&m, policy).unwrap();
+    let _g = no_grad();
+    let want = FakeQuant::new(&sens_cal).features(&m, &x).unwrap();
+    m.set_int8(Some(sens_cal.clone())).unwrap();
+    let plan = Int8Plan::new(sens_cal.clone());
+    let got = folo_core::cpu::in_pool(|| quant::exec::features(&m, &plan, &x)).unwrap();
+    for (i, name) in ["neck.out3.cv2", "neck.out4.cv2", "neck.out5.cv2"].iter().enumerate() {
+        let s = sens_cal.param(name).unwrap().scale;
+        let (a, b) = (want[i].to_vec::<f32>().unwrap(), got[i].to_vec::<f32>().unwrap());
+        let steps: Vec<f32> = a.iter().zip(&b).map(|(p, q)| ((p - q) / s).abs().round()).collect();
+        let exact = steps.iter().filter(|&&d| d == 0.0).count() as f64 / steps.len() as f64;
+        let worst = steps.iter().copied().fold(0f32, f32::max);
+        assert!(exact > 0.99 && worst <= 2.0, "sens {name}: {:.4} exact, worst {worst} steps", exact);
+    }
+
+    // End-to-end `calibrate_sample` on a tiny synthetic dataset under `TestDir` wires sensitivity selection.
+    let dir = folo_test_support::TestDir::new("folo-int8-sens");
+    let syn_cfg = folo_data::synthetic::SyntheticConfig {
+        images: 3,
+        imgsz: 64,
+        seed: 55,
+        ..folo_data::synthetic::SyntheticConfig::default()
+    };
+    folo_data::synthetic::write_yolo(&syn_cfg, dir.path(), folo_data::ImageFormat::Png).unwrap();
+    let ds = folo_data::open(dir.path()).unwrap();
+    let m_fresh = model(53);
+    let (sample_cal, n_imgs) = quant::calibrate_sample(
+        &m_fresh,
+        ds.split(folo_data::Split::Train),
+        2,
+        0,
+        (64, 2, 1),
+        Method::Percentile { p: 1e-4 },
+    )
+    .unwrap();
+    assert_eq!(n_imgs, 2);
+    assert_eq!(sample_cal.version, quant::VERSION_V2);
+    assert!(
+        sample_cal.f32_convs.contains(&"neck.out5.cv2".to_string()),
+        "calibrate_sample should wire sensitivity f32 selection: {:?}",
+        sample_cal.f32_convs
+    );
+    let mut m_check = model(53);
+    m_check.set_int8(Some(sample_cal)).unwrap();
+}
+
+#[test]
+fn sensitivity_edge_cases_and_scratch_pool_error_recovery() {
+    // 1. Unfused training-mode model: `analyze_sensitivity` must NOT mutate `pe.bn` running stats.
+    let mut unfused = FoloModel::with_rng(ModelConfig::new("n", 4).unwrap(), &mut Rng::seed(61)).unwrap();
+    // Seed non-trivial running stats on `pe.bn` so any zero-tensor forward would visibly shift them.
+    {
+        let bn = unfused.backbone.psa.blocks.items_mut()[0].attn.pe.bn.as_mut().expect("unfused pe has bn");
+        let n = bn.running_mean.dims()[0];
+        bn.running_mean.copy_from(&Tensor::from_vec(vec![1.25f32; n], [n]).unwrap()).unwrap();
+        bn.running_var.copy_from(&Tensor::from_vec(vec![2.5f32; n], [n]).unwrap()).unwrap();
+    }
+    let fused_ref = model(61);
+    let x = input(1, 64, 64, 62);
+    let cal = calibrated(&fused_ref, &x);
+    let before_mean = unfused.backbone.psa.blocks.items()[0]
+        .attn
+        .pe
+        .bn
+        .as_ref()
+        .unwrap()
+        .running_mean
+        .to_vec::<f32>()
+        .unwrap();
+    let before_var = unfused.backbone.psa.blocks.items()[0]
+        .attn
+        .pe
+        .bn
+        .as_ref()
+        .unwrap()
+        .running_var
+        .to_vec::<f32>()
+        .unwrap();
+    let _ = quant::analyze_sensitivity(&unfused, &cal).unwrap();
+    let after_mean = unfused.backbone.psa.blocks.items()[0]
+        .attn
+        .pe
+        .bn
+        .as_ref()
+        .unwrap()
+        .running_mean
+        .to_vec::<f32>()
+        .unwrap();
+    let after_var = unfused.backbone.psa.blocks.items()[0]
+        .attn
+        .pe
+        .bn
+        .as_ref()
+        .unwrap()
+        .running_var
+        .to_vec::<f32>()
+        .unwrap();
+    assert_eq!(before_mean, after_mean, "analyze_sensitivity mutated pe.bn running_mean");
+    assert_eq!(before_var, after_var, "analyze_sensitivity mutated pe.bn running_var");
+
+    // 2. Policy validation rejects NaN / out-of-range budgets and NaN SQNR threshold.
+    for bad in [
+        quant::SensitivityPolicy { max_f32_mac_fraction: f64::NAN, ..Default::default() },
+        quant::SensitivityPolicy { max_f32_mac_fraction: -0.05, ..Default::default() },
+        quant::SensitivityPolicy { max_f32_mac_fraction: 1.5, ..Default::default() },
+        quant::SensitivityPolicy { max_f32_mac_fraction: f64::INFINITY, ..Default::default() },
+        quant::SensitivityPolicy { sqnr_threshold_db: f64::NAN, ..Default::default() },
+    ] {
+        assert!(
+            quant::select_f32_convs(&fused_ref, &cal, bad).is_err(),
+            "invalid policy should error: {bad:?}"
+        );
+    }
+
+    // 3. Chaining `with_p5_tail_f32` + `with_sensitivity_f32` enforces the MAC cap on the combined set.
+    let p5_only = cal.clone().with_p5_tail_f32(&fused_ref);
+    let chained = p5_only
+        .clone()
+        .with_sensitivity_f32(
+            &fused_ref,
+            quant::SensitivityPolicy {
+                max_f32_mac_fraction: 0.05,
+                sqnr_threshold_db: 100.0,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        chained.f32_convs, p5_only.f32_convs,
+        "with_sensitivity_f32 must not append new convs when existing f32_convs already exceed the 5% cap"
+    );
+
+    // 4. Broadcast `f32` residual shape propagation (`2x2` `attn.proj` producing 1x1 broadcast over 2x2 at 64x64).
+    let mut bcast_m = model(63);
+    let c_attn = bcast_m.backbone.psa.blocks.items()[0].attn.proj.conv.config().in_channels;
+    bcast_m.backbone.psa.blocks.items_mut()[0].attn.proj = fused(c_attn, c_attn, 2, 1, 0, 64);
+    let bcast_entries = quant::analyze_sensitivity_at(&bcast_m, &cal, (64, 64)).unwrap();
+    let ffn1 = bcast_entries.iter().find(|e| e.name == "backbone.psa.block0.ffn1").unwrap();
+    let ffn2 = bcast_entries.iter().find(|e| e.name == "backbone.psa.block0.ffn2").unwrap();
+    assert_eq!(ffn1.out_hw, (2, 2), "ffn1 lost broadcast residual shape after 2x2 attn.proj");
+    assert_eq!(ffn2.out_hw, (2, 2), "ffn2 lost broadcast residual shape after 2x2 attn.proj");
+
+    // 5. All-zero weights yield 100 dB SQNR (never promoted), and `version: 1` calibrations analyse cleanly.
+    let mut zero_m = model(61);
+    let z_dims = zero_m.backbone.stage2.cv1.conv.weight.dims().to_vec();
+    zero_m.backbone.stage2.cv1.conv.weight = Tensor::zeros(z_dims);
+    let zero_entries = quant::analyze_sensitivity(&zero_m, &cal).unwrap();
+    let z_entry = zero_entries.iter().find(|e| e.name == "backbone.stage2.cv1").unwrap();
+    assert_eq!(z_entry.folded_weight_sqnr_db, 100.0);
+    assert_eq!(z_entry.score, 0.0);
+    let cal_v1 =
+        Calibration { version: quant::VERSION_V1, channel_ranges: Default::default(), ..cal.clone() };
+    let v1_entries = quant::analyze_sensitivity(&fused_ref, &cal_v1).unwrap();
+    assert!(v1_entries.len() >= 50);
+
+    // 6. `ScratchPool` error recovery: a mid-graph failure (34×34 fails at `neck.td4` concat while live
+    //    `SlotHandle`s exist) drops every handle and returns the pool cleanly so the next 64×64 forward
+    //    allocates zero new buffers (instead of leaking the pool and re-allocating ~12 buffers).
+    let plan = Int8Plan::new(cal);
+    let _g = no_grad();
+    let _ = folo_core::cpu::in_pool(|| quant::exec::features(&fused_ref, &plan, &x)).unwrap();
+    let bad_x = input(1, 34, 34, 65);
+    assert!(folo_core::cpu::in_pool(|| quant::exec::features(&fused_ref, &plan, &bad_x)).is_err());
+    let after_err = plan.scratch_stats();
+    let _ = folo_core::cpu::in_pool(|| quant::exec::features(&fused_ref, &plan, &x)).unwrap();
+    let after_recovery = plan.scratch_stats();
+    assert_eq!(
+        after_recovery.allocs, after_err.allocs,
+        "ScratchPool was not returned after an erroring forward: {after_err:?} -> {after_recovery:?}"
+    );
+    assert!(
+        after_recovery.reuses > after_err.reuses,
+        "expected buffer reuses on recovery forward: {after_err:?} -> {after_recovery:?}"
+    );
+}

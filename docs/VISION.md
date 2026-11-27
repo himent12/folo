@@ -76,28 +76,34 @@ targets v1 `FoloModel`):
 
 ### int8 inference (`model/quant/`)
 Post-training CPU int8 quantisation of the v1 backbone and neck (layers 0–22; the head stays `f32`, MODEL.md §9.6).
-A shared graph walk (`walk.rs`) drives three executors:
-- **Calibration (`calib.rs`):** `Calibrator` runs two `f32` passes over sample images (min/max, then 2048-bin
-  per-tensor and 256-bin per-channel histograms) and `Calibrator::finish` returns a `VERSION_V2` `Calibration` with
-  per-channel `channel_ranges` and `u8_stem: true` (`f32_convs` empty, `weights: None`). `calibrate` attaches the
-  64-bit FNV-1a weight fingerprint, `calibrate_sample` also adds the P5-tail `default_sensitivity_f32_convs`
-  (`neck.out5.*`), and `Calibration::store` serializes `folo.quant` (used by `folo quantize`). Loading remains
-  backward-compatible with `VERSION_V1` per-tensor files.
-- **Execution (`exec.rs`):** `Int8Plan` executes on `folo_core::cpu::q8` C4 buffers and `QConv` kernels (AVX-VNNI
-  when available, else portable scalar fallback; with per-part concat scale decoupling, packed weights cached on
-  each weight tensor via `Tensor::derived_f32`, bias fingerprints cached on each bias tensor, and cached uniform
-  grids for `VERSION_V1` checkpoints).
-  Activations produced by `f32` convs (such as `neck.out5.*` in `f32_convs`), an `f32` stem, or deferred
-  `quantize` boundaries stay in unquantised `f32` until an int8 conv consumes them (avoiding redundant
-  `f32 → u8 → f32` ping-pong across consecutive `f32` convs and into the `f32` head), and the head-only P5 output
-  (`neck.out5.cv2`) writes `f32` directly (`QOut::F32` when int8).
+A shared zero-allocation graph walk (`walk.rs`) drives calibration, sensitivity analysis, execution, and reference:
+- **Calibration & sensitivity (`calib.rs`, `sensitivity.rs`):** `Calibrator` runs two `f32` passes over sample images
+  (min/max, then 2048-bin per-tensor and 256-bin per-channel histograms) and `Calibrator::finish` returns a `VERSION_V2`
+  `Calibration` with per-channel `channel_ranges` and `u8_stem: true` (`f32_convs` empty, `weights: None`). `calibrate`
+  attaches the 64-bit FNV-1a weight fingerprint; `calibrate_sample` wires sensitivity-aware selective `f32` via
+  `Calibration::with_sensitivity_f32` (`SensitivityPolicy::default()`), ranking eligible convs by folded-weight SQNR
+  under a 5% MAC budget with atomic residual-bottleneck pairing and head-facing `neck.out5.cv2` (`with_p5_tail_f32` /
+  `default_sensitivity_f32_convs` remain available for explicit P5-tail selection). `Calibration::store` serializes
+  `folo.quant` (used by `folo quantize`), and loading remains backward-compatible with `VERSION_V1` per-tensor files.
+- **Execution (`exec.rs`, `pool.rs`, `cache.rs`):** `Int8Plan` executes on `folo_core::cpu::q8` C4 buffers and `QConv`
+  kernels (AVX-VNNI when available, else portable scalar fallback; with per-part concat scale decoupling, packed weights
+  cached on each weight tensor via `Tensor::derived_f32`, bias fingerprints cached on each bias tensor, a single FNV-1a
+  boundary table with precomputed half-split hashes and per-part max scales, and cached uniform grids for `VERSION_V1`
+  checkpoints). Each forward checks out a warm `ScratchPool` from `Int8Plan` and reuses C4 `Vec<u32>` activation
+  buffers across layers and calls with zero per-layer `Arc` allocations (`Int8Plan::scratch_stats`).
+  Activations produced by `f32` convs, an `f32` stem, or deferred `quantize` boundaries stay in unquantised `f32` until
+  an int8 conv consumes them; int8 producers whose downstream consumers all run in `f32` (such as `neck.out5.cv2` into
+  the head, `neck.down4` into an `f32` `neck.out5.cv1`, or a conv feeding an `f32` bottleneck `cv2`) write `QOut::F32`
+  directly without a `u8` round-trip, while `upsample2_for` and `SPPF`/`C3k2` `ensure_u8` quantise deferred `f32`
+  inputs once at the smaller resolution before `q8::upsample2`, `q8::max_pool`, or `narrow`. P3 and P4 (`x16`/`x19`) are
+  dequantised while L2-hot right after `neck.down3`/`neck.down4` so their C4 buffers recycle immediately.
   In `Attention` (`blocks.rs`, shared with `walk.rs`), eval-mode CPU `F32` forwards fuse `q^T k`, in-place scaled
   softmax, `v @ attn^T`, and depthwise 3×3 `pe(v)` accumulation without intermediate Q/K/V/transpose/PE allocations.
   When `u8_stem` is enabled, the stem is eligible (`stem_int8_able`), and it is not listed in `f32_convs`,
   `features_rgb0_u8` runs `q8::stem_u8` directly on packed `[R, G, B, 0]` bytes from `Letterbox::apply_rgb0_u8`
   without materialising an `f32` image (falling back to `f32` otherwise).
-- **Reference (`fake.rs`):** `FakeQuant` runs `f32` convolutions on the same quantisation grids and lazy `f32`
-  boundaries for parity checks.
+- **Reference (`fake.rs`):** `FakeQuant` runs `f32` convolutions on the same quantisation grids, consumer-aware
+  `conv_f32_out` boundaries, and lazy `f32` activations for parity checks.
 
 ## The loss
 - Task-aligned assigner (TAL: `score^alpha * max(CIoU, 0)^beta`, top-k), BCE classification on aligned targets,

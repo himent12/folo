@@ -1543,7 +1543,7 @@ GPU forwards, training, export and the `f32` default are unchanged.
 
 - **Schema versions (`version: 1` and `version: 2`).** `folo quantize` writes `version: 2` (`VERSION_V2`): per-channel
   C4 activation grids (`channel_ranges`), per-part concat scale decoupling, direct `u8` stem (`u8_stem: true`), and
-  sensitivity-default `f32_convs` (`neck.out5.*`). Readers accept `1..=2` (missing `version` defaults to `1`; any
+  sensitivity-selected `f32_convs` (`Calibration::with_sensitivity_f32` / `SensitivityPolicy::default()`). Readers accept `1..=2` (missing `version` defaults to `1`; any
   version outside `1..=2` is rejected). In either version, `channel_ranges` is used whenever present for a boundary
   (missing entries fall back to per-tensor `ranges`) and `u8_stem` (default `false` when absent) controls the direct
   `u8` stem; only per-part concat scale decoupling is gated on `version >= 2`.
@@ -1586,15 +1586,17 @@ GPU forwards, training, export and the `f32` default are unchanged.
   a 2048-bin per-tensor histogram and 256-bin per-channel histograms between them. Each range is then the `p`, `1 − p`
   quantiles (default, `p = 10⁻⁴`), the minimum and maximum, or the histogram-edge range of least expected squared error
   (rounding `Δ²/12` inside, clipping outside).
-- **Mixed precision.** A conv named in `f32_convs` (`folo quantize` / `calibrate_sample` defaults this via
-  `default_sensitivity_f32_convs` to the P5 neck tail `neck.out5.*`, which runs at low 20×20 resolution for 640×640
-  inputs where keeping its weights in `f32` has minimal runtime cost; `calibrate` / `Calibrator::finish` leave it
-  empty), or one the int8 kernel does not take (grouped, dilated, channels not a multiple of 4, a weight shaped other
-  than its config says, a reduction `c · k²` over 2¹⁵, stride over 64, padding over 4096, a kernel larger than its
-  padded input, buffer sizes that overflow, or a residual not on the output's shape, which `f32` broadcasts),
-  dequantises its inputs, runs in `f32` and quantises its output (for `neck.out5.*`, each conv's output is still
-  quantised onto its calibrated grid before P5 is dequantised for the head). The fake-quant reference keeps such a
-  conv's `f32` weights too.
+- **Mixed precision.** A conv named in `f32_convs` (`folo quantize` / `calibrate_sample` selects these via
+  `Calibration::with_sensitivity_f32` and `SensitivityPolicy::default()` — ranking eligible convs by folded-weight
+  SQNR within a 5% MAC budget, keeping the head-facing `neck.out5.cv2` and atomically pairing residual bottleneck
+  convs to avoid internal `u8 ↔ f32` round-trips; `calibrate` / `Calibrator::finish` leave it empty, and
+  `with_p5_tail_f32` / `default_sensitivity_f32_convs` remain available for explicit P5-tail selection), or one the
+  int8 kernel does not take (grouped, dilated, channels not a multiple of 4, a weight shaped other than its config
+  says, a reduction `c · k²` over 2¹⁵, stride over 64, padding over 4096, a kernel larger than its padded input,
+  buffer sizes that overflow, or a residual not on the output's shape, which `f32` broadcasts), runs in `f32` while
+  keeping its output in deferred `f32` until an int8 consumer reads it. Conversely, an int8 conv whose downstream
+  consumers all run in `f32` (such as `neck.out5.cv2` or a producer feeding an `f32` consumer) writes `QOut::F32`
+  directly without a `u8` round-trip. The fake-quant reference mirrors the same `f32` weights and boundaries.
 - **CPU.** The fast kernel needs AVX-VNNI (`vpdpbusd` on 256-bit registers, with AVX2 and FMA). Without it, AVX-512
   VNNI CPUs included (that form is not used), the int8 convs run a portable kernel with the same integers that is
   several times slower than the `f32` path: one folo-n row-8 run in review took 66.3 ms against 17.0 ms in `f32`.

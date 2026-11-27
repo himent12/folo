@@ -2,12 +2,16 @@
 //!
 //! - [`walk`]: the quantised graph of layers 0–22 over an executor ([`walk::Exec`]).
 //! - [`calib`]: range calibration over sample images ([`calibrate`]), and the stored ranges ([`Calibration`]).
-//! - [`exec`]: the int8 executor on folo-core's kernels ([`Int8Plan`]).
+//! - [`sensitivity`]: folded-weight SQNR and MAC-budgeted selective `f32` layer selection ([`select_f32_convs`]).
+//! - [`exec`]: the int8 executor on folo-core's kernels ([`Int8Plan`]) with reusable activation scratch buffers.
 //! - [`fake`]: the fake-quant reference executor ([`FakeQuant`]): `f32` arithmetic on the int8 plan's grids.
 
+mod cache;
 pub mod calib;
 pub mod exec;
 pub mod fake;
+mod pool;
+pub mod sensitivity;
 pub mod walk;
 
 pub use calib::{
@@ -15,6 +19,10 @@ pub use calib::{
 };
 pub use exec::Int8Plan;
 pub use fake::FakeQuant;
+pub use pool::ScratchStats;
+pub use sensitivity::{
+    ConvSensitivity, SensitivityPolicy, analyze_sensitivity, analyze_sensitivity_at, select_f32_convs,
+};
 
 /// An affine u8 grid (folo-core's [`folo_core::cpu::q8::Grid`]): `x ≈ scale · (q − zero)`.
 pub use folo_core::cpu::q8::Grid as QParam;
@@ -26,6 +34,20 @@ use folo_nn::io::Metadata;
 use folo_nn::{Activation, ConvBnAct, Error, Module, Result};
 
 use crate::model::FoloModel;
+
+/// Whether `conv`'s own static structure (fused, dense, undilated, SiLU/identity, matching weight/bias dims,
+/// supported by `QConv`) allows int8 execution, independent of dynamic spatial/residual shapes.
+pub(crate) fn static_int8_able(conv: &ConvBnAct) -> bool {
+    let cfg = conv.conv.config();
+    let (o, c, k) = (cfg.out_channels, cfg.in_channels, cfg.kernel);
+    conv.bn.is_none()
+        && cfg.groups == 1
+        && cfg.dilation == 1
+        && matches!(conv.act, Activation::Silu | Activation::Identity)
+        && conv.conv.weight.dims() == [o, c, k, k]
+        && conv.conv.bias.as_ref().is_none_or(|b| b.dims() == [o])
+        && folo_core::cpu::q8::QConv::supports((o, c, k), cfg.stride, cfg.padding)
+}
 
 /// The output size of `conv` on an `[n, c, h, w]` input when it runs on the int8 kernel; `None` when it runs in
 /// `f32` (the int8 executor dequantises its inputs, and the fake-quant reference keeps its `f32` weights). A conv
@@ -39,18 +61,10 @@ pub(crate) fn int8_able(
     res: Option<[usize; 4]>,
 ) -> Option<(usize, usize)> {
     let cfg = conv.conv.config();
-    let (o, k) = (cfg.out_channels, cfg.kernel);
-    let fits = conv.bn.is_none()
-        && cfg.groups == 1
-        && cfg.dilation == 1
-        && matches!(conv.act, Activation::Silu | Activation::Identity)
-        && cfg.in_channels == c
-        && conv.conv.weight.dims() == [o, c, k, k]
-        && conv.conv.bias.as_ref().is_none_or(|b| b.dims() == [o])
-        && folo_core::cpu::q8::QConv::supports((o, c, k), cfg.stride, cfg.padding);
-    if !fits {
+    if cfg.in_channels != c || !static_int8_able(conv) {
         return None;
     }
+    let (o, k) = (cfg.out_channels, cfg.kernel);
     folo_core::cpu::q8::conv_size(n, c, o, h, w, k, cfg.stride, cfg.padding)
         .filter(|&(oh, ow)| res.is_none_or(|r| r == [n, o, oh, ow]))
 }
