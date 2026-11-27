@@ -380,6 +380,14 @@ impl FoloApp {
                                     act(move |this, w, cx| {
                                         let clearing = this.play_class == Some(cid);
                                         this.play_class = if clearing { None } else { Some(cid) };
+                                        if !clearing
+                                            && matches!(
+                                                this.play_batch.qa_filter,
+                                                super::batch_qa::BatchQaFilter::ByClass(q) if q != cid
+                                            )
+                                        {
+                                            this.play_batch.qa_filter = super::batch_qa::BatchQaFilter::All;
+                                        }
                                         this.clear_play_hover();
                                         if clearing && distinct_above < 2 {
                                             this.focus_key("play-boxes", w, cx);

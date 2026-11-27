@@ -101,36 +101,6 @@ pub fn build_latest_per_class(epochs: &[Epoch], classes: &[String]) -> Vec<RunPe
     rows
 }
 
-/// Neutralizes leading characters that spreadsheet apps can interpret as formulas (`=`, `+`, `-`,
-/// `@`, `\t`, `\r`, or whitespace followed by a formula trigger) before CSV serialization.
-fn push_csv_safe_text(out: &mut String, field: &str) {
-    let needs_prefix = field.starts_with(['=', '+', '-', '@', '\t', '\r'])
-        || field.trim_start().starts_with(['=', '+', '-', '@']);
-    if needs_prefix {
-        let mut safe = String::with_capacity(field.len() + 1);
-        safe.push('\'');
-        safe.push_str(field);
-        push_csv_field(out, &safe);
-    } else {
-        push_csv_field(out, field);
-    }
-}
-
-fn push_csv_field(out: &mut String, field: &str) {
-    if field.contains([',', '"', '\n', '\r']) {
-        out.push('"');
-        for ch in field.chars() {
-            if ch == '"' {
-                out.push('"');
-            }
-            out.push(ch);
-        }
-        out.push('"');
-    } else {
-        out.push_str(field);
-    }
-}
-
 fn fmt_csv_f32(v: f32) -> String {
     if v.is_finite() { format!("{v}") } else { String::new() }
 }

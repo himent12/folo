@@ -3,6 +3,7 @@
 
 mod batch;
 mod batch_export;
+mod batch_qa;
 mod compare;
 mod device;
 mod export;
@@ -20,6 +21,7 @@ pub use batch::{
     BatchItemResult, BatchItemStatus, MAX_BATCH_FILES, PlayBatchItem, PlayBatchSource, PlayBatchState,
     bytes_fingerprint, disambiguate_file_labels, is_supported_image_ext, scan_image_folder,
 };
+pub use batch_qa::BatchQaFilter;
 pub use compare::{
     CompareClassFilter, ComparePaneCaption, CompareSideExport, PlayCompareState, PlayPredMeta,
     compare_detections_json, compare_pane_caption_parts, pick_default_model_b, summarize_comparison,

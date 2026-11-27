@@ -1,17 +1,19 @@
 //! Agent labeling screens: job list (`list.rs`), job detail (`page.rs`), image review workspace
-//! (`review.rs`, `stage.rs`, `box_rail.rs`), agent runner rail (`agent_panel.rs`), and inline forms
-//! (`forms.rs`).
+//! (`review.rs`, `notices.rs`, `filmstrip.rs`, `stage.rs`, `box_rail.rs`), agent runner rail
+//! (`agent_panel.rs`), and inline forms (`forms.rs`).
 
 mod agent_panel;
 mod box_rail;
+mod filmstrip;
 mod forms;
 mod list;
+mod notices;
 mod page;
 mod review;
 mod stage;
 
 #[cfg(test)]
-pub(crate) use review::filmstrip_max_tiles;
+pub(crate) use filmstrip::filmstrip_max_tiles;
 
 use folo_ui::{AnyElement, Context, IntoElement, ParentElement, Window};
 

@@ -130,6 +130,9 @@ pub struct PlayBatchState {
     pub batch_id: u64,
     pub items: Vec<PlayBatchItem>,
     pub active: usize,
+    /// Active QA filter (`All` / `With detections` / `Empty` / `By class`) on the filmstrip and
+    /// Batch Summary CSV export.
+    pub qa_filter: super::batch_qa::BatchQaFilter,
     /// True while sequential `Run All` is actively running.
     pub running: bool,
     /// Generation counter bumped on start, cancel, clear, or any parameter/route/backend change so
@@ -147,6 +150,7 @@ impl Default for PlayBatchState {
             batch_id: 0,
             items: Vec::new(),
             active: 0,
+            qa_filter: super::batch_qa::BatchQaFilter::All,
             running: false,
             run_gen: 0,
             load_gen: 0,
@@ -228,6 +232,7 @@ impl PlayBatchState {
         self.load_gen += 1;
         self.items.clear();
         self.active = 0;
+        self.qa_filter = super::batch_qa::BatchQaFilter::All;
     }
 
     /// Marks all completed/failed items back to `Pending` when model, device, or NMS IoU changes.
@@ -541,94 +546,160 @@ impl FoloApp {
             format!("{total} images ready")
         };
 
-        let max_tiles = batch_filmstrip_max_tiles(stage_w);
-        let start = active.saturating_sub(max_tiles / 2).min(total.saturating_sub(max_tiles));
-        let end = (start + max_tiles).min(total);
-        let items_slice: Vec<(usize, SharedString, BatchItemStatus)> = self.play_batch.items[start..end]
-            .iter()
-            .enumerate()
-            .map(|(off, item)| (start + off, item.name.clone(), item.status.clone()))
-            .collect();
+        let model_classes = self.play_shown_model().map(|m| m.classes.clone()).unwrap_or_default();
+        let qa_counts = self.play_batch.qa_counts(
+            model_id.as_deref(),
+            self.play_iou,
+            self.play_target,
+            self.play_conf,
+            self.play_class,
+            e2e,
+            &model_classes,
+        );
+        let filtered = self.play_batch.filtered_indices(
+            model_id.as_deref(),
+            self.play_iou,
+            self.play_target,
+            self.play_conf,
+            self.play_class,
+            e2e,
+        );
+        let qa_filter_row = self.play_batch_qa_filter_row(t, &qa_counts, window, cx);
+        let filter_active = self.play_batch.qa_filter != super::batch_qa::BatchQaFilter::All;
+        let counter_label = if filter_active {
+            match filtered.iter().position(|&i| i == active) {
+                Some(pos) => format!("{} / {} ({total} total)", pos + 1, filtered.len()),
+                None => format!("{} / {total} · {} match", active + 1, filtered.len()),
+            }
+        } else {
+            format!("{} / {total}", active + 1)
+        };
 
-        let tiles: Vec<AnyElement> = items_slice
-            .into_iter()
-            .map(|(idx, name, status)| {
-                let is_cur = idx == active;
-                let short = batch_tile_label(name.as_ref()).to_string();
-                let (dot_color, count_str, tip_detail) = match &status {
-                    BatchItemStatus::Pending => (t.text_disabled, "—".to_string(), "Not run yet".to_string()),
-                    BatchItemStatus::Running => (t.accent_solid, "…".to_string(), "Detecting…".to_string()),
-                    BatchItemStatus::Failed(err) => {
-                        (t.danger_solid, "!".to_string(), format!("Failed: {err}"))
-                    }
-                    BatchItemStatus::Done(res) => {
-                        let fresh = model_id.as_deref().is_some_and(|m| {
-                            res.matches_current(m, self.play_iou, self.play_target, self.play_conf, e2e)
-                        });
-                        if fresh {
-                            let n = filter_detections(&res.pred.boxes, self.play_conf, self.play_class).len();
-                            (t.success_solid, n.to_string(), plural(n, "detection"))
-                        } else {
-                            (
-                                t.text_disabled,
-                                "—".to_string(),
-                                "Needs re-run for current settings".to_string(),
-                            )
-                        }
-                    }
-                };
-                let key = format!("play-batch-item-{idx}");
-                let tip_text = format!("{} · {tip_detail}", name.as_ref());
-                let el = div()
-                    .id(SharedString::from(key.clone()))
-                    .tooltip(crate::controls::tip(tip_text, None))
-                    .w(px(124.))
-                    .h(px(32.))
-                    .flex_none()
-                    .px(px(8.))
-                    .rounded(px(radius::SM))
-                    .bg(if is_cur { t.bg_active } else { t.bg_raised })
-                    .border_1()
-                    .border_color(if is_cur { t.accent_solid } else { alpha(t.line_default, 0.8) })
-                    .cursor_pointer()
-                    .hover(|s| s.border_color(if is_cur { t.accent_solid } else { t.line_strong }))
-                    .flex()
-                    .items_center()
-                    .gap(px(6.))
-                    .child(div().size(px(6.)).rounded_full().flex_none().bg(dot_color))
-                    .child(
-                        text(ty::XS, if is_cur { t.text_primary } else { t.text_secondary })
-                            .font_family(crate::theme::MONO)
-                            .font_weight(if is_cur { FontWeight::MEDIUM } else { FontWeight::NORMAL })
-                            .flex_1()
-                            .min_w_0()
-                            .ellipsis()
-                            .child(short),
-                    )
-                    .child(
-                        text(
-                            ty::XS,
-                            if matches!(status, BatchItemStatus::Failed(_)) {
-                                t.danger_text
-                            } else {
-                                t.text_tertiary
-                            },
-                        )
-                        .tnum()
-                        .flex_none()
-                        .child(count_str),
-                    );
-                self.bind(
-                    el,
-                    &key,
-                    radius::SM,
-                    window,
-                    cx,
-                    act(move |this, _, cx| this.select_play_batch_item(idx, cx)),
-                )
+        let eff_class = self.play_batch.effective_class(self.play_class);
+        if !filtered.is_empty() && self.fh("play-batch-qa-reset", cx).is_focused(window) {
+            window.focus(&self.fh("play-batch-qa-all", cx));
+        }
+
+        let max_tiles = batch_filmstrip_max_tiles(stage_w);
+        let tile_row: AnyElement = if filtered.is_empty() {
+            let show_all = self.button(
+                "play-batch-qa-reset",
+                "Show all",
+                Btn::Secondary,
+                None,
+                window,
+                cx,
+                act(|this, w, cx| {
+                    this.set_play_batch_qa_filter(super::batch_qa::BatchQaFilter::All, cx);
+                    this.focus_key("play-batch-qa-all", w, cx);
+                }),
+            );
+            div()
+                .h(px(32.))
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .child(text(ty::XS, t.text_tertiary).child("No batch images match this QA filter."))
+                .child(show_all)
                 .into_any_element()
-            })
-            .collect();
+        } else {
+            let active_pos = filtered.iter().position(|&i| i == active).unwrap_or(0);
+            let start =
+                active_pos.saturating_sub(max_tiles / 2).min(filtered.len().saturating_sub(max_tiles));
+            let end = (start + max_tiles).min(filtered.len());
+            let items_slice: Vec<(usize, SharedString, BatchItemStatus)> = filtered[start..end]
+                .iter()
+                .map(|&idx| {
+                    let item = &self.play_batch.items[idx];
+                    (idx, item.name.clone(), item.status.clone())
+                })
+                .collect();
+
+            let tiles: Vec<AnyElement> = items_slice
+                .into_iter()
+                .map(|(idx, name, status)| {
+                    let is_cur = idx == active;
+                    let short = batch_tile_label(name.as_ref()).to_string();
+                    let (dot_color, count_str, tip_detail) = match &status {
+                        BatchItemStatus::Pending => {
+                            (t.text_disabled, "—".to_string(), "Not run yet".to_string())
+                        }
+                        BatchItemStatus::Running => {
+                            (t.accent_solid, "…".to_string(), "Detecting…".to_string())
+                        }
+                        BatchItemStatus::Failed(err) => {
+                            (t.danger_solid, "!".to_string(), format!("Failed: {err}"))
+                        }
+                        BatchItemStatus::Done(res) => {
+                            let fresh = model_id.as_deref().is_some_and(|m| {
+                                res.matches_current(m, self.play_iou, self.play_target, self.play_conf, e2e)
+                            });
+                            if fresh {
+                                let n = filter_detections(&res.pred.boxes, self.play_conf, eff_class).len();
+                                (t.success_solid, n.to_string(), plural(n, "detection"))
+                            } else {
+                                (
+                                    t.text_disabled,
+                                    "—".to_string(),
+                                    "Needs re-run for current settings".to_string(),
+                                )
+                            }
+                        }
+                    };
+                    let key = format!("play-batch-item-{idx}");
+                    let tip_text = format!("{} · {tip_detail}", name.as_ref());
+                    let el = div()
+                        .id(SharedString::from(key.clone()))
+                        .tooltip(crate::controls::tip(tip_text, None))
+                        .w(px(124.))
+                        .h(px(32.))
+                        .flex_none()
+                        .px(px(8.))
+                        .rounded(px(radius::SM))
+                        .bg(if is_cur { t.bg_active } else { t.bg_raised })
+                        .border_1()
+                        .border_color(if is_cur { t.accent_solid } else { alpha(t.line_default, 0.8) })
+                        .cursor_pointer()
+                        .hover(|s| s.border_color(if is_cur { t.accent_solid } else { t.line_strong }))
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .child(div().size(px(6.)).rounded_full().flex_none().bg(dot_color))
+                        .child(
+                            text(ty::XS, if is_cur { t.text_primary } else { t.text_secondary })
+                                .font_family(crate::theme::MONO)
+                                .font_weight(if is_cur { FontWeight::MEDIUM } else { FontWeight::NORMAL })
+                                .flex_1()
+                                .min_w_0()
+                                .ellipsis()
+                                .child(short),
+                        )
+                        .child(
+                            text(
+                                ty::XS,
+                                if matches!(status, BatchItemStatus::Failed(_)) {
+                                    t.danger_text
+                                } else {
+                                    t.text_tertiary
+                                },
+                            )
+                            .tnum()
+                            .flex_none()
+                            .child(count_str),
+                        );
+                    self.bind(
+                        el,
+                        &key,
+                        radius::SM,
+                        window,
+                        cx,
+                        act(move |this, _, cx| this.select_play_batch_item(idx, cx)),
+                    )
+                    .into_any_element()
+                })
+                .collect();
+            div().flex().items_center().gap(px(6.)).overflow_hidden().children(tiles).into_any_element()
+        };
 
         div()
             .id("play-batch-strip")
@@ -659,7 +730,7 @@ impl FoloApp {
                                     .font_weight(FontWeight::MEDIUM)
                                     .tnum()
                                     .flex_none()
-                                    .child(format!("{} / {total}", active + 1)),
+                                    .child(counter_label),
                             )
                             .child(next_btn)
                             .child(
@@ -687,7 +758,8 @@ impl FoloApp {
                             .child(clear_btn),
                     ),
             )
-            .child(div().flex().items_center().gap(px(6.)).overflow_hidden().children(tiles))
+            .child(qa_filter_row)
+            .child(tile_row)
             .into_any_element()
     }
 }
