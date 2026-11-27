@@ -381,6 +381,9 @@ impl FoloApp {
             // An Agent Labeling form (or a delete's second click) closed; the page stays.
         } else if self.dismiss_bench_form(window, cx) {
             // A Benchmarks form (or a delete's second click) closed; the page stays.
+        } else if self.route == Route::Playground && self.play_batch.running {
+            self.cancel_play_batch();
+            self.toast(Tone::Neutral, "Batch run cancelled", None, cx);
         } else if let Some(p) = self.parent_route() {
             self.navigate(p, window, cx);
         }

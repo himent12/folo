@@ -80,6 +80,7 @@ impl FoloApp {
         if self.play_compare.enabled == enabled {
             return;
         }
+        self.cancel_play_batch();
         self.play_compare.enabled = enabled;
         self.play_drag = None;
         self.play_compare.clear_hover();
@@ -147,6 +148,7 @@ impl FoloApp {
             return;
         }
         // Cancel any in-flight requests and local tickets so pre-swap responses never land in the wrong slot.
+        self.invalidate_play_batch();
         self.play_pred_seq += 1;
         self.play_compare.pred_b_seq += 1;
         let _ = crate::local::Ticket::take(&self.play_line);
@@ -696,11 +698,11 @@ enum PngExportJob {
     },
 }
 
-fn export_default_dir() -> PathBuf {
+pub(super) fn export_default_dir() -> PathBuf {
     std::env::current_dir().unwrap_or_default()
 }
 
-fn picked_save(
+pub(super) fn picked_save(
     this: &folo_ui::WeakEntity<FoloApp>,
     answer: Result<anyhow::Result<Option<PathBuf>>, folo_ui::oneshot::Canceled>,
     cx: &mut folo_ui::AsyncApp,

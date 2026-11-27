@@ -152,6 +152,9 @@ impl FoloApp {
             self.label.review_error = None;
             self.label.confirm_delete_image = None;
             self.label.editor.drawing = None;
+            self.label.editor.transforming = None;
+            self.label.editor.hover_handle = None;
+            self.label.editor.hover_move = false;
             cx.notify();
         }
     }

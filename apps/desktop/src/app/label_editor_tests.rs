@@ -659,3 +659,106 @@ fn playtest_r11_wheel_scroll_stage_stability_and_conflict_banner() {
         });
     }
 }
+
+#[test]
+fn labeling_box_move_resize_undo_redo_and_hotkey_input_guard() {
+    use crate::label::{ResizeHandle, TransformKind};
+    use folo_ui::Focusable;
+
+    let api = Arc::new(MockBackend::new(4200, true));
+    let (mut app, window) = open_with(api, 1280., 800., Mode::Dark);
+
+    drive(&mut app, window, |this, w, cx| this.navigate(Route::LabelJob("lb_4f10".into()), w, cx));
+    settle(&mut app, window);
+
+    let (img_id, orig_box) = drive(&mut app, window, |this, _, cx| {
+        let all = this.label.images.get("lb_4f10").and_then(|l| l.ready()).unwrap();
+        let im = all
+            .iter()
+            .find(|i| i.status == LabelImageStatus::Labeled && !i.boxes.is_empty())
+            .expect("labeled image with boxes")
+            .clone();
+        this.select_label_image(im.id.clone(), cx);
+        (im.id, im.boxes[0])
+    });
+    settle(&mut app, window);
+
+    // 1. Move box 0 via stage transform helper -> marks dirty, updates selection revision, undoable!
+    let moved_box = drive(&mut app, window, |this, _, cx| {
+        let b = this.label.stage_view.get().expect("stage bounds");
+        let im = this.ensure_label_editor_synced("lb_4f10", &img_id).unwrap();
+        let dims = (im.width.max(1) as f32, im.height.max(1) as f32);
+        let p0 = point(b.origin.x + px(100.), b.origin.y + px(100.));
+        let p1 = point(b.origin.x + px(130.), b.origin.y + px(120.));
+        let img_p0 =
+            crate::viz::to_image(b, dims, crate::viz::Fit::Contain, this.label.zoom, this.label.pan, p0);
+        assert!(this.label.editor.begin_transform(
+            0,
+            img_p0,
+            (f32::from(p0.x), f32::from(p0.y)),
+            TransformKind::Move
+        ));
+        this.update_label_box_transform(p1, cx);
+        assert!(this.label.editor.preview_transform(dims.0, dims.1).is_some());
+        this.finish_label_box_transform(cx);
+        assert!(this.label.editor.is_dirty_for("lb_4f10", &img_id));
+        let sel = this.label.selected_box.as_ref().expect("moved box stays selected");
+        assert_eq!(sel.revision, this.label.editor.draft_revision());
+        this.label.editor.draft[0]
+    });
+    assert_ne!(moved_box, orig_box);
+
+    // 2. Resize box 0 from SE handle -> second undo entry; Ctrl+Z x2 returns to clean base!
+    let resized_box = drive(&mut app, window, |this, _, cx| {
+        let b = this.label.stage_view.get().expect("stage bounds");
+        let im = this.ensure_label_editor_synced("lb_4f10", &img_id).unwrap();
+        let dims = (im.width.max(1) as f32, im.height.max(1) as f32);
+        let p0 = point(b.origin.x + px(130.), b.origin.y + px(120.));
+        let p1 = point(b.origin.x + px(180.), b.origin.y + px(170.));
+        let img_p0 =
+            crate::viz::to_image(b, dims, crate::viz::Fit::Contain, this.label.zoom, this.label.pan, p0);
+        assert!(this.label.editor.begin_transform(
+            0,
+            img_p0,
+            (f32::from(p0.x), f32::from(p0.y)),
+            TransformKind::Resize(ResizeHandle::Se),
+        ));
+        this.update_label_box_transform(p1, cx);
+        this.finish_label_box_transform(cx);
+        this.label.editor.draft[0]
+    });
+    assert_ne!(resized_box, moved_box);
+
+    press(&mut app, window, "ctrl-z");
+    assert_eq!(drive(&mut app, window, |this, _, _| this.label.editor.draft[0]), moved_box);
+    press(&mut app, window, "ctrl-z");
+    drive(&mut app, window, |this, _, _| {
+        assert_eq!(this.label.editor.draft[0], orig_box);
+        assert!(!this.label.editor.is_dirty());
+    });
+    press(&mut app, window, "ctrl-y");
+    assert_eq!(drive(&mut app, window, |this, _, _| this.label.editor.draft[0]), moved_box);
+
+    // 3. When a TextInput is focused (e.g. inline Export form name input), numeric '1'-'9' hotkeys
+    //    do NOT change draw_class or reclassify boxes.
+    drive(&mut app, window, |this, w, cx| {
+        this.label.editor.draw_class = 0;
+        let job = this.label_job_by_id("lb_4f10").unwrap().clone();
+        this.open_export_label_dataset(&job, w, cx);
+        let fh = this.label.export_ds.as_ref().unwrap().name.read(cx).focus_handle(cx);
+        w.focus(&fh);
+    });
+    settle(&mut app, window);
+    press(&mut app, window, "2");
+    drive(&mut app, window, |this, w, cx| {
+        assert_eq!(this.label.editor.draw_class, 0, "1-9 hotkeys ignored while TextInput is focused");
+        this.close_export_label_dataset(w, cx);
+    });
+    settle(&mut app, window);
+    press(&mut app, window, "2");
+    assert_eq!(
+        drive(&mut app, window, |this, _, _| this.label.editor.draw_class),
+        1,
+        "1-9 hotkeys work once TextInput is closed"
+    );
+}

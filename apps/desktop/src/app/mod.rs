@@ -39,6 +39,9 @@ mod page;
 mod playground;
 #[cfg(test)]
 mod playground_ab_tests;
+mod playground_batch;
+#[cfg(test)]
+mod playground_batch_tests;
 mod playground_compare;
 #[cfg(test)]
 mod playground_tests;
@@ -514,6 +517,8 @@ pub struct FoloApp {
     play_pred_for: Option<(u64, String)>,
     /// Playground Model A/B comparison state (Model B selection, prediction, hover, and tabs).
     pub play_compare: crate::screens::playground::PlayCompareState,
+    /// Playground multi-image / folder batch queue, filmstrip navigation, and Run All state.
+    pub play_batch: crate::screens::playground::PlayBatchState,
 
     // Settings
     pub server_mode: ServerMode,
@@ -855,6 +860,7 @@ impl FoloApp {
             play_pred_dim: false,
             play_pred_for: None,
             play_compare: Default::default(),
+            play_batch: Default::default(),
             server_mode: ServerMode::Mock,
             server_url,
             saved_server_url: None,

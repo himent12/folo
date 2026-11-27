@@ -64,6 +64,7 @@ impl FoloApp {
     /// drop asked for before it is dropped when it answers.
     pub fn play_dataset_image(&mut self, dataset: &str, image_id: &str, cx: &mut Context<Self>) {
         self.play_open_seq += 1;
+        self.clear_play_batch();
         self.load_play_dataset_image(dataset, image_id, cx);
     }
 
@@ -125,7 +126,7 @@ impl FoloApp {
     }
 
     /// Put a new image on the Playground stage; its old detections never paint over it.
-    fn set_play_image(&mut self, img: PlayImage, cx: &mut Context<Self>) {
+    pub(super) fn set_play_image(&mut self, img: PlayImage, cx: &mut Context<Self>) {
         self.play_image_gen += 1;
         // Images live in the GPU sprite atlas until dropped explicitly. Called from fetch
         // callbacks, where no window is mid-update, so every window's atlas is reached.
@@ -148,6 +149,43 @@ impl FoloApp {
         }
     }
 
+    /// Put a batch image on the Playground stage reusing its already-fresh Model A prediction
+    /// (avoiding a duplicate inference call when stepping across completed batch items).
+    pub(super) fn set_play_image_with_cached_pred(
+        &mut self,
+        img: PlayImage,
+        res: crate::screens::playground::BatchItemResult,
+        cx: &mut Context<Self>,
+    ) {
+        self.play_image_gen += 1;
+        self.play_pred_seq += 1;
+        let _ = crate::local::Ticket::take(&self.play_line);
+        if let Some(old) = self.play_image.replace(img) {
+            cx.drop_image(old.image, None);
+        }
+        let meta = crate::screens::playground::PlayPredMeta {
+            image_gen: self.play_image_gen,
+            model_id: res.model_id.clone(),
+            iou_bits: res.iou_bits,
+            target: res.target,
+            floor: res.floor,
+        };
+        self.play_pred = Load::Ready(res.pred);
+        self.play_pred_pending = false;
+        self.play_pred_dim = false;
+        self.play_pred_for = Some((self.play_image_gen, res.model_id));
+        self.play_fetched_floor = res.floor;
+        self.play_compare.pred_a_meta = Some(meta);
+        self.clear_play_hover();
+        self.clear_play_pred_b();
+        self.play_zoom = 1.0;
+        self.play_pan = (0., 0.);
+        self.play_drag = None;
+        if self.play_compare.enabled {
+            self.run_predict_b(cx);
+        }
+    }
+
     /// Dataset `dataset`'s files changed ([`FoloApp::forget_dataset_contents`]): its image ids are
     /// positions, so the id of the Playground's image may name another picture now, and the server
     /// predicts on the file the id names. The old pixels and every prediction for them are dropped
@@ -159,6 +197,11 @@ impl FoloApp {
         dataset: &str,
         cx: &mut Context<Self>,
     ) -> Option<Arc<folo_ui::RenderImage>> {
+        if self.play_batch.items.iter().any(|it| {
+            matches!(&it.source, crate::screens::playground::PlayBatchSource::Dataset { dataset_id, .. } if dataset_id == dataset)
+        }) {
+            self.invalidate_play_batch();
+        }
         let shown = self.play_image.as_ref().and_then(|p| match &p.input {
             PredictInput::Dataset { dataset_id, image_id } if dataset_id == dataset => Some(image_id.clone()),
             _ => None,
@@ -193,6 +236,7 @@ impl FoloApp {
     pub fn set_play_target(&mut self, target: Option<crate::local::Target>, cx: &mut Context<Self>) {
         if self.play_target != target {
             self.play_target = target;
+            self.invalidate_play_batch();
             if matches!(self.play_pred, Load::Ready(_)) {
                 // The same image and model: the boxes stay up, dimmed and "Updating…", until the
                 // other device answers, instead of blanking to placeholder rows.
@@ -255,6 +299,7 @@ impl FoloApp {
         if self.play_model.as_deref() != Some(id.as_str()) {
             self.play_class = None;
             self.clear_play_hover();
+            self.invalidate_play_batch();
         }
         self.play_model_run = self.store.model(&id).and_then(|m| m.run_id.clone());
         self.play_model = Some(id);
@@ -315,6 +360,7 @@ impl FoloApp {
         self.play_model = None;
         self.play_model_run = None;
         self.play_model_gone = name;
+        self.invalidate_play_batch();
         self.play_pred_seq += 1;
         self.play_pred = Load::Idle;
         self.play_pred_for = None;
@@ -340,16 +386,34 @@ impl FoloApp {
         self.play_hover_from_stage = false;
     }
 
-    /// Sets the Playground threshold, refetching when it drops below what was fetched (filtering
-    /// is local only above that floor).
+    /// Sets the Playground threshold, cancelling in-flight batch runs and refetching when it drops
+    /// below what was fetched (filtering is local only above that floor).
     pub fn set_play_conf(&mut self, conf: f32, cx: &mut Context<Self>) {
+        let changed = (self.play_conf - conf).abs() > f32::EPSILON;
         self.play_conf = conf;
+        if changed {
+            self.cancel_play_batch();
+            self.play_batch.invalidate_below_conf(conf);
+        }
         self.clear_play_hover();
         self.play_compare.clear_hover();
         if conf < self.play_fetched_floor - 1e-6 {
             self.run_predict(cx);
         }
         if self.play_compare.enabled && conf < self.play_compare.fetched_floor_b - 1e-6 {
+            self.run_predict_b(cx);
+        }
+    }
+
+    /// Commits a Playground NMS IoU change: cancels/invalidates batch work and reruns predictions.
+    pub(crate) fn on_play_iou_changed(&mut self, cx: &mut Context<Self>) {
+        let e2e = self.play_shown_model().is_some_and(|m| self.model_e2e(m));
+        self.cancel_play_batch();
+        if !e2e {
+            self.play_batch.invalidate_results();
+        }
+        self.run_predict(cx);
+        if self.play_compare.enabled {
             self.run_predict_b(cx);
         }
     }
@@ -434,6 +498,7 @@ impl FoloApp {
             }
             p
         });
+        self.sync_stage_pred_to_batch(meta.as_ref(), &r);
         self.play_compare.pred_a_meta = if r.is_ok() { meta } else { None };
         self.play_pred = r.into();
         self.play_pred_for = Some(key);
@@ -461,8 +526,8 @@ impl FoloApp {
         }
     }
 
-    /// Open image (the button, Ctrl+O, the palette): the picker, then [`Self::open_play_file`] with the
-    /// request it was accepted as. A cancelled picker changes nothing.
+    /// Open image(s) (the button, Ctrl+O, the palette): multi-file picker, then [`Self::open_play_paths`]
+    /// with the request it was accepted as. A cancelled picker changes nothing.
     pub fn pick_image(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // The shortcut and palette obey the button's rule, and say why.
         if let Some(why) = self.open_image_blocked() {
@@ -474,14 +539,14 @@ impl FoloApp {
         let rx = cx.prompt_for_paths(folo_ui::PathPromptOptions {
             files: true,
             directories: false,
-            multiple: false,
-            prompt: Some("Open image".into()),
+            multiple: true,
+            prompt: Some("Open images".into()),
         });
         cx.spawn(async move |this, cx| {
-            if let Some(p) = super::actions::picked(&this, rx.await, cx) {
+            if let Some(paths) = super::playground_batch::picked_paths(&this, rx.await, cx) {
                 handle
                     .update(cx, |_, window, cx| {
-                        this.update(cx, |this, cx| this.open_play_file(p, req, window, cx))
+                        this.update(cx, |this, cx| this.open_play_paths(paths, req, window, cx))
                     })
                     .ok();
             }
@@ -614,8 +679,8 @@ impl FoloApp {
 /// backend change, is dropped) and the model of the page it was asked on (its id and name), applied
 /// with the image or not at all (`None`: the Playground keeps its own).
 pub(super) struct OpenRequest {
-    ticket: u64,
-    model: Option<(String, String)>,
+    pub(super) ticket: u64,
+    pub(super) model: Option<(String, String)>,
 }
 
 #[cfg(test)]

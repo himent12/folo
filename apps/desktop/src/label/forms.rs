@@ -410,7 +410,8 @@ impl FoloApp {
             self.restore_label_focus(None, "label-rm-img", window, cx);
             cx.notify();
             true
-        } else if self.label.editor.cancel_draw()
+        } else if self.label.editor.cancel_transform()
+            || self.label.editor.cancel_draw()
             || self.label.editor.pending_switch.take().is_some()
             || self.label.selected_box.take().is_some()
         {

@@ -194,18 +194,78 @@ impl FoloApp {
             .into_any_element()
         };
 
+        let batch_exports = self.play_batch.is_active().then(|| {
+            let has_batch = self.has_play_batch_export();
+            let batch_json_btn = if has_batch {
+                self.button(
+                    "play-export-batch-json",
+                    "Batch JSON",
+                    Btn::Secondary,
+                    Some("icons/file-text.svg"),
+                    window,
+                    cx,
+                    act(|this, _, cx| this.export_play_batch_json(cx)),
+                )
+                .tooltip(crate::controls::tip("Save completed batch detections as JSON", None))
+                .into_any_element()
+            } else {
+                self.button_disabled(
+                    "play-export-batch-json",
+                    "Batch JSON",
+                    Btn::Secondary,
+                    Some("icons/file-text.svg"),
+                    "Run at least one batch image first",
+                    window,
+                    cx,
+                )
+                .into_any_element()
+            };
+            let batch_csv_btn = if has_batch {
+                self.button(
+                    "play-export-batch-csv",
+                    "Batch CSV",
+                    Btn::Secondary,
+                    Some("icons/download.svg"),
+                    window,
+                    cx,
+                    act(|this, _, cx| this.export_play_batch_csv(cx)),
+                )
+                .tooltip(crate::controls::tip("Save completed batch detections as CSV", None))
+                .into_any_element()
+            } else {
+                self.button_disabled(
+                    "play-export-batch-csv",
+                    "Batch CSV",
+                    Btn::Secondary,
+                    Some("icons/download.svg"),
+                    "Run at least one batch image first",
+                    window,
+                    cx,
+                )
+                .into_any_element()
+            };
+            div().flex().flex_wrap().items_center().gap(px(6.)).child(batch_json_btn).child(batch_csv_btn)
+        });
+
         div()
             .px(px(12.))
             .py(px(8.))
             .border_b_1()
             .border_color(t.line_subtle)
             .flex()
-            .flex_wrap()
-            .items_center()
+            .flex_col()
             .gap(px(6.))
-            .child(png_btn)
-            .child(json_btn)
-            .child(copy_btn)
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(6.))
+                    .child(png_btn)
+                    .child(json_btn)
+                    .child(copy_btn),
+            )
+            .children(batch_exports)
             .into_any_element()
     }
 

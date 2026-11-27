@@ -871,6 +871,26 @@ impl FoloApp {
         } else {
             heading.into_any_element()
         };
+        let batch_link = (thumbs.len() >= 2 && !no_models).then(|| {
+            let label =
+                if self.server_mode == crate::app::ServerMode::Mock { "Demo batch" } else { "Load batch" };
+            let el = div()
+                .id("play-load-val-batch")
+                .px(px(4.))
+                .rounded(px(radius::SM))
+                .cursor_pointer()
+                .hover(|s| s.bg(t.bg_hover))
+                .active(|s| s.bg(t.bg_active))
+                .child(inline_link(&t, label));
+            self.bind(
+                el,
+                "play-load-val-batch",
+                radius::SM,
+                window,
+                cx,
+                act(|this, w, cx| this.load_play_demo_batch(w, cx)),
+            )
+        });
         let picker = (!thumbs.is_empty() && !no_models).then(|| {
             div()
                 .flex()
@@ -880,7 +900,15 @@ impl FoloApp {
                 .py(px(if fold { 10. } else { 12. }))
                 .border_t_1()
                 .border_color(t.line_subtle)
-                .child(heading)
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(8.))
+                        .child(heading)
+                        .children(batch_link),
+                )
                 .when(picker_open, |d| d.child(div().flex().gap(px(6.)).children(thumbs)))
         });
         // One scrolling column: controls and sample images, then detections and their latency (no

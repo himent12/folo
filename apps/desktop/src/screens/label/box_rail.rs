@@ -122,6 +122,7 @@ impl FoloApp {
                 as usize;
             let heading = if sel_box.is_some() { "Reclassify (1–9)" } else { "Draw class (1–9)" };
 
+            let active_key_badge = (active_cls < 9).then(|| kbd(t, format!("{}", active_cls + 1)));
             let picker_body: AnyElement = if job.classes.len() > 9 {
                 let options: Vec<(SharedString, Option<SharedString>)> = job
                     .classes
@@ -148,13 +149,20 @@ impl FoloApp {
                 )
                 .into_any_element()
             } else {
+                const KEY_HINTS: [&str; 9] = ["1", "2", "3", "4", "5", "6", "7", "8", "9"];
                 let chips = job.classes.iter().enumerate().map(|(ci, name)| {
                     let (j, i) = (jid.clone(), img_id.clone());
                     let cls_u32 = ci as u32;
                     let cur = active_cls == ci;
+                    let key_num = ci + 1;
+                    let tip = if sel_box.is_some() {
+                        format!("Relabel selected box to {name}")
+                    } else {
+                        format!("Switch draw class to {name}")
+                    };
                     self.chip(
                         &format!("label-recls-{ci}"),
-                        format!("{} {name}", ci + 1),
+                        format!("[{key_num}] {name}"),
                         cur,
                         Some(cls_u32),
                         None,
@@ -162,6 +170,7 @@ impl FoloApp {
                         cx,
                         act(move |this, _, cx| this.set_label_draw_class(&j, &i, cls_u32, cx)),
                     )
+                    .tooltip(crate::controls::tip(tip, KEY_HINTS.get(ci).copied()))
                     .into_any_element()
                 });
                 div().flex().flex_wrap().gap(px(4.)).children(chips).into_any_element()
@@ -174,7 +183,15 @@ impl FoloApp {
                 .flex()
                 .flex_col()
                 .gap(px(6.))
-                .child(overline(t, heading))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(6.))
+                        .child(overline(t, heading))
+                        .children(active_key_badge),
+                )
                 .child(picker_body)
         });
 

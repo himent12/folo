@@ -191,6 +191,7 @@ impl FoloApp {
         self.play_labels = true;
         self.play_class = None;
         self.play_compare.reset_for_backend();
+        self.clear_play_batch();
         self.retry_all(cx);
     }
 
