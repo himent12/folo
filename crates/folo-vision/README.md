@@ -26,10 +26,10 @@ and [VISION.md](../../docs/VISION.md) is the tour of the implementation.
 | `src/cocoeval.rs` | `CocoEval`: the full pycocotools `COCOeval` (crowd regions, area buckets, AR) |
 | `src/train/` | `mod.rs` (`Trainer`), `config/` (`mod.rs` for `TrainConfig`, `tests.rs`), `setup.rs` (new and resumed runs), `epoch.rs` (one epoch), `run.rs` (the run loop), `checkpoint.rs`, `writer/` (epoch files off the training thread), `events.rs`, `feed.rs` (batches staged for a GPU), `device.rs`, `teacher.rs` (the distillation teacher), `gauge.rs` (BN-Conv Floor Gauge Normalisation), `tests.rs` |
 | `src/val.rs` | `validate`: a model on a dataset split, scored with `Evaluator` |
-| `src/predict.rs` | `Predictor`: `.folo` weights to detections in image pixels, with a timing breakdown (single, batch, tiled, and TTA) |
+| `src/predict.rs` | `Predictor`: `.folo` weights to detections in image pixels, with a timing breakdown (single, batch, tiled, TTA, and tracked sequences) |
 | `src/tile.rs` | SAHI tiled inference (`TileConfig`, `TileRect`, `TileMergeMetric`, `compute_tiles`, `crop_tile`, `merge_tiled_detections`) wired into `Predictor::predict_tiled` |
 | `src/tta.rs` | Test-Time Augmentation (`TtaConfig`, `PredictOptions`, `unflip_xyxy_h`, `merge_tta_detections`) wired into `Predictor::predict_tta`, `predict_batch_tta`, `predict_file_tta`, and `predict_*_with_options` |
-| `src/track.rs` | ByteTrack multi-object tracking (`ByteTracker`, `TrackConfig`, `TrackedDetection`, `SequenceFrame`) with decoupled 8-state Kalman filter + exact Hungarian association, wired into `Predictor::predict_sequence` |
+| `src/track/` | ByteTrack multi-object tracking (`mod.rs`: `ByteTracker`, `TrackConfig`, `TrackedDetection`, `SequenceFrame`, `Predictor::predict_sequence`; `kalman.rs`: decoupled 8-state Kalman filter; `assign.rs`: sparse-pruned exact Hungarian IoU matcher) |
 | `src/export/` | `onnx/`: `mod.rs` (`export`, `OnnxOptions`, the op table), `graph.rs`, `blocks.rs`, `decode.rs`, `proto.rs` (protobuf encoder) |
 | `src/precompile.rs` | GPU pipeline precompile for a run's kernels |
 | `src/error.rs` | `Error`: the trainer's, the validator's and the predictor's |

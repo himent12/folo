@@ -1,8 +1,8 @@
 //! ByteTrack-style multi-object tracking ([`ByteTracker`]) wired into [`Predictor::predict_sequence`].
 //!
 //! Each tracked object maintains a decoupled 8-state constant-velocity Kalman filter `[cx, cy, a, h, vx, vy, va, vh]`
-//! (`a = w / h`), and each frame runs ByteTrack's signature two-stage optimal IoU association (via an exact
-//! zero-dependency Hungarian solver):
+//! ([`kalman`]), and each frame runs ByteTrack's signature two-stage optimal IoU association via a sparse-pruned
+//! zero-dependency Hungarian solver ([`assign`]):
 //! 1. **Stage 1 (high-confidence):** Confirmed active and coasting lost tracks match detections with
 //!    `score >= TrackConfig::high_thresh` (`IoU >= TrackConfig::match_iou`).
 //! 2. **Stage 2 (low-confidence occlusion recovery):** Remaining unmatched active tracks match detections with
@@ -12,32 +12,37 @@
 //!    and unmatched high-confidence detections with `score >= new_track_thresh` spawn new tracks. Lost tracks coast
 //!    up to `track_buffer` missed frames before retiring.
 
+mod assign;
+mod kalman;
+
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
 
 #[cfg(target_arch = "wasm32")]
 use web_time::Instant;
 
-use folo_data::Image;
+use folo_data::{Image, Letterbox, LetterboxOptions};
 use serde::{Deserialize, Serialize};
 
-use crate::boxes::{IouKind, Xyxy, iou as box_iou};
+use crate::boxes::Xyxy;
 use crate::error::{Error, Result};
+use crate::fusion::ScoreRule;
+use crate::model::HeadMode;
 use crate::nms::Detection;
-use crate::predict::{Predictor, Timing, add_scaled_timing, ms, one_canvas};
+use crate::predict::{Predictor, Timing, add_scaled_timing, ms};
 use crate::tile::check_image;
 use crate::tta::run_views_with_oom_fallback;
 
-/// Maximum frames batched per detector pass inside [`Predictor::predict_sequence`].
+use self::assign::associate;
+use self::kalman::KalmanBox;
+
+/// Maximum consecutive same-canvas frames batched per detector pass inside [`Predictor::predict_sequence`].
 const SEQUENCE_BATCH: usize = 8;
 
-/// Sentinel cost for disallowed track-detection pairs in the Hungarian assignment matrix.
-const DISALLOWED_COST: f64 = 1e6;
-
-/// ByteTrack Kalman position std weight (`1 / 20`).
-const STD_WEIGHT_POS: f64 = 1.0 / 20.0;
-/// ByteTrack Kalman velocity std weight (`1 / 160`).
-const STD_WEIGHT_VEL: f64 = 1.0 / 160.0;
+/// Logit headroom subtracted from `low_thresh` when pre-extracting raw candidates for calibrated `ScoreRule`s
+/// (`Elc` / `DflConsensus` / `DflRepulse` / `DflCgr`) so clusters that calibrate upward past `low_thresh` are
+/// preserved before tracking.
+const CALIBRATED_LOGIT_HEADROOM: f64 = 1.5;
 
 /// Settings for [`ByteTracker`] and [`Predictor::predict_sequence`].
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -148,138 +153,23 @@ pub struct SequenceFrame {
     pub timing: Timing,
 }
 
-/// 1D constant-velocity Kalman state `[position, velocity]` with symmetric 2×2 covariance `[[p00, p01], [p01, p11]]`.
-///
-/// ByteTrack's 8-state filter `[cx, cy, a, h, vx, vy, va, vh]` has block-diagonal `F`, `H`, `P0`, `Q`, and `R`,
-/// so running four independent 2×2 filters is algebraically identical to the full 8×8 matrix update with O(1)
-/// flops, zero heap allocation, and guaranteed positive-definite variance.
-#[derive(Clone, Copy, Debug)]
-struct Kalman1D {
-    pos: f64,
-    vel: f64,
-    p00: f64,
-    p01: f64,
-    p11: f64,
-}
-
-impl Kalman1D {
-    #[inline]
-    fn new(pos: f64, std_pos: f64, std_vel: f64) -> Self {
-        Kalman1D { pos, vel: 0.0, p00: std_pos * std_pos, p01: 0.0, p11: std_vel * std_vel }
-    }
-
-    #[inline]
-    fn predict(&mut self, q_std_pos: f64, q_std_vel: f64) {
-        self.pos += self.vel;
-        self.p00 = self.p00 + 2.0 * self.p01 + self.p11 + q_std_pos * q_std_pos;
-        self.p01 += self.p11;
-        self.p11 += q_std_vel * q_std_vel;
-    }
-
-    #[inline]
-    fn update(&mut self, z: f64, r_std: f64) {
-        let r = r_std * r_std;
-        let s = self.p00 + r;
-        if s <= 0.0 || !s.is_finite() {
-            return;
-        }
-        let y = z - self.pos;
-        let k0 = self.p00 / s;
-        let k1 = self.p01 / s;
-        self.pos += k0 * y;
-        self.vel += k1 * y;
-        let one_minus_k0 = (1.0 - k0).max(0.0);
-        self.p00 = (one_minus_k0 * self.p00).max(1e-12);
-        self.p01 *= one_minus_k0;
-        self.p11 = (self.p11 - k1 * self.p01).max(1e-12);
-    }
-}
-
-/// Decoupled 8-state constant-velocity Kalman box tracker over `(cx, cy, aspect_ratio, height)`.
-#[derive(Clone, Copy, Debug)]
-struct KalmanBox {
-    cx: Kalman1D,
-    cy: Kalman1D,
-    a: Kalman1D,
-    h: Kalman1D,
-}
-
-impl KalmanBox {
-    fn from_bbox(b: Xyxy) -> Self {
-        let w = (b.x2 as f64 - b.x1 as f64).max(1e-3);
-        let h = (b.y2 as f64 - b.y1 as f64).max(1e-3);
-        let cx = b.x1 as f64 + 0.5 * w;
-        let cy = b.y1 as f64 + 0.5 * h;
-        let a = w / h;
-        let sp = 2.0 * STD_WEIGHT_POS * h;
-        let sv = 10.0 * STD_WEIGHT_VEL * h;
-        KalmanBox {
-            cx: Kalman1D::new(cx, sp, sv),
-            cy: Kalman1D::new(cy, sp, sv),
-            a: Kalman1D::new(a, 1e-2, 1e-5),
-            h: Kalman1D::new(h, sp, sv),
-        }
-    }
-
-    fn predict(&mut self, coasting: bool) {
-        if coasting || self.h.pos + self.h.vel <= 1e-3 {
-            // ByteTrack guard: dampen height velocity while coasting or if predicted height would collapse.
-            self.h.vel = 0.0;
-        }
-        let h_ref = self.h.pos.max(1.0);
-        let qp = STD_WEIGHT_POS * h_ref;
-        let qv = STD_WEIGHT_VEL * h_ref;
-        self.cx.predict(qp, qv);
-        self.cy.predict(qp, qv);
-        self.a.predict(1e-2, 1e-5);
-        self.h.predict(qp, qv);
-        self.h.pos = self.h.pos.max(1e-3);
-        self.a.pos = self.a.pos.max(1e-3);
-    }
-
-    fn update(&mut self, b: Xyxy) {
-        let w = (b.x2 as f64 - b.x1 as f64).max(1e-3);
-        let h = (b.y2 as f64 - b.y1 as f64).max(1e-3);
-        let cx = b.x1 as f64 + 0.5 * w;
-        let cy = b.y1 as f64 + 0.5 * h;
-        let a = w / h;
-        let r = STD_WEIGHT_POS * self.h.pos.max(1.0);
-        self.cx.update(cx, r);
-        self.cy.update(cy, r);
-        self.a.update(a, 1e-1);
-        self.h.update(h, r);
-        self.h.pos = self.h.pos.max(1e-3);
-        self.a.pos = self.a.pos.max(1e-3);
-    }
-
-    fn bbox(&self) -> Xyxy {
-        let h = self.h.pos.max(1e-3);
-        let w = (self.a.pos.max(1e-3) * h).max(1e-3);
-        let x1 = (self.cx.pos - 0.5 * w) as f32;
-        let y1 = (self.cy.pos - 0.5 * h) as f32;
-        let x2 = (self.cx.pos + 0.5 * w) as f32;
-        let y2 = (self.cy.pos + 0.5 * h) as f32;
-        Xyxy::new(x1, y1, x2, y2)
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum TrackState {
+pub(crate) enum TrackState {
     Tentative,
     Tracked,
     Lost,
 }
 
 #[derive(Clone, Debug)]
-struct Track {
-    id: u64,
-    kalman: KalmanBox,
-    class_id: u32,
-    score: f32,
-    age: u32,
-    hits: u32,
-    time_since_update: u32,
-    state: TrackState,
+pub(crate) struct Track {
+    pub(crate) id: u64,
+    pub(crate) kalman: KalmanBox,
+    pub(crate) class_id: u32,
+    pub(crate) score: f32,
+    pub(crate) age: u32,
+    pub(crate) hits: u32,
+    pub(crate) time_since_update: u32,
+    pub(crate) state: TrackState,
 }
 
 impl Track {
@@ -293,137 +183,6 @@ impl Track {
             bbox: self.kalman.bbox(),
         }
     }
-}
-
-/// Exact minimum-cost linear assignment (Kuhn-Munkres / Hungarian algorithm) for rectangular `n_rows × n_cols`
-/// matrices. Returns matched `(row, col)` pairs sorted by ascending `row`.
-fn hungarian(n_rows: usize, n_cols: usize, costs: &[f64]) -> Vec<(usize, usize)> {
-    if n_rows == 0 || n_cols == 0 {
-        return Vec::new();
-    }
-    if n_rows > n_cols {
-        let mut transposed = vec![0.0f64; n_rows * n_cols];
-        for r in 0..n_rows {
-            for c in 0..n_cols {
-                transposed[c * n_rows + r] = costs[r * n_cols + c];
-            }
-        }
-        let mut pairs: Vec<(usize, usize)> =
-            hungarian(n_cols, n_rows, &transposed).into_iter().map(|(c, r)| (r, c)).collect();
-        pairs.sort_unstable_by_key(|&(r, _)| r);
-        return pairs;
-    }
-
-    let mut u = vec![0.0f64; n_rows + 1];
-    let mut v = vec![0.0f64; n_cols + 1];
-    let mut p = vec![0usize; n_cols + 1];
-    let mut way = vec![0usize; n_cols + 1];
-    let mut minv = vec![0.0f64; n_cols + 1];
-    let mut used = vec![false; n_cols + 1];
-
-    for i in 1..=n_rows {
-        p[0] = i;
-        let mut j0 = 0usize;
-        minv.fill(f64::INFINITY);
-        used.fill(false);
-        loop {
-            used[j0] = true;
-            let i0 = p[j0];
-            let mut delta = f64::INFINITY;
-            let mut j1 = 0usize;
-            let row_off = (i0 - 1) * n_cols;
-            for j in 1..=n_cols {
-                if !used[j] {
-                    let cur = costs[row_off + (j - 1)] - u[i0] - v[j];
-                    if cur < minv[j] {
-                        minv[j] = cur;
-                        way[j] = j0;
-                    }
-                    if minv[j] < delta {
-                        delta = minv[j];
-                        j1 = j;
-                    }
-                }
-            }
-            for j in 0..=n_cols {
-                if used[j] {
-                    u[p[j]] += delta;
-                    v[j] -= delta;
-                } else {
-                    minv[j] -= delta;
-                }
-            }
-            j0 = j1;
-            if p[j0] == 0 {
-                break;
-            }
-        }
-        loop {
-            let j1 = way[j0];
-            p[j0] = p[j1];
-            j0 = j1;
-            if j0 == 0 {
-                break;
-            }
-        }
-    }
-
-    let mut pairs = Vec::with_capacity(n_rows);
-    for (j, &row) in p.iter().enumerate().skip(1) {
-        if row != 0 {
-            pairs.push((row - 1, j - 1));
-        }
-    }
-    pairs.sort_unstable_by_key(|&(r, _)| r);
-    pairs
-}
-
-/// Associate `tracks` with `dets` by optimal IoU matching (`IoU >= min_iou`, class-matched when `class_aware`).
-/// Returns `(matched_pairs, unmatched_track_positions, unmatched_det_positions)`.
-fn associate(
-    tracks: &[&Track],
-    dets: &[&Detection],
-    min_iou: f32,
-    class_aware: bool,
-) -> (Vec<(usize, usize)>, Vec<usize>, Vec<usize>) {
-    let nt = tracks.len();
-    let nd = dets.len();
-    if nt == 0 || nd == 0 {
-        return (Vec::new(), (0..nt).collect(), (0..nd).collect());
-    }
-    let track_boxes: Vec<Xyxy> = tracks.iter().map(|t| t.kalman.bbox()).collect();
-    let mut costs = vec![DISALLOWED_COST; nt * nd];
-    let mut any_valid = false;
-    for (ti, (track, tb)) in tracks.iter().zip(&track_boxes).enumerate() {
-        for (di, det) in dets.iter().enumerate() {
-            if class_aware && track.class_id != det.class {
-                continue;
-            }
-            let iou = box_iou(tb, &det.bbox, IouKind::Iou);
-            if iou.is_finite() && iou >= min_iou {
-                costs[ti * nd + di] = (1.0 - iou as f64).clamp(0.0, 1.0);
-                any_valid = true;
-            }
-        }
-    }
-    if !any_valid {
-        return (Vec::new(), (0..nt).collect(), (0..nd).collect());
-    }
-
-    let assigned = hungarian(nt, nd, &costs);
-    let mut matched = Vec::with_capacity(assigned.len());
-    let mut t_used = vec![false; nt];
-    let mut d_used = vec![false; nd];
-    for (ti, di) in assigned {
-        if costs[ti * nd + di] < DISALLOWED_COST * 0.5 {
-            matched.push((ti, di));
-            t_used[ti] = true;
-            d_used[di] = true;
-        }
-    }
-    let unmatched_t = (0..nt).filter(|&i| !t_used[i]).collect();
-    let unmatched_d = (0..nd).filter(|&i| !d_used[i]).collect();
-    (matched, unmatched_t, unmatched_d)
 }
 
 /// Deterministic two-stage ByteTrack multi-object tracker.
@@ -674,14 +433,69 @@ impl ByteTracker {
     }
 }
 
+/// Raw pre-NMS detector confidence floor for [`Predictor::predict_sequence`]:
+/// - Uses `target.next_down()` when `target > 0.0` so boundary detections with `score == low_thresh` survive
+///   the detector's strict `>` candidate filter (both `o2m` and `o2o`) before `ByteTracker::update`'s `>=` check.
+/// - For calibrated `ScoreRule`s (`Elc` / `DflConsensus` / `DflRepulse` / `DflCgr`) on `o2m`, lowers the pre-NMS
+///   floor by `CALIBRATED_LOGIT_HEADROOM` in logit space so clusters that calibrate upward past `low_thresh` are
+///   not pruned prematurely; `ByteTracker::update` still filters final calibrated scores by `>= low_thresh`.
+pub(crate) fn sequence_det_conf(
+    pred_conf: f32,
+    low_thresh: f32,
+    score_rule: ScoreRule,
+    head_mode: HeadMode,
+) -> f32 {
+    let target = pred_conf.min(low_thresh);
+    if target <= 0.0 {
+        return 0.0;
+    }
+    let strict_floor = target.next_down().max(0.0);
+    if head_mode == HeadMode::O2m && score_rule.is_calibrated() {
+        let p = (target as f64).clamp(1e-6, 1.0 - 1e-6);
+        let logit = (p / (1.0 - p)).ln() - CALIBRATED_LOGIT_HEADROOM;
+        let lowered = (1.0 / (1.0 + (-logit).exp())) as f32;
+        lowered.min(strict_floor).max(0.0)
+    } else {
+        strict_floor
+    }
+}
+
+/// Split `frames` into consecutive runs of up to `SEQUENCE_BATCH` frames that share the exact same `rect`
+/// letterbox canvas (or any consecutive frames when `rect == false`). Because runs never mix incompatible
+/// `rect` canvases, every frame's letterbox matches single-image [`Predictor::predict`] regardless of later
+/// frames' dimensions.
+fn canvas_runs(frames: &[Image], imgsz: u32, rect: bool) -> Vec<(usize, usize)> {
+    let mut runs = Vec::new();
+    let opts = LetterboxOptions { stride: Some(32), ..LetterboxOptions::default() };
+    let mut start = 0usize;
+    while start < frames.len() {
+        let first_canvas = rect
+            .then(|| Letterbox::compute(frames[start].width, frames[start].height, imgsz, imgsz, &opts).out);
+        let mut end = start + 1;
+        while end < frames.len() && end - start < SEQUENCE_BATCH {
+            if let Some(c0) = first_canvas {
+                let c = Letterbox::compute(frames[end].width, frames[end].height, imgsz, imgsz, &opts).out;
+                if c != c0 {
+                    break;
+                }
+            }
+            end += 1;
+        }
+        runs.push((start, end));
+        start = end;
+    }
+    runs
+}
+
 impl Predictor {
     /// Detect and track objects across an ordered sequence of frames using [`ByteTracker`].
     ///
-    /// Frames run in bounded batches (up to 8 frames per forward pass, inheriting CPU/int8/GPU/`f16`/`o2o`
-    /// fast paths and GPU OOM half-batch fallback) with the detector's confidence threshold lowered to
-    /// `self.config().conf.min(track_cfg.low_thresh)` so ByteTrack's second-stage low-confidence occlusion
-    /// recovery receives low-score candidates even when `PredictConfig::conf` is higher, without mutating
-    /// `self`. Tracker updates execute strictly in frame order.
+    /// Consecutive frames sharing the same letterbox canvas run in bounded batches (up to 8 frames per forward
+    /// pass, inheriting CPU/int8/GPU/`f16`/`o2o` fast paths and GPU OOM half-batch fallback) so every frame uses
+    /// the exact canvas of [`Predictor::predict`] independent of other frames' dimensions. The detector's raw
+    /// candidate threshold is lowered internally for `track_cfg.low_thresh` (including strict-boundary and
+    /// calibrated `ScoreRule` headroom) without mutating `self`, and tracker updates execute strictly in frame
+    /// order.
     pub fn predict_sequence(&self, frames: &[Image], track_cfg: &TrackConfig) -> Result<Vec<SequenceFrame>> {
         let mut tracker = ByteTracker::new(track_cfg.clone())?;
         if frames.is_empty() {
@@ -691,14 +505,20 @@ impl Predictor {
             check_image(frame)?;
         }
 
-        let det_conf = self.config().conf.min(track_cfg.low_thresh);
+        let det_conf = sequence_det_conf(
+            self.config().conf,
+            track_cfg.low_thresh,
+            self.config().score,
+            self.model().head_mode(),
+        );
         let imgsz = self.config().imgsz;
+        let rect = self.config().rect;
         let mut out = Vec::with_capacity(frames.len());
         let mut frame_index = 0usize;
 
-        for chunk in frames.chunks(SEQUENCE_BATCH) {
+        for (start, end) in canvas_runs(frames, imgsz, rect) {
+            let chunk = &frames[start..end];
             let refs: Vec<&Image> = chunk.iter().collect();
-            let rect = self.config().rect && one_canvas(chunk, imgsz);
             let t_chunk = Instant::now();
             let preds = run_views_with_oom_fallback(&refs, &mut |sub| {
                 self.run_with_imgsz_conf(sub, rect, imgsz, Some(det_conf))
@@ -762,113 +582,37 @@ mod tests {
     }
 
     #[test]
-    fn hungarian_matches_bruteforce_optimum_on_rectangular_matrices() {
-        fn brute_best(r: usize, c: usize, costs: &[f64]) -> f64 {
-            fn dfs(
-                row: usize,
-                r: usize,
-                c: usize,
-                costs: &[f64],
-                used: &mut [bool],
-                acc: f64,
-                best: &mut f64,
-            ) {
-                if row == r {
-                    if acc < *best {
-                        *best = acc;
-                    }
-                    return;
-                }
-                for col in 0..c {
-                    if !used[col] {
-                        used[col] = true;
-                        dfs(row + 1, r, c, costs, used, acc + costs[row * c + col], best);
-                        used[col] = false;
-                    }
-                }
-            }
-            let mut best = f64::INFINITY;
-            if r <= c {
-                let mut used = vec![false; c];
-                dfs(0, r, c, costs, &mut used, 0.0, &mut best);
-            } else {
-                let mut t = vec![0.0; r * c];
-                for i in 0..r {
-                    for j in 0..c {
-                        t[j * r + i] = costs[i * c + j];
-                    }
-                }
-                let mut used = vec![false; r];
-                dfs(0, c, r, &t, &mut used, 0.0, &mut best);
-            }
-            best
+    fn second_stage_recovers_occluded_object_including_exact_kalman_velocity_gate() {
+        let mut trk = ByteTracker::new(TrackConfig::default()).unwrap();
+
+        // Regression for prior-p01 Kalman update: 60x80 box centered at x = 100, 110, ..., 160, followed by a
+        // low-confidence detection centered at x = 149 (must pass default stage-2 IoU gate 0.5 and keep ID 1).
+        for step in 0..=6 {
+            let cx = 100.0 + step as f32 * 10.0;
+            let out = trk.update(&[
+                det(cx - 30.0, 60.0, cx + 30.0, 140.0, 0.90, 0),
+                det(400.0, 400.0, 450.0, 450.0, 0.20, 0), // lone low-conf noise must never spawn
+            ]);
+            assert_eq!(out.len(), 1);
+            assert_eq!((out[0].track_id, out[0].age, out[0].hits), (1, step + 1, step + 1));
         }
 
-        let mut seed = 0x517c_c1b7_2722_0a95u64;
-        let mut next = || {
-            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-            ((seed >> 33) as f64) / ((1u64 << 31) as f64)
-        };
-        for &(r, c) in &[(1, 1), (2, 3), (3, 2), (4, 4), (3, 5), (5, 3)] {
-            for _ in 0..25 {
-                let costs: Vec<f64> =
-                    (0..r * c).map(|_| if next() < 0.25 { DISALLOWED_COST } else { next() }).collect();
-                let got = hungarian(r, c, &costs);
-                assert_eq!(got.len(), r.min(c));
-                let got_cost: f64 = got.iter().map(|&(ri, ci)| costs[ri * c + ci]).sum();
-                let want_cost = brute_best(r, c, &costs);
-                assert!((got_cost - want_cost).abs() < 1e-9, "{r}x{c}: got {got_cost} vs {want_cost}");
-            }
-        }
-    }
-
-    #[test]
-    fn second_stage_recovers_occluded_object_from_low_confidence_detection() {
-        let mut trk = ByteTracker::new(TrackConfig {
-            high_thresh: 0.5,
-            low_thresh: 0.1,
-            new_track_thresh: 0.6,
-            match_iou: 0.2,
-            second_match_iou: 0.5,
-            ..Default::default()
-        })
-        .unwrap();
-
-        // Frame 1: high-confidence object spawns track 1; lone low-conf noise must NOT spawn a track.
-        let f1 =
-            trk.update(&[det(100.0, 100.0, 160.0, 180.0, 0.85, 0), det(300.0, 300.0, 350.0, 350.0, 0.25, 0)]);
-        assert_eq!(f1.len(), 1);
-        assert_eq!((f1[0].track_id, f1[0].age, f1[0].hits), (1, 1, 1));
-
-        // Frames 2-4: object moves steadily right (+10px/frame), confidence drops to 0.20 (partial occlusion).
-        for step in 1..=3 {
-            let x = 100.0 + step as f32 * 10.0;
-            let out = trk.update(&[det(x, 100.0, x + 60.0, 180.0, 0.20, 0)]);
-            assert_eq!(out.len(), 1, "stage-2 must keep track 1 alive at low confidence (step {step})");
-            assert_eq!(out[0].track_id, 1);
-            assert_eq!(out[0].age, 1 + step);
-            assert_eq!(out[0].hits, 1 + step);
-            assert!((out[0].score - 0.20).abs() < 1e-6);
-        }
-
-        // Frame 5: object emerges back at high confidence.
-        let f5 = trk.update(&[det(140.0, 100.0, 200.0, 180.0, 0.90, 0)]);
-        assert_eq!(f5.len(), 1);
-        assert_eq!((f5[0].track_id, f5[0].age, f5[0].hits), (1, 5, 5));
+        // Low-confidence occluded detection at cx = 149 (score 0.20 in [0.1, 0.5)).
+        let recovered = trk.update(&[det(149.0 - 30.0, 60.0, 149.0 + 30.0, 140.0, 0.20, 0)]);
+        assert_eq!(recovered.len(), 1, "stage-2 must retain ID 1 under exact Kalman prediction");
+        assert_eq!((recovered[0].track_id, recovered[0].age, recovered[0].hits), (1, 8, 8));
+        assert!((recovered[0].score - 0.20).abs() < 1e-6);
     }
 
     #[test]
     fn coasting_reidentification_crossing_stability_and_reset() {
         let mut trk = ByteTracker::new(TrackConfig { track_buffer: 3, ..Default::default() }).unwrap();
 
-        // Two objects moving toward and crossing each other with constant velocity.
-        // Track A moves right (+12px/frame), Track B moves left (-12px/frame), slightly offset vertically.
         let mut id_a = 0u64;
         let mut id_b = 0u64;
         for f in 0..8 {
             let ax = 50.0 + f as f32 * 12.0;
             let bx = 170.0 - f as f32 * 12.0;
-            // Deliberately alternate input detection order every frame to verify order invariance.
             let mut frame_dets =
                 vec![det(ax, 100.0, ax + 50.0, 160.0, 0.90, 0), det(bx, 110.0, bx + 50.0, 170.0, 0.88, 0)];
             if f % 2 == 1 {
@@ -888,7 +632,7 @@ mod tests {
             }
         }
 
-        // Complete 2-frame occlusion (empty frames), then reappearance along predicted trajectory -> same IDs!
+        // Complete 2-frame occlusion, then reappearance along trajectory -> same IDs!
         assert!(trk.update(&[]).is_empty());
         assert_eq!(trk.lost_count(), 2);
         assert!(trk.update(&[]).is_empty());
@@ -907,33 +651,48 @@ mod tests {
         for _ in 0..4 {
             assert!(trk.update(&[]).is_empty());
         }
-        assert_eq!(trk.active_count(), 0);
-        assert_eq!(trk.lost_count(), 0);
+        assert_eq!((trk.active_count(), trk.lost_count()), (0, 0));
 
         // Reset restores frame_id = 0 and next_id = 1.
         trk.reset();
         assert_eq!(trk.frame_id(), 0);
         let fresh = trk.update(&[det(10.0, 10.0, 50.0, 50.0, 0.9, 1)]);
         assert_eq!(fresh.len(), 1);
-        assert_eq!(fresh[0].track_id, 1);
-        assert_eq!(fresh[0].class_id, 1);
+        assert_eq!((fresh[0].track_id, fresh[0].class_id), (1, 1));
     }
 
     #[test]
-    fn min_hits_and_class_awareness_and_non_finite_filtering() {
+    fn min_hits_class_agnostic_track_buffer_zero_and_det_conf_floor() {
+        // Class-aware + min_hits = 2 + NaN/degenerate filtering.
         let mut trk =
             ByteTracker::new(TrackConfig { min_hits: 2, class_aware: true, ..Default::default() }).unwrap();
         let b = det(20.0, 20.0, 80.0, 80.0, 0.9, 0);
         let bad_nan = det(20.0, 20.0, 80.0, 80.0, f32::NAN, 0);
         let bad_deg = det(80.0, 20.0, 20.0, 80.0, 0.9, 0);
-
-        // Frame 1: tentative, not yet emitted.
         assert!(trk.update(&[b, bad_nan, bad_deg]).is_empty());
-        // Frame 2: different class on same box does NOT confirm class-0 tentative track.
         assert!(trk.update(&[det(20.0, 20.0, 80.0, 80.0, 0.9, 1)]).is_empty());
-        // Frame 3: class-1 second hit confirms class-1 track!
         let f3 = trk.update(&[det(20.0, 20.0, 80.0, 80.0, 0.9, 1)]);
         assert_eq!(f3.len(), 1);
         assert_eq!((f3[0].class_id, f3[0].hits, f3[0].age), (1, 2, 2));
+
+        // Class-agnostic tracking updates class_id across stages and track_buffer = 0 retires immediately on miss.
+        let mut ag =
+            ByteTracker::new(TrackConfig { class_aware: false, track_buffer: 0, ..Default::default() })
+                .unwrap();
+        let t1 = ag.update(&[det(10.0, 10.0, 60.0, 60.0, 0.9, 0)]);
+        assert_eq!((t1[0].track_id, t1[0].class_id), (1, 0));
+        // Stage-2 low-conf detection with different class updates class_id and keeps ID 1.
+        let t2 = ag.update(&[det(12.0, 10.0, 62.0, 60.0, 0.25, 2)]);
+        assert_eq!((t2.len(), t2[0].track_id, t2[0].class_id), (1, 1, 2));
+        // One missed frame immediately retires when track_buffer == 0.
+        assert!(ag.update(&[]).is_empty());
+        assert_eq!((ag.active_count(), ag.lost_count()), (0, 0));
+
+        // sequence_det_conf preserves strict boundary `score == low_thresh` and calibrated ScoreRule headroom.
+        assert_eq!(sequence_det_conf(0.25, 0.0, ScoreRule::None, HeadMode::O2m), 0.0);
+        let f_o2o = sequence_det_conf(0.25, 0.1, ScoreRule::None, HeadMode::O2o);
+        assert!((0.0..0.1).contains(&f_o2o));
+        let f_elc = sequence_det_conf(0.25, 0.1, ScoreRule::Elc, HeadMode::O2m);
+        assert!(f_elc < 0.05 && f_elc > 0.0, "ELC pre-NMS floor should leave headroom below 0.1: {f_elc}");
     }
 }

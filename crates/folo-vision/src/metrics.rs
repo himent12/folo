@@ -15,7 +15,9 @@
 //! differs from Ultralytics' own AP.
 
 use crate::boxes::Xyxy;
-use crate::eval::{ImageDiagnostics, diagnose_image, worst_images as rank_worst_images};
+use crate::eval::{
+    ImageDiagnostics, diagnose_image, normalize_diag_thresholds, worst_images as rank_worst_images,
+};
 use crate::nms::Detection;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -168,8 +170,14 @@ impl Evaluator {
         Self::with_config(num_classes, EvalConfig::default())
     }
 
-    /// An evaluator with explicit settings.
-    pub fn with_config(num_classes: usize, cfg: EvalConfig) -> Self {
+    /// An evaluator with explicit settings. Diagnostic thresholds (`diag_conf`, `diag_tp_iou`, `diag_bg_iou`)
+    /// are normalized once (non-finite values fall back to defaults and `diag_bg_iou` is clamped to
+    /// `<= diag_tp_iou`) so [`Evaluator::merge`] remains consistent across evaluators built from identical configs.
+    pub fn with_config(num_classes: usize, mut cfg: EvalConfig) -> Self {
+        let (dc, dt, db) = normalize_diag_thresholds(cfg.diag_conf, cfg.diag_tp_iou, cfg.diag_bg_iou);
+        cfg.diag_conf = dc;
+        cfg.diag_tp_iou = dt;
+        cfg.diag_bg_iou = db;
         Self {
             num_classes,
             cfg,

@@ -131,7 +131,37 @@ fn predict_sequence_matches_manual_tracking_across_f32_int8_and_o2o() {
     assert_eq!(o2o_seq.len(), 3);
     assert!(o2o_seq.iter().any(|f| !f.tracks.is_empty()));
 
-    // 4. Empty sequence, invalid config, and bad image buffer errors.
+    // 4. Mixed-resolution sequence: every frame keeps its exact single-frame `rect` canvas regardless of
+    // adjacent frames' dimensions, matching manual single-frame prediction bit-for-bit.
+    let mixed = vec![
+        sequence_frames(1, 128, 64).pop().unwrap(),
+        sequence_frames(1, 64, 128).pop().unwrap(),
+        sequence_frames(1, 128, 64).pop().unwrap(),
+    ];
+    let mixed_seq = pred.predict_sequence(&mixed, &track_cfg).unwrap();
+    let mut mixed_manual = ByteTracker::new(track_cfg.clone()).unwrap();
+    for (sf, img) in mixed_seq.iter().zip(&mixed) {
+        assert_eq!((sf.width, sf.height), (img.width, img.height));
+        let manual_det = pred_low.predict(img).unwrap();
+        assert_eq!(sf.tracks, mixed_manual.update(&manual_det.detections));
+    }
+
+    // 5. Calibrated ScoreRule (`Elc`) works seamlessly through `predict_sequence`.
+    let pred_elc = Predictor::new(
+        fused_model(2, HeadMode::O2m, 61),
+        PredictConfig {
+            imgsz: 64,
+            conf: 0.25,
+            max_det: 20,
+            score: folo_vision::fusion::ScoreRule::Elc,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let elc_seq = pred_elc.predict_sequence(&frames[..3], &track_cfg).unwrap();
+    assert_eq!(elc_seq.len(), 3);
+
+    // 6. Empty sequence, invalid config, and bad image buffer errors.
     assert!(pred.predict_sequence(&[], &track_cfg).unwrap().is_empty());
     let bad_cfg = TrackConfig { low_thresh: 0.8, high_thresh: 0.5, ..Default::default() };
     assert!(pred.predict_sequence(&[], &bad_cfg).is_err());
@@ -255,19 +285,50 @@ fn evaluator_diagnostics_merge_parity_coco_filter_and_serde() {
     assert_eq!(back.image_diagnostics, rep.image_diagnostics);
     assert_eq!(back.worst_images(2), rep.worst_images(2));
 
-    // 3. `coco_compatible: true` ignores out-of-range area truths consistently across metrics and diagnostics.
+    // 3. `coco_compatible: true` ignores out-of-range truths and detections matching them consistently across
+    // AP metrics and per-image diagnostics.
     let mut coco_ev =
         Evaluator::with_config(1, EvalConfig { record_diagnostics: true, ..EvalConfig::coco() });
     coco_ev.add_image(
-        &[det(0.0, 0.0, 10.0, 10.0, 0.9, 0)],
+        &[
+            det(0.0, 0.0, 10.0, 10.0, 0.9, 0),
+            det(0.0, 0.0, 90_000.0, 100_000.0, 0.85, 0), // matches COCO-ignored truth at IoU 0.75 -> ignored
+        ],
         &[
             gt(0.0, 0.0, 10.0, 10.0, 0),
-            gt(0.0, 0.0, 200_000.0, 200_000.0, 0), // area > 1e10 -> COCO-ignored
+            gt(0.0, 0.0, 120_000.0, 100_000.0, 0), // area > 1e10 -> COCO-ignored
         ],
     );
     let coco_rep = coco_ev.compute();
     assert_eq!(coco_rep.num_truths, 1);
     assert_eq!(coco_rep.image_diagnostics[0].num_truths, 1);
+    assert_eq!(coco_rep.image_diagnostics[0].num_preds, 1);
     assert_eq!(coco_rep.image_diagnostics[0].tp, 1);
+    assert_eq!(coco_rep.image_diagnostics[0].fp, 0);
     assert_eq!(coco_rep.image_diagnostics[0].fn_count, 0);
+    assert!(coco_rep.worst_images(5).is_empty());
+
+    // 4. Evaluators built with non-finite diagnostic thresholds normalize cleanly and merge without panicking.
+    let nan_cfg = EvalConfig {
+        record_diagnostics: true,
+        diag_conf: f32::NAN,
+        diag_tp_iou: f32::NAN,
+        diag_bg_iou: f32::NAN,
+        ..Default::default()
+    };
+    let mut nan_a = Evaluator::with_config(1, nan_cfg.clone());
+    let mut nan_b = Evaluator::with_config(1, nan_cfg);
+    nan_a.add_image(&[det(0.0, 0.0, 10.0, 10.0, 0.9, 0)], &[gt(0.0, 0.0, 10.0, 10.0, 0)]);
+    nan_b.add_image(&[], &[gt(0.0, 0.0, 10.0, 10.0, 0)]);
+    nan_a.merge(nan_b);
+    assert_eq!(nan_a.image_diagnostics().len(), 2);
+    assert_eq!(nan_a.image_diagnostics()[1].image_index, 1);
+}
+
+#[test]
+#[should_panic(expected = "config mismatch")]
+fn evaluator_merge_panics_on_mismatched_diagnostics_config() {
+    let mut a = Evaluator::with_config(1, EvalConfig::with_diagnostics());
+    let b = Evaluator::new(1);
+    a.merge(b);
 }

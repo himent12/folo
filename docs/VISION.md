@@ -24,7 +24,7 @@ val.rs             validate: a model on a dataset split
 predict.rs         Predictor
 tile.rs            SAHI tiled inference (TileConfig, compute_tiles, crop_tile, merge_tiled_detections)
 tta.rs             Test-Time Augmentation (TtaConfig, PredictOptions, unflip_xyxy_h, merge_tta_detections)
-track.rs           ByteTrack multi-object tracking (ByteTracker, TrackConfig, TrackedDetection, Predictor::predict_sequence)
+track/             ByteTrack multi-object tracking (mod.rs: ByteTracker, TrackConfig, TrackedDetection, Predictor::predict_sequence; kalman.rs; assign.rs)
 export/onnx/       ONNX export: graph.rs, blocks.rs (mirrors forward), decode.rs, proto.rs
 precompile.rs      GPU pipeline precompile for a run's kernels
 ```
