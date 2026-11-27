@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, HashSet};
 use folo_api::{LogLevel, LogLine, QueueRequest, Run, RunMetrics};
 use folo_server::store::{
     AutoBatchOptions, LogsQuery, MAX_RUN_NAME_CHARS, MetricsQuery, QueueMove, RunOptions,
-    check_auto_batch_options, parse_arch_override,
+    check_auto_batch_options, check_max_preempt_retries, parse_arch_override,
 };
 use rmcp::model::JsonObject;
 use serde_json::Value;
@@ -90,6 +90,7 @@ impl Inner {
             target_utilization: a.auto_batch_target,
         };
         check_auto_batch_options(&auto_batch)?;
+        check_max_preempt_retries(a.max_preempt_retries, a.config.compute.is_some())?;
         // The server's limit (`POST /api/runs`), also in the inputSchema's `maxLength`.
         check_name_at("name", &a.config.name, MAX_RUN_NAME_CHARS)?;
         self.ensure_dataset(&a.config.dataset_id).await?;
@@ -115,7 +116,9 @@ impl Inner {
             }
         }
         let auto_note = if auto_batch.enabled { " (auto-batch)" } else { "" };
-        let options = RunOptions { auto_batch, arch: arch_override };
+        let spot_note = a.max_preempt_retries.map_or_else(String::new, |n| format!(" (spot retries: {n})"));
+        let options =
+            RunOptions { auto_batch, arch: arch_override, max_preempt_retries: a.max_preempt_retries };
         let run = self
             .blocking(move |s| s.create_run_with_options(a.config, options))
             .await
@@ -127,7 +130,7 @@ impl Inner {
         }
         let arch_label = summary_arch.as_deref().unwrap_or_else(|| run.config.arch.as_str());
         let summary = format!(
-            "started {} ({}): {} on {}, {} epochs{auto_note}; follow it with run_status or folo://runs/{}",
+            "started {} ({}): {} on {}, {} epochs{auto_note}{spot_note}; follow it with run_status or folo://runs/{}",
             run.id, run.name, arch_label, run.config.dataset_id, run.epochs, run.id
         );
         out(&TrainResult { run_id: run.id, status: run.status }, summary)
@@ -189,19 +192,26 @@ impl Inner {
         }
         let id = a.run_id.clone();
         let n = a.log_lines as usize;
-        let (run, metrics, mut log) = self
+        let (run, preemption, metrics, mut log) = self
             .blocking(move |s| {
-                let run = s.get_run(&id)?;
+                let (run, preemption) = s.get_run_with_preemption(&id)?;
                 let metrics = s.run_metrics(&id, &MetricsQuery::every(u64::MAX))?;
                 // The whole log (as far as /logs serves it), for the warnings; `log` keeps the last n lines.
                 let log = s.run_logs(&id, &LogsQuery::last(WARNING_SCAN_LINES))?.lines;
-                Ok((run, metrics, log))
+                Ok((run, preemption, metrics, log))
             })
             .await?;
+        let cloud_preemption = preemption.map(|p| CloudPreemptionSummary {
+            retries: p.retries,
+            max_retries: p.max_retries,
+            recovering: p.recovering,
+            preempted_instances: p.preempted_instances,
+        });
         let warnings = log_warnings(&log);
         log.drain(..log.len().saturating_sub(n));
         let mut r = RunStatusResult {
             run,
+            cloud_preemption,
             last_step: metrics.steps.last().copied(),
             last_epoch: metrics.epochs.last().cloned(),
             warnings,
@@ -215,7 +225,7 @@ impl Inner {
         {
             e.val.per_class.clear();
         }
-        let mut line = run_line(&r.run);
+        let mut line = run_line(&r.run, r.cloud_preemption.as_ref());
         if let Some(w) = r.warnings.first() {
             line.push_str(&format!("; warning: {w}"));
             if r.warnings.len() > 1 {
@@ -348,9 +358,16 @@ pub(super) fn log_warnings(log: &[LogLine]) -> Vec<String> {
     out
 }
 
-fn run_line(r: &Run) -> String {
+fn run_line(r: &Run, preemption: Option<&CloudPreemptionSummary>) -> String {
     let mut s =
         format!("{} ({}): {}, epoch {}/{}, step {}", r.id, r.name, r.status_str(), r.epoch, r.epochs, r.step);
+    if let Some(p) = preemption {
+        if p.recovering {
+            s.push_str(&format!(", spot recovery in progress (preemptions {}/{})", p.retries, p.max_retries));
+        } else if p.retries > 0 {
+            s.push_str(&format!(", spot preemptions {}/{}", p.retries, p.max_retries));
+        }
+    }
     if let Some(b) = r.best {
         s.push_str(&format!(", best mAP50-95 {:.3} at epoch {}", b.map50_95, b.epoch));
     }

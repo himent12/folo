@@ -133,6 +133,11 @@ pub struct TrainArgs {
     #[serde(default)]
     #[schemars(range(min = 0.25, max = 0.95))]
     pub auto_batch_target: Option<f64>,
+    /// Cloud runs only: maximum automatic spot-preemption retries (`0..=20`, default `3`; `0` disables automatic
+    /// spot recovery). Rejected on local runs.
+    #[serde(default)]
+    #[schemars(range(min = 0, max = 20))]
+    pub max_preempt_retries: Option<u32>,
 }
 
 /// `train` result.
@@ -170,12 +175,29 @@ fn default_log_lines() -> u32 {
     20
 }
 
+/// Cloud spot-preemption auto-resume status reported alongside a cloud run.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CloudPreemptionSummary {
+    /// Spot preemptions survived (or currently recovering from) so far.
+    pub retries: u32,
+    /// Maximum automatic spot-preemption retries allowed for this run (`0` disables auto-resume).
+    pub max_retries: u32,
+    /// True while the control plane is actively provisioning a replacement instance after a preemption.
+    pub recovering: bool,
+    /// Prior cloud instance IDs that were preempted before the active instance.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub preempted_instances: Vec<String>,
+}
+
 /// `run_status` result: the run plus its latest step, epoch and log lines.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct RunStatusResult {
     /// The run.
     #[serde(flatten)]
     pub run: Run,
+    /// Cloud spot-preemption retry count and recovery state (cloud runs only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cloud_preemption: Option<CloudPreemptionSummary>,
     /// The latest optimizer step, if any.
     pub last_step: Option<Step>,
     /// The latest validated epoch, if any.
@@ -630,6 +652,23 @@ pub struct ModelSummary {
     pub about: Option<String>,
 }
 
+/// CPU SIMD capabilities and active INT8 Q8 kernel tier.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct CpuSimdInfo {
+    /// Host supports x86_64 AVX2.
+    pub avx2: bool,
+    /// Host supports x86_64 AVX-VNNI (256-bit).
+    pub avx_vnni: bool,
+    /// Host supports x86_64 AVX-512 VNNI.
+    pub avx512_vnni: bool,
+    /// Host supports aarch64 NEON.
+    pub neon: bool,
+    /// True when an accelerated VNNI INT8 dot-product kernel is active (not overridden to scalar/AVX2).
+    pub int8_fast: bool,
+    /// Active INT8 Q8 kernel tier name (e.g. `AVX-512 VNNI (512-bit)`, `AVX-VNNI`, `AVX2`, `portable`).
+    pub int8_kernel: String,
+}
+
 /// CPU of the machine running `folo mcp`.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct CpuDevice {
@@ -639,6 +678,9 @@ pub struct CpuDevice {
     pub threads: u32,
     /// Total memory in bytes.
     pub memory_bytes: u64,
+    /// CPU SIMD extensions and active INT8 Q8 kernel tier (`null` from an older server).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub simd: Option<CpuSimdInfo>,
 }
 
 /// Compute devices.

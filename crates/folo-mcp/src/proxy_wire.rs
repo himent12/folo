@@ -1,11 +1,50 @@
 //! Wire helpers for [`super::HttpStore`]: multipart encoding, content-type mapping, and safetensors header
 //! probing against older servers.
 
+use folo_api::{Run, SystemResponse};
 use folo_client::{Client, encode};
-use folo_server::store::check_arch_override;
+use folo_server::store::{CloudPreemptionStatus, check_arch_override};
+use folo_server::system::CpuSimd;
 use http::StatusCode;
 
 use crate::errors::Error;
+use crate::proxy::store_error;
+
+/// Reads `GET /api/system` including the additive `cpu_simd` field when present.
+pub(super) fn system_with_simd(client: &Client) -> Result<(SystemResponse, Option<CpuSimd>), Error> {
+    let mut raw: serde_json::Value = client.get("/system").map_err(store_error)?;
+    let cpu_simd = raw
+        .as_object_mut()
+        .and_then(|o| o.remove("cpu_simd"))
+        .filter(|v| !v.is_null())
+        .map(serde_json::from_value::<CpuSimd>)
+        .transpose()
+        .map_err(|e| decode_error(client.base(), e))?;
+    let base: SystemResponse = serde_json::from_value(raw).map_err(|e| decode_error(client.base(), e))?;
+    Ok((base, cpu_simd))
+}
+
+/// Reads `GET /api/runs/{id}` including the additive `cloud_preemption` field when present.
+pub(super) fn run_with_preemption(
+    client: &Client,
+    id: &str,
+) -> Result<(Run, Option<CloudPreemptionStatus>), Error> {
+    let mut raw: serde_json::Value = client.get(&format!("/runs/{}", encode(id))).map_err(store_error)?;
+    let preemption = raw
+        .as_object_mut()
+        .and_then(|o| o.remove("cloud_preemption"))
+        .filter(|v| !v.is_null())
+        .map(serde_json::from_value::<CloudPreemptionStatus>)
+        .transpose()
+        .map_err(|e| decode_error(client.base(), e))?;
+    let run: Run = serde_json::from_value(raw).map_err(|e| decode_error(client.base(), e))?;
+    Ok((run, preemption))
+}
+
+fn decode_error(base: &str, e: serde_json::Error) -> Error {
+    Error::new(StatusCode::BAD_GATEWAY, "bad_gateway", format!("unexpected response from {base}: {e}"))
+        .hint("the server may be a different FOLO version")
+}
 
 /// Reads the canonical detector architecture (`folo-*` or `folo2-*`) from the safetensors header of
 /// `GET /api/models/{id}/weights` via bounded `Range` requests. Used only against older real servers that do

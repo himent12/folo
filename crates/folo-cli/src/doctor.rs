@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use folo_cli::VERSION;
 use folo_server::WebSource;
+use folo_server::system::CpuSimd;
 use serde_json::json;
 
 use crate::cli::DoctorArgs;
@@ -14,26 +15,38 @@ fn gib(bytes: u64) -> String {
     format!("{:.1} GiB", bytes as f64 / (1u64 << 30) as f64)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct CpuSimd {
-    avx2: bool,
-    avx_vnni: bool,
-    neon: bool,
-    int8_fast: bool,
+#[derive(Debug, Clone, Copy, Default)]
+struct SimdOverrides {
+    scalar: bool,
+    no_vnni: bool,
+    no_avx512: bool,
 }
 
-fn cpu_simd() -> CpuSimd {
-    #[cfg(target_arch = "x86_64")]
-    let (avx2, avx_vnni, neon) =
-        (std::is_x86_feature_detected!("avx2"), std::is_x86_feature_detected!("avxvnni"), false);
-    #[cfg(target_arch = "aarch64")]
-    let (avx2, avx_vnni, neon) = (false, false, std::arch::is_aarch64_feature_detected!("neon"));
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-    let (avx2, avx_vnni, neon) = (false, false, false);
-    CpuSimd { avx2, avx_vnni, neon, int8_fast: folo_vision::model::quant::uses_vnni() }
+impl SimdOverrides {
+    fn from_env() -> Self {
+        Self {
+            scalar: std::env::var_os("FOLO_Q8_SCALAR").is_some(),
+            no_vnni: std::env::var_os("FOLO_Q8_NO_VNNI").is_some(),
+            no_avx512: std::env::var_os("FOLO_Q8_NO_AVX512").is_some(),
+        }
+    }
+
+    fn active_names(self) -> Vec<&'static str> {
+        let mut names = Vec::new();
+        if self.scalar {
+            names.push("FOLO_Q8_SCALAR");
+        }
+        if self.no_vnni {
+            names.push("FOLO_Q8_NO_VNNI");
+        }
+        if self.no_avx512 {
+            names.push("FOLO_Q8_NO_AVX512");
+        }
+        names
+    }
 }
 
-fn format_simd(simd: &CpuSimd, scalar_override: bool) -> String {
+fn format_simd(simd: &CpuSimd, overrides: SimdOverrides) -> String {
     let mut isas = Vec::new();
     if simd.avx2 {
         isas.push("avx2");
@@ -41,20 +54,21 @@ fn format_simd(simd: &CpuSimd, scalar_override: bool) -> String {
     if simd.avx_vnni {
         isas.push("avx-vnni");
     }
+    if simd.avx512_vnni {
+        isas.push("avx512-vnni");
+    }
     if simd.neon {
         isas.push("neon");
     }
     let isa = if isas.is_empty() { "none".to_string() } else { isas.join(", ") };
-    let int8 = if simd.int8_fast {
-        "int8 fast"
-    } else if scalar_override && simd.avx_vnni {
-        "int8 portable; disabled by FOLO_Q8_SCALAR"
-    } else if scalar_override {
-        "int8 portable; FOLO_Q8_SCALAR set"
-    } else {
-        "int8 portable"
-    };
-    format!("{isa} ({int8})")
+    let mut notes = vec![format!("int8: {}", simd.int8_kernel)];
+    let active = overrides.active_names();
+    if !active.is_empty() {
+        let verb =
+            if !simd.int8_fast && (simd.avx_vnni || simd.avx512_vnni) { "disabled by" } else { "override:" };
+        notes.push(format!("{verb} {}", active.join(", ")));
+    }
+    format!("{isa} ({})", notes.join("; "))
 }
 
 fn abs_path(p: PathBuf) -> PathBuf {
@@ -87,8 +101,8 @@ fn resolved_cache_dir() -> PathBuf {
 
 pub(crate) fn doctor(args: DoctorArgs, out: Out) -> Result<(), CliError> {
     let host = folo_server::system::host_info();
-    let simd = cpu_simd();
-    let scalar_override = std::env::var_os("FOLO_Q8_SCALAR").is_some();
+    let simd = folo_server::system::cpu_simd();
+    let simd_overrides = SimdOverrides::from_env();
     let data_dir = abs_path(resolved_data_dir());
     let weights_dir = abs_path(resolved_weights_dir());
     let cache_dir = abs_path(resolved_cache_dir());
@@ -160,8 +174,10 @@ pub(crate) fn doctor(args: DoctorArgs, out: Out) -> Result<(), CliError> {
             "simd": {
                 "avx2": simd.avx2,
                 "avx_vnni": simd.avx_vnni,
+                "avx512_vnni": simd.avx512_vnni,
                 "neon": simd.neon,
                 "int8_fast": simd.int8_fast,
+                "int8_kernel": simd.int8_kernel,
             },
         },
         "memory": { "total_bytes": host.memory_total_bytes, "available_bytes": host.memory_available_bytes },
@@ -184,7 +200,7 @@ pub(crate) fn doctor(args: DoctorArgs, out: Out) -> Result<(), CliError> {
     out.human(format!("folo      {VERSION}"));
     out.human(format!("os        {} ({})", host.os, host.arch));
     out.human(format!("cpu       {} ({} threads)", host.cpu_name, host.cpu_threads));
-    out.human(format!("simd      {}", format_simd(&simd, scalar_override)));
+    out.human(format!("simd      {}", format_simd(&simd, simd_overrides)));
     out.human(format!(
         "memory    {} total, {} available",
         gib(host.memory_total_bytes),
@@ -269,25 +285,90 @@ mod tests {
 
     #[test]
     fn format_simd_describes_isa_and_int8_status() {
+        let none = SimdOverrides::default();
         assert_eq!(
-            format_simd(&CpuSimd { avx2: true, avx_vnni: true, neon: false, int8_fast: true }, false),
-            "avx2, avx-vnni (int8 fast)"
+            format_simd(
+                &CpuSimd {
+                    avx2: true,
+                    avx_vnni: true,
+                    avx512_vnni: true,
+                    neon: false,
+                    int8_fast: true,
+                    int8_kernel: "AVX-512 VNNI (512-bit)".into(),
+                },
+                none
+            ),
+            "avx2, avx-vnni, avx512-vnni (int8: AVX-512 VNNI (512-bit))"
         );
         assert_eq!(
-            format_simd(&CpuSimd { avx2: true, avx_vnni: true, neon: false, int8_fast: false }, true),
-            "avx2, avx-vnni (int8 portable; disabled by FOLO_Q8_SCALAR)"
+            format_simd(
+                &CpuSimd {
+                    avx2: true,
+                    avx_vnni: true,
+                    avx512_vnni: true,
+                    neon: false,
+                    int8_fast: true,
+                    int8_kernel: "AVX-VNNI".into(),
+                },
+                SimdOverrides { no_avx512: true, ..none }
+            ),
+            "avx2, avx-vnni, avx512-vnni (int8: AVX-VNNI; override: FOLO_Q8_NO_AVX512)"
         );
         assert_eq!(
-            format_simd(&CpuSimd { avx2: true, avx_vnni: false, neon: false, int8_fast: false }, true),
-            "avx2 (int8 portable; FOLO_Q8_SCALAR set)"
+            format_simd(
+                &CpuSimd {
+                    avx2: true,
+                    avx_vnni: true,
+                    avx512_vnni: false,
+                    neon: false,
+                    int8_fast: false,
+                    int8_kernel: "portable".into(),
+                },
+                SimdOverrides { scalar: true, ..none }
+            ),
+            "avx2, avx-vnni (int8: portable; disabled by FOLO_Q8_SCALAR)"
         );
         assert_eq!(
-            format_simd(&CpuSimd { avx2: false, avx_vnni: false, neon: true, int8_fast: false }, false),
-            "neon (int8 portable)"
+            format_simd(
+                &CpuSimd {
+                    avx2: true,
+                    avx_vnni: false,
+                    avx512_vnni: false,
+                    neon: false,
+                    int8_fast: false,
+                    int8_kernel: "AVX2".into(),
+                },
+                SimdOverrides { no_vnni: true, ..none }
+            ),
+            "avx2 (int8: AVX2; override: FOLO_Q8_NO_VNNI)"
         );
         assert_eq!(
-            format_simd(&CpuSimd { avx2: false, avx_vnni: false, neon: false, int8_fast: false }, false),
-            "none (int8 portable)"
+            format_simd(
+                &CpuSimd {
+                    avx2: false,
+                    avx_vnni: false,
+                    avx512_vnni: false,
+                    neon: true,
+                    int8_fast: false,
+                    int8_kernel: "portable".into(),
+                },
+                none
+            ),
+            "neon (int8: portable)"
+        );
+        assert_eq!(
+            format_simd(
+                &CpuSimd {
+                    avx2: false,
+                    avx_vnni: false,
+                    avx512_vnni: false,
+                    neon: false,
+                    int8_fast: false,
+                    int8_kernel: "portable".into(),
+                },
+                none
+            ),
+            "none (int8: portable)"
         );
     }
 }

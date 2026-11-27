@@ -40,6 +40,7 @@ fn read_only_hides_and_rejects_mutating_tools() {
         "list_benchmarks",
         "get_benchmark",
         "bench_entry",
+        "compare_bench_entries",
     ];
     check_tools(&mut c, &listed);
     for (tool, args) in [

@@ -113,6 +113,9 @@ struct RunFile {
     /// Optional FOLO v2-Iso architecture override (`"folo2-n"`..`"folo2-x"`) requested when the run was created.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     arch_override: Option<String>,
+    /// Optional per-run override for cloud spot preemption auto-resume attempts (`0..=20`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_preempt_retries: Option<u32>,
 }
 
 impl RunFile {

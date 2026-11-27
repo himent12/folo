@@ -336,6 +336,10 @@ async fn a_confined_session_refuses_the_benchmark_tools() {
             ),
             ("bench_entry", entry.clone()),
             ("stop_bench_entry", entry.clone()),
+            (
+                "compare_bench_entries",
+                json!({ "benchmark_id": "bn_1", "baseline_entry_id": "be_1", "candidate_entry_id": "be_2" }),
+            ),
         ] {
             assert_eq!(err(s, tool, args).await.body.code, "not_supported", "{tool}");
         }

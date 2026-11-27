@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 
 use clap::builder::NonEmptyStringValueParser;
-use clap::{Args, Subcommand};
+use clap::{Args, Subcommand, ValueEnum};
 
 use super::SplitArg;
 
@@ -28,6 +28,9 @@ pub enum BenchCommand {
     Status(BenchStatusArgs),
     /// Stop an entry (nothing of it is scored).
     Stop(BenchEntryArgs),
+    /// Compare two finished entries of a benchmark head-to-head (deltas: candidate - baseline).
+    #[command(allow_negative_numbers = true)]
+    Compare(BenchCompareArgs),
 }
 
 /// Where a `folo bench` command finds the benchmarks.
@@ -168,6 +171,56 @@ pub struct BenchRunArgs {
     /// auto]. A server runs entries on its own --device.
     #[arg(long)]
     pub device: Option<String>,
+    #[command(flatten)]
+    pub conn: BenchServerArgs,
+}
+
+/// Output format for `folo bench compare`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+pub enum BenchCompareFormat {
+    /// Human-readable aligned tables.
+    #[default]
+    Table,
+    /// GitHub-flavored Markdown report.
+    #[value(alias = "md")]
+    Markdown,
+    /// RFC-4180 CSV rows (overall, accuracy, axes, calibration/localization, speed, and conditions).
+    Csv,
+}
+
+impl BenchCompareFormat {
+    /// Canonical lowercase name of the format.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Table => "table",
+            Self::Markdown => "markdown",
+            Self::Csv => "csv",
+        }
+    }
+}
+
+/// `folo bench compare`.
+#[derive(Debug, Args)]
+pub struct BenchCompareArgs {
+    /// The benchmark's id (`bn_…`, `folo bench list`).
+    pub bench: String,
+    /// Baseline entry id (`be_…`, reference).
+    pub baseline: String,
+    /// Candidate entry id (`be_…`, compared against baseline).
+    pub candidate: String,
+    /// Output format for stdout or `--out`: table, markdown (alias: md), or csv.
+    #[arg(long, value_enum, default_value_t = BenchCompareFormat::Table)]
+    pub format: BenchCompareFormat,
+    /// Write the formatted comparison report atomically to this new file (never overwrites).
+    #[arg(long, visible_alias = "output", value_name = "PATH")]
+    pub out: Option<PathBuf>,
+    /// Exit non-zero if `candidate.score - baseline.score < --min-delta` (default threshold: 0.0).
+    #[arg(long)]
+    pub fail_on_regression: bool,
+    /// With --fail-on-regression: minimum allowed score delta in points (negative allows small drops, e.g. -0.5)
+    /// [default: 0.0].
+    #[arg(long, requires = "fail_on_regression", value_name = "POINTS")]
+    pub min_delta: Option<f64>,
     #[command(flatten)]
     pub conn: BenchServerArgs,
 }

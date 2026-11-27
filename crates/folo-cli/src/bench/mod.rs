@@ -5,6 +5,7 @@
 //! on the data dir, whose lock it then holds as `folo mcp` does. A model's entry runs in the process that started it,
 //! so `run --model` without a server waits for the entry to end. `print` holds the human output.
 
+mod compare;
 mod print;
 
 use std::sync::Arc;
@@ -70,6 +71,7 @@ pub fn run(cmd: BenchCommand, out: Out) -> Result<(), CliError> {
             out.record(&r);
             print::state(&r, out);
         }
+        BenchCommand::Compare(a) => compare::compare(a, out)?,
     }
     Ok(())
 }

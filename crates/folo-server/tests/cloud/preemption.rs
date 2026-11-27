@@ -355,6 +355,84 @@ fn restart_during_preemption_recovery_continues_auto_resume() {
     store2.shutdown();
 }
 
+#[test]
+fn per_run_max_preempt_retries_override_and_status_surface() {
+    no_gpu();
+    let t = TestDir::new("cloud-spot-per-run");
+    let cloud = TestCloud::new(&t.join("workers"));
+    // Server default is 3, but per-run `max_preempt_retries` overrides it to 1 and 0.
+    let store = plane(&t.join("home"), &cloud, Tuning { max_preemption_retries: 3, ..fast() });
+    let ds = dataset(&store);
+    let conn = connect(&store);
+
+    // Local run rejects `max_preempt_retries`; out-of-range (> 20) is rejected too.
+    let local_cfg: TrainConfig = serde_json::from_value(serde_json::json!({
+        "dataset_id": ds.id, "epochs": 1, "imgsz": 64, "batch": 2, "device": "cpu"
+    }))
+    .unwrap();
+    let e = store
+        .create_run_with_options(
+            local_cfg,
+            folo_server::store::RunOptions { max_preempt_retries: Some(2), ..Default::default() },
+        )
+        .unwrap_err();
+    assert_eq!(e.body.code, "invalid_config");
+
+    let e = store
+        .create_run_with_options(
+            cloud_run(&ds, &conn.id, 3),
+            folo_server::store::RunOptions { max_preempt_retries: Some(21), ..Default::default() },
+        )
+        .unwrap_err();
+    assert_eq!(e.body.code, "invalid_config");
+
+    // Per-run `max_preempt_retries: Some(1)` recovers once then exhausts at attempt 1 (not server default 3).
+    cloud.hold_epochs(true);
+    let run1 = store
+        .create_run_with_options(
+            cloud_run(&ds, &conn.id, 4),
+            folo_server::store::RunOptions { max_preempt_retries: Some(1), ..Default::default() },
+        )
+        .unwrap();
+    until("run1 checkpoint synced", || run_of(&store, &run1.id).cloud.and_then(|c| c.synced));
+    let first_inst = run_of(&store, &run1.id).cloud.and_then(|c| c.instance_id).unwrap();
+    cloud.kill(0);
+
+    until("run1 replacement worker training", || {
+        (cloud.calls(Call::Launch) >= 2 && phase(&run_of(&store, &run1.id)) == CloudPhase::Training)
+            .then_some(())
+    });
+    let (_, pre1) = store.get_run_with_preemption(&run1.id).unwrap();
+    let pre1 = pre1.expect("cloud run reports preemption status");
+    assert_eq!((pre1.retries, pre1.max_retries, pre1.recovering), (1, 1, false));
+    assert_eq!(pre1.preempted_instances, vec![first_inst]);
+
+    // Second preemption exhausts the per-run limit of 1.
+    cloud.kill(1);
+    let done1 = finished(&store, &run1.id);
+    assert_eq!((done1.status, done1.error_code.as_deref()), (RunStatus::Failed, Some("cloud_instance_lost")));
+    assert!(done1.error.as_deref().unwrap().contains("exhausted all 1 attempt(s)"), "{:?}", done1.error);
+    assert_eq!(cloud.calls(Call::Launch), 2);
+
+    // Per-run `max_preempt_retries: Some(0)` disables automatic recovery on the very first preemption.
+    let run0 = store
+        .create_run_with_options(
+            cloud_run(&ds, &conn.id, 3),
+            folo_server::store::RunOptions { max_preempt_retries: Some(0), ..Default::default() },
+        )
+        .unwrap();
+    until("run0 checkpoint synced", || run_of(&store, &run0.id).cloud.and_then(|c| c.synced));
+    cloud.kill(2);
+    let done0 = finished(&store, &run0.id);
+    assert_eq!((done0.status, done0.error_code.as_deref()), (RunStatus::Failed, Some("cloud_instance_lost")));
+    let err0 = done0.error.as_deref().unwrap();
+    assert!(err0.contains("the weights copied so far stay") && !err0.contains("exhausted"), "{err0}");
+    assert_eq!(cloud.calls(Call::Launch), 3, "zero retries must not launch a replacement");
+    let (_, pre0) = store.get_run_with_preemption(&run0.id).unwrap();
+    assert_eq!(pre0.unwrap().max_retries, 0);
+    store.shutdown();
+}
+
 fn copy_dir_without_locks(src: &std::path::Path, dst: &std::path::Path) {
     std::fs::create_dir_all(dst).unwrap();
     for entry in std::fs::read_dir(src).unwrap() {

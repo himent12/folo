@@ -16,11 +16,12 @@ use folo_api::{
 };
 use folo_client::{Client, encode};
 use folo_server::store::{
-    AutoBatchOptions, DynamicAxes, FEATURE_EXPORT_DYNAMIC_AXES, FEATURE_FOLO2_ARCH,
-    FEATURE_THRESHOLD_CALIBRATION, FEATURE_TRAIN_AUTO_BATCH, FEATURE_VAL_DIAGNOSTICS, ImageData, ImageQuery,
-    IssueQuery, LogsQuery, MetricsQuery, PredictInput, PredictSource, QueueMove, RunOptions, Store,
-    Subscription, ThresholdCalibration, ValDiagConfig, ValDiagnostics, ValExtended, check_arch_override,
-    check_auto_batch_options, check_export_axes, check_val_diag_config,
+    AutoBatchOptions, CloudPreemptionStatus, DynamicAxes, FEATURE_CLOUD_SPOT_RESUME,
+    FEATURE_EXPORT_DYNAMIC_AXES, FEATURE_FOLO2_ARCH, FEATURE_THRESHOLD_CALIBRATION, FEATURE_TRAIN_AUTO_BATCH,
+    FEATURE_VAL_DIAGNOSTICS, ImageData, ImageQuery, IssueQuery, LogsQuery, MetricsQuery, PredictInput,
+    PredictSource, QueueMove, RunOptions, Store, Subscription, ThresholdCalibration, ValDiagConfig,
+    ValDiagnostics, ValExtended, check_arch_override, check_auto_batch_options, check_export_axes,
+    check_max_preempt_retries, check_val_diag_config,
 };
 use http::StatusCode;
 use serde::Serialize;
@@ -262,6 +263,11 @@ impl HttpStore {
     /// `GET /api/system` of the server.
     pub fn system(&self) -> Result<SystemResponse, Error> {
         self.get("/system")
+    }
+
+    /// `GET /api/system` of the server, including additive `cpu_simd` when the server reports it.
+    pub fn system_with_simd(&self) -> Result<(SystemResponse, Option<folo_server::system::CpuSimd>), Error> {
+        wire::system_with_simd(&self.client)
     }
 
     fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, Error> {
@@ -525,7 +531,7 @@ impl Store for HttpStore {
         config: TrainConfig,
         auto_batch: AutoBatchOptions,
     ) -> Result<Run, Error> {
-        self.create_run_with_options(config, RunOptions { auto_batch, arch: None })
+        self.create_run_with_options(config, RunOptions { auto_batch, arch: None, max_preempt_retries: None })
     }
 
     fn create_run_with_options(
@@ -534,6 +540,7 @@ impl Store for HttpStore {
         mut options: RunOptions,
     ) -> Result<Run, Error> {
         check_auto_batch_options(&options.auto_batch)?;
+        check_max_preempt_retries(options.max_preempt_retries, config.compute.is_some())?;
         if let Some(parsed) = check_arch_override(options.arch.as_deref())? {
             config.arch = parsed;
             if !options.arch.as_deref().is_some_and(|a| a.starts_with("folo2-")) {
@@ -565,6 +572,17 @@ impl Store for HttpStore {
             )
             .hint("update folo serve, or use a `folo-n..folo-x` architecture"));
         }
+        if options.max_preempt_retries.is_some() && !self.has_feature(FEATURE_CLOUD_SPOT_RESUME)? {
+            return Err(Error::new(
+                StatusCode::NOT_IMPLEMENTED,
+                "not_implemented",
+                format!(
+                    "the folo serve at {} is too old for per-run spot-preemption retries (`max_preempt_retries`)",
+                    self.base()
+                ),
+            )
+            .hint("update folo serve, or omit `max_preempt_retries`"));
+        }
         let mut body = serde_json::to_value(config).map_err(|e| Error::internal(e.to_string()))?;
         if let Some(arch) = options.arch {
             body["arch"] = serde_json::json!(arch);
@@ -574,6 +592,9 @@ impl Store for HttpStore {
             if let Some(target) = options.auto_batch.target_utilization {
                 body["auto_batch_target"] = serde_json::json!(target);
             }
+        }
+        if let Some(retries) = options.max_preempt_retries {
+            body["max_preempt_retries"] = serde_json::json!(retries);
         }
         self.post("/runs", &body)
     }
@@ -600,6 +621,19 @@ impl Store for HttpStore {
             )
             .hint("update folo serve, or omit auto-batch fields when resuming"));
         }
+        if fields.get("max_preempt_retries").is_some_and(|v| !v.is_null())
+            && !self.has_feature(FEATURE_CLOUD_SPOT_RESUME)?
+        {
+            return Err(Error::new(
+                StatusCode::NOT_IMPLEMENTED,
+                "not_implemented",
+                format!(
+                    "the folo serve at {} is too old for per-run spot-preemption retries (`max_preempt_retries`)",
+                    self.base()
+                ),
+            )
+            .hint("update folo serve, or omit `max_preempt_retries` when resuming"));
+        }
         if let Some(raw_arch) = fields.get("arch").filter(|v| !v.is_null())
             && let Some(s) = raw_arch.as_str()
         {
@@ -617,13 +651,11 @@ impl Store for HttpStore {
             }
         }
         let mut body = fields.clone();
-        // Strip explicit `null` auto-batch keys so older servers without `train_auto_batch` do not reject them
-        // as unknown fields when resuming a run without changing auto-batch settings.
-        if body.get("auto_batch").is_some_and(serde_json::Value::is_null) {
-            body.remove("auto_batch");
-        }
-        if body.get("auto_batch_target").is_some_and(serde_json::Value::is_null) {
-            body.remove("auto_batch_target");
+        // Strip explicit `null` additive control keys so older servers do not reject them as unknown fields.
+        for key in ["auto_batch", "auto_batch_target", "max_preempt_retries"] {
+            if body.get(key).is_some_and(serde_json::Value::is_null) {
+                body.remove(key);
+            }
         }
         body.insert("resume_run_id".into(), id.into());
         self.post("/runs", &serde_json::Value::Object(body))
@@ -632,6 +664,11 @@ impl Store for HttpStore {
     fn get_run(&self, id: &str) -> Result<Run, Error> {
         check_segment("run", id)?;
         self.get(&format!("/runs/{}", encode(id)))
+    }
+
+    fn get_run_with_preemption(&self, id: &str) -> Result<(Run, Option<CloudPreemptionStatus>), Error> {
+        check_segment("run", id)?;
+        wire::run_with_preemption(&self.client, id)
     }
 
     fn stop_run(&self, id: &str) -> Result<Run, Error> {

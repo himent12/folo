@@ -656,7 +656,7 @@ impl Exec {
                 self.hours()
             )));
         }
-        let max_retries = self.core.tuning.max_preemption_retries;
+        let max_retries = self.entry.max_preempt_retries().unwrap_or(self.core.tuning.max_preemption_retries);
         if max_retries == 0 {
             return Err(failed(
                 "cloud_instance_lost",

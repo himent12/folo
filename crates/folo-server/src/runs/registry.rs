@@ -332,7 +332,7 @@ mod tests {
         // Attempt 0 is stopped before the worker acquires the gate, then restarted into attempt 1.
         runs.stop(e.id()).unwrap();
         let cfg = e.run().config.clone();
-        let (_, attempt1) = runs.restart(&e, cfg.clone(), None).unwrap();
+        let (_, attempt1) = runs.restart(&e, cfg.clone(), None, None).unwrap();
         assert_eq!(attempt1, attempt0 + 1);
 
         // A delayed `enqueue` from attempt 0 must not duplicate attempt 1 in the queue.
@@ -370,7 +370,7 @@ mod tests {
             ended_in: None,
             unanswered_since: None,
         };
-        let (_, attempt2) = runs.restart(&e, cfg, Some(cloud)).unwrap();
+        let (_, attempt2) = runs.restart(&e, cfg, Some(cloud), None).unwrap();
         runs.enqueue(&e, attempt1).unwrap();
         runs.enqueue(&e, attempt2).unwrap();
         assert!(runs.queue.lock().unwrap().runs.is_empty(), "cloud-claimed run must never enter local queue");

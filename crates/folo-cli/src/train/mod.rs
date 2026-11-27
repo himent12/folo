@@ -8,6 +8,7 @@
 //! - `stop.rs`: `folo stop` (the stop file, the run folder's marker and lock) and Ctrl+C.
 //! - `tests.rs`: unit tests of `--set`, `--resume`, run-folder reservation and `folo stop`.
 
+mod cloud;
 mod config;
 mod progress;
 mod resume;
@@ -43,6 +44,10 @@ pub fn train(args: TrainArgs, out: Out) -> Result<(), CliError> {
             format!("--hsv takes three gains h,s,v (e.g. 0.015,0.7,0.4), got {}", args.hsv.len()),
         ));
     }
+    if args.cloud.is_some() {
+        return cloud::train_cloud(args, out);
+    }
+    cloud::reject_explicit_cloud_conn_flags(&args)?;
     // Mixed precision needs tensor cores, which the GPU device must be created with: ask before anything creates
     // the shared context (also when resuming a mixed-precision run without repeating --amp).
     if args.amp || args.resume.as_deref().is_some_and(checkpoint_uses_amp) {

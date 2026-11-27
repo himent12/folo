@@ -69,7 +69,8 @@ const TRAIN_CONFIG_FIELDS: &[&str] = &[
 /// Extra top-level control keys accepted by `POST /api/runs/estimate`.
 const ESTIMATE_EXTRA_FIELDS: &[&str] = &["auto_batch", "auto_batch_target"];
 /// Extra top-level control keys accepted by `POST /api/runs`.
-const RUN_CONTROL_FIELDS: &[&str] = &["checkpoint", "resume_run_id", "auto_batch", "auto_batch_target"];
+const RUN_CONTROL_FIELDS: &[&str] =
+    &["checkpoint", "resume_run_id", "auto_batch", "auto_batch_target", "max_preempt_retries"];
 /// Allowed keys of [`folo_api::Augment`].
 const AUGMENT_FIELDS: &[&str] = &["mosaic", "mixup", "hsv", "fliplr", "scale", "translate", "close_mosaic"];
 /// Allowed keys of [`folo_api::Compute`].
@@ -184,6 +185,21 @@ fn extract_arch_override(fields: &mut serde_json::Map<String, serde_json::Value>
     Ok(arch_override)
 }
 
+/// Extracts an optional `max_preempt_retries` integer from a `POST /api/runs` body before deserializing
+/// `folo_api::TrainConfig`.
+fn extract_max_preempt_retries(
+    fields: &mut serde_json::Map<String, serde_json::Value>,
+) -> Result<Option<u32>> {
+    match fields.remove("max_preempt_retries").filter(|v| !v.is_null()) {
+        None => Ok(None),
+        Some(v) => v
+            .as_u64()
+            .and_then(|n| u32::try_from(n).ok())
+            .map(Some)
+            .ok_or_else(|| body_error("max_preempt_retries: expected a non-negative integer")),
+    }
+}
+
 /// `POST /api/runs`: a `TrainConfig` starts a new run (`201`); with `resume_run_id` it resumes that run instead
 /// (`200`, same id); with `checkpoint` the new run continues that model's training state.
 pub(super) async fn create_run(
@@ -217,6 +233,7 @@ pub(super) async fn create_run(
     }
     let auto_batch = extract_auto_batch(&mut fields)?;
     let arch_override = extract_arch_override(&mut fields)?;
+    let max_preempt_retries = extract_max_preempt_retries(&mut fields)?;
     if checkpoint.is_some() && auto_batch.enabled {
         return Err(Error::new(
             StatusCode::BAD_REQUEST,
@@ -226,7 +243,8 @@ pub(super) async fn create_run(
     }
     let config: TrainConfig =
         serde_json::from_value(serde_json::Value::Object(fields)).map_err(body_error)?;
-    let options = crate::store::RunOptions { auto_batch, arch: arch_override };
+    crate::store::check_max_preempt_retries(max_preempt_retries, config.compute.is_some())?;
+    let options = crate::store::RunOptions { auto_batch, arch: arch_override, max_preempt_retries };
     let run = match checkpoint {
         Some(model) => blocking(&st, move |s| s.continue_run(&model, config)).await?,
         None if !options.is_default() => {
@@ -246,12 +264,21 @@ pub(super) async fn estimate_run(
     let arch_override = extract_arch_override(&mut fields)?;
     let config: TrainConfig =
         serde_json::from_value(serde_json::Value::Object(fields)).map_err(body_error)?;
-    let options = crate::store::RunOptions { auto_batch, arch: arch_override };
+    let options = crate::store::RunOptions { auto_batch, arch: arch_override, max_preempt_retries: None };
     Ok(Json(blocking(&st, move |s| s.estimate_run_with_options(config, options)).await?))
 }
 
+#[derive(serde::Serialize)]
+struct RunWithPreemption {
+    #[serde(flatten)]
+    run: folo_api::Run,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cloud_preemption: Option<crate::store::CloudPreemptionStatus>,
+}
+
 pub(super) async fn get_run(State(st): State<AppState>, ApiPath(id): ApiPath<String>) -> Result<Response> {
-    Ok(Json(st.store.get_run(&id)?).into_response())
+    let (run, cloud_preemption) = blocking(&st, move |s| s.get_run_with_preemption(&id)).await?;
+    Ok(Json(RunWithPreemption { run, cloud_preemption }).into_response())
 }
 
 pub(super) async fn run_cli(

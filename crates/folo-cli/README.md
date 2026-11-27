@@ -22,7 +22,7 @@ and two constants, so tests can parse commands with the real parser; every comma
 | `src/serve_lock.rs` | One owner per data dir: the OS lock on `<data dir>/serve.lock` and the address in `serve.json` |
 | `src/mcp.rs` | `folo mcp`: picks the folo-mcp backend (embedded, `--mock`, `--server`) and runs it on stdio |
 | `src/doctor.rs` | `folo doctor`: host, GPU adapters, the adapter FOLO picks, the Studio build |
-| `src/train/` | `folo train` and `folo stop`: `mod.rs` (flags, run folder, trainer), `config.rs` (`--set`), `resume.rs` (`--resume`), `progress.rs` (live view, JSON lines, summary), `stop.rs` (stop file, the run folder's marker and lock, Ctrl+C), `tests.rs` |
+| `src/train/` | `folo train` and `folo stop`: `mod.rs` (flags, run folder, trainer), `cloud.rs` (`--cloud` launch, `--max-preempt-retries`, and live preemption progress), `config.rs` (`--set`), `resume.rs` (`--resume`), `progress.rs` (live view, JSON lines, summary), `stop.rs` (stop file, the run folder's marker and lock, Ctrl+C), `tests.rs` |
 | `src/infer/` | `folo val`, `folo predict` and `folo export`: `mod.rs` (shared model/arg helpers, `val`), `diag.rs` (`val --diagnostics` / `--worst` per-image error diagnosis), `thresholds.rs` (calibrated per-class F1 threshold persistence and loading for `val --save-thresholds` / `predict --thresholds`), `predict.rs` (`predict`, ByteTrack `--track`, recursive image walking, `--save` checks and atomic saving), `export.rs` (`.folo` and ONNX export with `--dynamic-batch` / `--dynamic-hw` and `folo2-*` checkpoint support) |
 | `src/quantize.rs` | `folo quantize`: int8 calibration on sample dataset images, writing fused `f32` weights with `folo.quant` metadata |
 | `src/output_file.rs` | The file `export` and `quantize` write: a temporary name, then one move to a free name (`folo_nn::io::publish_new`) |
@@ -32,7 +32,7 @@ and two constants, so tests can parse commands with the real parser; every comma
 | `src/weights/` | `folo weights list \| pull` and published-name resolution (`mod.rs`); `download.rs` fetches a release over HTTPS, else with `gh` |
 | `src/cloud.rs` | `folo cloud ...` on the data dir, through `folo_server::cloud` |
 | `src/label/` | `folo label ...`: `mod.rs` opens the data dir's `folo serve` (or `--server`, else the data dir's labeler in this process, holding its lock; the store only for `export`) and runs folo-mcp's labeling operations (`folo_mcp::label::Labels`) with CLI hints; `print.rs` is the human output |
-| `src/bench/` | `folo bench ...`: `mod.rs` opens the data dir's `folo serve` (or `--server`, else the data dir's store in this process, holding its lock), resolves `--model` by id or name, follows an entry, and runs folo-mcp's benchmark operations (`folo_mcp::bench::Benchmarks`) with CLI hints; `print.rs` is the human output |
+| `src/bench/` | `folo bench ...`: `mod.rs` opens the data dir's `folo serve` (or `--server`, else the data dir's store in this process, holding its lock), resolves `--model` by id or name, follows an entry, and runs folo-mcp's benchmark operations (`folo_mcp::bench::Benchmarks`) with CLI hints; `compare.rs` formats `folo bench compare` (`table`, `markdown`, `csv`, `--out`, `--fail-on-regression`); `print.rs` is the human output |
 | `build.rs` | Bakes `FOLO_GIT_SHA` and `FOLO_BUILD_DATE` into `folo --version` |
 | `tests/` | Integration tests that run the built binary; see [Tests](#tests-and-benchmarks) |
 
@@ -49,7 +49,7 @@ From the `Command` enum in `src/cli.rs` and the `run` match in `src/main.rs`.
 | `stop` | `src/train/stop.rs` (`request_stop`) |
 | `val`, `predict`, `export` | `src/infer/` (`mod.rs`, `diag.rs`, `predict.rs`, `export.rs`) |
 | `quantize` | `src/quantize.rs` |
-| `bench catalog \| list \| create \| show \| delete \| run \| status \| stop` | `src/bench/`, on folo-mcp's `bench` module |
+| `bench catalog \| list \| create \| show \| delete \| run \| status \| stop \| compare` | `src/bench/`, on folo-mcp's `bench` module |
 | `dataset check \| stats \| synth \| convert \| split \| merge \| filter \| export` | `src/dataset/` (`mod.rs`, `check.rs`, `synth.rs`, `split.rs`, `merge.rs`, `filter.rs`, `export.rs`) |
 | `weights list \| pull` | `src/weights/mod.rs`, `src/weights/download.rs` |
 | `cloud providers \| connect \| connections \| check \| disconnect \| offers \| instances \| terminate` | `src/cloud.rs` |

@@ -369,7 +369,11 @@ fn older_server_rejects_folo2_arch_and_proxy_reads_arch_header() {
 
     let older = HttpStore::new("http://127.0.0.1:1", None).assume_features(vec![]);
     let cfg: folo_api::TrainConfig = serde_json::from_str(r#"{"dataset_id":"ds_1"}"#).unwrap();
-    let v2_opts = RunOptions { auto_batch: Default::default(), arch: Some("folo2-n".into()) };
+    let v2_opts = RunOptions {
+        auto_batch: Default::default(),
+        arch: Some("folo2-n".into()),
+        max_preempt_retries: None,
+    };
 
     let e = older.create_run_with_options(cfg.clone(), v2_opts.clone()).unwrap_err();
     assert_eq!((e.status, e.body.code.as_str()), (StatusCode::NOT_IMPLEMENTED, "not_implemented"));
@@ -418,7 +422,11 @@ fn older_server_rejects_folo2_arch_and_proxy_reads_arch_header() {
     let v1_run = v1_proxy
         .create_run_with_options(
             v1_cfg,
-            RunOptions { auto_batch: Default::default(), arch: Some("folo-s".into()) },
+            RunOptions {
+                auto_batch: Default::default(),
+                arch: Some("folo-s".into()),
+                max_preempt_retries: None,
+            },
         )
         .unwrap();
     assert_eq!(v1_run.config.arch, folo_api::Arch::S);
@@ -649,4 +657,93 @@ fn older_server_rejects_folo2_arch_and_proxy_reads_arch_header() {
     old_stop.store(true, Ordering::SeqCst);
     let _ = TcpStream::connect(old_addr);
     old_handle.join().unwrap();
+}
+
+#[test]
+fn spot_resume_capability_gating_preemption_and_system_simd() {
+    use folo_server::store::{FEATURE_CLOUD_SPOT_RESUME, RunOptions};
+
+    let older = HttpStore::new("http://127.0.0.1:1", None).assume_features(vec![]);
+    let cloud_cfg: folo_api::TrainConfig =
+        serde_json::from_str(r#"{"dataset_id":"ds_1","compute":{"connection_id":"cc_1","offer_id":"o1"}}"#)
+            .unwrap();
+    let opts = RunOptions { max_preempt_retries: Some(5), ..Default::default() };
+    let e = older.create_run_with_options(cloud_cfg.clone(), opts.clone()).unwrap_err();
+    assert_eq!((e.status, e.body.code.as_str()), (StatusCode::NOT_IMPLEMENTED, "not_implemented"));
+
+    // Local run with max_preempt_retries fails with invalid_config before feature probe.
+    let local_cfg: folo_api::TrainConfig = serde_json::from_str(r#"{"dataset_id":"ds_1"}"#).unwrap();
+    let e = older.create_run_with_options(local_cfg, opts).unwrap_err();
+    assert_eq!((e.status, e.body.code.as_str()), (StatusCode::BAD_REQUEST, "invalid_config"));
+
+    // Resume with non-null max_preempt_retries against an older server fails with 501.
+    let resume_fields = serde_json::json!({ "max_preempt_retries": 4 }).as_object().unwrap().clone();
+    let e = older.resume_run("run_1", &resume_fields).unwrap_err();
+    assert_eq!((e.status, e.body.code.as_str()), (StatusCode::NOT_IMPLEMENTED, "not_implemented"));
+
+    // A current server returns additive `cloud_preemption` on GET /api/runs/{id} and `cpu_simd` on GET /api/system.
+    let server = MockApi::start(|req, _| match req {
+        "GET /api/runs/run_c1" => (
+            "200 OK",
+            serde_json::json!({
+                "id": "run_c1",
+                "name": "spot-run",
+                "status": "running",
+                "config": { "dataset_id": "ds_1", "compute": { "connection_id": "cc_1", "offer_id": "o1" } },
+                "created": "2026-11-27T00:00:00Z",
+                "started": "2026-11-27T00:00:01Z",
+                "finished": null,
+                "epoch": 2,
+                "epochs": 10,
+                "step": 4,
+                "steps_per_epoch": 2,
+                "eta_s": 10.0,
+                "best": null,
+                "device": "gpu:0",
+                "model_id": null,
+                "error": null,
+                "cloud_preemption": {
+                    "retries": 1,
+                    "max_retries": 5,
+                    "recovering": true,
+                    "preempted_instances": ["ci_old1"]
+                }
+            })
+            .to_string(),
+        ),
+        "GET /api/system" => (
+            "200 OK",
+            serde_json::json!({
+                "cpu": { "name": "Test CPU", "threads": 8, "util": 0.1 },
+                "memory": { "used_bytes": 1, "total_bytes": 2 },
+                "gpus": [],
+                "data_dir": "/tmp/folo",
+                "features": [FEATURE_CLOUD_SPOT_RESUME],
+                "capabilities": null,
+                "gpu_pool": null,
+                "cpu_simd": {
+                    "avx2": true,
+                    "avx_vnni": true,
+                    "avx512_vnni": true,
+                    "neon": false,
+                    "int8_fast": true,
+                    "int8_kernel": "AVX-512 VNNI (512-bit)"
+                }
+            })
+            .to_string(),
+        ),
+        other => panic!("unexpected request: {other}"),
+    });
+    let proxy = HttpStore::new(&server.base, None).assume_features(vec![FEATURE_CLOUD_SPOT_RESUME.into()]);
+    let (run, pre) = proxy.get_run_with_preemption("run_c1").unwrap();
+    assert_eq!(run.id, "run_c1");
+    let pre = pre.expect("cloud_preemption parsed");
+    assert_eq!((pre.retries, pre.max_retries, pre.recovering), (1, 5, true));
+    assert_eq!(pre.preempted_instances, vec!["ci_old1"]);
+
+    let (sys, simd) = proxy.system_with_simd().unwrap();
+    assert_eq!(sys.system.cpu.threads, 8);
+    let simd = simd.expect("cpu_simd parsed");
+    assert!(simd.avx512_vnni && simd.int8_fast);
+    assert_eq!(simd.int8_kernel, "AVX-512 VNNI (512-bit)");
 }

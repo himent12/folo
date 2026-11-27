@@ -31,6 +31,7 @@ pub struct Cli {
 
 /// Top-level commands.
 #[derive(Debug, Subcommand)]
+#[allow(clippy::large_enum_variant)]
 pub enum Command {
     /// Run the HTTP API (docs/API.md) and serve FOLO Studio.
     Serve(ServeArgs),
@@ -367,6 +368,53 @@ pub struct TrainArgs {
     /// Which records --json prints: all, or epoch (no per-batch step records).
     #[arg(long, value_enum, default_value_t = JsonEvents::All)]
     pub json_events: JsonEvents,
+    /// Train on a connected cloud provider instead of locally: the connection id (`cc_…`, `folo cloud connections`).
+    #[arg(
+        long,
+        value_name = "CONNECTION_ID",
+        conflicts_with = "resume",
+        value_parser = clap::builder::NonEmptyStringValueParser::new()
+    )]
+    pub cloud: Option<String>,
+    /// With --cloud: GPU offer id (`folo cloud offers CONNECTION_ID`) [default: cheapest available offer].
+    #[arg(
+        long,
+        value_name = "OFFER_ID",
+        requires = "cloud",
+        value_parser = clap::builder::NonEmptyStringValueParser::new()
+    )]
+    pub offer: Option<String>,
+    /// With --cloud: maximum wall-clock hours before the cloud instance is stopped [0.25..=720] [default: 8].
+    #[arg(long, value_name = "HOURS", requires = "cloud")]
+    pub max_hours: Option<f64>,
+    /// With --cloud: cloud instance disk size in GB [10..=4096] [default: sized for the dataset].
+    #[arg(long, value_name = "GB", requires = "cloud")]
+    pub disk_gb: Option<u32>,
+    /// With --cloud: maximum automatic spot-preemption retries [0..=20] [default: 3; 0 disables auto-resume].
+    #[arg(long, value_name = "N", requires = "cloud")]
+    pub max_preempt_retries: Option<u32>,
+    /// With --cloud: data dir holding cloud connections, datasets and runs [default: $FOLO_HOME or ~/.folo].
+    #[arg(long, env = "FOLO_DATA_DIR")]
+    pub data_dir: Option<PathBuf>,
+    /// With --cloud: submit the cloud run to this `folo serve` URL instead of the local data dir.
+    #[arg(
+        long,
+        env = "FOLO_SERVER",
+        value_name = "URL",
+        value_parser = clap::builder::NonEmptyStringValueParser::new()
+    )]
+    pub server: Option<String>,
+    /// With --cloud: bearer token for `--server` (`folo serve --token`).
+    #[arg(
+        long,
+        env = "FOLO_TOKEN",
+        hide_env_values = true,
+        value_parser = clap::builder::NonEmptyStringValueParser::new()
+    )]
+    pub token: Option<String>,
+    /// With --cloud: PEM CA certificate file for an https:// `--server`.
+    #[arg(long = "tls-ca", env = "FOLO_TLS_CA", value_name = "PATH")]
+    pub tls_ca: Option<PathBuf>,
     /// The arguments given on the command line (set by `main`, so --resume can tell them from defaults).
     #[arg(skip)]
     pub explicit: Vec<String>,

@@ -23,6 +23,48 @@ pub struct HostInfo {
     pub memory_available_bytes: u64,
 }
 
+/// CPU SIMD ISA availability and the active CPU int8 (`q8`) micro-kernel tier on this host.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CpuSimd {
+    /// x86-64 AVX2 instruction set detected.
+    pub avx2: bool,
+    /// x86-64 AVX-VNNI (256-bit VEX `vpdpbusd`) detected.
+    pub avx_vnni: bool,
+    /// x86-64 AVX-512 VNNI (`avx512vnni`) detected.
+    pub avx512_vnni: bool,
+    /// ARM64 NEON instruction set detected.
+    pub neon: bool,
+    /// True when the active int8 micro-kernel uses hardware VNNI (`vpdpbusd` via AVX-512 VNNI or AVX-VNNI).
+    pub int8_fast: bool,
+    /// Human-readable active CPU int8 micro-kernel tier (`"AVX-512 VNNI (512-bit)"`, `"AVX-VNNI"`,
+    /// `"AVX-512 VNNI"`, `"AVX2"`, `"Wasm SIMD128"`, or `"portable"`).
+    pub int8_kernel: String,
+}
+
+/// Detects CPU SIMD ISA capabilities and the active `folo_core::cpu::q8` int8 kernel tier on this machine.
+pub fn cpu_simd() -> CpuSimd {
+    #[cfg(target_arch = "x86_64")]
+    let (avx2, avx_vnni, avx512_vnni, neon) = (
+        std::is_x86_feature_detected!("avx2"),
+        std::is_x86_feature_detected!("avxvnni"),
+        std::is_x86_feature_detected!("avx512vnni"),
+        false,
+    );
+    #[cfg(target_arch = "aarch64")]
+    let (avx2, avx_vnni, avx512_vnni, neon) =
+        (false, false, false, std::arch::is_aarch64_feature_detected!("neon"));
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    let (avx2, avx_vnni, avx512_vnni, neon) = (false, false, false, false);
+    CpuSimd {
+        avx2,
+        avx_vnni,
+        avx512_vnni,
+        neon,
+        int8_fast: folo_core::cpu::q8::uses_vnni(),
+        int8_kernel: folo_core::cpu::q8::kernel_name().to_string(),
+    }
+}
+
 /// What runs with `device: auto` can use here (f16, tensor cores, `amp`): `/api/system`'s `capabilities`, which
 /// `folo doctor` reports too. Creates the GPU context on first use, as a run would.
 pub fn capabilities() -> folo_api::Capabilities {

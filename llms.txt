@@ -8,7 +8,7 @@
 > Windows and Linux are in the GitHub release (README, Install); anywhere else, build from source.
 
 Fastest path for an agent:
-- **MCP:** `folo mcp` (stdio; `--data-dir DIR`, default `~/.folo`). It has 44 tools: folo_info, list_datasets, get_dataset,
+- **MCP:** `folo mcp` (stdio; `--data-dir DIR`, default `~/.folo`). It has 45 tools: folo_info, list_datasets, get_dataset,
   list_dataset_issues, list_dataset_images, register_dataset, create_synthetic_dataset, audit_dataset,
   merge_datasets, filter_dataset, dataset_export, list_models, train,
   run_status, list_runs, stop_run, reorder_run, val, predict, predict_batch, export, compare_runs,
@@ -17,8 +17,8 @@ Fastest path for an agent:
   view_label_image (the image with its boxes drawn and numbered, boxes in pixels of that view),
   set_label_boxes, review_label_images and export_label_dataset, and for vision benchmarks bench_catalog,
   list_benchmarks, get_benchmark (with the leaderboard), create_benchmark, delete_benchmark, start_bench_entry (a
-  model, or a file of predictions made elsewhere), bench_entry (progress, or the five-axis score; wait follows it)
-  and stop_bench_entry.
+  model, or a file of predictions made elsewhere), bench_entry (progress, or the five-axis score; wait follows it),
+  stop_bench_entry and compare_bench_entries (head-to-head score, axis, accuracy, speed, and condition deltas).
 - **CLI:** `folo <command> --json`. stdout is then JSON Lines only. Errors end with
   `{"error":{"code","message","hint"}}`. Exit codes: 0 ok, 1 runtime, 2 usage, 3 not found, 4 not implemented or
   not supported on this machine.

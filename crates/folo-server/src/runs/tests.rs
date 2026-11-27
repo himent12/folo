@@ -117,7 +117,7 @@ fn resumed_mid_epoch_metrics_prefer_live_tail_over_discarded_steps() {
     assert_eq!(stopped.steps[2].loss.total, 9.0);
 
     // Resumed and queued: discarded pre-resume epoch 2 steps are hidden.
-    runs.restart(&e, config, None).unwrap();
+    runs.restart(&e, config, None, None).unwrap();
     let queued = runs.metrics(e.id(), &MetricsQuery::default()).unwrap();
     assert_eq!(queued.steps.iter().map(|s| s.step).collect::<Vec<_>>(), [1, 2]);
 
@@ -205,6 +205,7 @@ fn queued_file(id: &str, config: TrainConfig) -> RunFile {
         alive_at: None,
         auto_batch: Default::default(),
         arch_override: None,
+        max_preempt_retries: None,
     }
 }
 
@@ -299,7 +300,7 @@ fn a_run_stopped_before_it_is_queued_stays_out_of_the_queue() {
     let e = runs.register(config.clone(), dataset, None, None, 0, "cpu".into(), None).unwrap();
     runs.stop(e.id()).unwrap();
     // `resume`: restart, then (after the interleaved stop) enqueue.
-    let (_, attempt) = runs.restart(&e, config, None).unwrap();
+    let (_, attempt) = runs.restart(&e, config, None, None).unwrap();
     assert_eq!(runs.stop(e.id()).unwrap().status, RunStatus::Stopped);
     runs.enqueue(&e, attempt).unwrap();
     let run = runs.snapshot(e.id()).unwrap();
@@ -360,6 +361,7 @@ fn listed_queue_positions_are_one_snapshot() {
             alive_at: None,
             auto_batch: Default::default(),
             arch_override: None,
+            max_preempt_retries: None,
         };
         std::fs::create_dir_all(dir.join(id)).unwrap();
         let entry = Arc::new(RunEntry::new(id.clone(), dir.join(id), file));
@@ -515,13 +517,13 @@ fn a_resumed_run_records_the_time_it_was_not_training() {
 
     // Stopped before it ever trained: resuming it starts it over, with nothing to leave out.
     ended(None, t - 100.0);
-    runs.restart(&e, config.clone(), None).unwrap();
+    runs.restart(&e, config.clone(), None, None).unwrap();
     assert_eq!(paused(), None);
     assert_eq!(serde_json::to_value(e.run()).unwrap().get("paused_s"), None, "absent, not null");
 
     // Trained, stopped overnight (10 h ago), resumed now: the night counts, and the wait in the queue once it trains.
     ended(Some(t - 40_000.0), t - 36_000.0);
-    runs.restart(&e, config.clone(), None).unwrap();
+    runs.restart(&e, config.clone(), None, None).unwrap();
     near(paused(), 36_000.0, 1.0);
     e.state.lock().unwrap().file.resumed_at = Some(t - 60.0);
     e.on_event(&RunEvent::Status(StatusEvent::new(RunStatus::Running, None)));
@@ -531,10 +533,10 @@ fn a_resumed_run_records_the_time_it_was_not_training() {
     // Resumed, stopped while it waited (it never trained in between), resumed again: from the first resume on (each
     // resume is "now"; the first is moved 500 s back by hand).
     ended(Some(t - 40_000.0), t - 50.0);
-    runs.restart(&e, config.clone(), None).unwrap();
+    runs.restart(&e, config.clone(), None, None).unwrap();
     e.state.lock().unwrap().file.resumed_at = Some(t - 500.0);
     ended(Some(t - 40_000.0), t - 100.0);
-    runs.restart(&e, config.clone(), None).unwrap();
+    runs.restart(&e, config.clone(), None, None).unwrap();
     near(paused(), 36_060.0 + 50.0 + 500.0, 4.0);
 
     // The reviewer's case: trained 60 s, stopped, resumed an hour later behind a long run (moved back by hand), and
@@ -553,7 +555,7 @@ fn a_resumed_run_records_the_time_it_was_not_training() {
     };
     ended(Some(t - 7200.0), t - 7140.0);
     e.state.lock().unwrap().file.run.paused_s = None;
-    runs.restart(&e, config.clone(), None).unwrap();
+    runs.restart(&e, config.clone(), None, None).unwrap();
     {
         let mut st = e.state.lock().unwrap();
         st.file.run.paused_s = Some(3540.0);
@@ -565,7 +567,7 @@ fn a_resumed_run_records_the_time_it_was_not_training() {
     assert_eq!(e.state.lock().unwrap().file.resumed_at, None, "the wait is settled");
     sixty(training());
     near(paused(), 7140.0, 2.0);
-    runs.restart(&e, config, None).unwrap();
+    runs.restart(&e, config, None, None).unwrap();
     sixty(training());
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -676,9 +678,9 @@ fn a_run_with_a_legacy_long_name_resumes() {
     std::fs::write(run_dir.join("run.json"), serde_json::to_vec(&file).unwrap()).unwrap();
     let runs = Runs::open(dir.to_path_buf(), Arc::new(Throughput::in_memory(Default::default())));
     let fields = serde_json::to_value(&config).unwrap().as_object().unwrap().clone();
-    let (e, wanted) = runs.resume_config("run_long", &fields).unwrap();
+    let (e, wanted, max_retries) = runs.resume_config("run_long", &fields).unwrap();
     assert_eq!(wanted.name, name);
-    assert_eq!(runs.restart(&e, wanted, None).unwrap().0.name, name);
+    assert_eq!(runs.restart(&e, wanted, None, max_retries).unwrap().0.name, name);
     runs.shutdown(None);
 }
 
@@ -778,7 +780,7 @@ fn a_run_left_training_ends_when_it_last_trained() {
     let runs = open();
     let e2 = runs.get(e.id()).unwrap();
     assert_eq!(e2.run().finished.as_deref(), Some(rfc3339(t - 300.0).as_str()));
-    runs.restart(&e2, config, None).unwrap();
+    runs.restart(&e2, config, None, None).unwrap();
     let paused = e2.run().paused_s.unwrap();
     let late = unix_now().floor() - t;
     assert!((400.0..=400.0 + late).contains(&paused), "paused_s {paused}, want 400 to {}", 400.0 + late);
@@ -878,7 +880,7 @@ fn resume_marker_is_newline_safe_after_torn_last_line() {
 
     // Resume writes `\n{"event":"resume"}\n`; discarded epoch-2 step 2 is immediately hidden even though the
     // crashed session never wrote a terminal status line.
-    runs.restart(&e, config, None).unwrap();
+    runs.restart(&e, config, None, None).unwrap();
     let queued = runs.metrics(e.id(), &MetricsQuery::default()).unwrap();
     assert_eq!(queued.steps.iter().map(|s| s.step).collect::<Vec<_>>(), [1]);
 

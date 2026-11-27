@@ -50,10 +50,14 @@ impl RealStore {
         checkpoint: Option<CheckpointSnapshot<'_>>,
         auto_batch: crate::store::AutoBatchOptions,
     ) -> Result<Run> {
-        self.start_run_with_options(config, checkpoint, crate::store::RunOptions { auto_batch, arch: None })
+        self.start_run_with_options(
+            config,
+            checkpoint,
+            crate::store::RunOptions { auto_batch, arch: None, max_preempt_retries: None },
+        )
     }
 
-    /// Like [`RealStore::start_run`], with optional auto-batch and `folo2-*` architecture overrides.
+    /// Like [`RealStore::start_run`], with optional auto-batch, `folo2-*` architecture, and cloud preemption overrides.
     pub(super) fn start_run_with_options(
         &self,
         mut config: TrainConfig,
@@ -62,6 +66,7 @@ impl RealStore {
     ) -> Result<Run> {
         crate::store::check_auto_batch_options(&options.auto_batch)?;
         crate::store::check_arch_override(options.arch.as_deref())?;
+        crate::store::check_max_preempt_retries(options.max_preempt_retries, config.compute.is_some())?;
         if options.auto_batch.enabled && config.compute.is_some() {
             return Err(Error::new(
                 StatusCode::BAD_REQUEST,
@@ -93,8 +98,16 @@ impl RealStore {
                 let device = format!("{} at {}", offer.gpu, connected.provider.info().name);
                 let fingerprint = upload_fingerprint(ds.format, &idx);
                 let cloud = run_cloud(&compute, &connected, offer);
-                let entry =
-                    self.runs.create_cloud(config, ds, weights, checkpoint, val_offset, device, cloud)?;
+                let entry = self.runs.create_cloud(
+                    config,
+                    ds,
+                    weights,
+                    checkpoint,
+                    val_offset,
+                    device,
+                    cloud,
+                    options.max_preempt_retries,
+                )?;
                 self.start_cloud(entry, connected, Some(fingerprint))
             }
             RunTarget::Local(device) => self.runs.create_with_options(

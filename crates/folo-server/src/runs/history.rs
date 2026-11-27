@@ -687,7 +687,7 @@ mod tests {
             st.file.run.started = Some(now());
             e.finish(&mut st, RunStatus::Failed, Some("instance lost".into()));
         }
-        let (resumed, _) = runs.restart(&e, config.clone(), None).unwrap();
+        let (resumed, _) = runs.restart(&e, config.clone(), None, None).unwrap();
         assert_eq!((resumed.epoch, resumed.step, resumed.best), (0, 0, None));
         let m = runs.metrics(e.id(), &MetricsQuery::default()).unwrap();
         assert!(m.steps.is_empty() && m.epochs.is_empty(), "lost cloud epochs must be hidden on resume");
@@ -718,7 +718,7 @@ mod tests {
             st.file.run.started = Some(now());
             e2.finish(&mut st, RunStatus::Failed, Some("instance lost".into()));
         }
-        let (resumed2, _) = runs.restart(&e2, config.clone(), None).unwrap();
+        let (resumed2, _) = runs.restart(&e2, config.clone(), None, None).unwrap();
         assert_eq!(resumed2.epoch, 1);
         assert_eq!(resumed2.step, 2, "step must roll back to epoch 1's last retained step");
         assert_eq!(resumed2.best, Some(BestEpoch { epoch: 1, map50_95: 0.40 }));
@@ -751,7 +751,7 @@ mod tests {
             st.file.run.started = Some(now());
             e3.finish(&mut st, RunStatus::Failed, Some("instance lost".into()));
         }
-        let (resumed3, _) = runs.restart(&e3, config, None).unwrap();
+        let (resumed3, _) = runs.restart(&e3, config, None, None).unwrap();
         assert_eq!(resumed3.epoch, 2, "epoch must match checkpoint ahead of local history");
         assert_eq!(resumed3.step, 20, "step must match checkpoint epoch * steps_per_epoch");
         assert_eq!(resumed3.best, Some(BestEpoch { epoch: 2, map50_95: 0.80 }));

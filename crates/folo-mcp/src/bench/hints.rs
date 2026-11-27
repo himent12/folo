@@ -41,6 +41,11 @@ pub fn decorate(mut e: Error, front: Front) -> Error {
             } else {
                 "`folo bench status BENCH ENTRY` says how it ended"
             }),
+            "bench_entry_not_done" => Some(if mcp {
+                "wait for the entry to finish with bench_entry, or pick a `done` entry from get_benchmark"
+            } else {
+                "wait for it with `folo bench status BENCH ENTRY --wait`, or pick a `done` entry from `folo bench show BENCH`"
+            }),
             "model_not_found" => Some(if mcp {
                 "list_models lists the models; published weights are models once pulled (`folo weights pull NAME`)"
             } else {

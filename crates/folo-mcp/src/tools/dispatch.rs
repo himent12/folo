@@ -193,6 +193,7 @@ impl Inner {
             "start_bench_entry" => self.start_bench_entry(parse_args(args)?).await,
             "bench_entry" => self.bench_entry(parse_args(args)?).await,
             "stop_bench_entry" => self.stop_bench_entry(parse_args(args)?).await,
+            "compare_bench_entries" => self.compare_bench_entries(parse_args(args)?).await,
             other => Err(Error::internal(format!("tool `{other}` has no handler"))),
         };
         match res {

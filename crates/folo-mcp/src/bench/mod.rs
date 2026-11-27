@@ -7,6 +7,7 @@
 //! operations both front ends share on them (the compact results of [`crate::types::bench`], following an entry,
 //! sending a file of external predictions), and `hints` words each front end's hints.
 
+mod compare;
 pub mod hints;
 mod ops;
 
