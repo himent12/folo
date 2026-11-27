@@ -54,6 +54,7 @@ mod tests_math;
 
 pub use assignment::assign_batch;
 pub use device::assign_batch_device;
+pub(crate) use device::{decode_device_loss_values, encode_detection_loss_device};
 pub use distill::{
     DistillConfig, DistillLoss, DistillTargets, TeacherView, distill_loss, distill_loss_with_context,
     gt_verify_weights_cpu,
@@ -553,8 +554,14 @@ impl DistillAssignment {
             DistillAssignment::Host(a) => Ok(std::borrow::Cow::Borrowed(a)),
             DistillAssignment::Device(asg) => {
                 let (g, k) = (asg.desc.g, asg.desc.k);
-                let picks = asg.picks.to_vec::<u32>()?;
-                let slots = asg.slots.to_vec::<u32>()?;
+                let (picks, slots) = if let Some(ctx) = folo_gpu::context_for(asg.picks.device()) {
+                    let mut downloaded = folo_gpu::download_many(&ctx, &[&asg.picks, &asg.slots])?;
+                    let slots = downloaded.pop().expect("slots").to_vec::<u32>()?;
+                    let picks = downloaded.pop().expect("picks").to_vec::<u32>()?;
+                    (picks, slots)
+                } else {
+                    (asg.picks.to_vec::<u32>()?, asg.slots.to_vec::<u32>()?)
+                };
                 let mut fg: Vec<(u32, u32, u32, f32, Xyxy)> = Vec::new();
                 for s in 0..batch * g * k {
                     if slots[2 * s + 1] == 1 {

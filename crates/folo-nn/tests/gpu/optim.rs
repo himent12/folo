@@ -200,3 +200,142 @@ fn cautious_optim_gpu_parity_and_large_cross_group_alias_order() {
     close(&p0_g, &p0_c, 1e-6, 1e-6, "large cautious cross-alias p0");
     close(&p1_g, &p1_c, 1e-6, 1e-6, "large cautious cross-alias p1");
 }
+
+/// Two-phase GPU AMP `unscale_clip_device_prepare`/`apply`, `unscale_prepare_device`, and
+/// `RunningStats::prepare_live_finite_check` with `folo_gpu::download_deferred` match the synchronous paths
+/// bit for bit across normal, clipped, multi-pass accumulated, and NaN/Inf overflow inputs.
+#[test]
+fn deferred_unscale_clip_and_live_finite_probe_match_sync() {
+    use folo_core::DType;
+    use folo_nn::LiveFiniteCheck;
+    let dev = gpu!();
+    let ctx = folo_gpu::context_for(dev).expect("gpu context");
+    let mut rng = Rng::seed(2028);
+    let shapes: [&[usize]; 3] = [&[16, 8, 3, 3], &[16], &[40, 7]];
+    let inv = 1.0f32 / 65536.0;
+
+    let build_acc = |passes: usize, poison: Option<f32>, rng: &mut Rng| -> (Vec<Tensor>, GradAccumulator) {
+        let ps: Vec<Tensor> = shapes
+            .iter()
+            .map(|s| Tensor::zeros_with(*s, DType::F32, dev).unwrap().requires_grad_())
+            .collect();
+        let mut acc = GradAccumulator::new(&ps);
+        for pass in 0..passes {
+            let mut grads = folo_core::Grads::default();
+            for (i, (p, s)) in ps.iter().zip(&shapes).enumerate() {
+                let mut host = Tensor::randn(*s, 0.0, 2e4, rng).to_vec::<f32>().unwrap();
+                if pass + 1 == passes
+                    && i == 2
+                    && let Some(bad) = poison
+                {
+                    host[11] = bad;
+                }
+                grads.insert(p, Tensor::from_vec(host, *s).unwrap().to_device(dev).unwrap());
+            }
+            acc.add_owned(grads).unwrap();
+        }
+        (ps, acc)
+    };
+
+    // Empty accumulator returns None cleanly.
+    let empty_ps: Vec<Tensor> =
+        shapes.iter().map(|s| Tensor::zeros_with(*s, DType::F32, dev).unwrap().requires_grad_()).collect();
+    let mut empty_acc = GradAccumulator::new(&empty_ps);
+    assert!(empty_acc.unscale_clip_device_prepare(inv, 10.0).unwrap().is_none());
+    assert!(empty_acc.unscale_prepare_device(inv).unwrap().is_none());
+
+    // Clipped (max_norm=1.0), unclipped (max_norm=1e9), and multi-pass accumulation (passes=3): bit-exact.
+    for (passes, max_norm) in [(1, 1.0), (1, 1e9), (3, 1.0)] {
+        let mut r1 = Rng::seed(3100 + passes as u64);
+        let mut r2 = Rng::seed(3100 + passes as u64);
+        let (ps_sync, mut acc_sync) = build_acc(passes, None, &mut r1);
+        let (ps_def, mut acc_def) = build_acc(passes, None, &mut r2);
+        let ok_sync = acc_sync.unscale_clip(inv, max_norm).unwrap();
+        let plan = acc_def.unscale_clip_device_prepare(inv, max_norm).unwrap().expect("gpu plan");
+        let dl = folo_gpu::download_deferred(&ctx, plan.finite_scalar()).unwrap();
+        acc_def.unscale_clip_device_apply(plan).unwrap();
+        ctx.flush();
+        let ok_def = dl.finish().unwrap().item::<f32>().unwrap().is_finite();
+        assert!(ok_sync && ok_def, "passes={passes} max_norm={max_norm}");
+        for (a, b) in ps_sync.iter().zip(&ps_def) {
+            let ga = acc_sync.grad(a).unwrap().to_vec::<f32>().unwrap();
+            let gb = acc_def.grad(b).unwrap().to_vec::<f32>().unwrap();
+            assert_eq!(
+                ga.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                gb.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                "bit-exact mismatch for passes={passes} max_norm={max_norm}"
+            );
+        }
+    }
+
+    // Overflow (NaN, +Inf, -Inf) with clipping and without clipping (max_norm=0).
+    for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+        let (_, mut acc) = build_acc(2, Some(bad), &mut rng);
+        let plan = acc.unscale_clip_device_prepare(inv, 10.0).unwrap().expect("gpu plan");
+        let dl = folo_gpu::download_deferred(&ctx, plan.finite_scalar()).unwrap();
+        acc.unscale_clip_device_apply(plan).unwrap();
+        ctx.flush();
+        assert!(!dl.finish().unwrap().item::<f32>().unwrap().is_finite(), "missed {bad} with clip");
+
+        let (_, mut acc0) = build_acc(2, Some(bad), &mut rng);
+        let flag = acc0.unscale_prepare_device(inv).unwrap().expect("gpu flag");
+        let dl0 = folo_gpu::download_deferred(&ctx, &flag).unwrap();
+        assert_ne!(dl0.finish().unwrap().to_vec::<u32>().unwrap()[0], 0, "missed {bad} without clip");
+    }
+
+    // Finite without clipping (max_norm=0) matches synchronous unscale_ bit for bit.
+    {
+        let mut r1 = Rng::seed(3200);
+        let mut r2 = Rng::seed(3200);
+        let (ps_sync, mut acc_sync) = build_acc(2, None, &mut r1);
+        let (ps_def, mut acc_def) = build_acc(2, None, &mut r2);
+        assert!(acc_sync.unscale_clip(inv, 0.0).unwrap());
+        let flag = acc_def.unscale_prepare_device(inv).unwrap().expect("gpu flag");
+        let dl = folo_gpu::download_deferred(&ctx, &flag).unwrap();
+        assert_eq!(dl.finish().unwrap().to_vec::<u32>().unwrap()[0], 0);
+        for (a, b) in ps_sync.iter().zip(&ps_def) {
+            let ga = acc_sync.grad(a).unwrap().to_vec::<f32>().unwrap();
+            let gb = acc_def.grad(b).unwrap().to_vec::<f32>().unwrap();
+            assert_eq!(
+                ga.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                gb.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    // RunningStats::prepare_live_finite_check returns a DeviceScalar on GPU and detects NaN/+Inf/-Inf.
+    let mut m = Sequential::new().push(BatchNorm2d::new(3)).push(BatchNorm2d::new(4));
+    m.to_device(dev).unwrap();
+    let snap = RunningStats::capture_training(&m).unwrap();
+    let probe = snap.prepare_live_finite_check().unwrap();
+    let LiveFiniteCheck::DeviceScalar(s) = probe else { panic!("expected GPU DeviceScalar probe") };
+    assert!(
+        folo_gpu::download_deferred(&ctx, &s).unwrap().finish().unwrap().item::<f32>().unwrap().is_finite()
+    );
+
+    for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+        let (_, buf) = m.named_buffers().into_iter().nth(2).unwrap();
+        {
+            let _g = no_grad();
+            buf.fill_assign(bad).unwrap();
+        }
+        let LiveFiniteCheck::DeviceScalar(s) = snap.prepare_live_finite_check().unwrap() else {
+            panic!("expected GPU DeviceScalar probe");
+        };
+        assert!(
+            !folo_gpu::download_deferred(&ctx, &s)
+                .unwrap()
+                .finish()
+                .unwrap()
+                .item::<f32>()
+                .unwrap()
+                .is_finite(),
+            "probe missed {bad}"
+        );
+        snap.restore().unwrap();
+    }
+
+    m.eval();
+    let frozen = RunningStats::capture_training(&m).unwrap();
+    assert!(matches!(frozen.prepare_live_finite_check().unwrap(), LiveFiniteCheck::Ready(true)));
+}

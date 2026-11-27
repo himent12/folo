@@ -92,3 +92,7 @@ harness = false
 [[bench]]
 name = "plan_gate"
 harness = false
+
+[[bench]]
+name = "gpu_trainer"
+harness = false

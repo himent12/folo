@@ -176,3 +176,83 @@ fn stopped_gpu_run_resumes_bit_exactly() {
     }
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// Pipelined GPU f32 training with dual `o2o` head, partial final accumulation window (`nb = 3`, `acc = 2`),
+/// and `folo2-n` produces finite losses, exact window step counts, and bit-exact epoch resume.
+#[test]
+fn pipelined_f32_o2o_and_partial_window_resume_bit_exactly() {
+    let Some(dev) = gpu() else { return };
+    let root = TestDir::new("gpu-f32-partial");
+    let ds_cfg = SyntheticConfig {
+        images: 16,
+        classes: vec!["circle".into(), "square".into()],
+        imgsz: 128,
+        seed: 11,
+        min_objects: 1,
+        max_objects: 3,
+        empty_fraction: 0.0,
+        small_fraction: 0.0,
+        vary_aspect: false,
+        val_fraction: 4.0 / 16.0,
+        ..SyntheticConfig::default()
+    };
+    let td = TrainData {
+        train: Arc::new(SyntheticDataset::new(ds_cfg.clone(), Split::Train).unwrap()),
+        val: Arc::new(SyntheticDataset::new(ds_cfg.clone(), Split::Val).unwrap()),
+        classes: ds_cfg.classes,
+    };
+    let cfg = TrainConfig {
+        epochs: 2,
+        batch: 4,
+        nbs: 8,
+        imgsz: 128,
+        optimizer: OptimizerChoice::Adamw,
+        lr0: 0.002,
+        momentum: 0.9,
+        warmup_epochs: 0.0,
+        workers: 2,
+        augment: AugmentConfig::none(),
+        device: "gpu:0".into(),
+        head: folo_vision::model::HeadMode::O2o,
+        ..TrainConfig::default()
+    };
+
+    let mut a = Trainer::new(cfg.clone(), td.clone(), TrainOptions::default()).unwrap();
+    assert_eq!((a.device(), a.batches_per_epoch(), a.accumulate()), (dev, 3, 2));
+    let sa = a.run().unwrap();
+    assert_eq!(sa.epochs_completed, 2);
+    assert_eq!(a.schedule().step(), 4);
+    assert!(sa.epochs.iter().all(|e| e.train_loss.total.is_finite()));
+    let pa = root.join("a.folo");
+    a.save_checkpoint(&pa).unwrap();
+
+    let ob = TrainOptions::default();
+    let stop = ob.stop.clone();
+    let ob = TrainOptions {
+        events: Some(Box::new(move |e| {
+            if matches!(e, RunEvent::Epoch(x) if x.epoch == 1) {
+                stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        })),
+        ..ob
+    };
+    let mut b = Trainer::new(cfg.clone(), td.clone(), ob).unwrap();
+    assert_eq!(b.run().unwrap().epochs_completed, 1);
+    let ckpt = root.join("b1.folo");
+    b.save_checkpoint(&ckpt).unwrap();
+    let over = ResumeOverrides { device: Some("gpu:0".into()), ..Default::default() };
+    let mut r = Trainer::resume(&ckpt, td.clone(), TrainOptions::default(), over).unwrap();
+    assert_eq!(r.run().unwrap().epochs_completed, 2);
+    let pb = root.join("b2.folo");
+    r.save_checkpoint(&pb).unwrap();
+    assert_eq!(tensors(&pa), tensors(&pb));
+
+    // Also verify `folo2-n` f32 pipelined training with partial-window flush.
+    let v2_cfg =
+        TrainConfig { arch: "folo2-n".into(), epochs: 1, head: folo_vision::model::HeadMode::O2m, ..cfg };
+    let mut v2 = Trainer::new(v2_cfg, td, TrainOptions::default()).unwrap();
+    let sv2 = v2.run().unwrap();
+    assert_eq!(sv2.epochs_completed, 1);
+    assert_eq!(v2.schedule().step(), 2);
+    assert!(sv2.epochs[0].train_loss.total.is_finite());
+}

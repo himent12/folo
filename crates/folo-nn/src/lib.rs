@@ -60,7 +60,7 @@ mod module;
 pub mod optim;
 mod sched;
 
-pub use amp::{AmpContract, GradScaler, ScaleUpdate, unscale_, usable_scale};
+pub use amp::{AmpContract, GradScaler, ScaleUpdate, unscale_, unscale_prepare_device_, usable_scale};
 pub use ema::{
     EMA_DECAY, EMA_MAX_WINDOW, EMA_TAU, EmaContract, EmaMode, EmaPowerConfig, EmaState, ModelEma,
     PEMA_GAMMA_0, PEMA_LF_MIN, PEMA_RHO, ema_for_run,
@@ -68,7 +68,7 @@ pub use ema::{
 pub use error::{Error, Result};
 pub use layers::{
     Activation, BN_EPS, BN_MOMENTUM, BatchNorm2d, Concat, Conv2d, Conv2dConfig, ConvBnAct, Identity, Linear,
-    MaxPool2d, ModuleList, RunningStats, Sequential, Upsample, fuse_conv_bn,
+    LiveFiniteCheck, MaxPool2d, ModuleList, RunningStats, Sequential, Upsample, fuse_conv_bn,
 };
 pub use module::{Forward, Layer, Mode, Module, NamedTensor, TensorKind};
 pub use sched::{

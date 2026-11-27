@@ -239,11 +239,13 @@ fn running_stats_recapture_and_capture_training() {
     assert_eq!(active.len(), 2);
     assert!(!active.is_empty());
     assert!(active.all_finite_live().unwrap());
+    assert!(matches!(active.prepare_live_finite_check().unwrap(), super::LiveFiniteCheck::Ready(true)));
 
     // Step 1: finite forward updates only train_bn.
     let x1 = Tensor::randn([2, 4, 4, 4], 0.5, 1.5, &mut rng);
     model.forward(&x1).unwrap();
     assert!(active.all_finite_live().unwrap());
+    assert!(matches!(active.prepare_live_finite_check().unwrap(), super::LiveFiniteCheck::Ready(true)));
     let after_step1: Vec<Vec<f32>> =
         model.named_buffers().iter().map(|(_, t)| t.to_vec::<f32>().unwrap()).collect();
 
@@ -253,9 +255,11 @@ fn running_stats_recapture_and_capture_training() {
         let x_bad = Tensor::full([2, 4, 4, 4], bad);
         model.forward(&x_bad).unwrap();
         assert!(!active.all_finite_live().unwrap(), "missed {bad}");
+        assert!(matches!(active.prepare_live_finite_check().unwrap(), super::LiveFiniteCheck::Ready(false)));
         assert!(!RunningStats::all_finite(&model).unwrap(), "missed {bad}");
         active.restore().unwrap();
         assert!(active.all_finite_live().unwrap());
+        assert!(matches!(active.prepare_live_finite_check().unwrap(), super::LiveFiniteCheck::Ready(true)));
         let restored: Vec<Vec<f32>> =
             model.named_buffers().iter().map(|(_, t)| t.to_vec::<f32>().unwrap()).collect();
         assert_eq!(restored, after_step1, "restore after {bad}");

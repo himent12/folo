@@ -51,6 +51,29 @@ pub(super) fn detection_loss_device_with_assignment(
     targets: &[ImageTargets],
     cfg: &LossConfig,
 ) -> Result<(LossOutput, Option<folo_gpu::detect::Assignment>)> {
+    let (out, asg) = encode_detection_loss_device(box_raw, cls_raw, anchors, targets, cfg)?;
+    // The loss's one readback: the reported items, the positives and the target score sum.
+    let st = out.stats.to_vec::<f32>()?;
+    let (total_value, items, num_fg, target_score_sum, ok) = decode_device_loss_values(&st);
+    if !ok {
+        return Ok((nan_loss(cls_raw.device())?, None));
+    }
+    Ok((
+        LossOutput { total: out.total, total_value, items, num_fg, target_score_sum, mean_iou_loss: None },
+        Some(asg),
+    ))
+}
+
+/// Encodes the GPU detection loss kernels without reading `stats` back to the host, so callers can batch or
+/// overlap the `stats` download via [`folo_gpu::download_many_deferred`] and decode with
+/// [`decode_device_loss_values`].
+pub(crate) fn encode_detection_loss_device(
+    box_raw: &Tensor,
+    cls_raw: &Tensor,
+    anchors: &Anchors,
+    targets: &[ImageTargets],
+    cfg: &LossConfig,
+) -> Result<(folo_gpu::detect::DeviceLoss, folo_gpu::detect::Assignment)> {
     check_inputs(box_raw, cls_raw, anchors, cfg)?;
     let tables = gpu_targets(targets);
     let gts: Vec<_> = tables.iter().map(|(b, l)| folo_gpu::detect::ImageGt { boxes: b, labels: l }).collect();
@@ -83,23 +106,17 @@ pub(super) fn detection_loss_device_with_assignment(
         dfl_ot_weight: cfg.dfl_ot_weight,
         dfl_crps_weight: cfg.dfl_crps_weight,
     };
-    let (out, asg) = folo_gpu::detect::detection_loss_with_assignment(box_raw, cls_raw, &at, &gts, &s)?;
-    // The loss's one readback: the reported items, the positives and the target score sum.
-    let st = out.stats.to_vec::<f32>()?;
+    folo_gpu::detect::detection_loss_with_assignment(box_raw, cls_raw, &at, &gts, &s)
+}
+
+/// Unpack the host-side `stats` vector from [`folo_gpu::detect::DeviceLoss::stats`] into
+/// `(total_value, items, num_fg, target_score_sum, inputs_finite)`.
+pub(crate) fn decode_device_loss_values(st: &[f32]) -> (f32, LossItems, usize, f32, bool) {
     if st[6] != 0.0 {
-        return Ok((nan_loss(cls_raw.device())?, None));
+        let nan = f32::NAN;
+        return (nan, LossItems { box_: nan, cls: nan, dfl: nan }, 0, 0.0, false);
     }
-    Ok((
-        LossOutput {
-            total: out.total,
-            total_value: st[0],
-            items: LossItems { box_: st[1], cls: st[2], dfl: st[3] },
-            num_fg: st[4] as usize,
-            target_score_sum: st[5],
-            mean_iou_loss: None,
-        },
-        Some(asg),
-    ))
+    (st[0], LossItems { box_: st[1], cls: st[2], dfl: st[3] }, st[4] as usize, st[5], true)
 }
 
 /// [`assign_batch`] on a folo-gpu device (the kernels [`detection_loss`] uses there), downloaded into the same
