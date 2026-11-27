@@ -188,7 +188,7 @@ pub(crate) fn mkdir(p: &Path) -> Result<()> {
     std::fs::create_dir_all(p).map_err(|e| DataError::io(p, e))
 }
 
-pub(crate) fn copy(from: &Path, to: &Path) -> Result<()> {
+fn copy(from: &Path, to: &Path) -> Result<()> {
     crate::guard::check(from).map_err(|e| DataError::io(from, e))?;
     std::fs::copy(from, to).map(|_| ()).map_err(|e| DataError::io(from, e))
 }

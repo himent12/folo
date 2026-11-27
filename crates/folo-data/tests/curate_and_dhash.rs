@@ -391,17 +391,17 @@ fn perceptual_dhash_audit_catches_recompressed_resized_and_cropped_split_leakage
 fn curation_edge_cases_empty_names_tiny_boxes_probe_and_validation() {
     let t = TempDir::new("curate-edges");
 
-    // 1. Unmapped empty / whitespace-only class name errors cleanly instead of silently dropping boxes.
+    // 1. Unmapped empty / whitespace-only class name errors cleanly in both Exact and CaseAndWhitespace modes.
     let empty_cls = t.join("empty_cls");
-    write(&empty_cls.join("data.yaml"), "train: images/train\nnames: [\"\", \"car\"]\n");
+    write(&empty_cls.join("data.yaml"), "train: images/train\nnames: [\"   \", \"car\"]\n");
     write_png(&empty_cls.join("images/train/a.png"), 32, 32, [10, 20, 30]);
     write(&empty_cls.join("labels/train/a.txt"), "0 0.5 0.5 0.4 0.4\n1 0.5 0.5 0.2 0.2\n");
     let ds_empty = open(&empty_cls).unwrap();
     assert!(ds_empty.remap_classes(&RemapConfig::default()).is_err());
 
-    // Explicitly remapping "" to "unknown" succeeds cleanly.
+    // Explicitly remapping "   " to "unknown" succeeds cleanly.
     let mut fix_map = HashMap::new();
-    fix_map.insert("".into(), Some("unknown".into()));
+    fix_map.insert("   ".into(), Some("unknown".into()));
     let fixed = ds_empty.remap_classes(&RemapConfig { map: fix_map, ..Default::default() }).unwrap();
     assert_eq!(fixed.classes, vec!["unknown", "car"]);
     assert_eq!(fixed.train.boxes(0).len(), 2);
@@ -432,14 +432,19 @@ fn curation_edge_cases_empty_names_tiny_boxes_probe_and_validation() {
     assert_eq!(reopened.train.boxes(0).len(), 1);
     assert!(reopened.train.boxes(0)[0].w > 0.0);
 
-    // 4. Non-finite / negative box rejected before claiming output directory.
-    let mut bad_ds = ds_tiny.clone();
-    let mut bad_entry = bad_ds.train.entries()[0].clone();
-    bad_entry.boxes = vec![folo_data::BBox::new(0, f32::NAN, 0.5, 0.2, 0.2)];
-    bad_ds.train = folo_data::FileDataset::new(Split::Train, vec!["dot".into()], vec![bad_entry]);
-    let bad_out = t.join("bad_out");
-    assert!(write_merged(&[&bad_ds], &bad_out, &MergeConfig::default()).is_err());
-    assert!(!bad_out.exists(), "output dir must not be created on box validation error");
+    // 4. Non-finite / sub-ULP degenerate box rejected before claiming output directory.
+    for bad_box in [
+        folo_data::BBox::new(0, f32::NAN, 0.5, 0.2, 0.2),
+        folo_data::BBox::new(0, 0.75, 0.5, 2.0f32.powi(-24), 0.2),
+    ] {
+        let mut bad_ds = ds_tiny.clone();
+        let mut bad_entry = bad_ds.train.entries()[0].clone();
+        bad_entry.boxes = vec![bad_box];
+        bad_ds.train = folo_data::FileDataset::new(Split::Train, vec!["dot".into()], vec![bad_entry]);
+        let bad_out = t.join("bad_out");
+        assert!(write_merged(&[&bad_ds], &bad_out, &MergeConfig::default()).is_err());
+        assert!(!bad_out.exists(), "output dir must not be created on box validation error");
+    }
 
     // 5. Filter rejects inverted/negative-dimension boxes under area & pixel bounds, and skips probing
     //    missing images whose boxes were already filtered out by class whitelist when no image dim bound is set.
@@ -448,18 +453,30 @@ fn curation_edge_cases_empty_names_tiny_boxes_probe_and_validation() {
         folo_data::BBox::new(0, 0.5, 0.5, -0.5, -0.5), // (-0.5)*(-0.5) = +0.25 must STILL be rejected
         folo_data::BBox::new(0, 0.5, 0.5, -0.5, 0.5),
     ];
+    let missing_excluded = folo_data::ImageEntry {
+        image: t.join("does_not_exist_on_disk.png"),
+        label: None,
+        size: None,
+        boxes: vec![folo_data::BBox::new(1, 0.5, 0.5, 0.4, 0.4)],
+    };
     let mut neg_ds = ds_tiny.clone();
-    neg_ds.train = folo_data::FileDataset::new(Split::Train, vec!["dot".into()], vec![neg_entry]);
+    neg_ds.classes = vec!["dot".into(), "ignored".into()];
+    neg_ds.train =
+        folo_data::FileDataset::new(Split::Train, neg_ds.classes.clone(), vec![neg_entry, missing_excluded]);
     let filtered_neg = neg_ds
         .filter(&FilterConfig {
+            include_classes: Some(vec!["dot".into()]),
             max_box_area: Some(0.5),
+            min_box_width_px: Some(1.0),
             max_box_width_px: Some(100.0),
             ..Default::default()
         })
         .unwrap();
+    assert_eq!(filtered_neg.train.len(), 2);
     assert!(filtered_neg.train.boxes(0).is_empty());
+    assert!(filtered_neg.train.boxes(1).is_empty());
 
-    // 6. `probe_image_sizes: true` probes real disk dimensions on an unverified COCO dataset with stale metadata.
+    // 6. `probe_image_sizes: true` rejects stale unverified COCO metadata instead of distorting normalised boxes.
     let stale_coco = t.join("stale_coco");
     write_png(&stale_coco.join("images/train/a.png"), 40, 40, [10, 20, 30]);
     write(
@@ -474,10 +491,11 @@ fn curation_edge_cases_empty_names_tiny_boxes_probe_and_validation() {
     );
     let unverified_coco =
         open_with(&stale_coco, &OpenOptions { format: Format::Coco, verify_images: false }).unwrap();
-    let probed = unverified_coco
+    let err = unverified_coco
         .filter(&FilterConfig { min_image_width: Some(1000), probe_image_sizes: true, ..Default::default() })
-        .unwrap();
-    assert_eq!(probed.train.len(), 0, "40px actual image must not pass min_image_width=1000 when probed");
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("verify_images: true"), "{err}");
 
     // 7. Invalid prefix fails up front in merge_datasets and merge_paths (before opening disk paths).
     assert!(

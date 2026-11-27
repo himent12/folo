@@ -241,6 +241,19 @@ fn validate_yolo_boxes(entry: &ImageEntry, num_classes: usize) -> Result<()> {
                 crate::paths::shown(&entry.image)
             )));
         }
+        // Reject boxes that collapse to zero width/height after clamping to `[0, 1]` (e.g. sub-ULP widths),
+        // matching `dataset::labels::parse_line` so written annotations round-trip without silent loss.
+        let clamped = b.clipped();
+        if clamped.w <= 0.0 || clamped.h <= 0.0 {
+            return Err(DataError::Config(format!(
+                "degenerate box ({}x{} at {}, {}) collapses to zero size inside [0, 1] in {}",
+                b.w,
+                b.h,
+                b.cx,
+                b.cy,
+                crate::paths::shown(&entry.image)
+            )));
+        }
     }
     Ok(())
 }
@@ -290,7 +303,7 @@ fn write_entry_resolving_os_aliases(
         match OpenOptions::new().write(true).create_new(true).open(&lbl_path) {
             Ok(mut lbl_file) => {
                 let img_path = img_dir.join(format!("{candidate}{ext}"));
-                match OpenOptions::new().write(true).create_new(true).open(&img_path) {
+                let img_err = match OpenOptions::new().write(true).create_new(true).open(&img_path) {
                     Ok(mut img_file) => {
                         let mut src =
                             std::fs::File::open(&entry.image).map_err(|e| DataError::io(&entry.image, e))?;
@@ -298,17 +311,19 @@ fn write_entry_resolving_os_aliases(
                         lbl_file.write_all(label_text.as_bytes()).map_err(|e| DataError::io(&lbl_path, e))?;
                         return Ok(n > 0);
                     }
-                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                        drop(lbl_file);
-                        let _ = std::fs::remove_file(&lbl_path);
-                        n += 1;
-                        candidate = format!("{initial_stem}_{n}");
-                    }
-                    Err(e) => {
-                        drop(lbl_file);
-                        let _ = std::fs::remove_file(&lbl_path);
-                        return Err(DataError::io(&img_path, e));
-                    }
+                    Err(e) => e,
+                };
+                // Close `lbl_file` via lexical scope before removing `lbl_path` (avoiding `drop(lbl_file)`
+                // which trips `clippy::drop_non_drop` on `wasm32` where `std::fs::File` has no `Drop` impl).
+                {
+                    let _close = lbl_file;
+                }
+                let _ = std::fs::remove_file(&lbl_path);
+                if img_err.kind() == std::io::ErrorKind::AlreadyExists {
+                    n += 1;
+                    candidate = format!("{initial_stem}_{n}");
+                } else {
+                    return Err(DataError::io(&img_path, img_err));
                 }
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -387,19 +402,19 @@ pub fn write_merged(datasets: &[&LoadedDataset], out: &Path, config: &MergeConfi
         let (resolved, split_renames) = resolve_merge_filenames(items, &merged.prefixes, config.collisions);
         renamed_collisions += split_renames;
 
-        let has_non_ascii = resolved.iter().any(|(stem, _)| !stem.is_ascii());
+        let has_non_ascii = resolved.iter().any(|(stem, _, _)| !stem.is_ascii());
         if has_non_ascii {
             // Sequential exclusive creation catches OS-level Unicode normalization aliases (e.g. APFS NFC/NFD).
-            for ((_, e), (stem, ext)) in items.iter().zip(&resolved) {
-                if write_entry_resolving_os_aliases(e, stem, ext, &img_dir, &lbl_dir)? {
+            for ((_, e), (stem, ext, already_renamed)) in items.iter().zip(&resolved) {
+                if write_entry_resolving_os_aliases(e, stem, ext, &img_dir, &lbl_dir)? && !already_renamed {
                     renamed_collisions += 1;
                 }
             }
         } else {
-            items.par_iter().zip(&resolved).try_for_each(|((_, e), (stem, ext))| {
+            items.par_iter().zip(&resolved).try_for_each(|((_, e), (stem, ext, _))| {
                 copy_exclusive(&e.image, &img_dir.join(format!("{stem}{ext}")))
             })?;
-            items.par_iter().zip(&resolved).try_for_each(|((_, e), (stem, _))| {
+            items.par_iter().zip(&resolved).try_for_each(|((_, e), (stem, _, _))| {
                 let text = format_yolo_labels(&e.boxes);
                 write_exclusive(&lbl_dir.join(format!("{stem}.txt")), text.as_bytes())
             })?;
@@ -465,13 +480,13 @@ fn clean_stem(p: &Path) -> String {
     if trimmed.is_empty() { "image".to_string() } else { trimmed.to_string() }
 }
 
-/// Generates collision-free `(stem, ".ext")` pairs for one split of a merged dataset, comparing stems
+/// Generates collision-free `(stem, ".ext", was_renamed)` tuples for one split of a merged dataset, comparing stems
 /// case-insensitively so Windows and macOS filesystems (and YOLO `.txt` label pairing) never overwrite an entry.
 fn resolve_merge_filenames(
     items: &[(usize, ImageEntry)],
     prefixes: &[String],
     policy: CollisionPolicy,
-) -> (Vec<(String, String)>, usize) {
+) -> (Vec<(String, String, bool)>, usize) {
     let mut stem_counts: HashMap<String, usize> = HashMap::with_capacity(items.len());
     let raw_stems: Vec<String> = items
         .iter()
@@ -483,7 +498,7 @@ fn resolve_merge_filenames(
         .collect();
 
     let mut taken: HashSet<String> = HashSet::with_capacity(items.len());
-    let mut names: Vec<(String, String)> = Vec::with_capacity(items.len());
+    let mut names: Vec<(String, String, bool)> = Vec::with_capacity(items.len());
     let mut renamed = 0usize;
 
     for ((ds_idx, e), stem) in items.iter().zip(raw_stems) {
@@ -500,10 +515,11 @@ fn resolve_merge_filenames(
             n += 1;
             candidate = format!("{base}_{n}");
         }
-        if candidate != stem {
+        let was_renamed = candidate != stem;
+        if was_renamed {
             renamed += 1;
         }
-        names.push((candidate, ext));
+        names.push((candidate, ext, was_renamed));
     }
 
     (names, renamed)
@@ -526,7 +542,7 @@ mod tests {
         let prefixes = vec!["ds0".into(), "ds1".into()];
 
         let (pairs, renamed) = resolve_merge_filenames(&items, &prefixes, CollisionPolicy::PrefixOnCollision);
-        let names: Vec<String> = pairs.into_iter().map(|(s, e)| format!("{s}{e}")).collect();
+        let names: Vec<String> = pairs.into_iter().map(|(s, e, _)| format!("{s}{e}")).collect();
         assert_eq!(
             names,
             vec!["ds0_0001.jpg", "unique.png", "ds1_0001.png", "ds1_0001_1.JPG", "ds1_0001_2.jpg"]
@@ -535,7 +551,7 @@ mod tests {
 
         let (pairs_all, renamed_all) =
             resolve_merge_filenames(&items, &prefixes, CollisionPolicy::AlwaysPrefix);
-        let prefixed: Vec<String> = pairs_all.into_iter().map(|(s, e)| format!("{s}{e}")).collect();
+        let prefixed: Vec<String> = pairs_all.into_iter().map(|(s, e, _)| format!("{s}{e}")).collect();
         assert_eq!(
             prefixed,
             vec!["ds0_0001.jpg", "ds0_unique.png", "ds1_0001.png", "ds1_0001_1.JPG", "ds0_ds1_0001.jpg"]

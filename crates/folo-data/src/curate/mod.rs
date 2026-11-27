@@ -243,9 +243,9 @@ pub(super) fn build_normalized_map(
         let resolved = match dst {
             Some(name) => {
                 let disp = normalize.display(name);
-                if disp.is_empty() {
+                if disp.trim().is_empty() {
                     return Err(DataError::Config(format!(
-                        "remapped target class name for {src:?} cannot be empty"
+                        "remapped target class name for {src:?} cannot be empty or whitespace-only"
                     )));
                 }
                 Some(disp)
@@ -294,9 +294,9 @@ pub(super) fn unify_classes(
                 None if drop_unmapped => None,
                 None => {
                     let disp = normalize.display(raw_name);
-                    if disp.is_empty() {
+                    if disp.trim().is_empty() {
                         return Err(DataError::Config(format!(
-                            "dataset #{ds_idx} class #{cls_idx} ({raw_name:?}) normalises to an empty class name; \
+                            "dataset #{ds_idx} class #{cls_idx} ({raw_name:?}) is empty or whitespace-only; \
                              remap or drop it explicitly via class_map"
                         )));
                     }
@@ -499,7 +499,25 @@ pub fn filter_dataset(dataset: &LoadedDataset, config: &FilterConfig) -> Result<
                         return Ok(e.size);
                     }
                     if config.probe_image_sizes {
-                        return probe_size(&e.image).map(Some);
+                        let actual = probe_size(&e.image)?;
+                        // COCO and VOC normalise pixel boxes against `declared` when opened with
+                        // `verify_images: false`; replacing a mismatched size in place would distort box
+                        // coordinates. Reject cleanly and ask the caller to reopen with `verify_images: true`.
+                        if matches!(dataset.format, Format::Coco | Format::Voc)
+                            && let Some(declared) = e.size
+                            && declared != actual
+                        {
+                            return Err(DataError::Config(format!(
+                                "{}: metadata size {}x{} disagrees with image header {}x{}; reopen with \
+                                 verify_images: true before filtering by pixel dimensions",
+                                crate::paths::shown(&e.image),
+                                declared.0,
+                                declared.1,
+                                actual.0,
+                                actual.1,
+                            )));
+                        }
+                        return Ok(Some(actual));
                     }
                     match e.size {
                         Some(sz) => Ok(Some(sz)),
