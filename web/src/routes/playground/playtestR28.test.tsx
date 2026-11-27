@@ -75,7 +75,6 @@ describe('Playtest R28 regressions', () => {
       }
       return new Promise<BenchResult>((resolve, reject) => {
         pendingResults.set(entryId, { resolve, reject });
-        void origResult(benchId, entryId);
       });
     });
 
@@ -270,6 +269,7 @@ describe('Playtest R28 regressions', () => {
     } finally {
       Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: origMediaDevices });
       if (origSrcObject) Object.defineProperty(HTMLMediaElement.prototype, 'srcObject', origSrcObject);
+      else delete (HTMLMediaElement.prototype as unknown as { srcObject?: unknown }).srcObject;
       URL.createObjectURL = origCreateUrl;
       URL.revokeObjectURL = origRevokeUrl;
     }
@@ -373,7 +373,7 @@ describe('Playtest R28 regressions', () => {
           frameMeta: () => media.lastFrameMeta.get(),
           predMatchesFrame: () => {
             const s = sourceKey.get();
-            return !!s && !isUnsyncedVideo() && !media.seeking.get() && !!media.lastFrameMeta.get() && predSourceKey.get() === s;
+            return !!s && !isUnsyncedVideo() && !media.seeking.get() && !media.awaitingCapture.get() && !!media.lastFrameMeta.get() && predSourceKey.get() === s;
           },
           modelId: () => 'm1',
           classes: () => ['circle'],
@@ -426,6 +426,201 @@ describe('Playtest R28 regressions', () => {
       expect(obs).toHaveLength(1);
       expect(obs[0]!.frame).toBe(1);
       expect(obs[0]!.timestamp_ms).toBe(2000);
+    } finally {
+      URL.createObjectURL = origCreateUrl;
+      URL.revokeObjectURL = origRevokeUrl;
+    }
+  });
+
+  it('clears BenchResults cache and refetches on in-place hub.epoch reconnect so exports never stay stuck or use stale connection data', async () => {
+    const api1 = new MockApi('normal', 0);
+    const origRes1 = api1.benchResult.bind(api1);
+    const pending1 = new Map<string, (r: BenchResult) => void>();
+    vi.spyOn(api1, 'benchResult').mockImplementation(
+      (_benchId, entryId) => new Promise<BenchResult>((resolve) => void pending1.set(entryId, resolve)),
+    );
+
+    hub.api = api1;
+    hub.mode = 'mock';
+    const route = '#/benchmarks/bn_5e12/compare?entries=be_5a21,be_5a20';
+    history.replaceState(history.state, '', route);
+    router.route = parse(route);
+    view = render(() => <BenchCompare />, target);
+
+    const getMenu = () => target.querySelector<HTMLButtonElement>('button[aria-haspopup="menu"][aria-label="Export comparison"]');
+    await until(() => pending1.has('be_5a21') && pending1.has('be_5a20'), 'connection 1 detail requests');
+    expect(getMenu()!.disabled).toBe(true);
+
+    // Reconnect in place (new API + hub.epoch increment) while connection 1's detail requests are still pending.
+    const api2 = new MockApi('normal', 0);
+    const origRes2 = api2.benchResult.bind(api2);
+    const pending2 = new Map<string, (r: BenchResult) => void>();
+    const spy2 = vi.spyOn(api2, 'benchResult').mockImplementation(
+      (_benchId, entryId) => new Promise<BenchResult>((resolve) => void pending2.set(entryId, resolve)),
+    );
+    hub.api = api2;
+    hub.epoch += 1;
+    flushSync();
+
+    // Connection 2 MUST issue fresh detail requests rather than getting stuck on connection 1's #asked set.
+    await until(() => pending2.has('be_5a21') && pending2.has('be_5a20'), 'connection 2 fresh detail requests');
+    expect(spy2).toHaveBeenCalledTimes(2);
+    expect(getMenu()!.disabled).toBe(true);
+
+    // Late resolution from connection 1 MUST be ignored and keep exports disabled until connection 2 resolves.
+    pending1.get('be_5a21')!(await origRes1('bn_5e12', 'be_5a21'));
+    pending1.get('be_5a20')!(await origRes1('bn_5e12', 'be_5a20'));
+    await tick();
+    flushSync();
+    expect(getMenu()!.disabled).toBe(true);
+
+    // Once connection 2 resolves, exports re-enable cleanly.
+    pending2.get('be_5a21')!(await origRes2('bn_5e12', 'be_5a21'));
+    pending2.get('be_5a20')!(await origRes2('bn_5e12', 'be_5a20'));
+    await until(() => getMenu()?.disabled === false, 'exports enabled on connection 2');
+  });
+
+  it('does not record the previous frame when Track IDs is re-enabled after an Auto-on +1f step while the new frame is still encoding', async () => {
+    const origCreateUrl = URL.createObjectURL;
+    const origRevokeUrl = URL.revokeObjectURL;
+    URL.createObjectURL = vi.fn(() => 'blob:r28-fwd-vid');
+    URL.revokeObjectURL = vi.fn();
+    const ctxStub = {
+      drawImage: vi.fn(),
+      save: vi.fn(),
+      beginPath: vi.fn(),
+      rect: vi.fn(),
+      clip: vi.fn(),
+      restore: vi.fn(),
+    } as unknown as CanvasRenderingContext2D;
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(ctxStub);
+    let holdNextBlob = false;
+    let releaseBlob: (() => void) | null = null;
+    vi.spyOn(HTMLCanvasElement.prototype, 'toBlob').mockImplementation((cb) => {
+      if (holdNextBlob) {
+        holdNextBlob = false;
+        releaseBlob = () => cb(new Blob(['stepped-jpg'], { type: 'image/jpeg' }));
+      } else {
+        cb(new Blob(['jpg'], { type: 'image/jpeg' }));
+      }
+    });
+    vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => {});
+    vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => {});
+
+    let nextTrackId = 1;
+    class FakeTracker {
+      update(boxes: PredictBox[]) {
+        return boxes.map((b) => ({ ...b, track_id: nextTrackId }));
+      }
+      reset() {
+        nextTrackId++;
+      }
+      free() {}
+    }
+    const fakeWasm = {
+      default: vi.fn(async () => {}),
+      FoloDetector: class {},
+      FoloTracker: FakeTracker,
+    } as unknown as WasmModule;
+    const engine = new BrowserEngine(async () => fakeWasm);
+
+    try {
+      const pred = signal<Prediction | null>(null);
+      const sourceKey = signal<string | null>(null);
+      const predSourceKey = signal<string | null>(null);
+      let frameSeqCounter = 0;
+      let media!: ReturnType<typeof useMediaSession>;
+      let tracking!: ReturnType<typeof useTracking>;
+      const fakeVideo = document.createElement('video');
+      Object.defineProperty(fakeVideo, 'videoWidth', { configurable: true, value: 320 });
+      Object.defineProperty(fakeVideo, 'videoHeight', { configurable: true, value: 180 });
+      Object.defineProperty(fakeVideo, 'duration', { configurable: true, value: 5 });
+      Object.defineProperty(fakeVideo, 'readyState', { configurable: true, value: 4 });
+      let t = 0;
+      Object.defineProperty(fakeVideo, 'currentTime', {
+        configurable: true,
+        get: () => t,
+        set: (v: number) => {
+          t = v;
+        },
+      });
+
+      function Harness() {
+        media = useMediaSession({
+          onFrame: (f) => {
+            const key = `frame:${++frameSeqCounter}:${f.name}`;
+            sourceKey.set(key);
+            predSourceKey.set(key);
+            pred.set({
+              model_id: 'm1',
+              image: { width: f.width, height: f.height },
+              boxes: [{ class: 0, name: 'circle', score: 0.9, x1: 10, y1: 10, x2: 50, y2: 50 }],
+              timing: { preprocess_ms: 1, inference_ms: 3, postprocess_ms: 1, total_ms: 5 },
+              device: 'cpu',
+            });
+          },
+          isPredicting: () => false,
+          isInferenceBlocked: () => false,
+          hasValidResult: () => !!pred.peek(),
+          lastLatencyMs: () => 5,
+          onTrackReset: () => tracking?.reset(),
+        });
+        media.videoEl.set(fakeVideo);
+        const isUnsyncedVideo = () => media.mode.get() === 'video' && !media.frameSynced.get();
+        tracking = useTracking({
+          engine,
+          browserOff: () => null,
+          mediaMode: () => media.mode.get(),
+          mediaKey: () => `${media.mode.get()}:${media.sessionSeq.get()}`,
+          frameKey: () => (media.mode.get() === 'none' ? null : `${media.mode.get()}:${media.sessionSeq.get()}:${media.frameSeq.get()}`),
+          frameMeta: () => media.lastFrameMeta.get(),
+          predMatchesFrame: () => {
+            const s = sourceKey.get();
+            return !!s && !isUnsyncedVideo() && !media.seeking.get() && !media.awaitingCapture.get() && !!media.lastFrameMeta.get() && predSourceKey.get() === s;
+          },
+          modelId: () => 'm1',
+          classes: () => ['circle'],
+          pred: () => pred.get(),
+          conf: () => 0.25,
+          iou: () => 0.45,
+          maxDet: () => 300,
+          o2o: () => false,
+        });
+        return <div />;
+      }
+
+      view = render(() => <Harness />, target);
+      flushSync();
+
+      // Load video with Auto ON and Track IDs OFF; initial frame at t = 0 s captures and predicts.
+      media.autoDetect.set(true);
+      media.loadVideo(new File(['v'], 'step.mp4', { type: 'video/mp4' }));
+      media.videoEvents.onloadedmetadata({ currentTarget: fakeVideo } as unknown as Event & { currentTarget: HTMLVideoElement });
+      media.videoEvents.onloadeddata({ currentTarget: fakeVideo } as unknown as Event & { currentTarget: HTMLVideoElement });
+      await until(() => !!pred.get(), 'initial frame 0 predicted');
+      expect(media.awaitingCapture.get()).toBe(false);
+
+      // Step +1f (Auto ON), fire seeked, and hold canvas.toBlob pending so the stepped frame is mid-encode.
+      holdNextBlob = true;
+      media.stepFrame(1);
+      expect(media.awaitingCapture.get()).toBe(true);
+      media.videoEvents.onseeked({ currentTarget: fakeVideo } as unknown as Event & { currentTarget: HTMLVideoElement });
+      await until(() => releaseBlob !== null, 'stepped frame encoding in flight');
+      expect(media.seeking.get()).toBe(false);
+      expect(media.awaitingCapture.get()).toBe(true);
+
+      // Enable Track IDs while the stepped frame is still encoding -> MUST NOT record the stale 0 ms frame!
+      tracking.setEnabled(true);
+      await tick();
+      flushSync();
+      expect(tracking.getObservations()).toHaveLength(0);
+
+      // Finish encoding the stepped frame -> records ONLY the new stepped timestamp (> 0 ms), never 0 ms.
+      releaseBlob!();
+      await until(() => tracking.getObservations().length === 1, 'stepped frame tracked');
+      const obs = tracking.getObservations();
+      expect(obs).toHaveLength(1);
+      expect(obs[0]!.timestamp_ms).toBeGreaterThan(0);
     } finally {
       URL.createObjectURL = origCreateUrl;
       URL.revokeObjectURL = origRevokeUrl;
