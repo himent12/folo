@@ -240,8 +240,8 @@ fn playground_per_class_thresholds_drive_overlays_compare_batch_and_remap_on_mod
         assert!(this.play_thresholds.per_class.is_empty());
     });
 
-    // 5. Older server lacking `threshold_calibration` falls back to low scalar floor without sending per_class_conf.
-    drive(&mut app, window, |this, _, _| {
+    // 5. Older server lacking `threshold_calibration` falls back to strictly-below scalar floor without sending per_class_conf.
+    drive(&mut app, window, |this, _, cx| {
         this.play_conf = 0.50;
         this.play_target = None;
         let mut ov = BTreeMap::new();
@@ -252,9 +252,45 @@ fn playground_per_class_thresholds_drive_overlays_compare_batch_and_remap_on_mod
         assert!((floor - 0.50).abs() < 1e-6);
         this.store.features.retain(|f| f != crate::api::FEATURE_THRESHOLD_CALIBRATION);
         let (old_conf, old_map, old_inc, old_floor) = this.play_predict_threshold_params(&ov);
-        assert!((old_conf - 0.05).abs() < 1e-6);
+        assert!(
+            old_conf < 0.05 && old_conf > 0.049,
+            "legacy floor should sit strictly below 0.05: {old_conf}"
+        );
         assert!(old_map.is_none() && !old_inc);
         assert!((old_floor - 0.50).abs() < 1e-6);
+
+        // Empty `ThresholdCalibration` import must be rejected without resetting `play_conf` to 0.
+        assert!(!this.apply_play_thresholds_json(
+            r#"{"global":{"best_conf":0,"best_f1":0,"precision":0,"recall":0},"macro_f1":0,"per_class":[]}"#,
+            cx
+        ));
+        assert!((this.play_conf - 0.50).abs() < 1e-6);
+        assert!(this.play_thresholds.import_error.is_some());
+    });
+
+    // 5b. Switching Model A while Model B is pending supersedes stale B when B's effective overrides change.
+    drive(&mut app, window, |this, _, cx| {
+        this.set_play_compare(true, cx);
+        this.pick_play_model("m_44c0".into(), cx); // 5 classes: circle, square, triangle, star, hex
+        this.set_play_class_conf(3, 0.95, cx); // star = 0.95
+        this.play_compare.pred_b_pending = true;
+        let seq_before = this.play_compare.pred_b_seq;
+        // Switch A to a model with disjoint/smaller class list so `star` override is dropped.
+        let other = this
+            .store
+            .models
+            .ready()
+            .unwrap()
+            .iter()
+            .find(|m| !m.classes.iter().any(|c| c == "star"))
+            .map(|m| m.id.clone());
+        if let Some(other_id) = other {
+            this.pick_play_model(other_id, cx);
+            assert!(
+                this.play_compare.pred_b_seq > seq_before,
+                "pending Model B must be superseded when Model A switch changes B's mapped overrides"
+            );
+        }
     });
 
     // 6. Switching to a model with an incompatible class list clears stale overrides (no silent leak!).

@@ -39,14 +39,15 @@ struct BoardCols {
 }
 
 impl BoardCols {
-    fn for_width(content_width: f32) -> Self {
+    fn for_width(content_width: f32, confirming_any: bool) -> Self {
+        let actions_w = if confirming_any { ACTIONS_W } else { 68. };
         if content_width < 870. {
             Self {
                 rank_w: 20.,
-                entry_min_w: 112.,
+                entry_min_w: if confirming_any { 112. } else { 176. },
                 score_w: 52.,
                 axis_w: [48., 48., 46., 44., 44.],
-                actions_w: 132.,
+                actions_w,
                 gap: 6.,
                 pad_x: 12.,
                 compact: true,
@@ -57,7 +58,7 @@ impl BoardCols {
                 entry_min_w: 160.,
                 score_w: SCORE_W,
                 axis_w: AXIS_W,
-                actions_w: ACTIONS_W,
+                actions_w,
                 gap: COL_GAP,
                 pad_x: 16.,
                 compact: false,
@@ -319,7 +320,9 @@ impl FoloApp {
             }
         };
         let head_row = panel_header(&t, "Leaderboard").child(run_controls);
-        let bc = BoardCols::for_width(self.content_width(window));
+        let confirming_any =
+            self.bench.confirm_delete.as_ref().is_some_and(|(bid, eid)| bid == &b.id && eid.is_some());
+        let bc = BoardCols::for_width(self.content_width(window), confirming_any);
         let cols = move |d: folo_ui::Stateful<folo_ui::Div>| {
             d.flex().items_center().gap(px(bc.gap)).px(px(bc.pad_x))
         };

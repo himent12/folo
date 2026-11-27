@@ -380,6 +380,22 @@ pub fn parse_thresholds_json(raw: &str, classes: &[String]) -> Result<ParsedThre
         || root.contains_key("default_conf")
         || root.get("global").is_some_and(|v| v.is_object() || v.is_number());
     if is_structured {
+        // Guard empty `ThresholdCalibration` payloads emitted by `folo val --save-thresholds` or
+        // `POST /api/val` on a split with no ground-truth boxes (note `serde` omits empty
+        // `per_class` via `skip_serializing_if = "Vec::is_empty"`), matching Models' handoff guard
+        // so Playground never silently resets confidence to `0.00`.
+        if !root.contains_key("default_conf")
+            && root.get("schema").and_then(Value::as_str) != Some("folo.thresholds.v1")
+            && root.get("global").is_some_and(Value::is_object)
+            && root.get("per_class").is_none_or(|v| v.as_array().is_some_and(Vec::is_empty))
+            && serde_json::from_value::<ThresholdCalibration>(Value::Object(root.clone()))
+                .is_ok_and(|cal| cal.is_empty())
+        {
+            return Err(
+                "This calibration file has no calibrated classes (no ground-truth boxes in the evaluated split). Existing thresholds were kept."
+                    .into(),
+            );
+        }
         let mut global_conf: Option<f32> = None;
         if let Some(gv) = root.get("global").filter(|v| !v.is_null()) {
             if gv.is_number() {
@@ -688,9 +704,23 @@ mod tests {
         assert!(r4.per_class.is_empty());
         assert_eq!(r4.warnings.len(), 1);
 
-        // 5. Rejects malformed/invalid inputs
+        // 5. Rejects malformed/invalid inputs and empty calibrations (while keeping explicit default_conf: 0 valid)
         assert!(parse_thresholds_json("", &classes).is_err());
         assert!(parse_thresholds_json("{bad", &classes).is_err());
+        assert!(
+            parse_thresholds_json(
+                r#"{"global":{"best_conf":0,"best_f1":0,"precision":0,"recall":0},"macro_f1":0,"per_class":[]}"#,
+                &classes
+            )
+            .is_err()
+        );
+        // Canonical serde / `POST /api/val` empty calibration omits `per_class` via skip_serializing_if.
+        let empty_serde = serde_json::to_string(&ThresholdCalibration::default()).unwrap();
+        assert!(parse_thresholds_json(&empty_serde, &classes).is_err());
+        assert!(parse_thresholds_json(&format!(r#"{{"thresholds":{empty_serde}}}"#), &classes).is_err());
+        let explicit_zero = parse_thresholds_json(r#"{"default_conf": 0}"#, &classes).unwrap();
+        assert_eq!(explicit_zero.global_conf, Some(0.0));
+        assert!(explicit_zero.per_class.is_empty());
         assert!(parse_thresholds_json(r#"{"0": 1.5}"#, &classes).is_err());
         assert!(parse_thresholds_json(r#"{"-1": 0.5}"#, &classes).is_err());
         assert!(parse_thresholds_json(r#"{"unknown_cls": 0.5}"#, &classes).is_err());

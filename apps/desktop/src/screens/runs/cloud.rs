@@ -121,7 +121,7 @@ impl FoloApp {
             div()
                 .map(|d| match width {
                     Some(w) => d.w(px(w)).flex_none(),
-                    None => d.flex_1().min_w_0(),
+                    None => d.flex_1().min_w(px(210.)),
                 })
                 .flex()
                 .flex_col()
@@ -157,6 +157,7 @@ impl FoloApp {
             )
         });
         let instance = if c.instance_id.is_some() {
+            let inst_tip = format!("{line} — Open in Settings › Cloud");
             let el = div()
                 .id("cloud-instance")
                 .max_w_full()
@@ -165,7 +166,7 @@ impl FoloApp {
                 .rounded(px(radius::SM))
                 .cursor_pointer()
                 .hover(|s| s.bg(t.bg_hover))
-                .tooltip(crate::controls::tip("Its instance in Settings › Cloud", None))
+                .tooltip(crate::controls::tip(inst_tip, None))
                 .child(
                     div()
                         .flex()
@@ -184,7 +185,12 @@ impl FoloApp {
             )
             .into_any_element()
         } else {
-            value(line)
+            div()
+                .id("cloud-instance-plain")
+                .max_w_full()
+                .tooltip(crate::controls::tip(line.clone(), None))
+                .child(value(line))
+                .into_any_element()
         };
         let cost = crate::cloud::panel_cost(c, ledger, unverified);
         let limit = match c.deadline.as_deref().and_then(time::parse).filter(|_| !released) {

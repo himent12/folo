@@ -330,12 +330,17 @@ impl FoloApp {
     pub fn pick_play_model(&mut self, id: String, cx: &mut Context<Self>) {
         self.select_play_model(id);
         self.run_predict(cx);
-        if self.play_compare.enabled
-            && self.play_image.is_some()
-            && !self.play_compare.pred_b_pending
-            && !self.pred_b_is_fresh()
-        {
-            self.run_predict_b(cx);
+        if self.play_compare.enabled && self.play_image.is_some() {
+            let per_b = self.play_per_class_b();
+            let b_thresholds_changed = !crate::screens::playground::thresholds_match(
+                &self.play_compare.fetched_per_class_b,
+                self.play_compare.fetched_floor_b,
+                self.play_conf,
+                &per_b,
+            );
+            if b_thresholds_changed || (!self.play_compare.pred_b_pending && !self.pred_b_is_fresh()) {
+                self.run_predict_b(cx);
+            }
         }
     }
 
