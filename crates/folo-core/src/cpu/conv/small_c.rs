@@ -9,6 +9,9 @@ use crate::backend::UnaryOp;
 use crate::cpu::elementwise::SendPtr;
 use crate::cpu::par_for;
 
+/// Cap on per-thread retained float scratch (`4 MiB`) so one wide/deep conv does not pin memory forever.
+const MAX_RETAINED_FLOATS: usize = 1 << 20;
+
 thread_local! {
     /// Reusable per-worker scratch for [`small_c_forward`] (eliminates per-task heap allocations + zero-fills).
     static SMALL_C_SCRATCH: RefCell<Vec<f32>> = const { RefCell::new(Vec::new()) };
@@ -29,13 +32,15 @@ fn with_small_c_scratch<R>(len: usize, f: impl FnOnce(&mut [f32]) -> R) -> R {
         .flatten();
     if let Some(mut v) = loaned.take() {
         let r = f(&mut v[..len]);
-        let _ = SMALL_C_SCRATCH.try_with(|cell| {
-            if let Ok(mut slot) = cell.try_borrow_mut()
-                && v.capacity() >= slot.capacity()
-            {
-                *slot = v;
-            }
-        });
+        if v.capacity() <= MAX_RETAINED_FLOATS {
+            let _ = SMALL_C_SCRATCH.try_with(|cell| {
+                if let Ok(mut slot) = cell.try_borrow_mut()
+                    && v.capacity() >= slot.capacity()
+                {
+                    *slot = v;
+                }
+            });
+        }
         return r;
     }
     let mut v = vec![0f32; len];
@@ -145,11 +150,20 @@ pub(super) fn small_c_forward(
                     prev_oy = oy;
                     let mut oc = 0;
                     while oc + 4 <= g.o {
-                        let b4 = match bias_slice {
+                        let mut b4 = match bias_slice {
                             Some(b) => [b[oc], b[oc + 1], b[oc + 2], b[oc + 3]],
                             None => [0.0; 4],
                         };
                         let add_bias = silu || b4.iter().any(|&v| v != 0.0);
+                        if add_bias && !silu {
+                            // Match `gemm::BiasAct::kernel_rows`: `x + (-0.0) == x` bit for bit so a zero-bias
+                            // channel grouped with a non-zero neighbour preserves `-0.0` accumulators.
+                            for v in &mut b4 {
+                                if *v == 0.0 {
+                                    *v = -0.0;
+                                }
+                            }
+                        }
                         // SAFETY: AVX2+FMA detected; 4 output rows for `oc..oc+4` at `(img, oy)` are disjointly owned.
                         unsafe {
                             let d0 = optr.0.add((img * g.o + oc) * ohw + oy * g.ow);
@@ -410,6 +424,7 @@ unsafe fn small_c_s2k3p1_row4_avx2(
             && ow <= owp16
             && ch_stride > 2 * owp16
             && slot_len >= c * ch_stride
+            && ord.iter().all(|&s| s < 3)
     );
     let w0 = wt4.as_ptr();
     // SAFETY: `wt4.len() >= 4 * k` asserted above.
@@ -527,6 +542,7 @@ unsafe fn small_c_s2k3p1_row1_avx2(
             && ow <= owp16
             && ch_stride > 2 * owp16
             && slot_len >= c * ch_stride
+            && ord.iter().all(|&s| s < 3)
     );
     let wp = w.as_ptr();
     let vb = _mm256_set1_ps(bias_val);
@@ -772,6 +788,25 @@ mod small_c_tests {
                 let same = got.iter().zip(&want).all(|(a, b)| a.to_bits() == b.to_bits());
                 assert!(same, "case {i} ({g:?}): not bit-identical with the GEMM path");
             }
+        }
+
+        // Regression: grouped 4-channel `s=2, k=3, p=1` with mixed zero/non-zero biases and identity activation
+        // must preserve `-0.0` accumulators identically to `gemm_path`.
+        let g = geom(1, 1, [2, 2], 4, [3, 3], p([2, 2], [1, 1], [1, 1]));
+        let x = [0.0f32, 0.0, 0.0, 0.25];
+        let mut wt = vec![0.0f32; 4 * 9];
+        wt[8] = -f32::from_bits(1);
+        wt[9 + 8] = -f32::from_bits(1);
+        for bias in [[0.0f32, 1.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]] {
+            let epi = Some(BiasAct { bias: Some(&bias), act: None });
+            let mut want = vec![f32::NAN; 4 * g.ohw()];
+            gemm_path(&x, &wt, &mut want, &g, epi);
+            let mut got = vec![f32::NAN; want.len()];
+            conv2d_forward(&x, &wt, &mut got, &g, false, epi);
+            assert!(
+                got.iter().zip(&want).all(|(a, b)| a.to_bits() == b.to_bits()),
+                "mixed-bias -0.0 mismatch: got={got:?} want={want:?}"
+            );
         }
     }
 }

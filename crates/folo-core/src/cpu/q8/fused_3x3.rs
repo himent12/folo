@@ -23,13 +23,13 @@ const MAX_RETAINED_WORDS: usize = 1 << 20;
 const MAX_SCRATCH_WORDS: usize = 1 << 22;
 
 thread_local! {
-    static FUSED_S2_SCRATCH: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
+    static FUSED_3X3_SCRATCH: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Run `f` with a reusable per-thread `u32` scratch slice of length `len` (re-entry-safe).
 #[inline]
 fn with_scratch_u32<R>(len: usize, f: impl FnOnce(&mut [u32]) -> R) -> R {
-    let mut loaned = FUSED_S2_SCRATCH
+    let mut loaned = FUSED_3X3_SCRATCH
         .try_with(|cell| {
             let Ok(mut v) = cell.try_borrow_mut() else { return None };
             if v.len() < len {
@@ -42,7 +42,7 @@ fn with_scratch_u32<R>(len: usize, f: impl FnOnce(&mut [u32]) -> R) -> R {
     if let Some(mut v) = loaned.take() {
         let r = f(&mut v[..len]);
         if v.capacity() <= MAX_RETAINED_WORDS {
-            let _ = FUSED_S2_SCRATCH.try_with(|cell| {
+            let _ = FUSED_3X3_SCRATCH.try_with(|cell| {
                 if let Ok(mut slot) = cell.try_borrow_mut()
                     && v.capacity() >= slot.capacity()
                 {
@@ -56,7 +56,7 @@ fn with_scratch_u32<R>(len: usize, f: impl FnOnce(&mut [u32]) -> R) -> R {
     f(&mut v[..len])
 }
 
-/// Read-only parameters for one `3×3` stride-2 `pad = 1` fused conv.
+/// Read-only parameters for one `3×3` (`stride ∈ {1, 2}`, `pad = 1`) fused row-strip conv.
 pub(super) struct Conv3x3Params<'a> {
     pub xs: &'a [C4<'a>],
     pub n: usize,
@@ -80,6 +80,20 @@ pub(super) struct Conv3x3Params<'a> {
     pub fptr: OutPtr<f32>,
 }
 
+/// Per-row arguments passed into the target-feature-specialized `compute_row` / `run_row` kernels.
+struct RowArgs<'a> {
+    p: &'a Conv3x3Params<'a>,
+    img: usize,
+    oy: usize,
+    ob_start: usize,
+    ob_end: usize,
+    group_stride: usize,
+    ev_w: usize,
+    slot_words: usize,
+    ord: [usize; 3],
+    buf: &'a [u32],
+}
+
 /// Source group lookup `(part_index, local_group_index)` and precomputed packed zero word.
 #[derive(Clone, Copy)]
 struct GroupSrc {
@@ -88,7 +102,7 @@ struct GroupSrc {
     zw: u32,
 }
 
-macro_rules! define_3x3_s2_isa {
+macro_rules! define_3x3_strip_isa {
     (
         mod $mod_name:ident,
         feature = $feat:literal,
@@ -115,12 +129,13 @@ macro_rules! define_3x3_s2_isa {
                 let (mut c20, mut c21, mut c22) = (z, z, z);
                 let (mut c30, mut c31, mut c32) = (z, z, z);
                 // SAFETY: caller guarantees `groups * 9 * MR` weights and valid `(ev, od)` extents per slot.
+                // Pointer advances are guarded by `g + 1 < groups` so no pointer steps past the buffer end.
                 unsafe {
                     let mut p0 = slots[0].add(col);
                     let mut p1 = slots[1].add(col);
                     let mut p2 = slots[2].add(col);
                     let mut ap = a;
-                    for _ in 0..groups {
+                    for g in 0..groups {
                         let ptrs = [p0, p1, p2];
                         for ev in ptrs {
                             let od = ev.add(ev_w);
@@ -131,7 +146,7 @@ macro_rules! define_3x3_s2_isa {
                                             let b1 = _mm256_loadu_si256(bp.add(1));
                                             let b2 = _mm256_loadu_si256(bp.add(2));
                                             let wp = ap.add(($aoff) * MR);
-                                            define_3x3_s2_isa!(@dp $dp_mode, b0, b1, b2, wp,
+                                            define_3x3_strip_isa!(@dp $dp_mode, b0, b1, b2, wp,
                                                 c00, c01, c02, c10, c11, c12, c20, c21, c22, c30, c31, c32);
                                         };
                                     }
@@ -140,9 +155,11 @@ macro_rules! define_3x3_s2_isa {
                             tap!(od.add(1), 2);
                             ap = ap.add(3 * MR);
                         }
-                        p0 = p0.add(ch_stride);
-                        p1 = p1.add(ch_stride);
-                        p2 = p2.add(ch_stride);
+                        if g + 1 < groups {
+                            p0 = p0.add(ch_stride);
+                            p1 = p1.add(ch_stride);
+                            p2 = p2.add(ch_stride);
+                        }
                     }
                     let out = acc.0.as_mut_ptr() as *mut __m256i;
                     _mm256_store_si256(out, c00);
@@ -177,12 +194,13 @@ macro_rules! define_3x3_s2_isa {
                 let (mut c20, mut c21, mut c22) = (z, z, z);
                 let (mut c30, mut c31, mut c32) = (z, z, z);
                 // SAFETY: caller guarantees `groups * 9 * MR` weights and `col + NR + 2 <= slot_w` per group row.
+                // Pointer advances are guarded by `g + 1 < groups` so no pointer steps past the buffer end.
                 unsafe {
                     let mut p0 = slots[0].add(col);
                     let mut p1 = slots[1].add(col);
                     let mut p2 = slots[2].add(col);
                     let mut ap = a;
-                    for _ in 0..groups {
+                    for g in 0..groups {
                         for row_ptr in [p0, p1, p2] {
                             macro_rules! tap {
                                         ($bp:expr, $aoff:expr) => {
@@ -191,7 +209,7 @@ macro_rules! define_3x3_s2_isa {
                                             let b1 = _mm256_loadu_si256(bp.add(1));
                                             let b2 = _mm256_loadu_si256(bp.add(2));
                                             let wp = ap.add(($aoff) * MR);
-                                            define_3x3_s2_isa!(@dp $dp_mode, b0, b1, b2, wp,
+                                            define_3x3_strip_isa!(@dp $dp_mode, b0, b1, b2, wp,
                                                 c00, c01, c02, c10, c11, c12, c20, c21, c22, c30, c31, c32);
                                         };
                                     }
@@ -200,9 +218,11 @@ macro_rules! define_3x3_s2_isa {
                             tap!(row_ptr.add(2), 2);
                             ap = ap.add(3 * MR);
                         }
-                        p0 = p0.add(slot_w);
-                        p1 = p1.add(slot_w);
-                        p2 = p2.add(slot_w);
+                        if g + 1 < groups {
+                            p0 = p0.add(slot_w);
+                            p1 = p1.add(slot_w);
+                            p2 = p2.add(slot_w);
+                        }
                     }
                     let out = acc.0.as_mut_ptr() as *mut __m256i;
                     _mm256_store_si256(out, c00);
@@ -221,24 +241,18 @@ macro_rules! define_3x3_s2_isa {
             }
 
             #[target_feature(enable = $feat)]
-            #[allow(clippy::too_many_arguments)]
             unsafe fn compute_row<
                 const IS_S2: bool,
                 const SILU: bool,
                 const HAS_RES: bool,
                 const OUT_U8: bool,
             >(
-                p: &Conv3x3Params<'_>,
-                img: usize,
-                oy: usize,
-                ob_start: usize,
-                ob_end: usize,
-                group_stride: usize,
-                ev_w: usize,
-                slot_words: usize,
-                ord: [usize; 3],
-                buf: &[u32],
+                r: &RowArgs<'_>,
             ) {
+                let p = r.p;
+                let (img, oy, ob_start, ob_end) = (r.img, r.oy, r.ob_start, r.ob_end);
+                let (group_stride, ev_w, slot_words, ord, buf) =
+                    (r.group_stride, r.ev_w, r.slot_words, r.ord, r.buf);
                 let ohw = p.oh * p.ow;
                 let chunks = p.ow.div_ceil(NR);
                 let ks = p.groups * 9;
@@ -365,119 +379,19 @@ macro_rules! define_3x3_s2_isa {
                 }
             }
 
-            #[allow(clippy::too_many_arguments)]
-            pub(super) unsafe fn run_row<const IS_S2: bool>(
-                p: &Conv3x3Params<'_>,
-                img: usize,
-                oy: usize,
-                ob_start: usize,
-                ob_end: usize,
-                group_stride: usize,
-                ev_w: usize,
-                slot_words: usize,
-                ord: [usize; 3],
-                buf: &[u32],
-            ) {
-                let has_res = p.res_view.is_some();
+            pub(super) unsafe fn run_row<const IS_S2: bool>(r: &RowArgs<'_>) {
+                let has_res = r.p.res_view.is_some();
                 // SAFETY: ISA checked by caller.
                 unsafe {
-                    match (p.silu, has_res, p.is_u8) {
-                        (true, false, true) => compute_row::<IS_S2, true, false, true>(
-                            p,
-                            img,
-                            oy,
-                            ob_start,
-                            ob_end,
-                            group_stride,
-                            ev_w,
-                            slot_words,
-                            ord,
-                            buf,
-                        ),
-                        (false, false, true) => compute_row::<IS_S2, false, false, true>(
-                            p,
-                            img,
-                            oy,
-                            ob_start,
-                            ob_end,
-                            group_stride,
-                            ev_w,
-                            slot_words,
-                            ord,
-                            buf,
-                        ),
-                        (true, true, true) => compute_row::<IS_S2, true, true, true>(
-                            p,
-                            img,
-                            oy,
-                            ob_start,
-                            ob_end,
-                            group_stride,
-                            ev_w,
-                            slot_words,
-                            ord,
-                            buf,
-                        ),
-                        (false, true, true) => compute_row::<IS_S2, false, true, true>(
-                            p,
-                            img,
-                            oy,
-                            ob_start,
-                            ob_end,
-                            group_stride,
-                            ev_w,
-                            slot_words,
-                            ord,
-                            buf,
-                        ),
-                        (true, false, false) => compute_row::<IS_S2, true, false, false>(
-                            p,
-                            img,
-                            oy,
-                            ob_start,
-                            ob_end,
-                            group_stride,
-                            ev_w,
-                            slot_words,
-                            ord,
-                            buf,
-                        ),
-                        (false, false, false) => compute_row::<IS_S2, false, false, false>(
-                            p,
-                            img,
-                            oy,
-                            ob_start,
-                            ob_end,
-                            group_stride,
-                            ev_w,
-                            slot_words,
-                            ord,
-                            buf,
-                        ),
-                        (true, true, false) => compute_row::<IS_S2, true, true, false>(
-                            p,
-                            img,
-                            oy,
-                            ob_start,
-                            ob_end,
-                            group_stride,
-                            ev_w,
-                            slot_words,
-                            ord,
-                            buf,
-                        ),
-                        (false, true, false) => compute_row::<IS_S2, false, true, false>(
-                            p,
-                            img,
-                            oy,
-                            ob_start,
-                            ob_end,
-                            group_stride,
-                            ev_w,
-                            slot_words,
-                            ord,
-                            buf,
-                        ),
+                    match (r.p.silu, has_res, r.p.is_u8) {
+                        (true, false, true) => compute_row::<IS_S2, true, false, true>(r),
+                        (false, false, true) => compute_row::<IS_S2, false, false, true>(r),
+                        (true, true, true) => compute_row::<IS_S2, true, true, true>(r),
+                        (false, true, true) => compute_row::<IS_S2, false, true, true>(r),
+                        (true, false, false) => compute_row::<IS_S2, true, false, false>(r),
+                        (false, false, false) => compute_row::<IS_S2, false, false, false>(r),
+                        (true, true, false) => compute_row::<IS_S2, true, true, false>(r),
+                        (false, true, false) => compute_row::<IS_S2, false, true, false>(r),
                     }
                 }
             }
@@ -568,9 +482,9 @@ fn split_w_avx2(w: i32) -> (i32, i32) {
     (ev as i32, od as i32)
 }
 
-define_3x3_s2_isa!(mod vnni_s2, feature = "avx2,fma,avxvnni", dp_mode = avxvnni);
-define_3x3_s2_isa!(mod avx512vnni_s2, feature = "avx2,fma,avx512vnni,avx512vl", dp_mode = avx512vnni);
-define_3x3_s2_isa!(mod avx2_s2, feature = "avx2,fma", dp_mode = avx2);
+define_3x3_strip_isa!(mod vnni_3x3, feature = "avx2,fma,avxvnni", dp_mode = avxvnni);
+define_3x3_strip_isa!(mod avx512vnni_3x3, feature = "avx2,fma,avx512vnni,avx512vl", dp_mode = avx512vnni);
+define_3x3_strip_isa!(mod avx2_3x3, feature = "avx2,fma", dp_mode = avx2);
 
 /// Plan `(row_blk, og_blk)` for the single-barrier fused `3×3` row-strip driver.
 fn plan_3x3_strip(
@@ -829,45 +743,14 @@ pub(super) unsafe fn try_run_3x3_strip(
                             &mut buf[s2 * slot_words..(s2 + 1) * slot_words],
                         );
                     }
+                    let row_args =
+                        RowArgs { p, img, oy, ob_start, ob_end, group_stride, ev_w, slot_words, ord, buf };
                     // SAFETY: ISA checked by caller; `(img, oy, ob_start..ob_end)` is disjointly owned.
                     unsafe {
                         match isa {
-                            FusedIsa::AvxVnni => vnni_s2::run_row::<true>(
-                                p,
-                                img,
-                                oy,
-                                ob_start,
-                                ob_end,
-                                group_stride,
-                                ev_w,
-                                slot_words,
-                                ord,
-                                buf,
-                            ),
-                            FusedIsa::Avx512Vnni => avx512vnni_s2::run_row::<true>(
-                                p,
-                                img,
-                                oy,
-                                ob_start,
-                                ob_end,
-                                group_stride,
-                                ev_w,
-                                slot_words,
-                                ord,
-                                buf,
-                            ),
-                            FusedIsa::Avx2 => avx2_s2::run_row::<true>(
-                                p,
-                                img,
-                                oy,
-                                ob_start,
-                                ob_end,
-                                group_stride,
-                                ev_w,
-                                slot_words,
-                                ord,
-                                buf,
-                            ),
+                            FusedIsa::AvxVnni => vnni_3x3::run_row::<true>(&row_args),
+                            FusedIsa::Avx512Vnni => avx512vnni_3x3::run_row::<true>(&row_args),
+                            FusedIsa::Avx2 => avx2_3x3::run_row::<true>(&row_args),
                         }
                     }
                 } else {
@@ -916,45 +799,14 @@ pub(super) unsafe fn try_run_3x3_strip(
                             &mut buf[s2 * slot_words..(s2 + 1) * slot_words],
                         );
                     }
+                    let row_args =
+                        RowArgs { p, img, oy, ob_start, ob_end, group_stride, ev_w: 0, slot_words, ord, buf };
                     // SAFETY: ISA checked by caller; `(img, oy, ob_start..ob_end)` is disjointly owned.
                     unsafe {
                         match isa {
-                            FusedIsa::AvxVnni => vnni_s2::run_row::<false>(
-                                p,
-                                img,
-                                oy,
-                                ob_start,
-                                ob_end,
-                                group_stride,
-                                0,
-                                slot_words,
-                                ord,
-                                buf,
-                            ),
-                            FusedIsa::Avx512Vnni => avx512vnni_s2::run_row::<false>(
-                                p,
-                                img,
-                                oy,
-                                ob_start,
-                                ob_end,
-                                group_stride,
-                                0,
-                                slot_words,
-                                ord,
-                                buf,
-                            ),
-                            FusedIsa::Avx2 => avx2_s2::run_row::<false>(
-                                p,
-                                img,
-                                oy,
-                                ob_start,
-                                ob_end,
-                                group_stride,
-                                0,
-                                slot_words,
-                                ord,
-                                buf,
-                            ),
+                            FusedIsa::AvxVnni => vnni_3x3::run_row::<false>(&row_args),
+                            FusedIsa::Avx512Vnni => avx512vnni_3x3::run_row::<false>(&row_args),
+                            FusedIsa::Avx2 => avx2_3x3::run_row::<false>(&row_args),
                         }
                     }
                 }

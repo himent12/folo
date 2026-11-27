@@ -649,10 +649,13 @@ fn fused_conv_noncontiguous_and_rowband_fill_match_exact_reference() {
 fn fused_3x3_strip_and_multipart_1x1_match_exact_reference() {
     let mut rng = Rng::seed(7012);
 
-    // 1. `k=3, s=2, p=1` single-barrier rotating strip (tiny 1x1, odd 29x35, multi-part input, residual, F32/U8).
+    // 1. `k=3, s=2, p=1` single-barrier rotating strip (tiny 1x1, multi-chunk `ow > NR`, odd 29x35, multi-part,
+    //    residual, F32/U8).
     for &(n, c0, c1, o, h, w, silu, has_res) in &[
         (1usize, 4usize, 0usize, 4usize, 1usize, 1usize, true, false),
+        (1, 4, 0, 4, 1, 49, true, false),
         (2, 8, 0, 8, 2, 3, false, true),
+        (1, 8, 4, 12, 3, 55, false, true),
         (2, 8, 4, 12, 29, 35, true, true),
         (1, 16, 0, 16, 40, 41, false, true),
     ] {

@@ -1,7 +1,8 @@
 //! Bit-exact division-free minimax fast SiLU (`silu_q8`) for the CPU int8 epilogue.
 //!
 //! Computes `x / (1 + exp(-x))` using:
-//! 1. Fused base-2 range reduction `u = clamp(x · (-log2(e)), -124, 124)`, `z = u + (1.5·2^23 + 127)` so
+//! 1. Fused base-2 range reduction `x_c = max(x, -85.0)`, `u = max(x_c · (-log2(e)), -124.0)` (automatically `< 124`
+//!    since `85 · log2(e) ≈ 122.63`), `z = u + (1.5·2^23 + 127)` so
 //!    `n = z - magic` rounds to nearest-even and `bits(z) << 23` yields `2^n` in a single shift (zero `vroundps`,
 //!    zero `vcvtps2dq`, zero `vpaddd`).
 //! 2. Economised degree-5 minimax polynomial for `2^f` on `f ∈ [-0.5, 0.5]` evaluated in Estrin form (3-stage

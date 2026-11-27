@@ -12,6 +12,8 @@
 //!   accumulator, and per-channel epilogue (dequantise, bias, SiLU, residual, requantise), the same bits on all paths.
 //! - `fused.rs` + `fused_epi.rs`: fused x86-64 L1-blocked tile-block drivers and zero-spill epilogues for `conv`,
 //!   `conv_per_channel`, and `stem_u8`.
+//! - `fused_3x3.rs`: single-barrier L1-hot rotating row-strip x86-64 driver for single-part `3×3, pad = 1` convs
+//!   at stride 2 and large-input stride 1.
 //! - `rows.rs`: input row-pointer preparation and row-band parallelised padded phase copies (`image_rows`).
 //! - `stem.rs`: direct `u8` RGB0-to-C4 AVX-VNNI stem ([`QStem`], [`stem_u8`], [`pack_f32_to_rgb0_u8`]).
 //! - `conv.rs`: packed weights ([`QConv`]) and the conv drivers ([`conv`], [`conv_per_channel`]).
