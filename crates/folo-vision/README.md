@@ -25,8 +25,9 @@ and [VISION.md](../../docs/VISION.md) is the tour of the implementation.
 | `src/cocoeval.rs` | `CocoEval`: the full pycocotools `COCOeval` (crowd regions, area buckets, AR) |
 | `src/train/` | `mod.rs` (`Trainer`), `config/` (`mod.rs` for `TrainConfig`, `tests.rs`), `setup.rs` (new and resumed runs), `epoch.rs` (one epoch), `run.rs` (the run loop), `checkpoint.rs`, `writer/` (epoch files off the training thread), `events.rs`, `feed.rs` (batches staged for a GPU), `device.rs`, `teacher.rs` (the distillation teacher), `gauge.rs` (BN-Conv Floor Gauge Normalisation), `tests.rs` |
 | `src/val.rs` | `validate`: a model on a dataset split, scored with `Evaluator` |
-| `src/predict.rs` | `Predictor`: `.folo` weights to detections in image pixels, with a timing breakdown (single, batch, and tiled) |
+| `src/predict.rs` | `Predictor`: `.folo` weights to detections in image pixels, with a timing breakdown (single, batch, tiled, and TTA) |
 | `src/tile.rs` | SAHI tiled inference (`TileConfig`, `TileRect`, `TileMergeMetric`, `compute_tiles`, `crop_tile`, `merge_tiled_detections`) wired into `Predictor::predict_tiled` |
+| `src/tta.rs` | Test-Time Augmentation (`TtaConfig`, `PredictOptions`, `unflip_xyxy_h`, `merge_tta_detections`) wired into `Predictor::predict_tta`, `predict_batch_tta`, `predict_file_tta`, and `predict_*_with_options` |
 | `src/export/` | `onnx/`: `mod.rs` (`export`, `OnnxOptions`, the op table), `graph.rs`, `blocks.rs`, `decode.rs`, `proto.rs` (protobuf encoder) |
 | `src/precompile.rs` | GPU pipeline precompile for a run's kernels |
 | `src/error.rs` | `Error`: the trainer's, the validator's and the predictor's |
@@ -105,6 +106,7 @@ cargo test -p folo-vision --test train       # one integration test binary
 | `distill.rs` | Distillation in the trainer: a run without a teacher pinned to its pre-distillation weights, determinism, resume with the teacher, incompatible teachers |
 | `harden_pipelines.rs` | End-to-end hardening across M4 training resume, ONNX export (sizes/`o2o`/`f16`/quantized), zero-GT & single-class sets, extreme image aspect ratios, corrupted `.folo` files, and post-processing stability |
 | `tiled_predict.rs` | SAHI tiled inference (`Predictor::predict_tiled`, `predict_batch_tiled`, `predict_file_tiled`): single-tile parity, `tile_batch` invariance across `f32`/`int8`/`o2o`, IoS/IoU merging, and `Vote`/`Sebf` fusion |
+| `tta_predict.rs` | Test-Time Augmentation (`Predictor::predict_tta`, `predict_batch_tta`, `predict_file_tta`, `PredictOptions`): single-view parity, scale-order invariance, horizontal-flip equivariance, `f32`/`int8`/`o2o` coverage, `Vote`/`Sebf`/`None` fusion, and `tta + tile` conflict validation |
 | `gpu.rs`, `gpu_f16.rs`, `gpu_tensor_cores.rs`, `gpu_in_place.rs`, `gpu_plan.rs`, `gpu_lazy_head.rs`, `gpu_loss/` (`main.rs`, `new_math.rs`, `math_winners.rs`), `gpu_train.rs`, `gpu_amp.rs`, `gpu_distill.rs` | The same on the GPU against the CPU: forward, f16, tensor cores, forward plans, candidate-first & fused `dfl_stats`, the loss (including `S-AEIoU`, `CRPS-DFL`, and GPU-fused `VFL`/`QFL` parity), training, mixed precision, distillation (and its fused kernel against the tensor path) |
 
 The `gpu*.rs` tests need a hardware GPU adapter and skip with a note without one (`FOLO_GPU_TEST_SOFTWARE=1` runs

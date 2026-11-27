@@ -416,17 +416,7 @@ impl Predictor {
                     ..d
                 }));
             }
-            // Scale the chunk's per-stage sum to actual wall time so parallel CPU sub-batches never
-            // double-count overlapping wall intervals while keeping the pre/inf/post breakdown faithful.
-            let b_sum = b_pre + b_inf + b_post;
-            if b_sum > 0.0 {
-                let scale = batch_wall / b_sum;
-                pre_ms += b_pre * scale;
-                inf_ms += b_inf * scale;
-                post_ms += b_post * scale;
-            } else {
-                inf_ms += batch_wall;
-            }
+            add_scaled_timing(&mut pre_ms, &mut inf_ms, &mut post_ms, b_pre, b_inf, b_post, batch_wall);
         }
 
         if tile_cfg.full_image {
@@ -474,6 +464,11 @@ impl Predictor {
     }
 
     fn run(&self, imgs: &[Image], rect: bool) -> Result<Vec<Prediction>> {
+        let refs: Vec<&Image> = imgs.iter().collect();
+        self.run_with_imgsz(&refs, rect, self.cfg.imgsz)
+    }
+
+    pub(crate) fn run_with_imgsz(&self, imgs: &[&Image], rect: bool, imgsz: u32) -> Result<Vec<Prediction>> {
         /// Images per forward when the CPU predicts a batch (see below). One, two and four measured within
         /// 5% of each other at batch 16 on 28 threads, and all about 20% faster than one batched forward.
         const CPU_BATCH_CHUNK: usize = 2;
@@ -486,23 +481,25 @@ impl Predictor {
             let chunk = CPU_BATCH_CHUNK;
             if imgs.len() > chunk {
                 return folo_core::cpu::in_pool(|| {
-                    let parts: Vec<Vec<Prediction>> =
-                        imgs.par_chunks(chunk).map(|c| self.run_here(c, rect)).collect::<Result<_>>()?;
+                    let parts: Vec<Vec<Prediction>> = imgs
+                        .par_chunks(chunk)
+                        .map(|c| self.run_here_with_imgsz(c, rect, imgsz))
+                        .collect::<Result<_>>()?;
                     Ok(parts.into_iter().flatten().collect())
                 });
             }
-            folo_core::cpu::in_pool(|| self.run_here(imgs, rect))
+            folo_core::cpu::in_pool(|| self.run_here_with_imgsz(imgs, rect, imgsz))
         } else {
-            self.run_here(imgs, rect)
+            self.run_here_with_imgsz(imgs, rect, imgsz)
         }
     }
 
-    fn run_here(&self, imgs: &[Image], rect: bool) -> Result<Vec<Prediction>> {
+    fn run_here_with_imgsz(&self, imgs: &[&Image], rect: bool, imgsz: u32) -> Result<Vec<Prediction>> {
         if self.model.int8_u8_stem_active() {
-            return self.run_here_rgb0_u8(imgs, rect);
+            return self.run_here_rgb0_u8_with_imgsz(imgs, rect, imgsz);
         }
         let t0 = Instant::now();
-        let batch = self.prepare(imgs, rect)?;
+        let batch = self.prepare_with_imgsz(imgs, rect, imgsz)?;
         self.wait_for_device()?;
         let pre = ms(t0);
         let nms = self.cfg.nms();
@@ -532,13 +529,12 @@ impl Predictor {
 
     /// Direct `u8` RGB0 path for CPU int8 models: letterboxes directly into packed `[R, G, B, 0]` `u32` words
     /// (zero `f32` canvas materialisation, bit-exact with `apply_planar_f32` + `pack_f32_to_rgb0_u8`).
-    fn run_here_rgb0_u8(&self, imgs: &[Image], rect: bool) -> Result<Vec<Prediction>> {
+    fn run_here_rgb0_u8_with_imgsz(&self, imgs: &[&Image], rect: bool, s: u32) -> Result<Vec<Prediction>> {
         if imgs.is_empty() {
             return Err(Error::Config("cannot predict an empty batch".into()));
         }
         let t0 = Instant::now();
-        let s = self.cfg.imgsz;
-        let rect = rect && one_canvas(imgs, s);
+        let rect = rect && one_canvas_refs(imgs, s);
         let opts = LetterboxOptions { stride: rect.then_some(32), ..LetterboxOptions::default() };
         for img in imgs {
             if img.width == 0 || img.height == 0 {
@@ -611,11 +607,15 @@ impl Predictor {
     /// `prepare` → `forward` → [`HeadOutput::detections`] → [`Predictor::finish_detections`]; [`Predictor::finish`]
     /// takes decoded outputs instead.
     pub fn prepare(&self, imgs: &[Image], rect: bool) -> Result<PreparedBatch> {
+        let refs: Vec<&Image> = imgs.iter().collect();
+        self.prepare_with_imgsz(&refs, rect, self.cfg.imgsz)
+    }
+
+    fn prepare_with_imgsz(&self, imgs: &[&Image], rect: bool, s: u32) -> Result<PreparedBatch> {
         if imgs.is_empty() {
             return Err(Error::Config("cannot predict an empty batch".into()));
         }
-        let s = self.cfg.imgsz;
-        let rect = rect && one_canvas(imgs, s);
+        let rect = rect && one_canvas_refs(imgs, s);
         let opts = LetterboxOptions { stride: rect.then_some(32), ..LetterboxOptions::default() };
         for img in imgs {
             if img.width == 0 || img.height == 0 {
@@ -626,12 +626,15 @@ impl Predictor {
             imgs.iter().map(|i| Letterbox::compute(i.width, i.height, s, s, &opts)).collect();
         // `rect` is only used for images that share their canvas, so every canvas of a call has the same size.
         let (device, dtype) = (self.model.device(), self.model.dtype());
-        let on_device =
-            if device.is_cpu() { None } else { letterbox_on_device_as(imgs, &letterboxes, device, dtype)? };
+        let on_device = if device.is_cpu() {
+            None
+        } else {
+            letterbox_on_device_as_refs(imgs, &letterboxes, device, dtype)?
+        };
         let input = match on_device {
             Some(x) => x,
             None => {
-                let x = letterbox_on_host(imgs, &letterboxes)?;
+                let x = letterbox_on_host_refs(imgs, &letterboxes)?;
                 let x = if device.is_cpu() { x } else { x.to_device(device)? };
                 x.to_dtype(dtype)?
             }
@@ -714,7 +717,7 @@ impl PreparedBatch {
 
 /// Whether every image of `imgs` gets the same `rect` letterbox canvas for target `s` (§9.2: the smallest multiple
 /// of 32 around the resized image), so they can share one `rect` batch. An empty image never shares one.
-fn one_canvas(imgs: &[Image], s: u32) -> bool {
+pub(crate) fn one_canvas(imgs: &[Image], s: u32) -> bool {
     let opts = LetterboxOptions { stride: Some(32), ..LetterboxOptions::default() };
     let canvas = |i: &Image| {
         (i.width > 0 && i.height > 0).then(|| Letterbox::compute(i.width, i.height, s, s, &opts).out)
@@ -722,6 +725,16 @@ fn one_canvas(imgs: &[Image], s: u32) -> bool {
     let Some((first, rest)) = imgs.split_first() else { return false };
     let first = canvas(first);
     first.is_some() && rest.iter().all(|i| canvas(i) == first)
+}
+
+fn one_canvas_refs(imgs: &[&Image], s: u32) -> bool {
+    let opts = LetterboxOptions { stride: Some(32), ..LetterboxOptions::default() };
+    let canvas = |i: &Image| {
+        (i.width > 0 && i.height > 0).then(|| Letterbox::compute(i.width, i.height, s, s, &opts).out)
+    };
+    let Some((&first, rest)) = imgs.split_first() else { return false };
+    let first = canvas(first);
+    first.is_some() && rest.iter().all(|&i| canvas(i) == first)
 }
 
 /// `u8` pixel → network input. A product (not `/ 255`), so the device letterbox can match it bit for bit.
@@ -735,22 +748,27 @@ const INV_255: f32 = 1.0 / 255.0;
 /// ([`folo_core::cpu::take_buffer`]), so a steady stream of predictions reuses the same input memory instead
 /// of faulting in fresh pages every call. Bit for bit the planes of [`Letterbox::apply`] times `1 / 255`.
 pub fn letterbox_on_host(imgs: &[Image], boxes: &[Letterbox]) -> Result<Tensor> {
+    let refs: Vec<&Image> = imgs.iter().collect();
+    letterbox_on_host_refs(&refs, boxes)
+}
+
+fn letterbox_on_host_refs(imgs: &[&Image], boxes: &[Letterbox]) -> Result<Tensor> {
     let [w, h] = check_letterbox(imgs, boxes)?;
     let plane = (w * h) as usize;
     let mut input = folo_core::cpu::take_buffer(imgs.len() * 3 * plane);
-    input.par_chunks_mut(3 * plane).zip(imgs.par_iter().zip(boxes)).for_each(|(dst, (img, lb))| {
+    input.par_chunks_mut(3 * plane).zip(imgs.par_iter().zip(boxes)).for_each(|(dst, (&img, lb))| {
         lb.apply_planar_f32(img, folo_data::PAD_VALUE, INV_255, dst);
     });
     Ok(Tensor::from_vec(input, [imgs.len(), 3, h as usize, w as usize])?)
 }
 
 /// Packed `[B, H, W]` `u32` `[R, G, B, 0]` letterbox canvases for the direct `u8` CPU int8 stem.
-fn letterbox_on_host_rgb0(imgs: &[Image], boxes: &[Letterbox]) -> Result<(Vec<u32>, usize, usize)> {
+fn letterbox_on_host_rgb0(imgs: &[&Image], boxes: &[Letterbox]) -> Result<(Vec<u32>, usize, usize)> {
     let [w, h] = check_letterbox(imgs, boxes)?;
     let plane = (w * h) as usize;
     let mut out = folo_core::cpu::q8::alloc(imgs.len(), 4, plane);
     out[..imgs.len() * plane].par_chunks_mut(plane).zip(imgs.par_iter().zip(boxes)).for_each(
-        |(dst, (img, lb))| {
+        |(dst, (&img, lb))| {
             lb.apply_rgb0_u8(img, folo_data::PAD_VALUE, dst);
         },
     );
@@ -772,10 +790,20 @@ pub fn letterbox_on_device_as(
     device: Device,
     dtype: DType,
 ) -> Result<Option<Tensor>> {
+    let refs: Vec<&Image> = imgs.iter().collect();
+    letterbox_on_device_as_refs(&refs, boxes, device, dtype)
+}
+
+fn letterbox_on_device_as_refs(
+    imgs: &[&Image],
+    boxes: &[Letterbox],
+    device: Device,
+    dtype: DType,
+) -> Result<Option<Tensor>> {
     let [w, h] = check_letterbox(imgs, boxes)?;
     let mut taps: Vec<u32> = Vec::new();
     let mut geoms = Vec::with_capacity(imgs.len());
-    for (img, lb) in imgs.iter().zip(boxes) {
+    for (&img, lb) in imgs.iter().zip(boxes) {
         let [rw, rh] = lb.resized;
         let plan = folo_data::resize::resize_plan(img.width, img.height, rw, rh);
         geoms.push(LetterboxImage {
@@ -802,11 +830,11 @@ pub fn letterbox_on_device_as(
 /// and each image is a view of the one device buffer (at a 4-byte aligned offset, which the letterbox kernel
 /// reads in place). A batch larger than the device's largest storage buffer is uploaded in several such runs,
 /// each as many images as fit. Elsewhere each image is uploaded on its own.
-fn upload_images(imgs: &[Image], device: Device) -> Result<Vec<Tensor>> {
+fn upload_images(imgs: &[&Image], device: Device) -> Result<Vec<Tensor>> {
     let Some(ctx) = folo_gpu::context_for(device) else {
         let host: Vec<Tensor> = imgs
             .par_iter()
-            .map(|im| Tensor::from_vec(im.data.clone(), [im.height as usize, im.width as usize, 3]))
+            .map(|&im| Tensor::from_vec(im.data.clone(), [im.height as usize, im.width as usize, 3]))
             .collect::<folo_core::Result<_>>()?;
         return Ok(host.iter().map(|t| t.to_device(device)).collect::<folo_core::Result<_>>()?);
     };
@@ -829,10 +857,10 @@ fn upload_images(imgs: &[Image], device: Device) -> Result<Vec<Tensor>> {
 }
 
 /// [`upload_images`]' one shared upload of `imgs` on a folo-gpu device.
-fn upload_run(ctx: &folo_gpu::GpuContext, imgs: &[Image], device: Device) -> Result<Vec<Tensor>> {
+fn upload_run(ctx: &folo_gpu::GpuContext, imgs: &[&Image], device: Device) -> Result<Vec<Tensor>> {
     let mut offsets = Vec::with_capacity(imgs.len());
     let mut total = 0usize;
-    for im in imgs {
+    for &im in imgs {
         offsets.push(total);
         total += im.data.len().next_multiple_of(4);
     }
@@ -841,7 +869,7 @@ fn upload_run(ctx: &folo_gpu::GpuContext, imgs: &[Image], device: Device) -> Res
     const CHUNK: usize = 64 * 1024;
     let fill = |start: usize, mut dst: folo_gpu::WriteOnly<'_, [u8]>| {
         let end = start + dst.len();
-        for (im, &off) in imgs.iter().zip(&offsets) {
+        for (&im, &off) in imgs.iter().zip(&offsets) {
             let (a, b) = (start.max(off), end.min(off + im.data.len()));
             if a < b {
                 dst.slice(a - start..b - start).copy_from_slice(&im.data[a - off..b - off]);
@@ -862,7 +890,7 @@ fn upload_run(ctx: &folo_gpu::GpuContext, imgs: &[Image], device: Device) -> Res
     Ok(imgs
         .iter()
         .zip(offsets)
-        .map(|(im, off)| {
+        .map(|(&im, off)| {
             all.narrow(0, off, im.data.len())?.reshape([im.height as usize, im.width as usize, 3])
         })
         .collect::<folo_core::Result<_>>()?)
@@ -870,7 +898,7 @@ fn upload_run(ctx: &folo_gpu::GpuContext, imgs: &[Image], device: Device) -> Res
 
 /// The common canvas `[width, height]` of a letterbox batch: one geometry per image, computed for its size,
 /// all with the same output size.
-fn check_letterbox(imgs: &[Image], boxes: &[Letterbox]) -> Result<[u32; 2]> {
+fn check_letterbox(imgs: &[&Image], boxes: &[Letterbox]) -> Result<[u32; 2]> {
     let first = boxes.first().ok_or_else(|| Error::Config("letterbox: no images".into()))?;
     if imgs.len() != boxes.len() {
         return Err(Error::Config(format!(
@@ -879,7 +907,7 @@ fn check_letterbox(imgs: &[Image], boxes: &[Letterbox]) -> Result<[u32; 2]> {
             boxes.len()
         )));
     }
-    for (img, lb) in imgs.iter().zip(boxes) {
+    for (&img, lb) in imgs.iter().zip(boxes) {
         if lb.orig != [img.width, img.height] || lb.out != first.out {
             return Err(Error::Config(format!(
                 "letterbox: geometry {lb:?} does not fit a {}x{} image on a {:?} canvas",
@@ -890,6 +918,29 @@ fn check_letterbox(imgs: &[Image], boxes: &[Letterbox]) -> Result<[u32; 2]> {
     Ok(first.out)
 }
 
-fn ms(t: Instant) -> f64 {
+/// Scale accumulated per-view `(pre, inf, post)` timings to actual `wall_ms` so parallel CPU sub-batches never
+/// double-count overlapping wall intervals while keeping stage proportions faithful.
+#[inline]
+pub(crate) fn add_scaled_timing(
+    pre_ms: &mut f64,
+    inf_ms: &mut f64,
+    post_ms: &mut f64,
+    b_pre: f64,
+    b_inf: f64,
+    b_post: f64,
+    wall_ms: f64,
+) {
+    let b_sum = b_pre + b_inf + b_post;
+    if b_sum > 0.0 {
+        let scale = wall_ms / b_sum;
+        *pre_ms += b_pre * scale;
+        *inf_ms += b_inf * scale;
+        *post_ms += b_post * scale;
+    } else {
+        *inf_ms += wall_ms;
+    }
+}
+
+pub(crate) fn ms(t: Instant) -> f64 {
     t.elapsed().as_secs_f64() * 1e3
 }
