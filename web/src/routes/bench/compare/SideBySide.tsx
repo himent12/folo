@@ -31,6 +31,8 @@ export interface SideBySideProps {
   onDownloadCsv?: () => void;
   /** True briefly after Copy Markdown succeeds. */
   copiedMd?: boolean;
+  /** Disables export actions while detailed comparison results (conditions, calibration) are still loading. */
+  exportDisabled?: boolean;
 }
 
 export default function SideBySide(props: SideBySideProps) {
@@ -99,20 +101,22 @@ export default function SideBySide(props: SideBySideProps) {
       meta="against the first, the baseline"
       pad="none"
       actions={
-        showExport.get() ? (
-          <span class="sbs-export-actions" data-compare-export-actions>
-            {props.onCopyMarkdown ? (
-              <Button size="sm" variant="ghost" icon={props.copiedMd ? Check : Copy} data-compare-copy-md onclick={props.onCopyMarkdown}>
-                {props.copiedMd ? 'Copied' : 'Copy Markdown'}
-              </Button>
-            ) : null}
-            {props.onDownloadCsv ? (
-              <Button size="sm" variant="ghost" icon={Download} data-compare-download-csv onclick={props.onDownloadCsv}>
-                Download CSV
-              </Button>
-            ) : null}
-          </span>
-        ) : undefined
+        showExport.get()
+          ? () => (
+              <span class="sbs-export-actions" data-compare-export-actions>
+                {props.onCopyMarkdown ? (
+                  <Button size="sm" variant="ghost" icon={props.copiedMd ? Check : Copy} disabled={props.exportDisabled} data-compare-copy-md onclick={props.onCopyMarkdown}>
+                    {props.copiedMd ? 'Copied' : 'Copy Markdown'}
+                  </Button>
+                ) : null}
+                {props.onDownloadCsv ? (
+                  <Button size="sm" variant="ghost" icon={Download} disabled={props.exportDisabled} data-compare-download-csv onclick={props.onDownloadCsv}>
+                    Download CSV
+                  </Button>
+                ) : null}
+              </span>
+            )
+          : undefined
       }
     >
       <div class="scroll">

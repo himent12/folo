@@ -67,6 +67,8 @@ export function useMediaSession(input: UseMediaSessionInput) {
   const playing = signal(false);
   const videoReady = signal(false);
   const seeking = signal(false);
+  /** True after a seek/wrap starts until the post-seek frame is captured and dispatched to Playground. */
+  const awaitingCapture = signal(false);
   const videoErr = signal<string | null>(null);
   const autoDetect = signal(true);
   const videoDims = signal<{ width: number; height: number } | null>(null);
@@ -240,6 +242,7 @@ export function useMediaSession(input: UseMediaSessionInput) {
       frameSentAt = performance.now();
       waitingForInference = true;
       input.onFrame({ blob: frame.blob, name, width: frame.width, height: frame.height });
+      awaitingCapture.set(false);
       // If inference completed synchronously or was blocked/skipped, settle on the next microtask.
       queueMicrotask(() => {
         if (!alive || seq !== captureSeq) return;
@@ -334,12 +337,15 @@ export function useMediaSession(input: UseMediaSessionInput) {
     if (mode.peek() !== 'video') return;
     if (!auto) {
       untrack(() => {
+        if (playing.peek() || awaitingCapture.peek()) {
+          captureSeq++;
+          frameSynced.set(false);
+        }
         clearLiveTimer();
         scrubThrottle.cancel();
         tracker.reset();
         fps.set(0);
         latencyMs.set(0);
-        if (playing.peek()) frameSynced.set(false);
       });
       return;
     }
@@ -392,6 +398,7 @@ export function useMediaSession(input: UseMediaSessionInput) {
     playing.set(false);
     videoReady.set(false);
     seeking.set(false);
+    awaitingCapture.set(false);
     videoErr.set(null);
     videoDims.set(null);
     frameSynced.set(false);
@@ -557,6 +564,8 @@ export function useMediaSession(input: UseMediaSessionInput) {
       void captureAndEmit(false);
     } else {
       tracker.reset();
+      fps.set(0);
+      latencyMs.set(0);
       void el?.play().catch(() => {});
       scheduleNextLiveTick();
     }
@@ -573,10 +582,12 @@ export function useMediaSession(input: UseMediaSessionInput) {
     if (Math.abs(el.currentTime - clamped) > 0.001) {
       captureSeq++;
       seeking.set(true);
+      awaitingCapture.set(true);
       pendingForwardStep = preserveTracks;
       if (!preserveTracks) {
         lastEmittedVideoTime = null;
         videoFrameCount = 0;
+        lastFrameMeta.set(null);
         input.onTrackReset?.();
       }
       if (!autoDetect.peek()) frameSynced.set(false);
@@ -603,15 +614,23 @@ export function useMediaSession(input: UseMediaSessionInput) {
     if (!el) return;
     if (el.paused) {
       if (duration.peek() > 0 && el.currentTime >= duration.peek() - 0.01) {
+        captureSeq++;
         pendingForwardStep = false;
         lastEmittedVideoTime = null;
         videoFrameCount = 0;
+        lastFrameMeta.set(null);
+        awaitingCapture.set(true);
         input.onTrackReset?.();
         el.currentTime = 0;
         currentTime.set(0);
       }
       tracker.reset();
-      if (!autoDetect.peek()) frameSynced.set(false);
+      fps.set(0);
+      latencyMs.set(0);
+      if (!autoDetect.peek()) {
+        captureSeq++;
+        frameSynced.set(false);
+      }
       void el.play().catch(() => {});
     } else {
       el.pause();
@@ -668,6 +687,7 @@ export function useMediaSession(input: UseMediaSessionInput) {
       if (mode.peek() === 'video') {
         captureSeq++;
         seeking.set(true);
+        awaitingCapture.set(true);
       }
     },
     onseeked: (e: Event & { currentTarget: HTMLVideoElement }) => {
@@ -678,6 +698,7 @@ export function useMediaSession(input: UseMediaSessionInput) {
       if (!wasForwardStep) {
         lastEmittedVideoTime = null;
         videoFrameCount = 0;
+        lastFrameMeta.set(null);
         input.onTrackReset?.();
       }
       seeking.set(false);
@@ -698,7 +719,10 @@ export function useMediaSession(input: UseMediaSessionInput) {
       ensureFrameObserver(e.currentTarget, videoSeq);
       playing.set(true);
       if (autoDetect.peek()) scheduleNextLiveTick();
-      else frameSynced.set(false);
+      else {
+        captureSeq++;
+        frameSynced.set(false);
+      }
     },
     onpause: () => {
       if (mode.peek() !== 'video') return;
@@ -720,6 +744,7 @@ export function useMediaSession(input: UseMediaSessionInput) {
       if (mode.peek() !== 'video') return;
       videoReady.set(false);
       seeking.set(false);
+      awaitingCapture.set(false);
       playing.set(false);
       clearLiveTimer();
       videoErr.set('This browser could not decode the selected video file. Try an MP4 (H.264) or WebM video.');
@@ -744,6 +769,7 @@ export function useMediaSession(input: UseMediaSessionInput) {
     playing,
     videoReady,
     seeking,
+    awaitingCapture,
     videoErr,
     autoDetect,
     videoDims,

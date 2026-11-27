@@ -259,7 +259,7 @@ export default function Playground() {
     mediaKey: () => `${mediaSession.mode.get()}:${mediaSession.sessionSeq.get()}`,
     frameKey: () => (mediaSession.mode.get() === 'none' ? null : `${mediaSession.mode.get()}:${mediaSession.sessionSeq.get()}:${mediaSession.frameSeq.get()}`),
     frameMeta: () => mediaSession.lastFrameMeta.get(),
-    predMatchesFrame: () => { const s = source.get(); return !s || predSourceKey.get() === sourceImageKey(s); },
+    predMatchesFrame: () => { const s = source.get(); return !!s && !isUnsyncedVideoFn() && !mediaSession.seeking.get() && !mediaSession.awaitingCapture.get() && !!mediaSession.lastFrameMeta.get() && predSourceKey.get() === sourceImageKey(s); },
     sourceName: () => (mediaSession.mode.get() === 'video' ? mediaSession.videoName.get() || 'video' : 'webcam'),
     modelId: () => modelId.get(), modelName: () => model.get()?.name ?? null, classes: () => classes.get(), pred: () => pred.get(),
     conf: () => conf.get(), perClassConf: () => perClassConf.get(), iou: () => iou.get(), maxDet: () => maxDet.get(), o2o: () => o2o.get(),
