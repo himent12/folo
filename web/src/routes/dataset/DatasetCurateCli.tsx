@@ -1,7 +1,7 @@
 /**
  * Concise, shell-safe CLI Curation & Export Helper paired with DatasetInsights and StatsTab: lets users copy real
- * `folo dataset` commands (`check --perceptual --fix-dry-run`, `split`, `filter`, `merge`, `convert`) tailored to the
- * loaded dataset.
+ * `folo dataset` commands (`check --perceptual --fix-dry-run`, `split`, `filter`, `merge`, `convert`, `export --format coco`)
+ * tailored to the loaded dataset.
  */
 import TriangleAlert from '$icons/triangle-alert';
 import { computed, css, effect, signal } from 'fw';
@@ -9,12 +9,15 @@ import type { Dataset, DatasetStats, Split } from '$lib/api/types';
 import { SHELL } from '$lib/trainCli';
 import CommandLine from '$lib/ui/CommandLine';
 import Segmented from '$lib/ui/Segmented';
+import Switch from '$lib/ui/Switch';
 import {
   buildDatasetCurateCli,
+  COCO_IMAGE_MODES,
   CONVERT_TARGET_FORMATS,
   CURATE_CLI_MODES,
   curateCliCopiedMessage,
   defaultConvertTarget,
+  type CocoImageMode,
   type ConvertTargetFormat,
   type CurateCliMode,
 } from './curateCli';
@@ -29,12 +32,16 @@ export interface DatasetCurateCliProps {
 export default function DatasetCurateCli(props: DatasetCurateCliProps) {
   const mode = signal<CurateCliMode>(props.dataset.splits.val === 0 ? 'split' : 'check');
   const targetFormat = signal<ConvertTargetFormat>(defaultConvertTarget(props.dataset.format));
+  const cocoImageMode = signal<CocoImageMode>('copy');
+  const cocoPretty = signal(false);
   let prevDatasetId = props.dataset.id;
   effect(() => {
     const id = props.dataset.id;
     if (id !== prevDatasetId) {
       prevDatasetId = id;
       targetFormat.set(defaultConvertTarget(props.dataset.format));
+      cocoImageMode.set('copy');
+      cocoPretty.set(false);
     }
   });
   const snippet = computed(() =>
@@ -43,6 +50,8 @@ export default function DatasetCurateCli(props: DatasetCurateCliProps) {
       activeClass: props.activeClass,
       activeSplit: props.activeSplit,
       targetFormat: targetFormat.get(),
+      cocoImageMode: cocoImageMode.get(),
+      cocoPretty: cocoPretty.get(),
     }),
   );
 
@@ -59,6 +68,16 @@ export default function DatasetCurateCli(props: DatasetCurateCliProps) {
               bind:value={targetFormat}
               options={[...CONVERT_TARGET_FORMATS]}
             />
+          ) : mode.get() === 'export' ? (
+            <div class="curate-export-opts" data-coco-export-options>
+              <Segmented
+                label="COCO image mode"
+                size="sm"
+                bind:value={cocoImageMode}
+                options={[...COCO_IMAGE_MODES]}
+              />
+              <Switch label="Pretty JSON" bind:checked={cocoPretty} />
+            </div>
           ) : null}
         </div>
       </div>
@@ -100,6 +119,12 @@ css`
     flex-wrap: wrap;
     align-items: center;
     gap: var(--space-2);
+  }
+  .curate-export-opts {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-3);
   }
   .curate-label {
     font-size: var(--type-sm-size);

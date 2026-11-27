@@ -18,6 +18,7 @@ export interface SidePanelsProps {
   conf?: number;
   resetButton: () => JSX.Element;
   secondarySliders: (inline: boolean) => JSX.Element;
+  perClassThresholds?: (() => JSX.Element) | null;
   inferenceOptions?: (() => JSX.Element) | null;
   displayToggles: () => JSX.Element;
   showAllButton: () => JSX.Element;
@@ -33,9 +34,10 @@ export default function SidePanels(props: SidePanelsProps) {
       <div class="thresholds">
         <Panel title="Thresholds" divided actions={props.resetButton}>
           <div class="sliders">
-            <Slider label="Confidence" bind:value={conf} min={0.01} max={0.95} step={0.01} hint="Hide boxes scored below this." />
+            <Slider label="Confidence" bind:value={conf} min={0} max={1} step={0.01} hint="Hide boxes scored below this." />
             {props.secondarySliders(false)}
           </div>
+          {props.perClassThresholds ? props.perClassThresholds() : null}
           {props.inferenceOptions ? props.inferenceOptions() : null}
           {/* What is drawn on the image: here rather than on the image's toolbar, which is only as wide as the image
               (on phones the same toggles sit in the Thresholds sheet). */}

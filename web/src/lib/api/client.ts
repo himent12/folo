@@ -90,6 +90,8 @@ export class ApiError extends Error {
   }
 }
 
+export type WeightsFormat = 'f16' | 'stored';
+
 export type RunEventHandlers = EventHandlers<RunEventMap>;
 export type LabelEventHandlers = EventHandlers<LabelEventMap>;
 export type BenchEventHandlers = EventHandlers<BenchEventMap>;
@@ -165,12 +167,12 @@ export interface Api {
 
   predict(input: PredictInput, opts: PredictOptions, signal?: AbortSignal): Promise<Prediction>;
   /**
-   * A model's `.folo` file for running it in the browser: the f16 export (GET /api/models/{id}/weights?format=f16,
-   * a fraction of a checkpoint's size). The browser's HTTP cache revalidates it by ETag.
+   * A model's `.folo` file for running it in the browser: the f16 export (`?format=f16`, default) or the untouched
+   * stored checkpoint (`'stored'`, preserving exact weights and `folo.quant` INT8 calibration metadata).
    */
-  modelWeights(id: string, signal?: AbortSignal): Promise<ArrayBuffer>;
+  modelWeights(id: string, signal?: AbortSignal, format?: WeightsFormat): Promise<ArrayBuffer>;
   /** The weights' current ETag (a HEAD request): it changes when the model's file does. Null when unknown. */
-  modelWeightsTag(id: string, signal?: AbortSignal): Promise<string | null>;
+  modelWeightsTag(id: string, signal?: AbortSignal, format?: WeightsFormat): Promise<string | null>;
 
   // Cloud compute (docs/API.md, Cloud compute): servers whose `system().features` has `cloud`.
   /** `GET /api/cloud/providers`: the kinds of compute, with the fields a connection to each takes. */
@@ -658,11 +660,12 @@ export class HttpApi implements Api {
     return this.#stream(`${this.base}/api/bench/benchmarks/${encodeURIComponent(id)}/events`, BENCH_EVENTS, handlers);
   }
 
-  async modelWeights(id: string, signal?: AbortSignal) {
+  async modelWeights(id: string, signal?: AbortSignal, format: WeightsFormat = 'f16') {
     let res: Response;
     const seen = this.access?.checks ?? 0;
+    const query = format === 'stored' ? '' : '?format=f16';
     try {
-      res = await fetch(`${this.base}/api/models/${encodeURIComponent(id)}/weights?format=f16`, { signal });
+      res = await fetch(`${this.base}/api/models/${encodeURIComponent(id)}/weights${query}`, { signal });
     } catch (e) {
       if (e instanceof DOMException && e.name === 'AbortError') throw e;
       this.reach?.failed();
@@ -720,10 +723,11 @@ export class HttpApi implements Api {
     }
   }
 
-  async modelWeightsTag(id: string, signal?: AbortSignal) {
+  async modelWeightsTag(id: string, signal?: AbortSignal, format: WeightsFormat = 'f16') {
     const seen = this.access?.checks ?? 0;
+    const query = format === 'stored' ? '' : '?format=f16';
     try {
-      const res = await fetch(`${this.base}/api/models/${encodeURIComponent(id)}/weights?format=f16`, { method: 'HEAD', signal });
+      const res = await fetch(`${this.base}/api/models/${encodeURIComponent(id)}/weights${query}`, { method: 'HEAD', signal });
       this.reach?.ok();
       this.#answered(res, seen);
       return res.ok ? res.headers.get('etag') : null;

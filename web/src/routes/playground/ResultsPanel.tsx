@@ -40,6 +40,8 @@ export interface ResultsPanelProps {
   pred: Prediction | null;
   conf?: number;
   maxDet?: number;
+  hasPerClassOverrides?: boolean;
+  onResetPerClass?: () => void;
   hidden: Set<number>;
   tbody?: HTMLTableSectionElement | undefined;
   tabRow: number | null;
@@ -134,10 +136,12 @@ export default function ResultsPanel(props: ResultsPanelProps) {
       (props.maxDet === undefined || hiddenAtConf.get() < props.maxDet),
   );
   const canShowAll = computed(() => !!props.onShowAll && (hiddenAtConf.get() > 0 || (props.hidden.size > 0 && !hasVisibleCandidates.get())));
+  const canResetPerClass = computed(() => !!props.hasPerClassOverrides && !!props.onResetPerClass && hiddenAtConf.get() === 0);
   const emptyMessage = computed(() => {
     const n = hiddenAtConf.get();
     if (n > 0) return `${n === 1 ? '1 detection is' : `${n} detections are`} hidden by the class filter.`;
     if (props.hidden.size > 0 && !hasVisibleCandidates.get()) return `No detections at conf ≥ ${conf.get().toFixed(2)} — every detected class is hidden.`;
+    if (props.hasPerClassOverrides) return `No detections above the active per-class thresholds (global ≥ ${conf.get().toFixed(2)})${props.hidden.size ? ' in the visible classes' : ''}.`;
     return `No detections at conf ≥ ${conf.get().toFixed(2)}${props.hidden.size ? ' in the visible classes' : ''}.`;
   });
 
@@ -215,7 +219,13 @@ export default function ResultsPanel(props: ResultsPanelProps) {
                   Show all classes
                 </button>
               ) : null}
-              {canShowAll.get() && canLower.get() ? ' · ' : null}
+              {canShowAll.get() && (canResetPerClass.get() || canLower.get()) ? ' · ' : null}
+              {canResetPerClass.get() ? (
+                <button type="button" class="inline" onclick={props.onResetPerClass}>
+                  Reset per-class thresholds
+                </button>
+              ) : null}
+              {canResetPerClass.get() && canLower.get() ? ' · ' : null}
               {canLower.get() ? (
                 <button type="button" class="inline" onclick={() => conf.set(Math.max(0.01, +(conf.get() / 2).toFixed(2)))}>
                   Lower the threshold

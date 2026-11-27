@@ -3,17 +3,30 @@
 import { computed, effect, onCleanup, onWindow, signal, untrack, type Signal } from 'fw';
 import { hub } from '$lib/api/index';
 import type { Model, Prediction } from '$lib/api/types';
+import { effectiveMinConf } from '$lib/detect/nms';
 import {
   DEFAULT_INFERENCE_CONFIG,
   inferenceConfigKey,
   inferenceMetaOf,
   isDetectorLoadError,
   type BrowserEngine,
+  type BrowserPrecision,
   type InferenceConfig,
 } from '$lib/inference/browser';
 import { isOom } from '$lib/oom';
 import { toast } from '$lib/ui/toast';
-import { isPredictionCutAt, markCompletionFailed, markPredictionComplete, needsCompletionAt } from './allCandidates';
+import {
+  hasCompletionFailed,
+  isPredictionCutAt,
+  loosePerClassFloor,
+  markCompletionFailed,
+  markPredictionComplete,
+  needsCandidateRefresh,
+  needsPerClassFloorRefresh,
+  recordFetchedFloors,
+} from './allCandidates';
+import { looksLikeFolo } from './folo';
+import { perClassConfKey, type PerClassConfMap } from './perClassConf';
 import {
   batchItemSource,
   batchPredKey,
@@ -29,7 +42,7 @@ import {
   type BatchQaFilter,
 } from './batch';
 import { takeImage } from './intake';
-import { ALL, ask, FETCH, noServerWeights, type RunOn } from './predict';
+import { ALL, ask, FETCH, noServerWeights, serverFetchConf, type RunOn } from './predict';
 import { sourceImageKey, type Source } from './source';
 
 export interface UseBatchSessionInput {
@@ -39,12 +52,15 @@ export interface UseBatchSessionInput {
   runOn: Signal<RunOn>;
   /** Effective inference enhancement config (standard / SAHI / TTA) for Model A's backend. */
   inference?: () => InferenceConfig;
+  /** Active browser precision override (`auto` for server). */
+  precision?: () => BrowserPrecision;
   localWeights: Signal<Map<string, File>>;
   compare: Signal<boolean>;
   o2o: () => boolean;
   conf: Signal<number>;
   iou: Signal<number>;
   maxDet: Signal<number>;
+  perClassConf?: Signal<PerClassConfMap>;
   hidden: Signal<Set<number>>;
   classes: () => string[];
   source: Signal<Source | null>;
@@ -92,6 +108,7 @@ export function useBatchSession(o: UseBatchSessionInput) {
     iou: o.iou.get(),
     maxDet: o.maxDet.get(),
     o2o: o.o2o(),
+    perClassConf: o.perClassConf?.get(),
   }));
   const summary = computed(() => summarizeBatch(items.get(), filter.get(), o.hidden.get()));
   const qaCounts = computed(() => batchQaCounts(items.get(), filter.get(), o.hidden.get(), o.classes()));
@@ -103,6 +120,35 @@ export function useBatchSession(o: UseBatchSessionInput) {
     visibleEntries
       .get()
       .reduce((n, entry) => n + ((entry.item.status === 'done' && entry.item.pred) || entry.item.status === 'error' ? 1 : 0), 0),
+  );
+  const hasRefreshable = computed(() => {
+    const f = filter.get();
+    const on = o.runOn.get();
+    return items
+      .get()
+      .some((it) => it.status === 'done' && it.pred && needsCandidateRefresh(it.pred, f.conf, f.perClassConf, on) !== null);
+  });
+  const canRunAll = computed(() => {
+    const s = summary.get();
+    if (s.done < s.total) return true;
+    const id = o.modelId();
+    if (!id) return false;
+    const on = o.runOn.get();
+    const infKey = inferenceConfigKey(currentInference());
+    const prec: BrowserPrecision = on !== 'server' && o.precision ? o.precision() : 'auto';
+    const key = batchPredKey(id, on, infKey, prec);
+    const f = filter.get();
+    return items.get().some((it) => {
+      if (it.status !== 'done' || !it.pred || it.predKey !== key) return true;
+      const plan = needsCandidateRefresh(it.pred, f.conf, f.perClassConf, on);
+      if (!plan) return false;
+      if (plan.useAll && !needsPerClassFloorRefresh(it.pred, f.conf, f.perClassConf) && hasCompletionFailed(it.pred)) return false;
+      return true;
+    });
+  });
+  const canExport = computed(() => exportableCount.get() > 0 || (qaFilter.get().kind !== 'all' && hasRefreshable.get()));
+  const canExportSummary = computed(
+    () => summaryExportableCount.get() > 0 || (qaFilter.get().kind !== 'all' && hasRefreshable.get()),
   );
 
   const activeLocalFile = computed(() => {
@@ -179,9 +225,14 @@ export function useBatchSession(o: UseBatchSessionInput) {
     return o.inference ? o.inference() : DEFAULT_INFERENCE_CONFIG;
   }
 
+  function currentPrecision(on: RunOn): BrowserPrecision {
+    return on !== 'server' && o.precision ? untrack(() => o.precision!()) : 'auto';
+  }
+
   function currentKey(): string | null {
     const id = o.modelId();
-    return id ? batchPredKey(id, o.runOn.peek(), inferenceConfigKey(untrack(currentInference))) : null;
+    const on = o.runOn.peek();
+    return id ? batchPredKey(id, on, inferenceConfigKey(untrack(currentInference)), currentPrecision(on)) : null;
   }
 
   function selectIndex(index: number) {
@@ -321,7 +372,7 @@ export function useBatchSession(o: UseBatchSessionInput) {
     const list = items.peek();
     const item = list.find((it) => it.file === s.file);
     if (!item || !item.pred) return null;
-    return item.predKey === batchPredKey(modelId, runOn, inferenceKey) ? item.pred : null;
+    return item.predKey === batchPredKey(modelId, runOn, inferenceKey, currentPrecision(runOn)) ? item.pred : null;
   }
 
   /** Mirrors single-image inference completions/errors onto the matching batch item so filmstrip badges stay live. */
@@ -330,7 +381,7 @@ export function useBatchSession(o: UseBatchSessionInput) {
     const idx = items.peek().findIndex((it) => it.file === s.file);
     if (idx < 0) return;
     if (pred) {
-      updateItem(idx, { pred, predKey: batchPredKey(modelId, runOn, inferenceKey), status: 'done', error: null });
+      updateItem(idx, { pred, predKey: batchPredKey(modelId, runOn, inferenceKey, currentPrecision(runOn)), status: 'done', error: null });
     } else if (err) {
       updateItem(idx, { pred: null, predKey: null, status: 'error', error: errorText(err) });
     }
@@ -350,7 +401,7 @@ export function useBatchSession(o: UseBatchSessionInput) {
     }
   }
 
-  /** Fetches full candidate set for a cut prediction (`FETCH.max_det` hit above current `conf`). */
+  /** Refreshes a batch prediction when it hit the candidate cap or needs a lower fetched floor for `conf` / `perClassConf`. */
   async function completeIfCut(
     itemSource: Extract<Source, { kind: 'file' }>,
     p: Prediction,
@@ -358,9 +409,14 @@ export function useBatchSession(o: UseBatchSessionInput) {
     on: RunOn,
     localFile: File | null,
     inference: InferenceConfig,
+    precision: BrowserPrecision,
+    confVal: number,
+    perClassConf: PerClassConfMap | undefined,
     signal: AbortSignal,
   ): Promise<{ pred: Prediction; haltError?: unknown }> {
-    if (!needsCompletionAt(p, o.conf.peek())) return { pred: p };
+    const plan = needsCandidateRefresh(p, confVal, perClassConf, on);
+    if (!plan) return { pred: p };
+    const reqOpts = { ...(plan.useAll ? ALL : FETCH), conf: plan.fetchConf };
     try {
       const all = await ask({
         api: hub.api,
@@ -369,13 +425,18 @@ export function useBatchSession(o: UseBatchSessionInput) {
         source: itemSource,
         on,
         file: localFile,
-        options: ALL,
+        options: reqOpts,
+        ...(on !== 'server' && plan.lowMap ? { perClassConf: plan.lowMap, confInclusive: true } : {}),
+        ...(on !== 'server' && plan.fetchConf < FETCH.conf ? { confInclusive: true } : {}),
+        precision,
         inference,
         signal,
       });
       if (signal.aborted) return { pred: p };
       const next = { ...all, timing: p.timing, cold: p.cold, ...(p.inference ? { inference: p.inference } : {}) };
-      markPredictionComplete(next);
+      o.engine.copyPredictionInfo(all, next);
+      if (plan.useAll) markPredictionComplete(next);
+      recordFetchedFloors(next, reqOpts.conf, on !== 'server' ? plan.lowMap : undefined, on !== 'server' && (!!plan.lowMap || reqOpts.conf < FETCH.conf));
       return { pred: next };
     } catch (e: unknown) {
       if (signal.aborted) return { pred: p };
@@ -387,7 +448,7 @@ export function useBatchSession(o: UseBatchSessionInput) {
     }
   }
 
-  /** Sequentially runs inference on every pending/failed batch item with full abort safety. */
+  /** Sequentially runs inference on every pending/failed/under-covered batch item with full abort safety. */
   async function runAll() {
     const id = o.modelId();
     const list = items.peek();
@@ -395,11 +456,26 @@ export function useBatchSession(o: UseBatchSessionInput) {
 
     const on = o.runOn.peek();
     const inf = untrack(currentInference);
-    const key = batchPredKey(id, on, inferenceConfigKey(inf));
+    const prec = currentPrecision(on);
+    const confSnap = o.conf.peek();
+    const pccSnap = o.perClassConf?.peek();
+    const lowMap = on !== 'server' ? loosePerClassFloor(pccSnap) : undefined;
+    const reqConf = on === 'server' ? serverFetchConf(effectiveMinConf(confSnap, pccSnap)) : Math.min(FETCH.conf, confSnap);
+    const reqOpts = reqConf === FETCH.conf ? FETCH : { ...FETCH, conf: reqConf };
+    const key = batchPredKey(id, on, inferenceConfigKey(inf), prec);
     const localFile = on === 'server' ? null : (o.localWeights.peek().get(id) ?? null);
 
-    // If all items are already complete for this model/backend, nothing to run.
-    if (list.every((it) => it.status === 'done' && it.pred && it.predKey === key)) return;
+    const itemNeedsRunAll = (it: BatchItem): boolean => {
+      if (it.status !== 'done' || !it.pred || it.predKey !== key) return true;
+      const plan = needsCandidateRefresh(it.pred, confSnap, pccSnap, on);
+      if (!plan) return false;
+      // Do not replay a cap-only ALL failure during Run All when the fetched confidence floor already covers current thresholds.
+      if (plan.useAll && !needsPerClassFloorRefresh(it.pred, confSnap, pccSnap) && hasCompletionFailed(it.pred)) return false;
+      return true;
+    };
+
+    // If all items are already complete AND satisfy current floor/cap coverage for this model/backend, nothing to run.
+    if (list.every((it) => !itemNeedsRunAll(it))) return;
 
     // Cancel any in-flight single-image or export completion request synchronously before dispatching batch work.
     o.cancelSinglePredict();
@@ -426,7 +502,7 @@ export function useBatchSession(o: UseBatchSessionInput) {
         if (destroyed || seq !== runSeq || ctrl.signal.aborted) break;
         const item = items.peek()[i];
         if (!item) break;
-        if (item.status === 'done' && item.pred && item.predKey === key) continue;
+        if (!itemNeedsRunAll(item)) continue;
 
         runningIndex.set(i);
         updateItem(i, { status: 'running', error: null });
@@ -439,21 +515,35 @@ export function useBatchSession(o: UseBatchSessionInput) {
         const itemSource = batchItemSource(item);
         const frameKey = sourceImageKey(itemSource);
         try {
-          const raw = await ask({
-            api: hub.api,
-            engine: o.engine,
-            model: id,
-            source: itemSource,
-            on,
-            file: localFile,
-            options: FETCH,
-            inference: inf,
-            signal: ctrl.signal,
-          });
-          if (destroyed || seq !== runSeq || ctrl.signal.aborted) break;
-          const completed = await completeIfCut(itemSource, raw, id, on, localFile, inf, ctrl.signal);
-          if (destroyed || seq !== runSeq || ctrl.signal.aborted) break;
-          const p = completed.pred;
+          let p: Prediction;
+          let haltError: unknown;
+          if (item.status === 'done' && item.pred && item.predKey === key) {
+            const completed = await completeIfCut(itemSource, item.pred, id, on, localFile, inf, prec, confSnap, pccSnap, ctrl.signal);
+            if (destroyed || seq !== runSeq || ctrl.signal.aborted) break;
+            p = completed.pred;
+            haltError = completed.haltError;
+          } else {
+            const raw = await ask({
+              api: hub.api,
+              engine: o.engine,
+              model: id,
+              source: itemSource,
+              on,
+              file: localFile,
+              options: reqOpts,
+              ...(lowMap ? { perClassConf: lowMap, confInclusive: true } : {}),
+              ...(on !== 'server' && reqConf < FETCH.conf ? { confInclusive: true } : {}),
+              precision: prec,
+              inference: inf,
+              signal: ctrl.signal,
+            });
+            if (destroyed || seq !== runSeq || ctrl.signal.aborted) break;
+            recordFetchedFloors(raw, reqOpts.conf, lowMap, on !== 'server' && (!!lowMap || reqConf < FETCH.conf));
+            const completed = await completeIfCut(itemSource, raw, id, on, localFile, inf, prec, confSnap, pccSnap, ctrl.signal);
+            if (destroyed || seq !== runSeq || ctrl.signal.aborted) break;
+            p = completed.pred;
+            haltError = completed.haltError;
+          }
           updateItem(i, { pred: p, predKey: key, status: 'done', error: null });
           if (i === activeIndex.peek()) {
             o.pred.set(p);
@@ -464,11 +554,14 @@ export function useBatchSession(o: UseBatchSessionInput) {
             o.weightsMissing.set(false);
             o.predicting.set(false);
           }
-          if (completed.haltError) {
+          if (haltError) {
             haltedOnNotice = true;
-            const he = completed.haltError;
+            const he = haltError;
             if (localFile && on !== 'server' && isDetectorLoadError(he)) {
-              o.dropLocal(id, localFile, he);
+              const keepPrecisionFile = prec === 'int8' && (await looksLikeFolo(localFile));
+              if (destroyed || seq !== runSeq || ctrl.signal.aborted) break;
+              if (keepPrecisionFile) o.error.set(he);
+              else o.dropLocal(id, localFile, he);
             } else if (on !== 'server' && !localFile && noServerWeights(he)) {
               o.weightsMissing.set(true);
             } else if (isOom(he)) {
@@ -480,14 +573,18 @@ export function useBatchSession(o: UseBatchSessionInput) {
         } catch (e: unknown) {
           if (destroyed || seq !== runSeq || ctrl.signal.aborted) break;
           if (localFile && on !== 'server' && isDetectorLoadError(e)) {
-            updateItem(i, { status: 'idle', error: null });
+            const keepPrecisionFile = prec === 'int8' && (await looksLikeFolo(localFile));
+            if (destroyed || seq !== runSeq || ctrl.signal.aborted) break;
+            updateItem(i, { status: keepPrecisionFile ? 'error' : 'idle', error: keepPrecisionFile ? errorText(e) : null });
             haltedOnNotice = true;
             if (i === activeIndex.peek()) {
               o.predicting.set(false);
               o.pred.set(null);
               o.predSourceKey.set(null);
+              if (keepPrecisionFile) o.error.set(e);
             }
-            o.dropLocal(id, localFile, e);
+            if (!keepPrecisionFile) o.dropLocal(id, localFile, e);
+            else o.error.set(e);
             break;
           }
           if (on !== 'server' && !localFile && noServerWeights(e)) {
@@ -543,7 +640,7 @@ export function useBatchSession(o: UseBatchSessionInput) {
     const f = filter.get();
     return {
       count: filterBatchBoxes(item.pred, f, o.hidden.get()).length,
-      cut: isPredictionCutAt(item.pred, f.conf),
+      cut: isPredictionCutAt(item.pred, f.conf, f.perClassConf),
     };
   }
 
@@ -555,17 +652,20 @@ export function useBatchSession(o: UseBatchSessionInput) {
   function runExport(kind: 'json' | 'csv' | 'summary-csv') {
     exportCtrl?.abort();
     exportCtrl = null;
+    const curRunOn = o.runOn.peek();
+    const curFilter = filter.peek();
     const snap = {
       modelId: o.modelId(),
       modelName: o.model()?.name ?? null,
-      runOn: o.runOn.peek(),
+      runOn: curRunOn,
+      precision: currentPrecision(curRunOn),
       inf: untrack(currentInference),
-      filter: { ...filter.peek() },
+      filter: { ...curFilter, ...(curFilter.perClassConf ? { perClassConf: { ...curFilter.perClassConf } } : {}) },
       hidden: new Set(o.hidden.peek()),
       classes: [...untrack(o.classes)],
       qaFilter: qaFilter.peek(),
     };
-    const key = snap.modelId ? batchPredKey(snap.modelId, snap.runOn, inferenceConfigKey(snap.inf)) : null;
+    const key = snap.modelId ? batchPredKey(snap.modelId, snap.runOn, inferenceConfigKey(snap.inf), snap.precision) : null;
 
     const buildInput = () => {
       const all = items.peek();
@@ -575,7 +675,12 @@ export function useBatchSession(o: UseBatchSessionInput) {
           : filterBatchItems(all, snap.qaFilter, snap.filter, snap.hidden).map((e) => e.item);
       const provisionalFilter =
         snap.qaFilter.kind !== 'all' &&
-        all.some((it) => it.status === 'done' && isPredictionCutAt(it.pred, snap.filter.conf));
+        all.some(
+          (it) =>
+            it.status === 'done' &&
+            (isPredictionCutAt(it.pred, snap.filter.conf, snap.filter.perClassConf) ||
+              needsPerClassFloorRefresh(it.pred, snap.filter.conf, snap.filter.perClassConf)),
+        );
       return {
         items: exportItems,
         modelId: snap.modelId,
@@ -592,15 +697,33 @@ export function useBatchSession(o: UseBatchSessionInput) {
 
     const doExport = () => {
       const input = buildInput();
+      const missingFloor = items
+        .peek()
+        .some((it) => it.status === 'done' && needsPerClassFloorRefresh(it.pred, snap.filter.conf, snap.filter.perClassConf));
+      if (snap.qaFilter.kind !== 'all' && input.items.length === 0) {
+        toast.info(
+          input.provisionalFilter ? 'Could not refresh lower thresholds' : 'Nothing to export',
+          input.provisionalFilter
+            ? 'No images match the cached candidates, and refreshing lower-threshold candidates failed.'
+            : 'No images match this filter after refreshing candidates.',
+        );
+        return;
+      }
+      if (missingFloor) {
+        toast.info(
+          'Exported with higher threshold floor',
+          'Some images could not refresh lower thresholds; detections below their fetched floor may be missing.',
+        );
+      }
       if (kind === 'json') return exportBatchJson(input);
       if (kind === 'summary-csv') return exportBatchSummaryCsv(input);
       return exportBatchCsv(input);
     };
 
-    // Complete every eligible capped item in the batch so filtered exports never miss boxes hidden past FETCH.max_det.
+    // Complete every eligible capped or under-floored item before selecting the QA export subset.
     const cutIndices = items
       .peek()
-      .map((item, index) => (item.status === 'done' && needsCompletionAt(item.pred, snap.filter.conf) ? index : -1))
+      .map((item, index) => (item.status === 'done' && needsCandidateRefresh(item.pred, snap.filter.conf, snap.filter.perClassConf, snap.runOn) ? index : -1))
       .filter((index) => index >= 0);
 
     if (cutIndices.length === 0) {
@@ -621,7 +744,18 @@ export function useBatchSession(o: UseBatchSessionInput) {
         const item = items.peek()[idx];
         if (!item?.pred || item.predKey !== key) continue;
         const itemSource = batchItemSource(item);
-        const { pred: next } = await completeIfCut(itemSource, item.pred, snap.modelId!, snap.runOn, localFile, snap.inf, ctrl.signal);
+        const { pred: next } = await completeIfCut(
+          itemSource,
+          item.pred,
+          snap.modelId!,
+          snap.runOn,
+          localFile,
+          snap.inf,
+          snap.precision,
+          snap.filter.conf,
+          snap.filter.perClassConf,
+          ctrl.signal,
+        );
         if (destroyed || ctrl.signal.aborted) return;
         if (next !== item.pred) {
           updateItem(idx, { pred: next });
@@ -654,15 +788,16 @@ export function useBatchSession(o: UseBatchSessionInput) {
     untrack(() => o.predicting.set(runIdx !== null && runIdx === curIdx));
   });
 
-  // Abort and invalidate cached batch predictions whenever model, backend, inference mode, or local weights change.
+  // Abort and invalidate cached batch predictions whenever model, backend, inference mode, browser precision, or local weights change.
   let lastModelKey: string | null = null;
   let lastLocalFile: File | null = null;
   effect(() => {
     const id = o.modelId();
     const on = o.runOn.get();
     const infKey = inferenceConfigKey(currentInference());
+    const prec: BrowserPrecision = on !== 'server' && o.precision ? o.precision() : 'auto';
     const f = activeLocalFile.get();
-    const nextKey = id ? batchPredKey(id, on, infKey) : null;
+    const nextKey = id ? batchPredKey(id, on, infKey, prec) : null;
     if (lastModelKey !== null && (nextKey !== lastModelKey || f !== lastLocalFile)) {
       untrack(() => {
         if (items.peek().length) invalidatePredictions();
@@ -675,7 +810,7 @@ export function useBatchSession(o: UseBatchSessionInput) {
   // Abort any in-flight Run All cleanly when thresholds or Compare A/B mode change (cached raw predictions stay intact).
   let lastThreshKey: string | null = null;
   effect(() => {
-    const k = `${o.conf.get()}|${o.iou.get()}|${o.maxDet.get()}`;
+    const k = `${o.conf.get()}|${o.iou.get()}|${o.maxDet.get()}|${perClassConfKey(o.perClassConf?.get())}`;
     if (lastThreshKey !== null && k !== lastThreshKey && untrack(() => runningAll.peek())) {
       untrack(() => stopRunAll());
     }
@@ -721,6 +856,9 @@ export function useBatchSession(o: UseBatchSessionInput) {
     visibleEntries,
     exportableCount,
     summaryExportableCount,
+    canRunAll,
+    canExport,
+    canExportSummary,
     classes: o.classes,
     loadFiles,
     selectIndex,

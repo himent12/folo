@@ -132,6 +132,9 @@ export default function BatchFilmstrip(props: BatchFilmstripProps) {
     if (kind === 'summary CSV') {
       const ready = b.summaryExportableCount.get();
       if (ready === 0) {
+        if (isFiltered.get() && b.canExportSummary.get()) {
+          return 'Refresh lower-threshold candidates and export matching per-image summary as CSV';
+        }
         return isFiltered.get() ? 'No matching images to summarize' : 'Run inference on at least one image first';
       }
       const scope = isFiltered.get() ? `matching (${ready})` : 'batch';
@@ -141,6 +144,9 @@ export default function BatchFilmstrip(props: BatchFilmstripProps) {
     }
     const ready = b.exportableCount.get();
     if (ready === 0) {
+      if (isFiltered.get() && b.canExport.get()) {
+        return `Refresh lower-threshold candidates and export matching detections as ${kind}`;
+      }
       return isFiltered.get() ? 'No matching completed images to export' : 'Run inference on at least one image first';
     }
     const scope = isFiltered.get() ? `matching (${ready})` : 'all completed';
@@ -240,9 +246,9 @@ export default function BatchFilmstrip(props: BatchFilmstripProps) {
         <div class="actions" ref={actionsEl}>
           <Button
             size="sm"
-            variant={b.runningAll.get() ? 'secondary' : b.summary.get().done < b.summary.get().total ? 'primary' : 'secondary'}
-            icon={b.runningAll.get() ? Square : b.summary.get().done < b.summary.get().total ? Play : Check}
-            disabled={!b.runningAll.get() && (!props.hasModel || b.summary.get().done >= b.summary.get().total)}
+            variant={b.runningAll.get() ? 'secondary' : b.canRunAll.get() ? 'primary' : 'secondary'}
+            icon={b.runningAll.get() ? Square : b.canRunAll.get() ? Play : Check}
+            disabled={!b.runningAll.get() && (!props.hasModel || !b.canRunAll.get())}
             data-batch-run
             aria-label={
               b.runningAll.get()
@@ -253,9 +259,13 @@ export default function BatchFilmstrip(props: BatchFilmstripProps) {
                   ? props.compare
                     ? 'Run all A (Model A)'
                     : 'Run all images'
-                  : props.compare
-                    ? 'All A run (Model A)'
-                    : 'All run'
+                  : b.canRunAll.get()
+                    ? props.compare
+                      ? 'Refresh all A (Model A)'
+                      : 'Refresh all images for lower thresholds'
+                    : props.compare
+                      ? 'All A run (Model A)'
+                      : 'All run'
             }
             onfocus={() => {
               runBtnFocused = true;
@@ -263,7 +273,7 @@ export default function BatchFilmstrip(props: BatchFilmstripProps) {
             onblur={(e) => {
               const btn = e.currentTarget as HTMLButtonElement;
               if (!btn.disabled && e.relatedTarget !== null) runBtnFocused = false;
-              else if (!btn.disabled && b.summary.peek().done < b.summary.peek().total) runBtnFocused = false;
+              else if (!btn.disabled && b.canRunAll.peek()) runBtnFocused = false;
             }}
             onclick={() => {
               if (b.runningAll.peek()) b.stopRunAll();
@@ -276,9 +286,13 @@ export default function BatchFilmstrip(props: BatchFilmstripProps) {
                 ? props.compare
                   ? 'Run all A'
                   : 'Run all'
-                : props.compare
-                  ? 'All A run'
-                  : 'All run'}
+                : b.canRunAll.get()
+                  ? props.compare
+                    ? 'Refresh all A'
+                    : 'Refresh all'
+                  : props.compare
+                    ? 'All A run'
+                    : 'All run'}
           </Button>
           <span use:tooltip={exportTooltip('JSON')}>
             <Button
@@ -287,7 +301,7 @@ export default function BatchFilmstrip(props: BatchFilmstripProps) {
               icon={FileJson}
               data-batch-export="json"
               aria-label={props.compare ? 'A JSON — export Model A batch' : 'Export batch JSON'}
-              disabled={b.runningAll.get() || b.exportableCount.get() === 0}
+              disabled={b.runningAll.get() || !b.canExport.get()}
               onclick={() => b.onExportJson()}
             >
               {props.compare ? 'A JSON' : 'Batch JSON'}
@@ -300,7 +314,7 @@ export default function BatchFilmstrip(props: BatchFilmstripProps) {
               icon={Download}
               data-batch-export="csv"
               aria-label={props.compare ? 'A CSV — export Model A batch' : 'Export batch CSV'}
-              disabled={b.runningAll.get() || b.exportableCount.get() === 0}
+              disabled={b.runningAll.get() || !b.canExport.get()}
               onclick={() => b.onExportCsv()}
             >
               {props.compare ? 'A CSV' : 'Batch CSV'}
@@ -313,7 +327,7 @@ export default function BatchFilmstrip(props: BatchFilmstripProps) {
               icon={Download}
               data-batch-export="summary-csv"
               aria-label={props.compare ? 'A Summary CSV — export Model A per-image summary' : 'Export batch summary CSV'}
-              disabled={b.runningAll.get() || b.summaryExportableCount.get() === 0}
+              disabled={b.runningAll.get() || !b.canExportSummary.get()}
               onclick={() => b.onExportSummaryCsv()}
             >
               {props.compare ? 'A Summary' : 'Summary CSV'}

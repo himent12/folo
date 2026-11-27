@@ -364,11 +364,11 @@ export class MockApi extends MockTrainingApi implements Api {
 
   // ---------- inference ----------
 
-  modelWeightsTag(): Promise<string | null> {
+  modelWeightsTag(_id?: string, _signal?: AbortSignal, _format?: 'f16' | 'stored'): Promise<string | null> {
     return Promise.resolve(null);
   }
 
-  modelWeights(id: string): Promise<ArrayBuffer> {
+  modelWeights(id: string, _signal?: AbortSignal, _format?: 'f16' | 'stored'): Promise<ArrayBuffer> {
     // The demo's models are not real networks: there is no file to run in the browser.
     return Promise.reject(new ApiError(501, 'not_implemented', `Demo model ${id} has no weights file.`));
   }

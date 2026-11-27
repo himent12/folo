@@ -10,6 +10,7 @@ import { hub } from '$lib/api/index';
 import type { Dataset, DatasetImage as Img, Prediction, Split } from '$lib/api/types';
 import type { InferenceConfig } from '$lib/inference/browser';
 import type { CompareViewMode } from './compare';
+import type { PerClassConfMap } from './perClassConf';
 import { DEFAULTS } from './predict';
 import type { Source } from './source';
 
@@ -26,6 +27,10 @@ export interface Session {
   conf: number;
   iou: number;
   maxDet: number;
+  perClassConf?: PerClassConfMap;
+  /** Model ID and class list that `perClassConf` indices belonged to (for safe cross-model remapping on restore). */
+  perClassModelId?: string | null;
+  perClassClasses?: string[];
   labels: boolean;
   scores: boolean;
   truth: boolean;
@@ -85,7 +90,7 @@ export function fromUrl(q: URLSearchParams): FromUrl {
   return {
     model: q.get('model') || null,
     image: dataset && image && SPLITS.includes(split) ? { dataset, image, split: split as Split, at: at === null ? null : Math.floor(at) } : null,
-    conf: number(q, 'conf', 0.01, 0.95),
+    conf: number(q, 'conf', 0, 1),
     iou: number(q, 'iou', 0.05, 0.95),
     maxDet: number(q, 'max', 1, 300),
   };

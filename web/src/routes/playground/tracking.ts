@@ -20,9 +20,9 @@ export const MAX_TRAIL_POINTS = 20;
 /** Frames a missing track's trail fades out before pruning. */
 const TRAIL_STALE_FRAMES = 3;
 
-/** Builds valid `FoloTrackOptions` aligned with Playground's active confidence slider (`lowThresh <= highThresh <= newTrackThresh`). */
+/** Builds valid `FoloTrackOptions` aligned with Playground's active confidence thresholds (`0 <= lowThresh <= highThresh <= newTrackThresh <= 1`). */
 export function trackerOptionsForConf(conf: number): FoloTrackOptions {
-  const high = Math.max(0.01, Math.min(1, Number.isFinite(conf) ? conf : 0.25));
+  const high = Math.max(0, Math.min(1, Number.isFinite(conf) ? conf : 0.25));
   const low = Math.min(0.1, high);
   // Omit `classes` so per-frame `seen_names` are cleared cleanly on `reset()` when switching models.
   return {

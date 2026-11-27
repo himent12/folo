@@ -6,8 +6,22 @@
 import { computed, css, For } from 'fw';
 import type { Timing } from '$lib/api/types';
 import { ms, num } from '$lib/format';
+import type { WasmPrecision } from '$lib/inference/browser';
 
-export default function TimingBar(props: { timing: Timing; device: string; cold?: boolean; mode?: string | null; engineBadge?: string | null }) {
+export default function TimingBar(props: {
+  timing: Timing;
+  device: string;
+  cold?: boolean;
+  mode?: string | null;
+  engineBadge?: string | null;
+  precision?: WasmPrecision | null;
+  precisionFallback?: string | null;
+}) {
+  const displayEngineBadge = computed(() => {
+    const b = props.engineBadge;
+    if (!b) return null;
+    return props.precision === 'int8' ? b.replace(/\s*·\s*INT8$/, '') : b;
+  });
   const parts = computed(() => [
     { key: 'pre', label: 'Preprocess', what: 'decode, resize', v: props.timing.preprocess_ms, color: 'var(--text-tertiary)' },
     { key: 'inf', label: 'Inference', what: 'the model', v: props.timing.inference_ms, color: 'var(--text-primary)' },
@@ -54,9 +68,22 @@ export default function TimingBar(props: { timing: Timing; device: string; cold?
       <p class="device">
         <span class="faint">Device</span> <span class="mono">{props.device}</span>
       </p>
-      {props.engineBadge ? (
+      {displayEngineBadge.get() ? (
         <p class="device engine" data-browser-engine-info>
-          <span class="faint">Engine</span> <span class="mono">{props.engineBadge}</span>
+          <span class="faint">Engine</span>
+          <span class="engine-val">
+            {props.precision === 'int8' ? (
+              <span class="prec-pill" data-browser-precision="int8">
+                INT8
+              </span>
+            ) : null}
+            <span class="mono">{displayEngineBadge.get()}</span>
+          </span>
+        </p>
+      ) : null}
+      {props.precisionFallback ? (
+        <p class="prec-fallback" data-precision-fallback>
+          {props.precisionFallback}
         </p>
       ) : null}
       {props.mode ? (
@@ -152,9 +179,31 @@ css`
   .device {
     display: flex;
     justify-content: space-between;
+    align-items: center;
     gap: var(--space-2);
     padding-top: var(--space-2);
     border-top: 1px solid var(--line-subtle);
     font-size: var(--type-sm-size);
+  }
+  .engine-val {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    min-width: 0;
+  }
+  .prec-pill {
+    padding: 0 var(--space-2);
+    border-radius: var(--radius-sm);
+    background: var(--accent-muted);
+    color: var(--accent-text);
+    font-size: var(--type-sm-size);
+    font-weight: var(--weight-medium);
+    white-space: nowrap;
+  }
+  .prec-fallback {
+    margin-top: calc(-1 * var(--space-2));
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    color: var(--warning-text);
   }
 `;

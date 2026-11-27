@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { filterDetections, iou, nms, type NmsBox } from './nms';
+import { effectiveMinConf, filterDetections, iou, nms, thresholdForClass, type NmsBox } from './nms';
 
 const box = (cls: number, score: number, x1: number, y1: number, x2: number, y2: number): NmsBox => ({ class: cls, score, x1, y1, x2, y2 });
 
@@ -84,5 +84,33 @@ describe('filterDetections', () => {
 
   it('applies max detections last', () => {
     expect(filterDetections(xs, { conf: 0, iou: 0.7, maxDet: 1 })).toEqual([xs[0]]);
+  });
+
+  it('applies per-class confidence overrides with global fallback and inclusive/strict boundary control', () => {
+    expect(thresholdForClass(1, 0.25, { 1: 0.5 })).toBe(0.5);
+    expect(thresholdForClass(0, 0.25, { 1: 0.5 })).toBe(0.25);
+    expect(effectiveMinConf(0.25, { 0: 0.6, 2: 0.04 })).toBe(0.04);
+    expect(effectiveMinConf(0.25, { 0: 0.6 })).toBe(0.25);
+
+    // Raise class 1 to 0.5 (drops score 0.4), lower class 2 to 0.05 (keeps score 0.05 inclusively)
+    expect(
+      filterDetections(xs, {
+        conf: 0.25,
+        iou: 0.7,
+        maxDet: 300,
+        perClassConf: { 1: 0.5, 2: 0.05 },
+      }),
+    ).toEqual([xs[0], xs[3]]);
+
+    // Strict (`confInclusive: false`) excludes exact boundary score 0.05
+    expect(
+      filterDetections(xs, {
+        conf: 0.25,
+        iou: 0.7,
+        maxDet: 300,
+        perClassConf: { 1: 0.5, 2: 0.05 },
+        confInclusive: false,
+      }),
+    ).toEqual([xs[0]]);
   });
 });

@@ -1,12 +1,14 @@
 // Shell-safe `folo dataset` curation & export CLI command builders paired with DatasetInsights and StatsTab:
 // `check` (perceptual dHash duplicate/leakage audit + dry-run fixes), `split` (stratified train/val),
-// `filter` (class/split/empty-image curation), `merge` (multi-dataset unification), and `convert` (YOLO/COCO/VOC export).
+// `filter` (class/split/empty-image curation), `merge` (multi-dataset unification), `convert` (YOLO/COCO/VOC),
+// and `export` (spec-compliant COCO instances JSON with split selection, copy/link/reference images, pretty JSON).
 // Every subcommand and flag matches crates/folo-cli/src/cli/dataset.rs and docs/CLI.md verbatim.
 import type { Dataset, DatasetStats, Split } from '$lib/api/types';
 import { quote } from '$lib/trainCli';
 
-export type CurateCliMode = 'check' | 'split' | 'filter' | 'merge' | 'convert';
+export type CurateCliMode = 'check' | 'split' | 'filter' | 'merge' | 'convert' | 'export';
 export type ConvertTargetFormat = 'yolo' | 'coco' | 'voc';
+export type CocoImageMode = 'copy' | 'link' | 'reference';
 
 export interface CurateCliCommand {
   mode: CurateCliMode;
@@ -25,12 +27,19 @@ export const CURATE_CLI_MODES: readonly { value: CurateCliMode; label: string }[
   { value: 'filter', label: 'Filter' },
   { value: 'merge', label: 'Merge' },
   { value: 'convert', label: 'Convert' },
+  { value: 'export', label: 'Export COCO' },
 ];
 
 export const CONVERT_TARGET_FORMATS: readonly { value: ConvertTargetFormat; label: string }[] = [
   { value: 'yolo', label: 'YOLO' },
   { value: 'coco', label: 'COCO' },
   { value: 'voc', label: 'VOC' },
+];
+
+export const COCO_IMAGE_MODES: readonly { value: CocoImageMode; label: string }[] = [
+  { value: 'copy', label: 'Copy' },
+  { value: 'link', label: 'Hard-link' },
+  { value: 'reference', label: 'Reference' },
 ];
 
 /** Picks the most useful default conversion target format for a dataset (YOLO for COCO datasets, else COCO). */
@@ -49,10 +58,27 @@ function flagValue(flag: string, value: string): string {
   return value.startsWith('-') ? quote(`${flag}=${value}`) : `${flag} ${quote(value)}`;
 }
 
+/**
+ * Normalizes a dataset path so Windows PowerShell 5.1 passes it verbatim to native executables:
+ * - A literal `--%` folder name is prefixed with `./` because PowerShell 5.1 strips `--%` even inside single quotes.
+ * - A trailing backslash on a path containing spaces (or any non-root path) is trimmed or converted to `/` so
+ *   Windows CRT `CommandLineToArgvW` never interprets `\"` as an escaped quote absorbing subsequent flags.
+ */
+export function normalizeCliPath(raw: string): string {
+  if (raw === '--%') return './--%';
+  if (/^[A-Za-z]:\\+$/.test(raw)) return `${raw.slice(0, 2)}/`;
+  if (raw.length > 1 && raw.endsWith('\\')) {
+    const stripped = raw.replace(/\\+$/, '');
+    return stripped.length > 0 ? stripped : raw;
+  }
+  return raw;
+}
+
 /** Quotes a positional dataset path; prefixes `--` when the path starts with `-` so clap never reads it as a flag. */
 function positionalPath(path: string, trailingFlags: string[]): string[] {
-  if (path.startsWith('-')) return [...trailingFlags, '--', quote(path)];
-  return [quote(path), ...trailingFlags];
+  const safe = normalizeCliPath(path);
+  if (safe.startsWith('-')) return [...trailingFlags, '--', quote(safe)];
+  return [quote(safe), ...trailingFlags];
 }
 
 /** Suggests a sibling output folder name derived cleanly from the dataset name (never inside the input folder). */
@@ -75,6 +101,8 @@ export function buildDatasetCurateCli(
     activeClass?: number;
     activeSplit?: 'all' | Split;
     targetFormat?: ConvertTargetFormat;
+    cocoImageMode?: CocoImageMode;
+    cocoPretty?: boolean;
   } = {},
 ): CurateCliCommand {
   const pathUnsafe = !!dataset.path && UNSAFE_PS_NATIVE_ARG.test(dataset.path);
@@ -162,7 +190,8 @@ export function buildDatasetCurateCli(
     const to = opts.targetFormat ?? defaultConvertTarget(dataset.format);
     const out = suggestedOut(dataset, to);
     const flags = [`--to ${to}`];
-    const args = hasRealPath && path.startsWith('-') ? [...flags, '--', quoted(path), out] : [quoted(path), out, ...flags];
+    const norm = hasRealPath ? normalizeCliPath(path) : path;
+    const args = hasRealPath && norm.startsWith('-') ? [...flags, '--', quoted(norm), out] : [hasRealPath ? quoted(norm) : norm, out, ...flags];
     const formatNames: Record<ConvertTargetFormat, string> = {
       yolo: 'YOLO (data.yaml + labels/*.txt)',
       coco: 'COCO (annotations/instances_<split>.json)',
@@ -178,10 +207,38 @@ export function buildDatasetCurateCli(
     };
   }
 
+  if (mode === 'export') {
+    const imageMode: CocoImageMode = opts.cocoImageMode ?? 'copy';
+    const splitFilter = opts.activeSplit && opts.activeSplit !== 'all' ? opts.activeSplit : null;
+    const flags = ['--out <out_dir>', '--format coco'];
+    if (splitFilter) flags.push(`--split ${splitFilter}`);
+    flags.push(`--images ${imageMode}`);
+    if (opts.cocoPretty) flags.push('--pretty');
+    const args = hasRealPath ? positionalPath(path, flags) : [path, ...flags];
+    const imageDesc: Record<CocoImageMode, string> = {
+      copy: 'copies source images into <out_dir>/images/<split>/',
+      link: 'hard-links source images into <out_dir>/images/<split>/ (falls back to copy across filesystems)',
+      reference: 'references source images in place via relative paths without duplicating files',
+    };
+    const splitDesc = splitFilter ? `the ${splitFilter} split` : 'all non-empty splits';
+    return {
+      mode,
+      label: 'Export COCO',
+      command: `folo dataset export ${args.join(' ')}`,
+      description: `Exports ${splitDesc} to spec-compliant COCO Detection JSON (annotations/instances_<split>.json) and ${imageDesc[imageMode]}${opts.cocoPretty ? ', pretty-printed' : ''}.`,
+      warning: pathWarning,
+      placeholders: [...pathPlaceholder, '<out_dir>'],
+    };
+  }
+
   // merge
   const out = suggestedOut(dataset, 'merged');
   const flags = [`--out ${out}`, '--splits stratified', '--val 0.2'];
-  const inputs = hasRealPath && path.startsWith('-') ? [...flags, '--', quoted(path), '<other_dataset>'] : [quoted(path), '<other_dataset>', ...flags];
+  const norm = hasRealPath ? normalizeCliPath(path) : path;
+  const inputs =
+    hasRealPath && norm.startsWith('-')
+      ? [...flags, '--', quoted(norm), '<other_dataset>']
+      : [hasRealPath ? quoted(norm) : norm, '<other_dataset>', ...flags];
   return {
     mode,
     label: 'Merge',

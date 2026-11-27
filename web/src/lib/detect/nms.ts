@@ -43,17 +43,51 @@ export function nms<T extends NmsBox>(boxes: readonly T[], iouThreshold: number,
 }
 
 export interface FilterOptions {
-  /** Minimum score (inclusive). */
+  /** Minimum score fallback for classes not overridden in `perClassConf`. */
   conf: number;
   /** NMS IoU threshold. */
   iou: number;
   maxDet: number;
+  /** Optional per-class confidence threshold overrides (`class_id -> conf` in `[0, 1]`). */
+  perClassConf?: Readonly<Record<number, number>> | null;
+  /** Use inclusive (`score >= conf`, default `true`) vs strict (`score > conf`) comparison. */
+  confInclusive?: boolean;
 }
 
-/** The Playground's pipeline: confidence filter, then NMS, then the max-detections cap. */
+/** Resolves the active confidence threshold for `classId` (per-class override when finite, else global `conf`). */
+export function thresholdForClass(
+  classId: number,
+  globalConf: number,
+  perClassConf?: Readonly<Record<number, number>> | null,
+): number {
+  const override = perClassConf?.[classId];
+  return typeof override === 'number' && Number.isFinite(override) ? override : globalConf;
+}
+
+/** Lowest effective confidence threshold across global `conf` and any valid per-class overrides. */
+export function effectiveMinConf(
+  globalConf: number,
+  perClassConf?: Readonly<Record<number, number>> | null,
+): number {
+  let min = globalConf;
+  if (perClassConf) {
+    for (const v of Object.values(perClassConf)) {
+      if (typeof v === 'number' && Number.isFinite(v) && v < min) min = v;
+    }
+  }
+  return min;
+}
+
+/** The Playground's pipeline: confidence filter (global + optional per-class overrides), then NMS, then max-detections cap. */
 export function filterDetections<T extends NmsBox>(boxes: readonly T[], o: FilterOptions): T[] {
+  const inclusive = o.confInclusive ?? true;
+  const map = o.perClassConf;
+  const hasMap = !!map && Object.keys(map).length > 0;
   return nms(
-    boxes.filter((b) => b.score >= o.conf),
+    boxes.filter((b) => {
+      const t = hasMap ? thresholdForClass(b.class, o.conf, map) : o.conf;
+      return inclusive ? b.score >= t : b.score > t;
+    }),
     o.iou,
     Math.max(0, Math.floor(o.maxDet)),
   );

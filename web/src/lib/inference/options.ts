@@ -5,6 +5,17 @@ export type InferenceMode = 'standard' | 'sahi' | 'tta';
 
 export type TtaScalePreset = 'multi' | 'single';
 
+/** Precision choice exposed by `folo-wasm` (`FoloLoadOptions.precision`); `'auto'` omits the option so `folo-wasm` picks INT8 on CPU for quantized checkpoints and f32 otherwise. */
+export type WasmPrecision = 'f32' | 'f16' | 'int8';
+export type BrowserPrecision = 'auto' | WasmPrecision;
+
+export const BROWSER_PRECISION_OPTIONS: readonly { value: BrowserPrecision; label: string }[] = [
+  { value: 'auto', label: 'Auto' },
+  { value: 'f32', label: 'f32' },
+  { value: 'f16', label: 'f16' },
+  { value: 'int8', label: 'INT8' },
+];
+
 export interface TileOptions {
   /** Square tile size in pixels (`320 | 512 | 640 | 1024`). */
   tileSize: number;
@@ -25,6 +36,8 @@ export interface InferenceConfig {
   mode: InferenceMode;
   tile: TileOptions;
   tta: TtaOptions;
+  /** Optional browser WASM compute precision (`auto` | `f32` | `f16` | `int8`; ignored for server runs). */
+  precision?: BrowserPrecision;
 }
 
 /** Recorded on a `Prediction` (and exported in JSON) when SAHI or TTA produced the boxes. */
@@ -41,21 +54,26 @@ export type InferenceMeta =
       scales: number[];
     };
 
-/** Per-call options accepted by `FoloDetector.detectTiled` (crates/folo-wasm, docs/WASM.md). */
-export interface WasmTileDetectOptions {
+/** Base per-call options accepted by `FoloDetector.detect` (crates/folo-wasm/src/lib.rs). */
+export interface WasmDetectOptions {
   conf?: number;
   iou?: number;
   maxDet?: number;
+  /** Optional per-class confidence thresholds (`class_id -> conf`, finite values in `[0, 1]`). */
+  perClassConf?: Record<number, number>;
+  /** Use inclusive (`score >= conf`) thresholding matching `folo val`'s calibrated F1 operating points. */
+  confInclusive?: boolean;
+}
+
+/** Per-call options accepted by `FoloDetector.detectTiled` (crates/folo-wasm, docs/WASM.md). */
+export interface WasmTileDetectOptions extends WasmDetectOptions {
   tileSize?: number;
   overlap?: number;
   fullImage?: boolean;
 }
 
 /** Per-call options accepted by `FoloDetector.detectTta` (crates/folo-wasm, docs/WASM.md). */
-export interface WasmTtaDetectOptions {
-  conf?: number;
-  iou?: number;
-  maxDet?: number;
+export interface WasmTtaDetectOptions extends WasmDetectOptions {
   hflip?: boolean;
   scales?: number[];
   mergeIou?: number;
@@ -168,15 +186,57 @@ export function inferenceShortTag(meta: InferenceMeta | null | undefined): strin
   return `TTA ${meta.scales.length}×${meta.hflip ? ' + flip' : ''}`;
 }
 
-/** Builds `FoloDetector.detectTiled` options from base thresholds and `TileOptions`. */
-export function toWasmTileOptions(
-  base: { conf: number; iou: number; maxDet: number },
-  tile: TileOptions,
-): WasmTileDetectOptions {
+const CANONICAL_CLASS_ID = /^(?:0|[1-9]\d*)$/;
+
+/** Sanitizes a per-class confidence map to canonical non-negative integer class IDs and finite `[0, 1]` values for `folo-wasm`. */
+export function sanitizeWasmPerClassConf(
+  map: Readonly<Record<number, number>> | null | undefined,
+): Record<number, number> | undefined {
+  if (!map) return undefined;
+  const out: Record<number, number> = {};
+  let count = 0;
+  for (const [k, v] of Object.entries(map)) {
+    if (!CANONICAL_CLASS_ID.test(k)) continue;
+    const id = Number(k);
+    if (!Number.isSafeInteger(id) || id > 0xffff_ffff) continue;
+    if (typeof v !== 'number' || !Number.isFinite(v) || v < 0 || v > 1) continue;
+    out[id] = v;
+    count++;
+  }
+  return count > 0 ? out : undefined;
+}
+
+/** Builds `FoloDetector.detect` options from base thresholds plus optional `perClassConf` / `confInclusive`. */
+export function toWasmDetectOptions(base: {
+  conf: number;
+  iou: number;
+  maxDet: number;
+  perClassConf?: Readonly<Record<number, number>> | null;
+  confInclusive?: boolean;
+}): WasmDetectOptions {
+  const perClassConf = sanitizeWasmPerClassConf(base.perClassConf);
   return {
     conf: base.conf,
     iou: base.iou,
     maxDet: base.maxDet,
+    ...(perClassConf ? { perClassConf } : {}),
+    ...(typeof base.confInclusive === 'boolean' ? { confInclusive: base.confInclusive } : {}),
+  };
+}
+
+/** Builds `FoloDetector.detectTiled` options from base thresholds and `TileOptions`. */
+export function toWasmTileOptions(
+  base: {
+    conf: number;
+    iou: number;
+    maxDet: number;
+    perClassConf?: Readonly<Record<number, number>> | null;
+    confInclusive?: boolean;
+  },
+  tile: TileOptions,
+): WasmTileDetectOptions {
+  return {
+    ...toWasmDetectOptions(base),
     tileSize: tile.tileSize,
     overlap: tile.overlap,
     fullImage: tile.fullImage,
@@ -185,17 +245,26 @@ export function toWasmTileOptions(
 
 /** Builds `FoloDetector.detectTta` options; clamps loose `iou = 1` fetches so cross-view fusion still runs. */
 export function toWasmTtaOptions(
-  base: { conf: number; iou: number; maxDet: number },
+  base: {
+    conf: number;
+    iou: number;
+    maxDet: number;
+    perClassConf?: Readonly<Record<number, number>> | null;
+    confInclusive?: boolean;
+  },
   tta: TtaOptions,
 ): WasmTtaDetectOptions {
   return {
-    conf: base.conf,
-    iou: base.iou,
-    maxDet: base.maxDet,
+    ...toWasmDetectOptions(base),
     hflip: tta.hflip,
     scales: [...tta.scales],
     mergeIou: base.iou >= 0.99 ? DEFAULT_TTA_MERGE_IOU : base.iou,
   };
+}
+
+/** Normalizes an optional browser precision into `'auto' | 'f32' | 'f16' | 'int8'`. */
+export function normalizeBrowserPrecision(v: unknown): BrowserPrecision {
+  return v === 'f32' || v === 'f16' || v === 'int8' ? v : 'auto';
 }
 
 /** Builds `POST /api/predict` `tile` payload (`folo_vision::TileConfig`). */

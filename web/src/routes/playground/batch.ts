@@ -1,10 +1,11 @@
 // Pure state types, threshold filtering, summary stats, and JSON/CSV export helpers for Playground multi-image batch mode.
 import type { Prediction } from '$lib/api/types';
 import { filterDetections } from '$lib/detect/nms';
-import type { InferenceMeta } from '$lib/inference/browser';
+import type { BrowserPrecision, InferenceMeta } from '$lib/inference/browser';
 import { exportTableCsv, exportTableJson, type CsvCell } from '$lib/tableExport';
 import { toast } from '$lib/ui/toast';
 import { isPredictionCutAt } from './allCandidates';
+import { perClassConfForExport, type PerClassConfMap } from './perClassConf';
 import type { RunOn } from './predict';
 import type { Source } from './source';
 import type { Det } from './viewState';
@@ -31,6 +32,7 @@ export interface BatchFilter {
   iou: number;
   maxDet: number;
   o2o: boolean;
+  perClassConf?: PerClassConfMap;
 }
 
 export interface BatchSummary {
@@ -92,9 +94,15 @@ export const BATCH_SUMMARY_CSV_HEADERS = [
   'error',
 ] as const;
 
-/** Cache key binding a batch item's raw prediction to the model, backend, and inference mode that produced it. */
-export function batchPredKey(modelId: string, runOn: RunOn, inferenceKey = 'standard'): string {
-  return inferenceKey === 'standard' ? `${modelId}|${runOn}` : `${modelId}|${runOn}|${inferenceKey}`;
+/** Cache key binding a batch item's raw prediction to the model, backend, inference mode, and browser precision. */
+export function batchPredKey(
+  modelId: string,
+  runOn: RunOn,
+  inferenceKey = 'standard',
+  precision?: BrowserPrecision,
+): string {
+  const base = inferenceKey === 'standard' ? `${modelId}|${runOn}` : `${modelId}|${runOn}|${inferenceKey}`;
+  return runOn !== 'server' && precision && precision !== 'auto' ? `${base}|prec:${precision}` : base;
 }
 
 /** Builds a Playground `Source` pointing at a batch item whose object URL is owned by the batch session. */
@@ -121,6 +129,7 @@ export function filterBatchBoxes(
     conf: filter.conf,
     iou: filter.o2o ? 1 : filter.iou,
     maxDet: filter.maxDet,
+    perClassConf: filter.perClassConf,
   });
   return hidden.size ? kept.filter((b) => !hidden.has(b.class)) : kept;
 }
@@ -140,7 +149,7 @@ export function summarizeBatch(
     if (item.status === 'done' && item.pred) {
       done++;
       totalDetections += filterBatchBoxes(item.pred, filter, hidden).length;
-      if (isPredictionCutAt(item.pred, filter.conf)) truncated++;
+      if (isPredictionCutAt(item.pred, filter.conf, filter.perClassConf)) truncated++;
     } else if (item.status === 'running') {
       running++;
     } else if (item.status === 'error') {
@@ -270,6 +279,7 @@ export function buildBatchJson(input: BatchExportInput) {
   const hiddenClasses = input.hidden.size
     ? [...input.hidden].sort((a, b) => a - b).map((c) => input.classes[c] ?? `class ${c}`)
     : undefined;
+  const perClass = perClassConfForExport(input.filter.perClassConf);
   const baseFilter = input.filter.o2o
     ? { conf: input.filter.conf, max_det: input.filter.maxDet }
     : { conf: input.filter.conf, iou: input.filter.iou, max_det: input.filter.maxDet };
@@ -280,7 +290,11 @@ export function buildBatchJson(input: BatchExportInput) {
     model_name: input.modelName,
     backend: input.runOn,
     ...(input.inference ? { inference: input.inference } : {}),
-    filter: hiddenClasses?.length ? { ...baseFilter, hidden_classes: hiddenClasses } : baseFilter,
+    filter: {
+      ...baseFilter,
+      ...(perClass ? { per_class_conf: perClass } : {}),
+      ...(hiddenClasses?.length ? { hidden_classes: hiddenClasses } : {}),
+    },
     ...(qa ? { qa_filter: qa } : {}),
     summary: {
       total_images: summary.total,
@@ -291,7 +305,7 @@ export function buildBatchJson(input: BatchExportInput) {
     },
     images: input.items.map((item) => {
       const boxes = item.status === 'done' ? filterBatchBoxes(item.pred, input.filter, input.hidden) : [];
-      const truncated = item.status === 'done' && isPredictionCutAt(item.pred, input.filter.conf);
+      const truncated = item.status === 'done' && isPredictionCutAt(item.pred, input.filter.conf, input.filter.perClassConf);
       return {
         filename: item.name,
         width: item.pred?.image.width ?? item.width,

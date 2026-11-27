@@ -3,6 +3,7 @@
 // (`predict_options`), exposes honest disabled reasons, and resolves the effective config per backend.
 import { computed, signal, type Signal } from 'fw';
 import { hub } from '$lib/api/index';
+import type { Prediction } from '$lib/api/types';
 import {
   DEFAULT_INFERENCE_CONFIG,
   DEFAULT_TILE_OPTIONS,
@@ -10,9 +11,12 @@ import {
   inferenceConfigKey,
   inferenceMetaOf,
   inferenceShortTag,
+  normalizeBrowserPrecision,
   scalesForPreset,
   ttaScalePreset,
   type BrowserEngine,
+  type BrowserPrecision,
+  type DetectorInfo,
   type InferenceConfig,
   type InferenceMode,
   type TtaScalePreset,
@@ -32,6 +36,8 @@ export interface UseInferenceOptionsInput {
   runOn: Signal<RunOn>;
   /** Optional Model B backend while Compare A/B is active so heterogeneous A/B backends stay honest. */
   compareRunOn?: () => RunOn | null;
+  /** Optional active predictions (Model A and, in Compare mode, Model B) for scoping precision fallback notices. */
+  activePredictions?: () => (Prediction | null)[];
   engine: BrowserEngine;
   browserOff: () => string | null;
   serverPredictOptions: () => boolean;
@@ -81,8 +87,10 @@ export function useInferenceOptions(input: UseInferenceOptionsInput) {
   const fullImage = signal<boolean>(DEFAULT_TILE_OPTIONS.fullImage);
   const hflip = signal<boolean>(DEFAULT_TTA_OPTIONS.hflip);
   const scalePreset = signal<TtaScalePreset>(ttaScalePreset(DEFAULT_TTA_OPTIONS.scales));
+  const precision = signal<BrowserPrecision>('auto');
 
-  const config = computed<InferenceConfig>(() => ({
+  /** Enhancement-only config (`mode`, `tile`, `tta`): excludes browser precision so Server effects never rerun on precision toggles. */
+  const modeConfig = computed<InferenceConfig>(() => ({
     mode: mode.get(),
     tile: {
       tileSize: tileSize.get(),
@@ -94,6 +102,51 @@ export function useInferenceOptions(input: UseInferenceOptionsInput) {
       scales: scalesForPreset(scalePreset.get()),
     },
   }));
+
+  const config = computed<InferenceConfig>(() => {
+    const p = precision.get();
+    const base = modeConfig.get();
+    return p !== 'auto' ? { ...base, precision: p } : base;
+  });
+
+  const hasBrowserBackend = computed(() => {
+    if (input.browserOff()) return false;
+    if (input.runOn.get() !== 'server') return true;
+    const onB = input.compareRunOn?.() ?? null;
+    return onB !== null && onB !== 'server';
+  });
+
+  const hasWebGpuBackend = computed(() => {
+    if (input.browserOff()) return false;
+    if (input.runOn.get() === 'webgpu') return true;
+    return (input.compareRunOn?.() ?? null) === 'webgpu';
+  });
+
+  const engineInfo = computed<DetectorInfo | null>(() => input.engine.info);
+
+  /** Precision fallback notice scoped to an active prediction matching the currently selected browser backend & precision. */
+  const activePrecisionFallback = computed<string | null>(() => {
+    if (!hasBrowserBackend.get()) return null;
+    const wantPrec = precision.get();
+    const activeBackends = new Set<string>();
+    if (input.runOn.get() !== 'server') activeBackends.add(input.runOn.get());
+    const onB = input.compareRunOn?.() ?? null;
+    if (onB && onB !== 'server') activeBackends.add(onB);
+    const preds = input.activePredictions ? input.activePredictions() : [];
+    for (const p of preds) {
+      if (!p?.backend || !activeBackends.has(p.backend)) continue;
+      const info = input.engine.infoFor(p);
+      const reqPrec = input.engine.precisionFor(p);
+      if (info?.precisionFallback && (reqPrec === null || reqPrec === wantPrec)) {
+        return info.precisionFallback;
+      }
+    }
+    return null;
+  });
+
+  function precisionFor(on: RunOn): BrowserPrecision {
+    return on === 'server' ? 'auto' : precision.get();
+  }
 
   function availabilityFor(on: RunOn): InferenceAvailability {
     const caps = input.engine.capabilities;
@@ -128,7 +181,7 @@ export function useInferenceOptions(input: UseInferenceOptionsInput) {
 
   /** Effective config sent for `on`: degrades cleanly to `standard` whenever the chosen mode is unavailable on `on`. */
   function effectiveFor(on: RunOn): InferenceConfig {
-    const cfg = config.get();
+    const cfg = modeConfig.get();
     if (cfg.mode === 'standard') return cfg;
     const avail = availabilityFor(on);
     if (cfg.mode === 'sahi' && !avail.sahi) return DEFAULT_INFERENCE_CONFIG;
@@ -142,12 +195,16 @@ export function useInferenceOptions(input: UseInferenceOptionsInput) {
   const badge = computed(() => {
     const onB = input.compareRunOn?.() ?? null;
     const meta = effectiveMeta.get() ?? (onB ? inferenceMetaOf(effectiveFor(onB)) : undefined);
-    return inferenceShortTag(meta);
+    const modeTag = inferenceShortTag(meta);
+    const prec = hasBrowserBackend.get() ? precision.get() : 'auto';
+    const precTag = prec === 'int8' ? 'INT8' : prec !== 'auto' ? prec : null;
+    if (modeTag && precTag) return `${modeTag} · ${precTag}`;
+    return modeTag ?? precTag;
   });
 
   /** Active mode shown in the segmented selector (reads `standard` if unsupported on every active backend). */
   const displayMode = computed<InferenceMode>(() => {
-    const cfg = config.get();
+    const cfg = modeConfig.get();
     if (cfg.mode === 'standard') return 'standard';
     const avail = availability.get();
     if (cfg.mode === 'sahi' && !avail.sahi) return 'standard';
@@ -169,6 +226,7 @@ export function useInferenceOptions(input: UseInferenceOptionsInput) {
     fullImage.set(saved.tile.fullImage);
     hflip.set(saved.tta.hflip);
     scalePreset.set(ttaScalePreset(saved.tta.scales));
+    precision.set(normalizeBrowserPrecision(saved.precision));
   }
 
   function reset() {
@@ -178,6 +236,7 @@ export function useInferenceOptions(input: UseInferenceOptionsInput) {
     fullImage.set(DEFAULT_TILE_OPTIONS.fullImage);
     hflip.set(DEFAULT_TTA_OPTIONS.hflip);
     scalePreset.set(ttaScalePreset(DEFAULT_TTA_OPTIONS.scales));
+    precision.set('auto');
   }
 
   return {
@@ -188,6 +247,12 @@ export function useInferenceOptions(input: UseInferenceOptionsInput) {
     fullImage,
     hflip,
     scalePreset,
+    precision,
+    hasBrowserBackend,
+    hasWebGpuBackend,
+    engineInfo,
+    activePrecisionFallback,
+    precisionFor,
     config,
     availability,
     effective,

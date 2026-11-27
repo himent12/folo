@@ -4,6 +4,7 @@ import type { SystemInfo } from '$lib/api/types';
 import {
   BrowserEngine,
   DEFAULT_INFERENCE_CONFIG,
+  detectorInfoBadge,
   probeWasm,
   resetDecodeCanvas,
   resetWasmProbe,
@@ -13,7 +14,9 @@ import {
   wasmFromSystem,
   type Backend,
   type Detector,
+  type WasmDetectOptions,
   type WasmModule,
+  type WasmPrecision,
   type WasmTileDetectOptions,
   type WasmTtaDetectOptions,
 } from './browser';
@@ -496,6 +499,146 @@ describe('BrowserEngine', () => {
     expect(firstCaps).toEqual({ tiled: true, tta: true, tracker: false });
     await e.predict({ ...req('m1', null), tag: null });
     expect(e.capabilities).toBe(firstCaps);
+  });
+
+  it('forwards perClassConf, confInclusive, and load precision (including int8) into folo-wasm and caches detectors per precision', async () => {
+    const loadOpts: { backend: Backend; modelId: string; precision?: WasmPrecision }[] = [];
+    const detectCalls: (WasmDetectOptions | undefined)[] = [];
+    const tiledCalls: (WasmTileDetectOptions | undefined)[] = [];
+    const ttaCalls: (WasmTtaDetectOptions | undefined)[] = [];
+
+    const mod: WasmModule = {
+      default: async () => {},
+      FoloDetector: {
+        load: async (_bytes, opts) => {
+          loadOpts.push({ ...opts });
+          const activePrec: WasmPrecision = opts.precision === 'int8' && opts.backend === 'webgpu' ? 'f32' : (opts.precision ?? 'int8');
+          const fallback =
+            opts.precision === 'int8' && opts.backend === 'webgpu'
+              ? 'int8 inference runs on the CPU; running in f32 on WebGPU'
+              : null;
+          return {
+            backend: opts.backend,
+            info: () => ({
+              backend: opts.backend,
+              device: opts.backend === 'webgpu' ? 'gpu:0' : 'cpu',
+              adapter: null,
+              fallback: null,
+              precision: activePrec,
+              precisionFallback: fallback,
+              family: 'folo2',
+              arch: 'folo2-n',
+              headMode: 'o2o',
+              hasIouHead: true,
+              imgsz: 640,
+              classes: ['circle', 'square'],
+              modelId: opts.modelId,
+            }),
+            detect: async (_img, _w, _h, dOpts) => {
+              detectCalls.push(dOpts);
+              return {
+                model_id: opts.modelId,
+                image: { width: 1, height: 1 },
+                boxes: [],
+                timing: { preprocess_ms: 1, inference_ms: 2, postprocess_ms: 0.5, total_ms: 3.5 },
+                device: opts.backend === 'webgpu' ? 'gpu:0' : 'cpu',
+                backend: opts.backend,
+              } as Prediction;
+            },
+            detectTiled: async (_img, _w, _h, tOpts) => {
+              tiledCalls.push(tOpts);
+              return {
+                model_id: opts.modelId,
+                image: { width: 1, height: 1 },
+                boxes: [],
+                timing: { preprocess_ms: 1, inference_ms: 4, postprocess_ms: 0.5, total_ms: 5.5 },
+                device: 'cpu',
+                backend: opts.backend,
+              } as Prediction;
+            },
+            detectTta: async (_img, _w, _h, ttaOpts) => {
+              ttaCalls.push(ttaOpts);
+              return {
+                model_id: opts.modelId,
+                image: { width: 1, height: 1 },
+                boxes: [],
+                timing: { preprocess_ms: 1, inference_ms: 5, postprocess_ms: 0.5, total_ms: 6.5 },
+                device: 'cpu',
+                backend: opts.backend,
+              } as Prediction;
+            },
+            free: () => {},
+          };
+        },
+      },
+    };
+
+    const e = new BrowserEngine(async () => mod, pixels);
+    await e.predict({
+      ...req('m1', null, 'cpu'),
+      precision: 'auto',
+      options: { conf: 0.01, iou: 1, maxDet: 1000, perClassConf: { 0: 0.45, 1: 0.7 }, confInclusive: true },
+    });
+    expect(loadOpts).toEqual([{ backend: 'cpu', modelId: 'm1' }]);
+    expect(detectCalls).toEqual([
+      { conf: 0.01, iou: 1, maxDet: 1000, perClassConf: { 0: 0.45, 1: 0.7 }, confInclusive: true },
+    ]);
+    expect(e.info?.precision).toBe('int8');
+    expect(detectorInfoBadge(e.info)).toBe('folo2-n · FOLO v2 · o2o · IoU head · INT8');
+
+    // Switching to explicit f32 reloads a distinct cached detector and passes precision: 'f32'
+    await e.predict({
+      ...req('m1', null, 'cpu'),
+      precision: 'f32',
+      options: { conf: 0.01, iou: 1, maxDet: 1000, perClassConf: { 1: 0.6 }, confInclusive: true },
+      inference: { ...DEFAULT_INFERENCE_CONFIG, mode: 'sahi' },
+    });
+    expect(loadOpts[1]).toEqual({ backend: 'cpu', modelId: 'm1', precision: 'f32' });
+    expect(tiledCalls[0]).toMatchObject({ perClassConf: { 1: 0.6 }, confInclusive: true, tileSize: 640 });
+
+    // TTA forwards perClassConf & confInclusive too, and requesting int8 on WebGPU surfaces precisionFallback
+    const pInt8 = await e.predict({
+      ...req('m1', null, 'cpu'),
+      precision: 'auto',
+      weightsFormat: 'stored',
+      options: { conf: 0.01, iou: 1, maxDet: 1000 },
+    });
+    const pWebgpuFallback = await e.predict({
+      ...req('m1', null, 'webgpu'),
+      precision: 'int8',
+      weightsFormat: 'f16',
+      options: { conf: 0.01, iou: 1, maxDet: 1000, perClassConf: { 0: 0.3 }, confInclusive: true },
+      inference: { ...DEFAULT_INFERENCE_CONFIG, mode: 'tta' },
+    });
+    expect(loadOpts.at(-1)).toEqual({ backend: 'webgpu', modelId: 'm1', precision: 'int8' });
+    expect(ttaCalls[0]).toMatchObject({ perClassConf: { 0: 0.3 }, confInclusive: true });
+    expect(e.info?.precision).toBe('f32');
+    expect(e.info?.precisionFallback).toContain('runs on the CPU');
+
+    // Per-prediction info survives subsequent predictions on other backends/models (Compare A/B) AND across new BrowserEngine instances (restored sessions).
+    expect(e.infoFor(pInt8)?.precision).toBe('int8');
+    expect(e.infoFor(pInt8)?.precisionFallback).toBeNull();
+    expect(e.precisionFor(pInt8)).toBe('auto');
+    expect(e.infoFor(pWebgpuFallback)?.precision).toBe('f32');
+    expect(e.infoFor(pWebgpuFallback)?.precisionFallback).toContain('runs on the CPU');
+    expect(e.precisionFor(pWebgpuFallback)).toBe('int8');
+
+    const freshEngine = new BrowserEngine(async () => mod, pixels);
+    expect(freshEngine.infoFor(pInt8)?.precision).toBe('int8');
+    expect(freshEngine.infoFor(pWebgpuFallback)?.precisionFallback).toContain('runs on the CPU');
+    expect(freshEngine.precisionFor(pWebgpuFallback)).toBe('int8');
+    freshEngine.dispose();
+
+    // copyPredictionInfo preserves per-prediction metadata across candidate-completion clones.
+    const cloned = { ...pInt8 };
+    e.copyPredictionInfo(pInt8, cloned);
+    expect(e.infoFor(cloned)?.precision).toBe('int8');
+    expect(e.precisionFor(cloned)).toBe('auto');
+
+    // Stored vs f16 weights formats never share one cached detector entry.
+    const loadsBefore = loadOpts.length;
+    await e.predict({ ...req('m1', null, 'cpu'), precision: 'f32', weightsFormat: 'stored' });
+    expect(loadOpts.length).toBe(loadsBefore + 1);
   });
 });
 
