@@ -443,6 +443,12 @@ css`
   .skip:focus-visible {
     transform: none;
   }
+  @media (min-width: 768px) and (max-width: 1023px) {
+    /* On single-column tablets, leave room below the page to scroll controls clear of any visible toast stack. */
+    main {
+      padding-bottom: var(--toast-h);
+    }
+  }
   @media (max-width: 767px) {
     /* The sidebar's own column only (pages have rails of their own, which phones show as sections). */
     .app :global(.shell-rail) {

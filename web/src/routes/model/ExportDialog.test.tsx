@@ -678,7 +678,7 @@ describe('ExportDialog: dynamic ONNX axes & CLI commands', () => {
 
     const switches = await until(() => target.ownerDocument.querySelector('dialog [role="group"][aria-label="ONNX options"]'), 'ONNX options');
     const text = switches.textContent ?? '';
-    expect(text).toContain('end-to-end detections');
+    expect(text).toContain('end-to-end detections [batch, K, 6] (up to 300 per image)');
     expect(text).toContain('no external NMS');
     expect(text).not.toContain('NMS still runs outside');
   });

@@ -51,7 +51,7 @@ export function safeFilename(base: string, ext: 'csv' | 'json'): string {
 }
 
 /** Triggers a browser download for a text payload and revokes its object URL cleanly. */
-export function downloadText(content: string, filename: string, mimeType: string): boolean {
+export function downloadText(content: string, filename: string, mimeType: string, toastKey?: string): boolean {
   let url: string | undefined;
   let a: HTMLAnchorElement | undefined;
   try {
@@ -68,24 +68,37 @@ export function downloadText(content: string, filename: string, mimeType: string
     return true;
   } catch (err) {
     if (url) URL.revokeObjectURL(url);
-    toast.error(err instanceof Error ? err : new Error('Your browser blocked the file download.'), 'Download failed');
+    toast.error(
+      err instanceof Error ? err : new Error('Your browser blocked the file download.'),
+      'Download failed',
+      toastKey ? { key: toastKey } : undefined,
+    );
     return false;
   } finally {
     a?.remove();
   }
 }
 
-export function exportTableCsv(filenameBase: string, headers: readonly string[], rows: readonly (readonly CsvCell[])[]): boolean {
-  return downloadText(toCsv(headers, rows), safeFilename(filenameBase, 'csv'), 'text/csv;charset=utf-8');
+export function exportTableCsv(
+  filenameBase: string,
+  headers: readonly string[],
+  rows: readonly (readonly CsvCell[])[],
+  toastKey?: string,
+): boolean {
+  return downloadText(toCsv(headers, rows), safeFilename(filenameBase, 'csv'), 'text/csv;charset=utf-8', toastKey);
 }
 
-export function exportTableJson(filenameBase: string, data: unknown): boolean {
+export function exportTableJson(filenameBase: string, data: unknown, toastKey?: string): boolean {
   let content: string;
   try {
     content = toJson(data);
   } catch (err) {
-    toast.error(err instanceof Error ? err : new Error('Could not serialize export data.'), 'Download failed');
+    toast.error(
+      err instanceof Error ? err : new Error('Could not serialize export data.'),
+      'Download failed',
+      toastKey ? { key: toastKey } : undefined,
+    );
     return false;
   }
-  return downloadText(content, safeFilename(filenameBase, 'json'), 'application/json;charset=utf-8');
+  return downloadText(content, safeFilename(filenameBase, 'json'), 'application/json;charset=utf-8', toastKey);
 }

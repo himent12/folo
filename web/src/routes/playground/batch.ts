@@ -216,7 +216,7 @@ export function exportBatchJson(input: BatchExportInput): boolean {
   if (summary.done === 0) return false;
   const payload = buildBatchJson(input);
   const truncated = payload.summary.truncated_images ?? 0;
-  const ok = exportTableJson(batchFilenameBase(input.modelName, input.items.length), payload);
+  const ok = exportTableJson(batchFilenameBase(input.modelName, input.items.length), payload, 'playground-export');
   if (ok) {
     toast.success(
       'Batch JSON exported',
@@ -233,7 +233,7 @@ export function exportBatchCsv(input: BatchExportInput): boolean {
   const summary = summarizeBatch(input.items, input.filter, input.hidden);
   if (summary.done === 0) return false;
   const rows = buildBatchCsvRows(input);
-  const ok = exportTableCsv(batchFilenameBase(input.modelName, input.items.length), BATCH_CSV_HEADERS, rows);
+  const ok = exportTableCsv(batchFilenameBase(input.modelName, input.items.length), BATCH_CSV_HEADERS, rows, 'playground-export');
   if (ok) {
     toast.success(
       'Batch CSV exported',

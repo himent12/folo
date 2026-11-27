@@ -87,7 +87,7 @@ export function exportDetectionsJson(filenameBase: string, payload: unknown): bo
     toast.error(err instanceof Error ? err : new Error('Could not serialize export JSON.'), 'Export failed', { key: 'playground-export' });
     return false;
   }
-  return downloadText(content, exportFilename(filenameBase, 'json'), 'application/json;charset=utf-8');
+  return downloadText(content, exportFilename(filenameBase, 'json'), 'application/json;charset=utf-8', 'playground-export');
 }
 
 /** Draws ground-truth boxes, predicted boxes, and readable label chips onto `ctx` within `(ox, oy, width, height)`. */

@@ -530,7 +530,7 @@ export default function ExportDialog(props: ExportDialogProps) {
                               <span class="sw-name">{o().label}</span>
                               <span class="opt-desc">
                                 {o().key === 'decode' && model().head === 'o2o'
-                                  ? 'Outputs end-to-end detections [batch, max_det, 6] directly from the graph — no external NMS needed.'
+                                  ? 'Outputs end-to-end detections [batch, K, 6] (up to 300 per image) directly from the graph — no external NMS needed.'
                                   : o().key === 'dynamic' && dynamicAxesOk.get() && axes.get() === 'batch'
                                     ? 'Symbolic batch only, fixed height and width.'
                                     : o().key === 'dynamic' && dynamicAxesOk.get() && axes.get() === 'hw'

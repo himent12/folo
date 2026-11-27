@@ -45,7 +45,7 @@ function makeItem(over: Partial<BatchItem> = {}): BatchItem {
 const DEFAULT_FILTER: BatchFilter = { conf: 0.25, iou: 0.7, maxDet: 300, o2o: false };
 
 afterEach(() => {
-  toast.items = [];
+  for (const t of toast.items) toast.dismiss(t.id);
   vi.restoreAllMocks();
 });
 
@@ -194,10 +194,26 @@ describe('playground batch helpers', () => {
       expect(toast.items).toHaveLength(1);
       expect(toast.items[0]?.key).toBe('playground-export');
       expect(toast.items[0]?.title).toBe('Batch CSV exported');
-      expect(createUrl).toHaveBeenCalledTimes(2);
-      expect(click).toHaveBeenCalledTimes(2);
+      // A failed download replaces the prior success toast instead of stacking, and a subsequent retry replaces the error.
+      createUrl.mockImplementationOnce(() => {
+        throw new Error('Blocked');
+      });
+      expect(exportBatchCsv(doneInput)).toBe(false);
+      expect(toast.items).toHaveLength(1);
+      expect(toast.items[0]?.key).toBe('playground-export');
+      expect(toast.items[0]?.tone).toBe('error');
+      expect(toast.items[0]?.title).toBe('Download failed');
+
+      expect(exportBatchCsv(doneInput)).toBe(true);
+      expect(toast.items).toHaveLength(1);
+      expect(toast.items[0]?.key).toBe('playground-export');
+      expect(toast.items[0]?.tone).toBe('success');
+      expect(toast.items[0]?.title).toBe('Batch CSV exported');
+
+      expect(createUrl).toHaveBeenCalledTimes(4);
+      expect(click).toHaveBeenCalledTimes(3);
       vi.advanceTimersByTime(1000);
-      expect(revokeUrl).toHaveBeenCalledTimes(2);
+      expect(revokeUrl).toHaveBeenCalledTimes(3);
     } finally {
       vi.useRealTimers();
     }

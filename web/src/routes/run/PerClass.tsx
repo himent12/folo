@@ -30,7 +30,8 @@ const sameTwo = (a: [Epoch | undefined, Epoch | undefined], b: [Epoch | undefine
 
 /** Formats a positive bar scale upper bound without rounding near-zero AP scales (e.g. 0.000042) to "0". */
 function formatBarTop(top: number): string {
-  const d = Math.min(12, stepDecimals(top));
+  const d = stepDecimals(top);
+  if (d > 12) return top.toExponential(1);
   const s = top
     .toFixed(d)
     .replace(/(\.\d*?[1-9])0+$/, '$1')
