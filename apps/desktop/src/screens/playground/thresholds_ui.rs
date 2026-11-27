@@ -251,7 +251,7 @@ impl FoloApp {
                 .child(
                     text(ty::XS, t.text_secondary)
                         .whitespace_normal()
-                        .child("This server filters per-class overrides after its 300-box cap; switch to Local inference or update folo serve for exact pre-cap filtering."),
+                        .child("Desktop filters per-class overrides after the server's 300-box cap; switch to Local inference or update folo serve for exact pre-cap filtering."),
                 )
         });
 

@@ -473,13 +473,14 @@ fn validate_save_thresholds_and_predict_thresholds_share_path_and_exclude_conf()
         "folo val --model \"D:/my models/best.folo\" --data \"D:/my data/shapes\" --split test --precision f16"
     );
 
-    // Distinct splits (`val` vs `test` vs `train`) produce non-colliding threshold files shared by Validate & Predict.
+    // Distinct splits (`val` vs `test` vs `train`) produce non-colliding threshold files shared by
+    // Validate & Predict, and never collide with checkpoints whose names end in `-test` / `-train`.
     st.predict_precision = PredictPrecision::F32;
     st.val_save_thresholds = true;
     let v_test = build_model_cli(&m, Some("D:/my data/shapes"), &st);
     assert_eq!(
         v_test.command,
-        "folo val --model \"D:/my models/best.folo\" --data \"D:/my data/shapes\" --split test --save-thresholds \"D:/my models/best-test-thresholds.json\""
+        "folo val --model \"D:/my models/best.folo\" --data \"D:/my data/shapes\" --split test --save-thresholds \"D:/my models/best-thresholds.test.json\""
     );
 
     // Predict mode with `--thresholds` uses the exact same split-scoped derived thresholds path and omits `--conf`
@@ -491,7 +492,7 @@ fn validate_save_thresholds_and_predict_thresholds_share_path_and_exclude_conf()
     let p = build_model_cli(&m, None, &st);
     assert_eq!(
         p.command,
-        "folo predict --model \"D:/my models/best.folo\" <images> --thresholds \"D:/my models/best-test-thresholds.json\""
+        "folo predict --model \"D:/my models/best.folo\" <images> --thresholds \"D:/my models/best-thresholds.test.json\""
     );
     assert!(!p.command.contains("--conf"), "{}", p.command);
     st.val_split = Split::Val;
@@ -499,6 +500,13 @@ fn validate_save_thresholds_and_predict_thresholds_share_path_and_exclude_conf()
     assert_eq!(
         p_val.command,
         "folo predict --model \"D:/my models/best.folo\" <images> --thresholds \"D:/my models/best-thresholds.json\""
+    );
+    let mut m_test_name = m.clone();
+    m_test_name.path = Some("D:/my models/best-test.folo".into());
+    let p_named_test = build_model_cli(&m_test_name, None, &st);
+    assert_eq!(
+        p_named_test.command,
+        "folo predict --model \"D:/my models/best-test.folo\" <images> --thresholds \"D:/my models/best-test-thresholds.json\""
     );
 
     // Shell-unsafe `$` path falls back to `<thresholds.json>` placeholder with a quote note.

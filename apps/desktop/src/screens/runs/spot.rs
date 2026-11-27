@@ -314,7 +314,9 @@ fn parse_preempt_logs(logs: &[LogLine]) -> ParsedPreemptLog {
         if lower.contains("during preemption recovery")
             || lower.contains("before a replacement worker could launch")
             || lower.contains("ended the run after worker preemption")
-            || lower.contains("ended the run before it trained")
+            || ((out.attempt.is_some() || out.restarted_during_recovery)
+                && !out.confirmed_resumed_after_preempt
+                && lower.contains("ended the run before it trained"))
         {
             out.stopped_during_recovery_log = true;
             continue;
@@ -596,6 +598,20 @@ mod tests {
         ));
         let releasing_stopped = spot_recovery_status(&r, &c, true, Some(&startup_dl_logs), None);
         assert_eq!(releasing_stopped.state, SpotRecoveryState::StoppedDuringRecovery);
+
+        // 1d. Initial non-preempted startup hitting the same time limit stays NotUsed (never StoppedDuringRecovery).
+        let (mut r_init, mut c_init) = cloud_run_fixture();
+        r_init.status = RunStatus::Stopped;
+        c_init.phase = CloudPhase::Released;
+        c_init.ended_in = Some(CloudPhase::Provisioning);
+        let init_dl_logs = vec![log_at(
+            "2026-11-08T06:01:00Z",
+            LogLevel::Info,
+            "the time limit of 4 h ended the run before it trained",
+        )];
+        let init_stopped = spot_recovery_status(&r_init, &c_init, true, Some(&init_dl_logs), None);
+        assert_eq!(init_stopped.state, SpotRecoveryState::NotUsed);
+        assert_eq!(init_stopped.retries, 0);
 
         // 2. Time limit expired during preemption recovery -> StoppedDuringRecovery (never Recovered!).
         r.status = RunStatus::Stopped;

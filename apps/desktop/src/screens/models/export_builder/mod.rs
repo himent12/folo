@@ -821,8 +821,8 @@ impl FoloApp {
 
         let conf = self.model_cli.predict_conf;
         let conf_control: AnyElement = if self.model_cli.predict_use_thresholds {
-            let splits = [Split::Val, Split::Test, Split::Train];
-            let s_labels = ["val", "test", "train"];
+            let splits = [Split::Val, Split::Train, Split::Test];
+            let s_labels = ["val", "train", "test"];
             let s_idx = splits.iter().position(|&s| s == self.model_cli.val_split).unwrap_or(0);
             let s_seg = self.segmented(
                 "model-cli-predict-thr-split",

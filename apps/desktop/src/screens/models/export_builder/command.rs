@@ -530,15 +530,15 @@ pub(super) fn derive_thresholds_path(
             }
         }
     };
-    let split_tag = match split {
+    let split_ext = match split {
         Split::Val => "",
-        Split::Test => "-test",
-        Split::Train => "-train",
+        Split::Test => ".test",
+        Split::Train => ".train",
     };
     let candidate = if stem.is_empty() {
-        format!("thresholds{prec_tag}{split_tag}.json")
+        format!("thresholds{prec_tag}{split_ext}.json")
     } else {
-        format!("{stem}{prec_tag}{split_tag}-thresholds.json")
+        format!("{stem}{prec_tag}-thresholds{split_ext}.json")
     };
     match folo_api::json::quote_path(&candidate) {
         Some(quoted) => (quoted, None),
