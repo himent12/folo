@@ -35,7 +35,6 @@ export interface ComparePickersProps {
   compareView?: CompareViewMode;
   webgpu: boolean;
   browserOff: string | null;
-  runOnNote: string | null;
 }
 
 const VIEW_MODES: { value: CompareViewMode; label: string }[] = [
@@ -72,7 +71,14 @@ export default function ComparePickers(props: ComparePickersProps) {
         <span class="ab-label">{label}</span>
         {badge === 'A' ? (
           <span class="ab-swap" use:tooltip={'Swap Model A and Model B'}>
-            <Button size="sm" variant="ghost" icon={ArrowLeftRight} aria-label="Swap Model A and Model B" onclick={props.swapModels}>
+            <Button
+              size="sm"
+              variant="ghost"
+              icon={ArrowLeftRight}
+              aria-label="Swap Model A and Model B"
+              disabled={props.modelAId === props.modelBId && runOnA.get() === runOnB.get()}
+              onclick={props.swapModels}
+            >
               Swap
             </Button>
           </span>

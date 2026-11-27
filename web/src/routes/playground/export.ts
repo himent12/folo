@@ -320,10 +320,17 @@ export async function exportComparePng(opts: ExportComparePngOptions): Promise<b
       ctx.fillStyle = '#C5F82A';
       ctx.fillRect(Math.max(0, cutX - Math.floor(lineW / 2)), 0, lineW, h);
 
-      const inset = Math.max(8, Math.round(10 * scale));
-      const maxBadgeW = Math.max(48, Math.floor(w / 2 - inset * 1.5));
-      if (opts.layerA.caption) drawBadge(ctx, opts.layerA.caption, inset, inset, 'left', scale, maxBadgeW);
-      if (opts.layerB.caption) drawBadge(ctx, opts.layerB.caption, w - inset, inset, 'right', scale, maxBadgeW);
+      const inset = Math.max(4, Math.round(10 * scale));
+      const availHalf = Math.floor((w - inset * 3) / 2);
+      if (availHalf >= 64) {
+        if (opts.layerA.caption) drawBadge(ctx, opts.layerA.caption, inset, inset, 'left', scale, availHalf);
+        if (opts.layerB.caption) drawBadge(ctx, opts.layerB.caption, w - inset, inset, 'right', scale, availHalf);
+      } else if (w >= 96) {
+        const fullW = Math.max(32, w - inset * 2);
+        const pillH = Math.round(Math.max(12, Math.round(13 * scale)) * 1.8);
+        if (opts.layerA.caption) drawBadge(ctx, opts.layerA.caption, inset, inset, 'left', scale, fullW);
+        if (opts.layerB.caption) drawBadge(ctx, opts.layerB.caption, inset, inset + pillH + 4, 'left', scale, fullW);
+      }
     }
 
     const blob = await canvasToPng(canvas);

@@ -75,6 +75,7 @@ export interface ImagePanelProps {
   cut?: boolean;
   kept: Det[];
   truthBoxes: Img['boxes'];
+  truthOnly?: Set<number> | null;
   classes: string[];
   labels: boolean;
   scores: boolean;
@@ -274,6 +275,7 @@ export default function ImagePanel(props: ImagePanelProps) {
                     height={props.dims.height}
                     boxes={props.pred ? props.kept : []}
                     truth={props.truthBoxes}
+                    truthOnly={props.truthOnly}
                     classes={props.classes}
                     labels={props.labels}
                     scores={props.scores}

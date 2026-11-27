@@ -84,6 +84,8 @@ export default function MediaCaptureDialog(props: MediaCaptureDialogProps) {
 
   function stopCamera() {
     camSeq++;
+    captureSeq++;
+    captureBusy.set(false);
     stopTracks(stream);
     stream = null;
     if (camEl) camEl.srcObject = null;
@@ -101,6 +103,7 @@ export default function MediaCaptureDialog(props: MediaCaptureDialogProps) {
 
   function clearVideo() {
     captureSeq++;
+    captureBusy.set(false);
     const old = videoUrl.peek();
     if (old) URL.revokeObjectURL(old);
     videoUrl.set(null);
@@ -127,6 +130,7 @@ export default function MediaCaptureDialog(props: MediaCaptureDialogProps) {
     if (!open.get()) {
       captureSeq++;
       stopCamera();
+      camErr.set(null);
       if (videoEl && !videoEl.paused) videoEl.pause();
       playing.set(false);
       seeking.set(false);
@@ -165,14 +169,15 @@ export default function MediaCaptureDialog(props: MediaCaptureDialogProps) {
         return;
       }
       stream = next;
-      if (camEl) {
-        camEl.srcObject = next;
-        await camEl.play().catch(() => {});
+      const targetEl = camEl;
+      if (targetEl) {
+        targetEl.srcObject = next;
+        await targetEl.play().catch(() => {});
       }
       if (!alive || seq !== camSeq || !open.peek() || mode.peek() !== 'camera') {
         stopTracks(next);
         if (stream === next) stream = null;
-        if (camEl) camEl.srcObject = null;
+        if (targetEl && targetEl.srcObject === next) targetEl.srcObject = null;
         return;
       }
       camActive.set(true);
@@ -212,6 +217,8 @@ export default function MediaCaptureDialog(props: MediaCaptureDialogProps) {
         ? `${videoName.peek().replace(/\.[^.]+$/, '') || 'video'}-${currentTime.peek().toFixed(1)}s.png`
         : 'camera-snapshot.png';
     captureBusy.set(true);
+    videoErr.set(null);
+    camErr.set(null);
     try {
       const blob = await videoFrameToPng(el);
       if (!alive || seq !== captureSeq || !open.peek() || mode.peek() !== activeMode) return;
@@ -327,6 +334,7 @@ export default function MediaCaptureDialog(props: MediaCaptureDialogProps) {
                   }}
                   onplay={() => playing.set(true)}
                   onpause={() => playing.set(false)}
+                  onended={() => playing.set(false)}
                   onerror={() => {
                     videoReady.set(false);
                     seeking.set(false);
@@ -396,6 +404,11 @@ export default function MediaCaptureDialog(props: MediaCaptureDialogProps) {
         ) : (
           <div class="cap-stage">
             <video ref={(el) => (camEl = el)} muted playsinline class:hidden={!camActive.get()}></video>
+            {camActive.get() && camErr.get() ? (
+              <p class="cap-err" role="alert">
+                {camErr.get()}
+              </p>
+            ) : null}
             {!camActive.get() ? (
               <div class="cap-empty">
                 <p role={camErr.get() ? 'alert' : undefined}>

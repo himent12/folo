@@ -53,6 +53,8 @@ export function createCompareController(input: CompareControllerInput) {
   const retryTickB = signal(0);
   const hoverB = signal<Det | null>(null);
   const pickedB = signal<Det | null>(null);
+  /** Model B–only class names (absent from Model A's class list) hidden by the user. */
+  const hiddenBNames = signal<Set<string>>(new Set());
   const zoom = createZoomState();
 
   let reuseSwapA: string | null = null;
@@ -91,6 +93,13 @@ export function createCompareController(input: CompareControllerInput) {
     input.badFileB.set(null);
   });
 
+  let lastModelBId: string | null = null;
+  effect(() => {
+    const id = modelBId.get();
+    if (id !== null && lastModelBId !== null && id !== lastModelBId) untrack(() => hiddenBNames.set(new Set()));
+    if (id !== null) lastModelBId = id;
+  });
+
   function toggleCompare(next?: boolean) {
     const on = next ?? !compare.peek();
     if (on === compare.peek()) return;
@@ -114,9 +123,10 @@ export function createCompareController(input: CompareControllerInput) {
     const aId = input.modelAId();
     const bId = modelBId.peek();
     if (!aId || !bId) return;
-    const s = input.source.peek();
     const prevRunA = input.runOnA.peek();
     const prevRunB = runOnB.peek();
+    if (aId === bId && prevRunA === prevRunB) return;
+    const s = input.source.peek();
     const prevPredA = input.predA.peek();
     const prevPredB = predB.peek();
 
@@ -155,6 +165,7 @@ export function createCompareController(input: CompareControllerInput) {
     weightsMissingB.set(false);
     hoverB.set(null);
     pickedB.set(null);
+    hiddenBNames.set(new Set());
     resetZoomState(zoom, false);
   }
 
@@ -208,6 +219,7 @@ export function createCompareController(input: CompareControllerInput) {
     ask({ api: hub.api, engine: input.engine, model: id, source: s, on, file, options: FETCH, signal: ctrl.signal }).then(
       (p) => {
         if (ctrl.signal.aborted) return;
+        input.badFileB.set(null);
         predB.set(p);
         hoverB.set(null);
         pickedB.set(null);
@@ -226,6 +238,7 @@ export function createCompareController(input: CompareControllerInput) {
           weightsMissingB.set(true);
           return;
         }
+        input.badFileB.set(null);
         predB.set(null);
         errorB.set(e);
       },
@@ -256,19 +269,35 @@ export function createCompareController(input: CompareControllerInput) {
   const keptB = computed(() => resultB.get()?.boxes ?? []);
   const classesB = computed(() => modelB.get()?.classes ?? []);
 
-  // Map hidden class names from Model A onto Model B's class indices so hiding "circle" hides it on both sides.
-  const hiddenB = computed(() => {
+  // Map hidden class names from Model A and Model B–only hidden names onto Model B's class indices.
+  const allHiddenNames = computed(() => {
     const h = input.hidden.get();
-    if (!h.size) return new Set<number>();
-    const clsA = input.classesA();
-    const hiddenNames = new Set([...h].map((i) => clsA[i] ?? `class ${i}`));
+    const extra = hiddenBNames.get();
+    const out = new Set<string>(extra);
+    if (h.size) {
+      const clsA = input.classesA();
+      for (const i of h) out.add(clsA[i] ?? `class ${i}`);
+    }
+    return out;
+  });
+
+  const hiddenB = computed(() => {
+    const names = allHiddenNames.get();
+    if (!names.size) return new Set<number>();
     const clsB = classesB.get();
     const out = new Set<number>();
     clsB.forEach((name, idx) => {
-      if (hiddenNames.has(name)) out.add(idx);
+      if (names.has(name)) out.add(idx);
     });
     return out;
   });
+
+  function toggleHiddenBName(name: string) {
+    const next = new Set(hiddenBNames.peek());
+    if (next.has(name)) next.delete(name);
+    else next.add(name);
+    hiddenBNames.set(next);
+  }
 
   const onlyB = computed(() => visibleClasses(classesB.get(), hiddenB.get()));
   const rowsB = computed(() => visibleRows(keptB.get(), hiddenB.get()));
@@ -287,9 +316,8 @@ export function createCompareController(input: CompareControllerInput) {
   );
 
   const compareJson = computed(() => {
-    const h = input.hidden.get();
-    const clsA = input.classesA();
-    const hiddenClasses = h.size ? [...h].sort((a, b) => a - b).map((c) => clsA[c] ?? `class ${c}`) : undefined;
+    const names = allHiddenNames.get();
+    const hiddenClasses = names.size ? [...names].sort() : undefined;
     return comparePredictionJson({
       view: compareView.get(),
       predA: input.predA.get(),
@@ -332,6 +360,8 @@ export function createCompareController(input: CompareControllerInput) {
     retryTickB,
     hoverB,
     pickedB,
+    hiddenBNames,
+    allHiddenNames,
     zoom,
     resultB,
     keptB,
@@ -346,6 +376,7 @@ export function createCompareController(input: CompareControllerInput) {
     summary,
     compareJson,
     toggleCompare,
+    toggleHiddenBName,
     swapModels,
     consumeReuseA,
     clearResults,

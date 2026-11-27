@@ -256,4 +256,58 @@ describe('Playground: Compare A/B and Export', () => {
     flushSync();
     expect(dlg.textContent).toContain('Camera capture is unavailable');
   });
+
+  it('hides a B-only class without affecting unrelated classes in Model A', async () => {
+    const api = new MockApi('normal', 0);
+    api.imageUrl = async () => 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+    const origModels = api.models.bind(api);
+    api.models = async () => {
+      const list = await origModels();
+      return list.map((m) =>
+        m.id === 'm_hard_s'
+          ? { ...m, classes: ['circle', 'square'] }
+          : m.id === 'm_shapes_n'
+            ? { ...m, classes: ['car', 'truck'] }
+            : m,
+      );
+    };
+    api.predict = async (_input, opts) => ({
+      model_id: opts.model_id,
+      image: { width: 640, height: 480 },
+      boxes:
+        opts.model_id === 'm_hard_s'
+          ? [{ class: 0, name: 'circle', score: 0.9, x1: 10, y1: 10, x2: 50, y2: 50 }]
+          : [{ class: 0, name: 'car', score: 0.9, x1: 20, y1: 20, x2: 80, y2: 80 }],
+      timing: { preprocess_ms: 1, inference_ms: 5, postprocess_ms: 1, total_ms: 7 },
+      device: 'gpu:0',
+    });
+    hub.api = api;
+    hub.mode = 'mock';
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    router.route = parse('#/playground?model=m_hard_s&compare=1&modelB=m_shapes_n');
+    handle = render(() => <Playground />, target);
+    (await until(() => target.querySelector<HTMLButtonElement>('button.sample'), 'sample image')).click();
+    await until(() => target.querySelector('[data-compare-view="side-by-side"]'), 'compare stage');
+    await until(() => target.querySelector('.ab-sum .delta') !== null, 'both predictions loaded');
+
+    // Switch inspect side to Model B, open Classes tab, and hide 'car' (index 0 in B, absent from A).
+    const sideBBtn = [...target.querySelectorAll<HTMLButtonElement>('[role="radio"]')].find((b) => b.textContent?.includes('Model B'))!;
+    sideBBtn.click();
+    flushSync();
+    const classesTab = [...target.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find((t) => t.textContent?.includes('Classes'))!;
+    classesTab.click();
+    flushSync();
+    const carToggle = await until(
+      () => [...target.querySelectorAll<HTMLButtonElement>('#pg-panel ul.counts button')].find((b) => b.textContent?.includes('car')),
+      'car class toggle',
+    );
+    carToggle.click();
+    flushSync();
+
+    // Model B's 'car' is now hidden (countB === 0), while Model A's 'circle' (also index 0) stays visible (countA === 1).
+    const detKpi = target.querySelector('.ab-sum .k-vals')!;
+    const parts = [...detKpi.querySelectorAll(':scope > span')].map((s) => s.textContent?.replace(/\s+/g, ' ').trim());
+    expect(parts).toEqual(['A 1', 'vs', 'B 0', 'Δ -1']);
+  });
 });

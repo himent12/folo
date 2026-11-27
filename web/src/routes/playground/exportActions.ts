@@ -28,19 +28,19 @@ export interface RunPngExportInput {
   boxesB: readonly Det[];
   classesA: readonly string[];
   classesB: readonly string[];
-  onlyA: ReadonlySet<number> | null;
-  onlyB: ReadonlySet<number> | null;
+  /** Visibility filter in dataset class-index space (`source.ds.classes`), matching the viewer. */
+  truthOnly: ReadonlySet<number> | null;
   truthBoxes: readonly Img['boxes'][number][];
   labels: boolean;
   scores: boolean;
 }
 
-/** Filters ground-truth boxes using the same class visibility set `DetectionView` applies on screen. */
+/** Filters ground-truth boxes using dataset class indices resolved against hidden class names. */
 export function visibleTruthBoxes(
   truthBoxes: readonly Img['boxes'][number][],
-  only: ReadonlySet<number> | null,
+  truthOnly: ReadonlySet<number> | null,
 ): Img['boxes'][number][] {
-  return only ? truthBoxes.filter((b) => only.has(b.class)) : [...truthBoxes];
+  return truthOnly ? truthBoxes.filter((b) => truthOnly.has(b.class)) : [...truthBoxes];
 }
 
 export function buildExportBase(shortName: string, compare: boolean, modelAName?: string, modelBName?: string): string {
@@ -51,8 +51,7 @@ export function buildExportBase(shortName: string, compare: boolean, modelAName?
 
 export async function runPngExport(input: RunPngExportInput): Promise<boolean> {
   const filenameBase = buildExportBase(input.shortName, input.compare, input.modelA?.name, input.modelB?.name);
-  const truthA = visibleTruthBoxes(input.truthBoxes, input.onlyA);
-  const truthB = visibleTruthBoxes(input.truthBoxes, input.onlyB);
+  const filteredTruth = visibleTruthBoxes(input.truthBoxes, input.truthOnly);
   const imageSplitPct =
     input.compare && input.compareView === 'split'
       ? viewportSplitToImagePct({
@@ -76,7 +75,7 @@ export async function runPngExport(input: RunPngExportInput): Promise<boolean> {
           splitPct: imageSplitPct,
           layerA: {
             boxes: input.predA ? input.boxesA : [],
-            truth: truthA,
+            truth: filteredTruth,
             classes: input.classesA,
             labels: input.labels,
             scores: input.scores,
@@ -84,7 +83,7 @@ export async function runPngExport(input: RunPngExportInput): Promise<boolean> {
           },
           layerB: {
             boxes: input.predB ? input.boxesB : [],
-            truth: truthB,
+            truth: filteredTruth,
             classes: input.classesB,
             labels: input.labels,
             scores: input.scores,
@@ -99,7 +98,7 @@ export async function runPngExport(input: RunPngExportInput): Promise<boolean> {
           height: input.dims.height,
           layer: {
             boxes: input.boxesA,
-            truth: truthA,
+            truth: filteredTruth,
             classes: input.classesA,
             labels: input.labels,
             scores: input.scores,

@@ -32,6 +32,8 @@ export interface CompareStageProps {
   labels: boolean;
   scores: boolean;
   truthBoxes: Img['boxes'];
+  /** Visibility filter in dataset class-index space (`source.ds.classes`), shared by both panes. */
+  truthOnly: Set<number> | null;
   // Model A
   modelA: Model | null;
   predA: Prediction | null;
@@ -185,6 +187,7 @@ export default function CompareStage(props: CompareStageProps) {
       height={props.dims.height}
       boxes={props.predA ? props.keptA : []}
       truth={props.truthBoxes}
+      truthOnly={props.truthOnly}
       classes={props.classesA}
       labels={props.labels}
       scores={props.scores}
@@ -205,6 +208,7 @@ export default function CompareStage(props: CompareStageProps) {
       height={props.dims.height}
       boxes={props.predB ? props.keptB : []}
       truth={props.truthBoxes}
+      truthOnly={props.truthOnly}
       classes={props.classesB}
       labels={props.labels}
       scores={props.scores}
@@ -223,7 +227,16 @@ export default function CompareStage(props: CompareStageProps) {
         <span class="busy b" role="status">
           {props.runOnB === 'server' || hub.api.mock ? `Detecting with ${props.modelB?.name}…` : PHASE_TEXT[props.engine.phase] || 'Starting…'}
         </span>
-      ) : props.weightsMissingB || props.badFileB ? (
+      ) : props.errorB && !props.predB ? (
+        <div class={floating ? 'b-banner' : 'b-veil'} role="alert">
+          <span>Model B failed: {errorDetail(props.errorB)}</span>
+          <div class="b-veil-actions">
+            <Button size="sm" variant="secondary" onclick={props.onRetryB}>
+              Retry B
+            </Button>
+          </div>
+        </div>
+      ) : !props.predB && (props.weightsMissingB || props.badFileB) ? (
         <div class={floating ? 'b-banner' : 'b-veil'} role="alert">
           <span>
             {props.badFileB
@@ -238,15 +251,6 @@ export default function CompareStage(props: CompareStageProps) {
             </Button>
             <Button size="sm" onclick={props.onServerB}>
               Run on server
-            </Button>
-          </div>
-        </div>
-      ) : props.errorB && !props.predB ? (
-        <div class={floating ? 'b-banner' : 'b-veil'} role="alert">
-          <span>Model B failed: {errorDetail(props.errorB)}</span>
-          <div class="b-veil-actions">
-            <Button size="sm" variant="secondary" onclick={props.onRetryB}>
-              Retry B
             </Button>
           </div>
         </div>

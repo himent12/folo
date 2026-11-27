@@ -39,6 +39,8 @@ export interface DetectionViewProps {
   scores?: boolean;
   /** Only show these classes (null = all). */
   only?: ReadonlySet<number> | null;
+  /** Optional class-visibility filter for `truth` boxes when dataset class indices differ from model class indices. */
+  truthOnly?: ReadonlySet<number> | null;
   /** Index into `boxes` to emphasise (e.g. hovered in a list). */
   active?: number | null;
   onhover?: (i: number | null) => void;
@@ -88,6 +90,10 @@ export default function DetectionView(props: DetectionViewProps) {
   const shown = (b: ViewBox) => {
     const only = p.only;
     return !only || only.has(b.class);
+  };
+  const shownTruth = (b: ViewBox) => {
+    if (p.truthOnly !== undefined) return !p.truthOnly || p.truthOnly.has(b.class);
+    return shown(b);
   };
   // Small views (phones) get smaller chips, inside their box when they fit there, and never over another box (./chips).
   // Boxes under 20 px on screen keep their label for a tap (selection) or hover (a chip would cover the object), as
@@ -242,7 +248,7 @@ export default function DetectionView(props: DetectionViewProps) {
           <Index each={p.truth}>
             {(b) => (
               <>
-                {shown(b()) ? (
+                {shownTruth(b()) ? (
                   <div
                     class="box truth"
                     class:fade={p.selected !== null}

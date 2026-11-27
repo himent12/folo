@@ -102,7 +102,11 @@ export default function CompareSummaryPanel(props: CompareSummaryPanelProps) {
               </table>
             </div>
           ) : (
-            <p class="hint">Neither model kept any detections at the current thresholds.</p>
+            <p class="hint">
+              {props.summary.countA !== null && props.summary.countB !== null
+                ? 'Neither model kept any detections at the current thresholds.'
+                : 'No detections kept yet at the current thresholds.'}
+            </p>
           )}
 
           <div class="inspect-row">

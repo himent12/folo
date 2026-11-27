@@ -205,14 +205,14 @@ export default function Playground() {
     weightPickSeq.set(id, seq);
     if (!(await looksLikeFolo(f))) {
       if (!isDestroyed() && weightPickSeq.get(id) === seq) {
-        if (side === 'b') badFileB.set({ name: f.name, why: null });
-        else if (modelId.peek() === id) badFile.set({ name: f.name, why: null });
+        if (side === 'b' && cmp.modelBId.peek() === id) badFileB.set({ name: f.name, why: null });
+        else if (side === 'a' && modelId.peek() === id) badFile.set({ name: f.name, why: null });
       }
       return;
     }
     if (isDestroyed() || weightPickSeq.get(id) !== seq) return;
-    if (side === 'b') badFileB.set(null);
-    else if (modelId.peek() === id) badFile.set(null);
+    if (side === 'b' && cmp.modelBId.peek() === id) badFileB.set(null);
+    else if (side === 'a' && modelId.peek() === id) badFile.set(null);
     localWeights.set(new Map(localWeights.peek()).set(id, f));
   }
 
@@ -283,7 +283,7 @@ export default function Playground() {
     truth,
     hidden,
     compare: cmp.compare,
-    modelB: () => cmp.modelBId.get(),
+    modelB: () => cmp.modelBId.get() ?? cmp.pickedModelB.get(),
     pickModelB: (id) => cmp.pickedModelB.set(id),
     compareView: cmp.compareView,
     setSource,
@@ -358,11 +358,12 @@ export default function Playground() {
   function pickFromImage(i: number) {
     const b = kept.peek()[i];
     if (!b) return;
-    const switched = cmp.compare.peek() && cmp.inspectSide.peek() !== 'a';
-    if (switched) cmp.inspectSide.set('a');
+    const switched = (cmp.compare.peek() && cmp.inspectSide.peek() !== 'a') || tab.peek() !== 'detections';
+    if (cmp.compare.peek() && cmp.inspectSide.peek() !== 'a') cmp.inspectSide.set('a');
     const next = picked.peek() === b ? null : b;
     picked.set(next);
     if (next) {
+      if (tab.peek() !== 'detections') tab.set('detections');
       if (switched) queueMicrotask(() => scrollRowIntoView(rowEl(i), narrow.peek()));
       else scrollRowIntoView(rowEl(i), narrow.peek());
     }
@@ -371,11 +372,12 @@ export default function Playground() {
   function pickFromImageB(i: number) {
     const b = cmp.keptB.peek()[i];
     if (!b) return;
-    const switched = cmp.inspectSide.peek() !== 'b';
-    if (switched) cmp.inspectSide.set('b');
+    const switched = cmp.inspectSide.peek() !== 'b' || tab.peek() !== 'detections';
+    if (cmp.inspectSide.peek() !== 'b') cmp.inspectSide.set('b');
     const next = cmp.pickedB.peek() === b ? null : b;
     cmp.pickedB.set(next);
     if (next) {
+      if (tab.peek() !== 'detections') tab.set('detections');
       if (switched) queueMicrotask(() => scrollRowIntoView(rowEl(i), narrow.peek()));
       else scrollRowIntoView(rowEl(i), narrow.peek());
     }
@@ -420,6 +422,16 @@ export default function Playground() {
   const truthBoxes = computed(() => {
     const s = source.get();
     return truth.get() && s?.kind === 'dataset' ? s.img.boxes : [];
+  });
+  /** Dataset ground-truth visibility set resolved by class name against `source.ds.classes`. */
+  const truthOnly = computed(() => {
+    const s = source.get();
+    if (s?.kind !== 'dataset') return null;
+    const names = cmp.compare.get()
+      ? cmp.allHiddenNames.get()
+      : new Set([...hidden.get()].map((i) => classes.get()[i] ?? `class ${i}`));
+    if (!names.size) return null;
+    return new Set(s.ds.classes.map((name, idx) => (names.has(name) ? -1 : idx)).filter((idx) => idx >= 0));
   });
 
   const singleJson = computed(() => {
@@ -469,8 +481,7 @@ export default function Playground() {
         boxesB: cmp.rowsB.peek().map((r) => r.b),
         classesA: classes.peek(),
         classesB: cmp.classesB.peek(),
-        onlyA: only.peek(),
-        onlyB: cmp.onlyB.peek(),
+        truthOnly: truthOnly.peek(),
         truthBoxes: truthBoxes.peek(),
         labels: labels.peek(),
         scores: scores.peek(),
@@ -517,10 +528,15 @@ export default function Playground() {
     </Button>
   );
 
+  function clearAllHidden() {
+    hidden.set(new Set());
+    cmp.hiddenBNames.set(new Set());
+  }
+
   const showAllButton = () => (
     <>
-      {hidden.get().size ? (
-        <Button size="sm" variant="ghost" onclick={() => hidden.set(new Set())}>
+      {hidden.get().size || (cmp.compare.get() && cmp.hiddenBNames.get().size) ? (
+        <Button size="sm" variant="ghost" onclick={clearAllHidden}>
           Show all
         </Button>
       ) : null}
@@ -528,9 +544,10 @@ export default function Playground() {
   );
 
   function toggleClassB(cB: number) {
-    const nameB = cmp.classesB.peek()[cB];
-    const idxA = nameB !== undefined ? classes.peek().indexOf(nameB) : -1;
-    toggleClass(idxA >= 0 ? idxA : cB);
+    const nameB = cmp.classesB.peek()[cB] ?? `class ${cB}`;
+    const idxA = classes.peek().indexOf(nameB);
+    if (idxA >= 0) toggleClass(idxA);
+    else cmp.toggleHiddenBName(nameB);
   }
 
   const classList = () => (
@@ -559,6 +576,7 @@ export default function Playground() {
       labels={labels.get()}
       scores={scores.get()}
       truthBoxes={truthBoxes.get()}
+      truthOnly={truthOnly.get()}
       modelA={model.get()}
       predA={pred.get()}
       keptA={kept.get()}
@@ -635,7 +653,6 @@ export default function Playground() {
         bind:compareView={cmp.compareView}
         webgpu={webgpu}
         browserOff={browserOff.get()}
-        runOnNote={runOnNote.get()}
       />
     ) : (
       <ModelPickers
@@ -675,7 +692,7 @@ export default function Playground() {
       classCount={showingB.get() ? cmp.countsB.get().length : counts.get().length}
       classList={classList}
       showAllButton={showAllButton}
-      onShowAll={() => hidden.set(new Set())}
+      onShowAll={clearAllHidden}
       result={tableResult.get()}
       bind:tab={tab}
       rows={tableRows.get()}
@@ -807,6 +824,7 @@ export default function Playground() {
                 cut={cut()}
                 kept={kept.get()}
                 truthBoxes={truthBoxes.get()}
+                truthOnly={truthOnly.get()}
                 classes={classes.get()}
                 labels={labels.get()}
                 scores={scores.get()}
@@ -857,11 +875,11 @@ export default function Playground() {
 
               {source.get() && phone.current ? (
                 <PhoneDetails
-                  result={result.get()}
-                  counts={counts.get()}
-                  hidden={hidden.get()}
-                  pred={pred.get()}
-                  where={where.get()}
+                  result={showingB.get() ? cmp.resultB.get() : result.get()}
+                  counts={showingB.get() ? cmp.countsB.get() : counts.get()}
+                  hidden={showingB.get() ? cmp.hiddenB.get() : hidden.get()}
+                  pred={showingB.get() ? cmp.predB.get() : pred.get()}
+                  where={cmp.compare.get() ? whereLabel(showingB.get() ? cmp.predB.get() : pred.get()) : where.get()}
                   showAllButton={showAllButton}
                   classList={classList}
                   timingBody={timingBody}
@@ -872,10 +890,10 @@ export default function Playground() {
             {narrow.current ? (
               <SidePanels
                 source={source.get()}
-                result={result.get()}
-                counts={counts.get()}
-                pred={pred.get()}
-                where={where.get()}
+                result={showingB.get() ? cmp.resultB.get() : result.get()}
+                counts={showingB.get() ? cmp.countsB.get() : counts.get()}
+                pred={showingB.get() ? cmp.predB.get() : pred.get()}
+                where={cmp.compare.get() ? whereLabel(showingB.get() ? cmp.predB.get() : pred.get()) : where.get()}
                 bind:conf={conf}
                 resetButton={resetButton}
                 secondarySliders={secondarySliders}
@@ -893,7 +911,7 @@ export default function Playground() {
                 compareSummary={cmp.compare.get() ? () => compareSummary(true) : null}
                 detections={() => results(true)}
                 timing={timingBody}
-                where={pred.get() ? where.get() : null}
+                where={cmp.compare.get() ? null : pred.get() ? where.get() : null}
               />
             )}
           </div>
