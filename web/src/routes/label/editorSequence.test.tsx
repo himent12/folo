@@ -192,10 +192,11 @@ describe('Labeling editor: Duplicate box (D) and Copy previous frame boxes (P)',
     expect(boxCount()).toBe(2);
     expect(editor()!.querySelector('[role="status"]')?.textContent).toContain('Already copied');
 
-    // Single Ctrl+Z reverts the entire copied frame back to 0 boxes and clears dirty state
+    // Single Ctrl+Z reverts the entire copied frame back to 0 boxes, clears dirty state, and clears stale "Already copied" status (Playtest R24 P3-2)
     press('z', { ctrlKey: true });
     expect(boxCount()).toBe(0);
     expect(footer()).not.toContain('Unsaved changes');
+    expect(editor()!.querySelector('[role="status"]')?.textContent ?? '').not.toContain('Already copied');
 
     // P key re-copies cleanly
     expect(press('P').defaultPrevented).toBe(true);
@@ -212,5 +213,34 @@ describe('Labeling editor: Duplicate box (D) and Copy previous frame boxes (P)',
     copyBtn.click();
     flushSync();
     expect(boxCount()).toBe(1);
+  });
+
+  it('preserves a subsequent save error when P was pressed while save was pending', async () => {
+    await hub.api.updateLabelImage('lb_7c21', '1', [{ class: 0, x1: 20, y1: 20, x2: 120, y2: 120 }]);
+    await openEditor('2', 'lb_7c21');
+
+    let rejectSave!: (err: Error) => void;
+    vi.spyOn(hub.api, 'updateLabelImage').mockImplementation(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectSave = reject;
+        }),
+    );
+
+    byText('Add box').click();
+    flushSync();
+    byText('Save').click();
+    flushSync();
+    // Press P while save is still in flight -> sets copyNoticeId; then save fails and replaces the notice.
+    press('p');
+    rejectSave(new Error('disk full'));
+    await vi.waitFor(() => {
+      flushSync();
+      expect(editor()!.querySelector('[role="alert"]')?.textContent ?? '').toContain('Could not save the boxes');
+    });
+
+    // Subsequent undo must NOT dismiss the save error notice.
+    press('z', { ctrlKey: true });
+    expect(editor()!.querySelector('[role="alert"]')?.textContent ?? '').toContain('Could not save the boxes');
   });
 });

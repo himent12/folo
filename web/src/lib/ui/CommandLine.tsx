@@ -22,9 +22,11 @@ export default function CommandLine(props: CommandLineProps) {
   const notify = feedback();
 
   async function copy() {
+    const command = props.command;
+    const copied = props.copied;
     try {
-      await navigator.clipboard.writeText(props.command);
-      notify.success('Command copied', props.copied);
+      await navigator.clipboard.writeText(command);
+      notify.success('Command copied', copied);
     } catch (e) {
       notify.error(e, 'Could not copy the command');
     }

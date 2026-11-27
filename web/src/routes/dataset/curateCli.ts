@@ -15,6 +15,8 @@ export interface CurateCliCommand {
   description: string;
   /** Non-null when a class name or path cannot be represented safely in PowerShell / clap flags. */
   warning: string | null;
+  /** Exact placeholder tokens inserted by this builder (never literal quoted paths or class names). */
+  placeholders: readonly string[];
 }
 
 export const CURATE_CLI_MODES: readonly { value: CurateCliMode; label: string }[] = [
@@ -83,6 +85,8 @@ export function buildDatasetCurateCli(
     ? `Dataset "${dataset.name}" has a path with a quote or newline that Windows PowerShell cannot pass verbatim; replace <dataset_path> with your shell-quoted path.`
     : null;
 
+  const pathPlaceholder = hasRealPath ? [] : ['<dataset_path>'];
+
   if (mode === 'check') {
     const flags = ['--perceptual', '--fix-dry-run'];
     const args = hasRealPath ? positionalPath(path, flags) : [path, ...flags];
@@ -93,6 +97,7 @@ export function buildDatasetCurateCli(
       description:
         'Checks broken labels, corrupt images, exact byte duplicates, and 64-bit dHash perceptual near-duplicate / cross-split leakage (dry-run fix notes; modifies nothing).',
       warning: pathWarning,
+      placeholders: pathPlaceholder,
     };
   }
 
@@ -109,6 +114,7 @@ export function buildDatasetCurateCli(
           ? 'This dataset has no validation split yet. Builds a deterministic multi-label stratified 80/20 train/val split in a new folder.'
           : 'Re-splits into a deterministic multi-label stratified 80/20 train/val split in a new folder (adjust --val / --test ratios as needed).',
       warning: pathWarning,
+      placeholders: [...pathPlaceholder, '<out_dir>'],
     };
   }
 
@@ -148,6 +154,7 @@ export function buildDatasetCurateCli(
       command: `folo dataset filter ${args.join(' ')}`,
       description: desc,
       warning: [pathWarning, classWarning].filter(Boolean).join(' ') || null,
+      placeholders: [...pathPlaceholder, '<out_dir>'],
     };
   }
 
@@ -167,6 +174,7 @@ export function buildDatasetCurateCli(
       command: `folo dataset convert ${args.join(' ')}`,
       description: `Converts this ${dataset.format.toUpperCase()} dataset into ${formatNames[to]} in a new folder (images are copied unchanged).`,
       warning: pathWarning,
+      placeholders: [...pathPlaceholder, '<out_dir>'],
     };
   }
 
@@ -181,5 +189,20 @@ export function buildDatasetCurateCli(
     description:
       'Merges this dataset with another YOLO, COCO, or Pascal VOC folder using collision-safe filenames and stratified train/val splits.',
     warning: pathWarning,
+    placeholders: [...pathPlaceholder, '<other_dataset>', '<out_dir>'],
   };
+}
+
+/** Formats copy-toast guidance: reminds users to replace placeholders before running so PowerShell never parses `<...>`. */
+export function curateCliCopiedMessage(snippet: Pick<CurateCliCommand, 'label' | 'placeholders'>): string {
+  const placeholders = snippet.placeholders;
+  const name = snippet.label.toLowerCase();
+  if (placeholders.length === 0) {
+    return `Run this ${name} command from your terminal.`;
+  }
+  const list =
+    placeholders.length === 1
+      ? placeholders[0]!
+      : `${placeholders.slice(0, -1).join(', ')} and ${placeholders[placeholders.length - 1]!}`;
+  return `Replace ${list} before running this ${name} command.`;
 }

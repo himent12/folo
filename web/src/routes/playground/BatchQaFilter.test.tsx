@@ -138,12 +138,29 @@ describe('Playground batch QA filter and summary export', () => {
     expect(emptyCsv).toContain('filename,status,detections,classes,top_confidence,total_ms,image_width,image_height,error');
     expect(emptyCsv).toContain('bb.png,done,0,,,7,320,240,');
 
-    // Filter to With detections -> shows indices 0 and 2, Next and Arrow/Home/End step strictly within matching items
+    // Filter to With detections -> shows indices 0 and 2; focused Next button reaching the last match moves focus to the selected thumbnail (Playtest R24 P3-1)
     target.querySelector<HTMLButtonElement>('[data-qa-filter="with-detections"]')!.click();
     flushSync();
     const thumbs = [...target.querySelectorAll<HTMLButtonElement>('[data-batch-filmstrip] [role="option"]')];
     expect(thumbs.map((el) => el.getAttribute('data-batch-idx'))).toEqual(['0', '2']);
     expect(target.querySelector('.src-name')?.textContent).toBe('a.png');
+    const nextBtn = target.querySelector<HTMLButtonElement>('button[aria-label="Next image"]')!;
+    const prevBtn = target.querySelector<HTMLButtonElement>('button[aria-label="Previous image"]')!;
+    nextBtn.focus();
+    nextBtn.click();
+    await vi.waitFor(() => {
+      expect(nextBtn.disabled).toBe(true);
+      expect(document.activeElement).toBe(target.querySelector('[data-batch-idx="2"]'));
+    });
+    expect(target.querySelector('.src-name')?.textContent).toBe('ccc.png');
+    prevBtn.focus();
+    prevBtn.click();
+    await vi.waitFor(() => {
+      expect(prevBtn.disabled).toBe(true);
+      expect(document.activeElement).toBe(target.querySelector('[data-batch-idx="0"]'));
+    });
+    expect(target.querySelector('.src-name')?.textContent).toBe('a.png');
+
     const strip = target.querySelector<HTMLElement>('[data-batch-filmstrip]')!;
     strip.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true, cancelable: true }));
     flushSync();

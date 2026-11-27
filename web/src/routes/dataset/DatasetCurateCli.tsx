@@ -13,6 +13,7 @@ import {
   buildDatasetCurateCli,
   CONVERT_TARGET_FORMATS,
   CURATE_CLI_MODES,
+  curateCliCopiedMessage,
   defaultConvertTarget,
   type ConvertTargetFormat,
   type CurateCliMode,
@@ -64,7 +65,7 @@ export default function DatasetCurateCli(props: DatasetCurateCliProps) {
       <CommandLine
         command={snippet.get().command}
         label={`Dataset ${snippet.get().label} CLI command`}
-        copied={`Run this ${snippet.get().label.toLowerCase()} command from your terminal.`}
+        copied={curateCliCopiedMessage(snippet.get())}
       />
       {snippet.get().warning ? (
         <p class="curate-warn" data-curate-warning>

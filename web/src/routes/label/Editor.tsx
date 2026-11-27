@@ -189,6 +189,7 @@ export default function Editor(props: EditorProps) {
         draft.set(cur.boxes);
         selected.set(null);
         hovered.set(null);
+        untrack(clearCopyNotice);
         untrack(forget);
       } else if (!saving.get()) {
         // Not this editor's own save on its way (its answer sets `base`): someone else's.
@@ -205,9 +206,21 @@ export default function Editor(props: EditorProps) {
   const locked = computed(() => (img.get()?.status === 'labeling' ? 'The agent is labeling this image. You can edit it once it is done.' : null));
 
   // ---------- editing ----------
+  /** Notice id of the last transient copy-previous message; cleared only if that exact notice is still displayed. */
+  let copyNoticeId: number | null = null;
+  function showCopyNotice(title: string, detail?: string) {
+    status.info(title, detail);
+    copyNoticeId = untrack(() => status.notice?.id ?? null);
+  }
+  function clearCopyNotice() {
+    if (copyNoticeId === null) return;
+    if (untrack(() => status.notice?.id ?? null) === copyNoticeId) status.clear();
+    copyNoticeId = null;
+  }
   /** Every edit of the draft goes through here, so it can be undone; `kind` joins a run of like edits into one step. */
   function edit(next: Box[], kind: string | null = null) {
     if (sameBoxes(next, draft.peek())) return;
+    clearCopyNotice();
     history.record(draft.peek(), kind);
     draft.set(next);
     rev.set(rev.peek() + 1);
@@ -216,6 +229,7 @@ export default function Editor(props: EditorProps) {
     if (locked.peek()) return;
     const to = redo ? history.redo(draft.peek()) : history.undo(draft.peek());
     if (!to) return;
+    clearCopyNotice();
     // The selection is a place in the list, and a step (Discard most of all) may put another box there: it goes, so
     // Delete or a class key never lands on a box the user did not pick.
     selected.set(null);
@@ -289,23 +303,23 @@ export default function Editor(props: EditorProps) {
     if (!cur || locked.peek()) return;
     const prev = prevLabeled.peek();
     if (!prev) {
-      status.info('No previous labeled image', 'No earlier image in this job has boxes to copy.');
+      showCopyNotice('No previous labeled image', 'No earlier image in this job has boxes to copy.');
       return;
     }
     const adapted = adaptBoxesToImage(prev.boxes, prev.width, prev.height, cur.width, cur.height, props.job.classes.length);
     if (adapted.length === 0) {
-      status.info('No boxes fit this image', `Every box from ${prev.file} was too small or out of range for this image.`);
+      showCopyNotice('No boxes fit this image', `Every box from ${prev.file} was too small or out of range for this image.`);
       return;
     }
     const existing = draft.peek();
     const toAdd = adapted.filter((box) => !existing.some((x) => sameBox(x, box)));
     if (toAdd.length === 0) {
-      status.info('Already copied', `Every box from ${prev.file} is already on this image.`);
+      showCopyNotice('Already copied', `Every box from ${prev.file} is already on this image.`);
       return;
     }
     edit([...existing, ...toAdd]);
     selected.set(null);
-    status.info(
+    showCopyNotice(
       `Copied ${toAdd.length} ${toAdd.length === 1 ? 'box' : 'boxes'} from ${prev.file}`,
       'Undo anytime, or Save when ready.',
     );
