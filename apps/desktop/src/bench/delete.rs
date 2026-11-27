@@ -59,10 +59,8 @@ impl FoloApp {
                         if this.bench.new_loop.as_ref().is_some_and(|f| f.bench == bench) {
                             this.bench.new_loop = None;
                         }
-                        if let Some(f) = this.bench.external.take().filter(|f| f.bench == bench)
-                            && let Some(c) = f.cancel
-                        {
-                            c.store(true, std::sync::atomic::Ordering::Relaxed);
+                        if this.bench.external.as_ref().is_some_and(|f| f.bench == bench) {
+                            this.bench.external = None;
                         }
                         this.bench.compare.remove(&bench);
                         if route_bench(&this.route) == Some(bench.as_str()) {

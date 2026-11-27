@@ -46,7 +46,10 @@ impl FoloApp {
         };
         let check_err =
             if path_matches { f.check.as_ref().and_then(|r| r.as_ref().err()).cloned() } else { None };
-        let score_err = if path_matches && scored {
+        let needs_scored_recheck = path_matches
+            && scored
+            && f.check.as_ref().is_some_and(|r| r.as_ref().is_ok_and(|c| !c.checked_scored));
+        let score_err = if path_matches && scored && !needs_scored_recheck {
             f.check
                 .as_ref()
                 .and_then(|r| r.as_ref().ok())
@@ -114,6 +117,18 @@ impl FoloApp {
                     text(ty::SM, t.warning_text).whitespace_normal().child(
                         "File path changed — click Check file to validate the new file before scoring.",
                     ),
+                )
+                .into_any_element()
+        } else if needs_scored_recheck {
+            div()
+                .flex()
+                .items_start()
+                .gap(px(6.))
+                .child(icon("icons/triangle-alert.svg", 14., t.warning_text))
+                .child(
+                    text(ty::SM, t.warning_text)
+                        .whitespace_normal()
+                        .child("Confidences were enabled after checking — click Check file to re-validate."),
                 )
                 .into_any_element()
         } else if let Some(ref msg) = score_err {
@@ -261,6 +276,8 @@ impl FoloApp {
             Some("Checking predictions file")
         } else if path_changed {
             Some("File path changed — click Check file first")
+        } else if needs_scored_recheck {
+            Some("Confidences changed — click Check file to re-validate")
         } else if score_err.is_some() {
             Some("Fix box scores or switch to No confidences")
         } else if check_ok.is_none() {

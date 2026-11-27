@@ -112,10 +112,18 @@ pub struct ExternalEntryForm {
     pub file_bytes: u64,
     pub check: Option<Result<super::external::CheckedExternal, String>>,
     pub submitting: bool,
-    /// Cooperative cancel flag for an in-flight upload (set when the form closes or navigates away).
+    /// Cooperative cancel flag for an in-flight upload (set automatically when dropped unless cleared on finish).
     pub cancel: Option<Arc<AtomicBool>>,
     pub error: Option<ApiError>,
     pub show_how: bool,
+}
+
+impl Drop for ExternalEntryForm {
+    fn drop(&mut self) {
+        if let Some(c) = self.cancel.take() {
+            c.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
 }
 
 /// How an entry's images are ordered.

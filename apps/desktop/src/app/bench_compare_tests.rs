@@ -523,4 +523,38 @@ fn pr746_r1_deleted_compare_slot_and_confidence_recheck_regressions() {
         let err = chk.as_ref().unwrap_err();
         assert!(err.contains("different boxes"), "recheck must catch differing-score duplicate: {err}");
     });
+
+    // 3. Edit path -> toggle Uses confidences -> restore path still blocks submit (`checked_scored == false`).
+    let cancel_probe = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let cancel_probe_ref = cancel_probe.clone();
+    drive(&mut app, window, |this, _, cx| {
+        this.set_external_scored(false, cx);
+        let p = dup_path.to_string_lossy().to_string();
+        this.bench.external.as_ref().unwrap().file_path.update(cx, |i, cx| i.set_text(&p, cx));
+        this.check_typed_external_file(cx);
+    });
+    app.frame(window.into());
+    app.run_until_idle();
+    app.frame(window.into());
+    drive(&mut app, window, |this, w, cx| {
+        let orig = dup_path.to_string_lossy().to_string();
+        // Edit path away, enable confidences, then undo path edit back to orig.
+        this.bench.external.as_ref().unwrap().file_path.update(cx, |i, cx| i.set_text("other.json", cx));
+        this.set_external_scored(true, cx);
+        this.bench.external.as_ref().unwrap().file_path.update(cx, |i, cx| i.set_text(&orig, cx));
+        this.submit_external_entry(cx);
+        let f = this.bench.external.as_mut().expect("form blocks submit");
+        assert!(
+            f.error.as_ref().is_some_and(|e| e.message.contains("Check file")),
+            "must refuse unchecked confidence mode after path undo: {:?}",
+            f.error
+        );
+        // Navigating directly to another benchmark drops the form and signals cancel via Drop.
+        f.cancel = Some(cancel_probe_ref);
+        this.navigate(Route::Bench("bn_3c90".into()), w, cx);
+    });
+    assert!(
+        cancel_probe.load(std::sync::atomic::Ordering::Relaxed),
+        "direct Bench(A) -> Bench(B) navigation cancels in-flight upload via Drop"
+    );
 }

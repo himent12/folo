@@ -37,13 +37,7 @@ impl FoloApp {
             BenchForm::Design => self.bench.design = None,
             BenchForm::NewLoop => self.bench.new_loop = None,
             BenchForm::NewBench => self.bench.new_bench = None,
-            BenchForm::External => {
-                if let Some(f) = self.bench.external.take()
-                    && let Some(c) = f.cancel
-                {
-                    c.store(true, std::sync::atomic::Ordering::Relaxed);
-                }
-            }
+            BenchForm::External => self.bench.external = None,
         }
         let opener = self.fh(form.opener(), cx);
         window.focus(&opener);

@@ -42,6 +42,8 @@ pub struct ExternalSummary {
 pub struct CheckedExternal {
     pub predictions: Arc<Vec<BenchPrediction>>,
     pub summary: ExternalSummary,
+    /// Whether this check validated box scores and score-sensitive duplicate records (`scored: true`).
+    pub checked_scored: bool,
 }
 
 #[derive(Deserialize)]
@@ -418,7 +420,7 @@ pub fn check_predictions(
         record_count: out.len(),
         parts_count,
     };
-    Ok(CheckedExternal { predictions: Arc::new(out), summary })
+    Ok(CheckedExternal { predictions: Arc::new(out), summary, checked_scored: scored })
 }
 
 /// Uploads validated external predictions in one request or pass-by-pass parts. On any failure
@@ -760,6 +762,14 @@ impl FoloApp {
             cx.notify();
             return;
         };
+        if f.scored && !checked.checked_scored {
+            f.error = Some(ApiError::new(
+                "invalid_body",
+                "Confidences were enabled after checking — click Check file to re-validate.",
+            ));
+            cx.notify();
+            return;
+        }
         if f.scored
             && let Err(msg) = validate_box_scores(&checked.predictions)
         {
