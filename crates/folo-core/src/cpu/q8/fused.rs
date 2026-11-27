@@ -175,7 +175,7 @@ macro_rules! define_fused_isa {
 
             #[target_feature(enable = $feat)]
             #[inline]
-            unsafe fn k_loop_stem9(
+            unsafe fn k_loop_stem9<const VECS: usize>(
                 a: *const i32,
                 row_ptrs: &[*const u32; 9],
                 col: usize,
@@ -186,16 +186,16 @@ macro_rules! define_fused_isa {
                 let (mut c10, mut c11, mut c12) = (z, z, z);
                 let (mut c20, mut c21, mut c22) = (z, z, z);
                 let (mut c30, mut c31, mut c32) = (z, z, z);
-                // SAFETY: caller guarantees `9 * MR` weights and `col + NR` readable words per tap strip.
+                // SAFETY: caller guarantees `9 * MR` weights and `col + VECS * 8` readable words per tap strip.
                 unsafe {
                     macro_rules! tap {
                         ($idx:expr) => {
                             let bp = row_ptrs[$idx].add(col) as *const __m256i;
                             let b0 = _mm256_loadu_si256(bp);
-                            let b1 = _mm256_loadu_si256(bp.add(1));
-                            let b2 = _mm256_loadu_si256(bp.add(2));
+                            let b1 = if VECS >= 2 { _mm256_loadu_si256(bp.add(1)) } else { z };
+                            let b2 = if VECS >= 3 { _mm256_loadu_si256(bp.add(2)) } else { z };
                             let ap = a.add(($idx) * MR);
-                            define_fused_isa!(@dp $dp_mode, b0, b1, b2, ap,
+                            define_fused_isa!(@dp_v $dp_mode, VECS, b0, b1, b2, ap,
                                 c00, c01, c02, c10, c11, c12, c20, c21, c22, c30, c31, c32);
                         };
                     }
@@ -210,17 +210,17 @@ macro_rules! define_fused_isa {
                     tap!(8);
                     let out = acc.0.as_mut_ptr() as *mut __m256i;
                     _mm256_store_si256(out, c00);
-                    _mm256_store_si256(out.add(1), c01);
-                    _mm256_store_si256(out.add(2), c02);
+                    if VECS >= 2 { _mm256_store_si256(out.add(1), c01); }
+                    if VECS >= 3 { _mm256_store_si256(out.add(2), c02); }
                     _mm256_store_si256(out.add(3), c10);
-                    _mm256_store_si256(out.add(4), c11);
-                    _mm256_store_si256(out.add(5), c12);
+                    if VECS >= 2 { _mm256_store_si256(out.add(4), c11); }
+                    if VECS >= 3 { _mm256_store_si256(out.add(5), c12); }
                     _mm256_store_si256(out.add(6), c20);
-                    _mm256_store_si256(out.add(7), c21);
-                    _mm256_store_si256(out.add(8), c22);
+                    if VECS >= 2 { _mm256_store_si256(out.add(7), c21); }
+                    if VECS >= 3 { _mm256_store_si256(out.add(8), c22); }
                     _mm256_store_si256(out.add(9), c30);
-                    _mm256_store_si256(out.add(10), c31);
-                    _mm256_store_si256(out.add(11), c32);
+                    if VECS >= 2 { _mm256_store_si256(out.add(10), c31); }
+                    if VECS >= 3 { _mm256_store_si256(out.add(11), c32); }
                 }
             }
 
@@ -292,12 +292,12 @@ macro_rules! define_fused_isa {
                                 };
                                 if OUT_U8 {
                                     if contiguous {
-                                        apply_epi_aligned::<SILU, HAS_RES, true>(
+                                        apply_epi_aligned::<SILU, HAS_RES, true, 3>(
                                             &acc, &corr, &scale, &bias, res_ptr, &rs, &rz, &inv,
                                             &z01_arr, &z23_arr, q_plane.add(pix0), &mut fv,
                                         );
                                     } else {
-                                        apply_epi_aligned::<SILU, HAS_RES, true>(
+                                        apply_epi_aligned::<SILU, HAS_RES, true, 3>(
                                             &acc, &corr, &scale, &bias, res_ptr, &rs, &rz, &inv,
                                             &z01_arr, &z23_arr, qw.as_mut_ptr(), &mut fv,
                                         );
@@ -308,7 +308,7 @@ macro_rules! define_fused_isa {
                                         }
                                     }
                                 } else {
-                                    apply_epi_aligned::<SILU, HAS_RES, false>(
+                                    apply_epi_aligned::<SILU, HAS_RES, false, 3>(
                                         &acc, &corr, &scale, &bias, res_ptr, &rs, &rz, &inv,
                                         &z01_arr, &z23_arr, std::ptr::null_mut(), &mut fv,
                                     );
@@ -512,7 +512,8 @@ macro_rules! define_fused_isa {
                 qptr: *mut u32,
                 fptr: *mut f32,
             ) {
-                let chunks = ow.div_ceil(NR);
+                let full_chunks = ow / NR;
+                let tail = ow % NR;
                 let zero_corr = [0i32; MR];
                 let zero_rs = [0.0f32; MR];
                 let zero_rz = [0i32; MR];
@@ -542,31 +543,59 @@ macro_rules! define_fused_isa {
                         } else {
                             std::ptr::null_mut()
                         };
-                        for chunk in 0..chunks {
+                        for chunk in 0..full_chunks {
                             let col = chunk * NR;
-                            let cols = NR.min(ow - col);
-                            k_loop_stem9(panel, row_ptrs, col, &mut acc);
+                            k_loop_stem9::<3>(panel, row_ptrs, col, &mut acc);
                             if OUT_U8 {
-                                if cols == NR {
-                                    apply_epi_aligned::<SILU, false, true>(
-                                        &acc, &zero_corr, &sc, &bi, std::ptr::null(), &zero_rs, &zero_rz,
-                                        &inv, &z01_arr, &z23_arr, q_row.add(col), &mut fv,
-                                    );
-                                } else {
-                                    apply_epi_aligned::<SILU, false, true>(
-                                        &acc, &zero_corr, &sc, &bi, std::ptr::null(), &zero_rs, &zero_rz,
-                                        &inv, &z01_arr, &z23_arr, qw.as_mut_ptr(), &mut fv,
-                                    );
-                                    std::ptr::copy_nonoverlapping(qw.as_ptr(), q_row.add(col), cols);
-                                }
+                                apply_epi_aligned::<SILU, false, true, 3>(
+                                    &acc, &zero_corr, &sc, &bi, std::ptr::null(), &zero_rs, &zero_rz,
+                                    &inv, &z01_arr, &z23_arr, q_row.add(col), &mut fv,
+                                );
                             } else {
-                                apply_epi_aligned::<SILU, false, false>(
+                                apply_epi_aligned::<SILU, false, false, 3>(
                                     &acc, &zero_corr, &sc, &bi, std::ptr::null(), &zero_rs, &zero_rz,
                                     &inv, &z01_arr, &z23_arr, std::ptr::null_mut(), &mut fv,
                                 );
                                 for (rr, row) in fv.iter().enumerate() {
-                                    std::ptr::copy_nonoverlapping(row.as_ptr(), f_row.add(rr * ohw + col), cols);
+                                    std::ptr::copy_nonoverlapping(row.as_ptr(), f_row.add(rr * ohw + col), NR);
                                 }
+                            }
+                        }
+                        if tail > 0 {
+                            let col = full_chunks * NR;
+                            macro_rules! stem_tail {
+                                ($vecs:literal) => {{
+                                    k_loop_stem9::<$vecs>(panel, row_ptrs, col, &mut acc);
+                                    if OUT_U8 {
+                                        if tail == $vecs * 8 {
+                                            apply_epi_aligned::<SILU, false, true, $vecs>(
+                                                &acc, &zero_corr, &sc, &bi, std::ptr::null(), &zero_rs, &zero_rz,
+                                                &inv, &z01_arr, &z23_arr, q_row.add(col), &mut fv,
+                                            );
+                                        } else {
+                                            apply_epi_aligned::<SILU, false, true, $vecs>(
+                                                &acc, &zero_corr, &sc, &bi, std::ptr::null(), &zero_rs, &zero_rz,
+                                                &inv, &z01_arr, &z23_arr, qw.as_mut_ptr(), &mut fv,
+                                            );
+                                            std::ptr::copy_nonoverlapping(qw.as_ptr(), q_row.add(col), tail);
+                                        }
+                                    } else {
+                                        apply_epi_aligned::<SILU, false, false, $vecs>(
+                                            &acc, &zero_corr, &sc, &bi, std::ptr::null(), &zero_rs, &zero_rz,
+                                            &inv, &z01_arr, &z23_arr, std::ptr::null_mut(), &mut fv,
+                                        );
+                                        for (rr, row) in fv.iter().enumerate() {
+                                            std::ptr::copy_nonoverlapping(row.as_ptr(), f_row.add(rr * ohw + col), tail);
+                                        }
+                                    }
+                                }};
+                            }
+                            if tail <= 8 {
+                                stem_tail!(1);
+                            } else if tail <= 16 {
+                                stem_tail!(2);
+                            } else {
+                                stem_tail!(3);
                             }
                         }
                     }
@@ -611,53 +640,62 @@ macro_rules! define_fused_isa {
         }
     };
 
-    (@dp avxvnni, $b0:ident, $b1:ident, $b2:ident, $ap:ident,
+    (@dp $mode:ident, $b0:ident, $b1:ident, $b2:ident, $ap:ident,
+        $c00:ident, $c01:ident, $c02:ident,
+        $c10:ident, $c11:ident, $c12:ident,
+        $c20:ident, $c21:ident, $c22:ident,
+        $c30:ident, $c31:ident, $c32:ident) => {
+        define_fused_isa!(@dp_v $mode, 3, $b0, $b1, $b2, $ap,
+            $c00, $c01, $c02, $c10, $c11, $c12, $c20, $c21, $c22, $c30, $c31, $c32);
+    };
+
+    (@dp_v avxvnni, $vecs:expr, $b0:ident, $b1:ident, $b2:ident, $ap:ident,
         $c00:ident, $c01:ident, $c02:ident,
         $c10:ident, $c11:ident, $c12:ident,
         $c20:ident, $c21:ident, $c22:ident,
         $c30:ident, $c31:ident, $c32:ident) => {
         let w0 = _mm256_set1_epi32(*$ap);
         $c00 = _mm256_dpbusd_avx_epi32($c00, $b0, w0);
-        $c01 = _mm256_dpbusd_avx_epi32($c01, $b1, w0);
-        $c02 = _mm256_dpbusd_avx_epi32($c02, $b2, w0);
+        if $vecs >= 2 { $c01 = _mm256_dpbusd_avx_epi32($c01, $b1, w0); }
+        if $vecs >= 3 { $c02 = _mm256_dpbusd_avx_epi32($c02, $b2, w0); }
         let w1 = _mm256_set1_epi32(*$ap.add(1));
         $c10 = _mm256_dpbusd_avx_epi32($c10, $b0, w1);
-        $c11 = _mm256_dpbusd_avx_epi32($c11, $b1, w1);
-        $c12 = _mm256_dpbusd_avx_epi32($c12, $b2, w1);
+        if $vecs >= 2 { $c11 = _mm256_dpbusd_avx_epi32($c11, $b1, w1); }
+        if $vecs >= 3 { $c12 = _mm256_dpbusd_avx_epi32($c12, $b2, w1); }
         let w2 = _mm256_set1_epi32(*$ap.add(2));
         $c20 = _mm256_dpbusd_avx_epi32($c20, $b0, w2);
-        $c21 = _mm256_dpbusd_avx_epi32($c21, $b1, w2);
-        $c22 = _mm256_dpbusd_avx_epi32($c22, $b2, w2);
+        if $vecs >= 2 { $c21 = _mm256_dpbusd_avx_epi32($c21, $b1, w2); }
+        if $vecs >= 3 { $c22 = _mm256_dpbusd_avx_epi32($c22, $b2, w2); }
         let w3 = _mm256_set1_epi32(*$ap.add(3));
         $c30 = _mm256_dpbusd_avx_epi32($c30, $b0, w3);
-        $c31 = _mm256_dpbusd_avx_epi32($c31, $b1, w3);
-        $c32 = _mm256_dpbusd_avx_epi32($c32, $b2, w3);
+        if $vecs >= 2 { $c31 = _mm256_dpbusd_avx_epi32($c31, $b1, w3); }
+        if $vecs >= 3 { $c32 = _mm256_dpbusd_avx_epi32($c32, $b2, w3); }
     };
 
-    (@dp avx512vnni, $b0:ident, $b1:ident, $b2:ident, $ap:ident,
+    (@dp_v avx512vnni, $vecs:expr, $b0:ident, $b1:ident, $b2:ident, $ap:ident,
         $c00:ident, $c01:ident, $c02:ident,
         $c10:ident, $c11:ident, $c12:ident,
         $c20:ident, $c21:ident, $c22:ident,
         $c30:ident, $c31:ident, $c32:ident) => {
         let w0 = _mm256_set1_epi32(*$ap);
         $c00 = _mm256_dpbusd_epi32($c00, $b0, w0);
-        $c01 = _mm256_dpbusd_epi32($c01, $b1, w0);
-        $c02 = _mm256_dpbusd_epi32($c02, $b2, w0);
+        if $vecs >= 2 { $c01 = _mm256_dpbusd_epi32($c01, $b1, w0); }
+        if $vecs >= 3 { $c02 = _mm256_dpbusd_epi32($c02, $b2, w0); }
         let w1 = _mm256_set1_epi32(*$ap.add(1));
         $c10 = _mm256_dpbusd_epi32($c10, $b0, w1);
-        $c11 = _mm256_dpbusd_epi32($c11, $b1, w1);
-        $c12 = _mm256_dpbusd_epi32($c12, $b2, w1);
+        if $vecs >= 2 { $c11 = _mm256_dpbusd_epi32($c11, $b1, w1); }
+        if $vecs >= 3 { $c12 = _mm256_dpbusd_epi32($c12, $b2, w1); }
         let w2 = _mm256_set1_epi32(*$ap.add(2));
         $c20 = _mm256_dpbusd_epi32($c20, $b0, w2);
-        $c21 = _mm256_dpbusd_epi32($c21, $b1, w2);
-        $c22 = _mm256_dpbusd_epi32($c22, $b2, w2);
+        if $vecs >= 2 { $c21 = _mm256_dpbusd_epi32($c21, $b1, w2); }
+        if $vecs >= 3 { $c22 = _mm256_dpbusd_epi32($c22, $b2, w2); }
         let w3 = _mm256_set1_epi32(*$ap.add(3));
         $c30 = _mm256_dpbusd_epi32($c30, $b0, w3);
-        $c31 = _mm256_dpbusd_epi32($c31, $b1, w3);
-        $c32 = _mm256_dpbusd_epi32($c32, $b2, w3);
+        if $vecs >= 2 { $c31 = _mm256_dpbusd_epi32($c31, $b1, w3); }
+        if $vecs >= 3 { $c32 = _mm256_dpbusd_epi32($c32, $b2, w3); }
     };
 
-    (@dp avx2, $b0:ident, $b1:ident, $b2:ident, $ap:ident,
+    (@dp_v avx2, $vecs:expr, $b0:ident, $b1:ident, $b2:ident, $ap:ident,
         $c00:ident, $c01:ident, $c02:ident,
         $c10:ident, $c11:ident, $c12:ident,
         $c20:ident, $c21:ident, $c22:ident,
@@ -682,8 +720,8 @@ macro_rules! define_fused_isa {
             };
         }
         col_step!($b0, $c00, $c10, $c20, $c30);
-        col_step!($b1, $c01, $c11, $c21, $c31);
-        col_step!($b2, $c02, $c12, $c22, $c32);
+        if $vecs >= 2 { col_step!($b1, $c01, $c11, $c21, $c31); }
+        if $vecs >= 3 { col_step!($b2, $c02, $c12, $c22, $c32); }
     }};
 }
 

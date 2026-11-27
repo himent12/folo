@@ -127,52 +127,186 @@ pub async fn init_async() -> std::result::Result<Device, GpuError> {
     init()
 }
 
+/// Handle to an in-flight GPU-to-CPU tensor download started by [`download_deferred`] or
+/// [`download_many_deferred`].
+///
+/// Subsequent GPU operations can be encoded and submitted before collecting the CPU tensor with
+/// [`DeferredDownload::finish`] or [`DeferredDownload::finish_async`]; collecting waits only for this download's
+/// submission rather than draining newer GPU work.
+pub struct DeferredDownload {
+    inner: DeferredDownloadInner,
+}
+
+enum DeferredDownloadInner {
+    Ready(Tensor),
+    Pending { readback: crate::context::Readback, shape: Shape, dtype: CoreDType },
+}
+
+impl DeferredDownload {
+    /// Polls the device non-blockingly and reports whether the CPU tensor can be collected without waiting.
+    pub fn poll_ready(&self) -> Result<bool> {
+        match &self.inner {
+            DeferredDownloadInner::Ready(_) => Ok(true),
+            DeferredDownloadInner::Pending { readback, .. } => readback.poll_ready().core(),
+        }
+    }
+
+    /// Waits for this download's submission (blocking; native only) and returns the owned CPU tensor.
+    pub fn finish(self) -> Result<Tensor> {
+        match self.inner {
+            DeferredDownloadInner::Ready(t) => Ok(t),
+            DeferredDownloadInner::Pending { readback, shape, dtype } => {
+                let host = readback.finish(|bytes| CpuStorage::from_bytes(bytes, dtype)).core()??;
+                Tensor::from_storage(Storage::Cpu(host), shape)
+            }
+        }
+    }
+
+    /// Awaits this download without blocking the browser and returns the owned CPU tensor.
+    pub async fn finish_async(self) -> Result<Tensor> {
+        match self.inner {
+            DeferredDownloadInner::Ready(t) => Ok(t),
+            DeferredDownloadInner::Pending { readback, shape, dtype } => {
+                let host =
+                    readback.finish_async(|bytes| CpuStorage::from_bytes(bytes, dtype)).await.core()??;
+                Tensor::from_storage(Storage::Cpu(host), shape)
+            }
+        }
+    }
+}
+
+/// Starts a non-blocking download of `t` into a new CPU tensor (its own storage, no gradient).
+///
+/// The copy (and any strided gather needed) is ordered after all work encoded so far and submitted once;
+/// callers can immediately encode the next GPU step and later collect the result with
+/// [`DeferredDownload::finish`] or [`DeferredDownload::finish_async`]. `ctx` must be the context of `t`'s
+/// device ([`GpuContext::shared`] after [`init`] / [`init_async`]).
+pub fn download_deferred(ctx: &GpuContext, t: &Tensor) -> Result<DeferredDownload> {
+    let mut batch = download_many_deferred(ctx, &[t])?;
+    Ok(batch.pop().expect("single download"))
+}
+
+/// Starts non-blocking downloads of all `tensors`, encoding all staging copies into a single command buffer and
+/// queue submission.
+///
+/// Mixed CPU and GPU tensors (including strided or unaligned views) are supported: any strided or unaligned
+/// views first encode gather dispatches into the open command batch (which follows
+/// [`GpuContext::flush_interval`]), and then every staging copy is submitted together under one submission fence.
+pub fn download_many_deferred(ctx: &GpuContext, tensors: &[&Tensor]) -> Result<Vec<DeferredDownload>> {
+    if tensors.is_empty() {
+        return Ok(Vec::new());
+    }
+    enum Slot {
+        Ready(Tensor),
+        Pending { read_idx: usize, shape: Shape, dtype: CoreDType },
+    }
+    // Validate every GPU view first so a malformed layout fails before encoding any gather kernels.
+    for t in tensors {
+        if t.device().is_cpu() {
+            continue;
+        }
+        t.with_view(|v| -> Result<()> {
+            match v.storage {
+                Storage::Device(ds) if ds.downcast_ref::<GpuStorage>().is_some() => {}
+                Storage::Device(_) => {
+                    return Err(core_err(GpuError::Shape("device storage is not a wgpu buffer".into())));
+                }
+                Storage::Cpu(_) => unreachable!("checked above"),
+            }
+            if !v.layout.fits(v.storage.len()) {
+                return Err(Error::InvalidShape {
+                    op: "download_async",
+                    shape: v.layout.shape().clone(),
+                    msg: "layout reaches outside its storage".into(),
+                });
+            }
+            Ok(())
+        })?;
+    }
+    let mut slots = Vec::with_capacity(tensors.len());
+    // Keep dense temporaries and cloned source buffers alive until `read_batch_deferred` encodes every copy.
+    let mut held_dense: Vec<GpuBuffer> = Vec::new();
+    let mut read_specs: Vec<(wgpu::Buffer, u64, u64)> = Vec::new();
+    for t in tensors {
+        if t.device().is_cpu() {
+            let cpu = Tensor::from_storage(Storage::Cpu(t.to_cpu_storage()?), t.shape().clone())?;
+            slots.push(Slot::Ready(cpu));
+            continue;
+        }
+        let dtype = t.dtype();
+        let n = t.numel();
+        if n == 0 {
+            let empty =
+                Tensor::from_storage(Storage::Cpu(CpuStorage::from_bytes(&[], dtype)?), t.shape().clone())?;
+            slots.push(Slot::Ready(empty));
+            continue;
+        }
+        let eb = dtype.size_in_bytes();
+        let (buf, off) = t.with_view(|v| -> Result<(wgpu::Buffer, u64)> {
+            let src = match v.storage {
+                Storage::Device(ds) => ds.downcast_ref::<GpuStorage>().expect("validated above").buf.raw(),
+                Storage::Cpu(_) => unreachable!("checked above"),
+            };
+            let off = v.layout.offset() * eb;
+            if v.layout.is_contiguous() && off.is_multiple_of(4) {
+                return Ok((src.clone(), off as u64));
+            }
+            let dense = ctx.alloc(elem(dtype).buffer_bytes(n).core()?).core()?;
+            strided::gather_strided(ctx, elem(dtype), src, &strided_of(v.layout), dense.raw()).core()?;
+            let raw = dense.raw().clone();
+            held_dense.push(dense);
+            Ok((raw, 0))
+        })?;
+        let read_idx = read_specs.len();
+        read_specs.push((buf, off, (n * eb) as u64));
+        slots.push(Slot::Pending { read_idx, shape: t.shape().clone(), dtype });
+    }
+    let read_refs: Vec<(&wgpu::Buffer, u64, u64)> =
+        read_specs.iter().map(|(b, off, len)| (b, *off, *len)).collect();
+    let mut readbacks: Vec<Option<crate::context::Readback>> =
+        ctx.read_batch_deferred(&read_refs).core()?.into_iter().map(Some).collect();
+    drop(held_dense);
+    let mut out = Vec::with_capacity(slots.len());
+    for slot in slots {
+        match slot {
+            Slot::Ready(t) => out.push(DeferredDownload { inner: DeferredDownloadInner::Ready(t) }),
+            Slot::Pending { read_idx, shape, dtype } => {
+                let readback = readbacks[read_idx].take().expect("unique read_idx");
+                out.push(DeferredDownload {
+                    inner: DeferredDownloadInner::Pending { readback, shape, dtype },
+                });
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// Copies `t` to a new CPU tensor (its own storage, no gradient) without blocking.
 ///
 /// The browser cannot wait for the GPU inside a call (WebGPU maps buffers from the event loop), so
 /// [`Tensor::to_vec`] and `to_device(Device::Cpu)` fail there for GPU tensors; this is the readback to await
 /// instead. The copy is ordered after all work encoded so far, which it submits. Natively it works too and
-/// waits like a blocking download. `ctx` must be the context of `t`'s device ([`GpuContext::shared`] after
+/// waits only for its own submission. `ctx` must be the context of `t`'s device ([`GpuContext::shared`] after
 /// [`init`] / [`init_async`]).
 pub async fn download_async(ctx: &GpuContext, t: &Tensor) -> Result<Tensor> {
-    if t.device().is_cpu() {
-        return Tensor::from_storage(Storage::Cpu(t.to_cpu_storage()?), t.shape().clone());
+    download_deferred(ctx, t)?.finish_async().await
+}
+
+/// Copies all `tensors` to new CPU tensors with all staging copies batched into one GPU submission and wait
+/// (blocking; native only). See [`download_many_deferred`].
+pub fn download_many(ctx: &GpuContext, tensors: &[&Tensor]) -> Result<Vec<Tensor>> {
+    download_many_deferred(ctx, tensors)?.into_iter().map(DeferredDownload::finish).collect()
+}
+
+/// Copies all `tensors` to new CPU tensors with all staging copies batched into one GPU submission without
+/// blocking. See [`download_many_deferred`].
+pub async fn download_many_async(ctx: &GpuContext, tensors: &[&Tensor]) -> Result<Vec<Tensor>> {
+    let pending = download_many_deferred(ctx, tensors)?;
+    let mut out = Vec::with_capacity(pending.len());
+    for d in pending {
+        out.push(d.finish_async().await?);
     }
-    let dtype = t.dtype();
-    let n = t.numel();
-    let eb = dtype.size_in_bytes();
-    let pending = t.with_view(|v| -> Result<_> {
-        let buf = match v.storage {
-            Storage::Device(ds) => ds
-                .downcast_ref::<GpuStorage>()
-                .map(|s| s.buf.raw())
-                .ok_or_else(|| core_err(GpuError::Shape("device storage is not a wgpu buffer".into())))?,
-            Storage::Cpu(_) => unreachable!("checked above"),
-        };
-        if !v.layout.fits(v.storage.len()) {
-            return Err(Error::InvalidShape {
-                op: "download_async",
-                shape: v.layout.shape().clone(),
-                msg: "layout reaches outside its storage".into(),
-            });
-        }
-        let off = v.layout.offset() * eb;
-        if v.layout.is_contiguous() && off.is_multiple_of(4) {
-            return ctx.begin_read(buf, off as u64, (n * eb) as u64).core();
-        }
-        // Dense copy first; the buffer may go back to the pool at once, the readback is ordered after it.
-        let dense = ctx.alloc(elem(dtype).buffer_bytes(n).core()?).core()?;
-        strided::gather_strided(ctx, elem(dtype), buf, &strided_of(v.layout), dense.raw()).core()?;
-        ctx.begin_read(dense.raw(), 0, (n * eb) as u64).core()
-    })?;
-    let host = match pending {
-        None => CpuStorage::from_bytes(&[], dtype)?,
-        Some(p) => {
-            p.wait().await.core()?;
-            p.finish(|bytes| CpuStorage::from_bytes(bytes, dtype)).core()??
-        }
-    };
-    Tensor::from_storage(Storage::Cpu(host), t.shape().clone())
+    Ok(out)
 }
 
 /// Registers a [`GpuBackend`] over `ctx` as folo-core's `device` and remembers the pair for [`context_for`], which

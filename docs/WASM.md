@@ -187,8 +187,8 @@ and reuse it per image: loading parses and fuses the model and, on WebGPU, compi
   CPU for single-pass, tiled, and TTA across both `folo` and `folo2`, the GPU paths against the CPU/native GPU `Predictor`, and `Tracker` against `ByteTracker`).
 - **WebGPU.** The browser creates adapters and devices asynchronously and never lets the page's thread block, so
   folo-gpu has async entry points used on every target: `GpuContext::new_async` / `shared_async`,
-  `folo_gpu::init_async()` and `folo_gpu::download_async(ctx, tensor)` (a readback that resolves when WebGPU has
-  mapped the staging buffer). The blocking ones (`GpuContext::new`, `sync`'s wait, `Tensor::to_vec` of a GPU
+  `folo_gpu::init_async()`, `folo_gpu::download_async(ctx, tensor)`, and `folo_gpu::download_many_async(ctx, tensors)` (readbacks that resolve when WebGPU has
+  mapped the staging buffers; `download_many_async` batches FOLO v2 `iou_head`'s decoded head + `iou_raw` tensors and any candidate-overflow rows into a single GPU submission and awaited round-trip). The blocking ones (`GpuContext::new`, `sync`'s wait, `Tensor::to_vec` of a GPU
   tensor) return a "use the async variant" error in the browser instead of hanging. To avoid downloading the full
   `~2.8 MiB` decoded head on every frame, `Detector::detect` runs device-side candidate extraction
   (`Tensor::detect_candidates`, reusing a cached `[3, A]` device anchors tensor per canvas shape) and awaits a compact

@@ -541,12 +541,16 @@ impl Detector {
                     None => None,
                 };
                 drop(det_out.head);
-                let host = folo_gpu::download_async(ctx, &dec).await.map_err(BatchError::from_core)?;
-                let iou_host = match iou_f32 {
+                let (host, iou_host) = match iou_f32 {
                     Some(iou) => {
-                        Some(folo_gpu::download_async(ctx, &iou).await.map_err(BatchError::from_core)?)
+                        let mut both = folo_gpu::download_many_async(ctx, &[&dec, &iou])
+                            .await
+                            .map_err(BatchError::from_core)?;
+                        let iou_host = both.pop().expect("iou_raw download");
+                        let host = both.pop().expect("decoded head download");
+                        (host, Some(iou_host))
                     }
-                    None => None,
+                    None => (folo_gpu::download_async(ctx, &dec).await.map_err(BatchError::from_core)?, None),
                 };
                 let inf = ms(t1);
                 let t2 = Instant::now();
@@ -719,29 +723,35 @@ async fn download_candidate_records_batch(
             head.len()
         )));
     }
-    let mut records = Vec::with_capacity(b);
+    let mut records: Vec<Option<Vec<u32>>> = Vec::with_capacity(b);
+    let mut overflow_indices: Vec<usize> = Vec::new();
+    let mut overflow_views: Vec<Tensor> = Vec::new();
     for (i, row) in head.chunks_exact(stride).enumerate() {
         let n = row[0] as usize;
         if n > a {
             return Err(BatchError::Other(format!("detect_candidates: {n} candidates for {a} anchors")));
         }
         if n <= cap {
-            records.push(row[1..1 + W * n].to_vec());
+            records.push(Some(row[1..1 + W * n].to_vec()));
         } else {
             let full_view = cands
                 .narrow(0, i, 1)
                 .map_err(BatchError::from_core)?
                 .narrow(1, 1, W * n)
                 .map_err(BatchError::from_core)?;
-            let full = folo_gpu::download_async(ctx, &full_view)
-                .await
-                .map_err(BatchError::from_core)?
-                .to_vec::<u32>()
-                .map_err(BatchError::from_core)?;
-            records.push(full);
+            overflow_indices.push(i);
+            overflow_views.push(full_view);
+            records.push(None);
         }
     }
-    Ok(records)
+    if !overflow_views.is_empty() {
+        let refs: Vec<&Tensor> = overflow_views.iter().collect();
+        let downloaded = folo_gpu::download_many_async(ctx, &refs).await.map_err(BatchError::from_core)?;
+        for (i, t) in overflow_indices.into_iter().zip(downloaded) {
+            records[i] = Some(t.to_vec::<u32>().map_err(BatchError::from_core)?);
+        }
+    }
+    Ok(records.into_iter().map(|r| r.expect("populated record row")).collect())
 }
 
 /// Parses `DETECT_RECORD_WORDS`-word device candidate records and sorts by anchor (NMS tie-break order).

@@ -52,6 +52,8 @@ fn u8_stem_matches_exact_integer_and_f32_reference() {
     let mut rng = Rng::seed(7002);
     for &(n, h, w, o, k, s, p, silu) in &[
         (1, 32, 32, 16, 3, 2, 1, true),
+        (1, 16, 64, 12, 3, 2, 1, true), // ow = 32 = 24 + 8 (exact VECS=1 tail direct store)
+        (1, 16, 80, 12, 3, 2, 1, false), // ow = 40 = 24 + 16 (exact VECS=2 tail direct store)
         (2, 29, 35, 12, 3, 2, 1, true),
         (1, 17, 19, 8, 3, 1, 1, false),
         (2, 16, 16, 20, 1, 1, 0, true),
@@ -656,6 +658,10 @@ fn fused_3x3_strip_and_multipart_1x1_match_exact_reference() {
         (1, 4, 0, 4, 1, 49, true, false),
         (2, 8, 0, 8, 2, 3, false, true),
         (1, 8, 4, 12, 3, 55, false, true),
+        (1, 8, 0, 8, 8, 16, true, true), // ow = 8 (exact VECS=1 direct store + residual)
+        (1, 8, 0, 8, 8, 32, false, true), // ow = 16 (exact VECS=2 direct store + residual)
+        (1, 8, 0, 8, 8, 64, true, true), // ow = 32 = 24 + 8 (full + exact VECS=1)
+        (1, 8, 0, 8, 8, 80, true, false), // ow = 40 = 24 + 16 (full + exact VECS=2)
         (2, 8, 4, 12, 29, 35, true, true),
         (1, 16, 0, 16, 40, 41, false, true),
     ] {
@@ -737,9 +743,10 @@ fn fused_3x3_strip_and_multipart_1x1_match_exact_reference() {
         }
     }
 
-    // 2. Large-input `k=3, s=1, p=1` (> 384 KiB triggers the single-barrier s1 row-strip path), odd width + residual.
-    {
-        let (n, c, o, h, w) = (1usize, 64usize, 8usize, 80usize, 81usize);
+    // 2. Large-input `k=3, s=1, p=1` (> 384 KiB triggers the single-barrier s1 row-strip path):
+    //    exact VECS=1 (`w=80`), exact VECS=2 (`w=88`), and odd partial (`w=81`) tails with residual.
+    for &w in &[80usize, 81, 88] {
+        let (n, c, o, h) = (1usize, 64usize, 8usize, 80usize);
         let hw = h * w;
         let in_g: Vec<Grid> = (0..c).map(|i| Grid::from_range(-0.3, 1.8 + 0.02 * i as f32)).collect();
         let in_z: Vec<u8> = in_g.iter().map(|g| g.zero).collect();

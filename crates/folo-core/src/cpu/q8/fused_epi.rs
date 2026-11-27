@@ -344,7 +344,12 @@ pub(super) unsafe fn finish_col8<const SILU: bool, const HAS_RES: bool, const OU
 #[target_feature(enable = "avx2,fma")]
 #[inline]
 #[allow(clippy::too_many_arguments)]
-pub(super) unsafe fn apply_epi_aligned<const SILU: bool, const HAS_RES: bool, const OUT_U8: bool>(
+pub(super) unsafe fn apply_epi_aligned<
+    const SILU: bool,
+    const HAS_RES: bool,
+    const OUT_U8: bool,
+    const VECS: usize,
+>(
     acc: &AlignedTile,
     corr: &[i32; MR],
     scale: &[f32; MR],
@@ -358,9 +363,9 @@ pub(super) unsafe fn apply_epi_aligned<const SILU: bool, const HAS_RES: bool, co
     q_dst: *mut u32,
     f_dst: &mut [[f32; NR]; MR],
 ) {
-    // SAFETY: `acc.0` is 32-byte aligned (`MR x NR = 4 x 24` `i32`s); pointer bounds guaranteed by caller.
+    // SAFETY: `acc.0` is 32-byte aligned (`MR x NR = 4 x 24` `i32`s); `VECS <= 3`; pointer bounds guaranteed by caller.
     unsafe {
-        for k in 0..3usize {
+        for k in 0..VECS {
             let off = 8 * k;
             let mut y0 = _mm256_fmadd_ps(
                 _mm256_cvtepi32_ps(_mm256_sub_epi32(
