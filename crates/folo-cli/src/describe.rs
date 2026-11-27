@@ -138,7 +138,8 @@ fn describe_arg(cmd: &Command, cmd_path: &str, arg: &Arg) -> Value {
     };
     let default = match (takes_values, defaults.len()) {
         (false, _) => Value::Bool(false),
-        (true, 0) => Value::Null,
+        (true, 0) => crate::cli::bounds::effective_default(cmd_path, arg.get_id().as_str())
+            .map_or(Value::Null, |d| Value::String(d.to_string())),
         (true, 1) if !multiple => Value::String(defaults[0].clone()),
         (true, _) => json!(defaults),
     };

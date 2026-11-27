@@ -16,14 +16,14 @@ fn gib(bytes: u64) -> String {
 }
 
 #[derive(Debug, Clone, Copy, Default)]
-struct SimdOverrides {
-    scalar: bool,
-    no_vnni: bool,
-    no_avx512: bool,
+pub(crate) struct SimdOverrides {
+    pub(crate) scalar: bool,
+    pub(crate) no_vnni: bool,
+    pub(crate) no_avx512: bool,
 }
 
 impl SimdOverrides {
-    fn from_env() -> Self {
+    pub(crate) fn from_env() -> Self {
         Self {
             scalar: std::env::var_os("FOLO_Q8_SCALAR").is_some(),
             no_vnni: std::env::var_os("FOLO_Q8_NO_VNNI").is_some(),
@@ -31,7 +31,7 @@ impl SimdOverrides {
         }
     }
 
-    fn active_names(self) -> Vec<&'static str> {
+    pub(crate) fn active_names(self) -> Vec<&'static str> {
         let mut names = Vec::new();
         if self.scalar {
             names.push("FOLO_Q8_SCALAR");

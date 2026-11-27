@@ -106,11 +106,10 @@ fn open_int8(command: &str, path: &Path, device: &str, tensor_cores: bool) -> Re
         )
         .hint("pass --device cpu (or auto)"));
     }
-    if !folo_vision::model::quant::uses_vnni() {
-        eprintln!(
-            "note: --precision int8: the int8 kernels take their portable path, several times slower than f32 \
-             (they need AVX-VNNI, which this CPU lacks, AVX-512 VNNI not being used; or FOLO_Q8_SCALAR is set)"
-        );
+    if let Some(note) =
+        int8_kernel_note(&folo_server::system::cpu_simd(), crate::doctor::SimdOverrides::from_env())
+    {
+        eprintln!("{note}");
     }
     if tensor_cores {
         eprintln!("note: --tensor-cores only affects f16 inference (--half on a GPU); running without them");
@@ -134,6 +133,44 @@ fn open_int8(command: &str, path: &Path, device: &str, tensor_cores: bool) -> Re
     .map_err(|e| nn_error(command, e))?;
     model.set_int8(Some(cal)).map_err(|e| calibration_error(e.to_string()))?;
     Ok(model)
+}
+
+/// Returns a stderr note when `--precision int8` is not running on a fast VNNI kernel, naming the actual
+/// selected kernel (`AVX2`, `portable`, etc.) and any active `FOLO_Q8_*` override rather than assuming portable.
+fn int8_kernel_note(
+    simd: &folo_server::system::CpuSimd,
+    overrides: crate::doctor::SimdOverrides,
+) -> Option<String> {
+    if simd.int8_fast {
+        return None;
+    }
+    let active = overrides.active_names();
+    let has_x86_simd = simd.avx2 || simd.avx_vnni || simd.avx512_vnni;
+    if simd.int8_kernel == "portable" {
+        if !active.is_empty() && has_x86_simd {
+            Some(format!(
+                "note: --precision int8: using portable kernel (fast SIMD disabled by {}); expect slower than f32",
+                active.join(", ")
+            ))
+        } else {
+            Some(
+                "note: --precision int8: using portable kernel (this CPU lacks AVX-512 VNNI, AVX-VNNI, and AVX2); \
+                 expect several times slower than f32"
+                    .to_string(),
+            )
+        }
+    } else if !active.is_empty() {
+        Some(format!(
+            "note: --precision int8: using {} kernel (override: {}); slower than VNNI",
+            simd.int8_kernel,
+            active.join(", ")
+        ))
+    } else {
+        Some(format!(
+            "note: --precision int8: using {} kernel (this CPU lacks AVX-512 VNNI / AVX-VNNI); slower than VNNI",
+            simd.int8_kernel
+        ))
+    }
 }
 
 /// The precision a model runs in: `f32`, `f16` or `int8`.
@@ -437,5 +474,52 @@ mod tests {
             assert!(e.message.contains(flag), "expected {flag} in {}", e.message);
             assert!(e.hint.as_deref().is_some_and(|h| h.contains("folo describe predict --json")));
         }
+    }
+
+    #[test]
+    fn int8_kernel_note_names_active_kernel_and_overrides() {
+        use crate::doctor::SimdOverrides;
+        use folo_server::system::CpuSimd;
+
+        // Fast VNNI tiers emit no slowness note.
+        let fast = CpuSimd {
+            avx2: true,
+            avx_vnni: true,
+            avx512_vnni: false,
+            neon: false,
+            int8_fast: true,
+            int8_kernel: "AVX-VNNI".into(),
+        };
+        assert_eq!(int8_kernel_note(&fast, SimdOverrides::default()), None);
+
+        // `FOLO_Q8_NO_VNNI` on a VNNI CPU selecting AVX2 names AVX2 and the override (never claims portable/missing ISA).
+        let avx2_override = CpuSimd { int8_fast: false, int8_kernel: "AVX2".into(), ..fast.clone() };
+        let note =
+            int8_kernel_note(&avx2_override, SimdOverrides { no_vnni: true, ..Default::default() }).unwrap();
+        assert!(
+            note.contains("AVX2") && note.contains("FOLO_Q8_NO_VNNI") && !note.contains("portable"),
+            "{note}"
+        );
+
+        // `FOLO_Q8_SCALAR` on a VNNI CPU names portable and the override (never claims the CPU lacks AVX-VNNI).
+        let scalar_override = CpuSimd { int8_fast: false, int8_kernel: "portable".into(), ..fast };
+        let note =
+            int8_kernel_note(&scalar_override, SimdOverrides { scalar: true, ..Default::default() }).unwrap();
+        assert!(
+            note.contains("portable") && note.contains("FOLO_Q8_SCALAR") && !note.contains("lacks"),
+            "{note}"
+        );
+
+        // Non-x86 host (ARM64 NEON) with `FOLO_Q8_NO_VNNI` does not blame the override for portable dispatch.
+        let neon = CpuSimd {
+            avx2: false,
+            avx_vnni: false,
+            avx512_vnni: false,
+            neon: true,
+            int8_fast: false,
+            int8_kernel: "portable".into(),
+        };
+        let note = int8_kernel_note(&neon, SimdOverrides { no_vnni: true, ..Default::default() }).unwrap();
+        assert!(note.contains("portable") && !note.contains("FOLO_Q8_NO_VNNI"), "{note}");
     }
 }
