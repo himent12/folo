@@ -43,6 +43,17 @@ type SitePart = (Tensor, Tensor, Tensor, usize, f32, usize);
 /// Tags the planned device side's key apart from the forward's ([`FoloModel::forward`]).
 const SITES_PLAN: u64 = 1;
 
+/// True when `device` is backed by a DX12 software adapter (Windows WARP / `Microsoft Basic Render Driver`),
+/// whose runtime (`d3d10warp.dll`) hits `STATUS_ACCESS_VIOLATION` in the GPU site kernels; callers keep DX12
+/// software adapters on the dense path while leaving hardware GPUs and non-DX12 software adapters unchanged.
+pub(crate) fn is_dx12_software_adapter(device: Device) -> bool {
+    !device.is_cpu()
+        && folo_gpu::context_for(device).is_some_and(|c| {
+            let s = c.summary();
+            s.device_type == "Cpu" && s.backend == "Dx12"
+        })
+}
+
 /// Candidate slots per image of the P3, P4 and P5 levels (at most the level's pixels). At `conf = 0.25` over COCO
 /// val2017 with the published weights the most any image has is far below (docs/notes/hill/r3-lazy-head.md); the
 /// slots past an image's candidates cost a workgroup that returns at once.

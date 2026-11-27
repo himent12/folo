@@ -28,12 +28,14 @@ fn rep_conv_at(rep: &WsQARepConv3x3, x: &Tensor, at: &Tensor) -> Result<Tensor> 
 impl FoloV2Model {
     /// Whether [`FoloV2Model::predict_candidates`] serves an input on `device` with `nms`: a fused eval-mode
     /// model, single-label, without `iou_head` (which fuses per-anchor localization quality logits with class
-    /// probabilities before thresholding), on CPU (`F32`) or a GPU (`F32` / `F16`).
+    /// probabilities before thresholding), on CPU (`F32`) or a GPU (`F32` / `F16`, excluding DX12 software
+    /// adapters where WARP crashes in site kernels).
     pub fn candidates_first_applies(&self, device: Device, nms: &NmsConfig) -> bool {
         self.fused
             && !self.is_training()
             && !nms.multi_label
             && !self.head.has_iou_head
+            && !crate::model::lazy_gpu::is_dx12_software_adapter(device)
             && ((device.is_cpu() && self.dtype() == DType::F32) || !device.is_cpu())
     }
 
