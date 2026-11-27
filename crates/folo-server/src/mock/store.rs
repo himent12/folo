@@ -398,6 +398,10 @@ impl Store for MockStore {
         Ok(self.all_models())
     }
 
+    fn list_models_with_arch(&self) -> Result<Vec<(Model, String)>> {
+        Ok(self.all_models_with_arch())
+    }
+
     fn get_model(&self, id: &str) -> Result<Model> {
         self.all_models().into_iter().find(|m| m.id == id).ok_or_else(|| Error::not_found("model", id))
     }

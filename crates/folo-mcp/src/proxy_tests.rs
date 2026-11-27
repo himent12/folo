@@ -457,6 +457,63 @@ fn older_server_rejects_folo2_arch_and_proxy_reads_arch_header() {
     assert_eq!(proxy.model_arch("m_v2").unwrap(), "folo2-n");
     handle.join().unwrap();
 
+    // `GET /api/models` carrying additive `arch_name` preserves `folo2-n` through `list_models_with_arch`
+    // (and falls back to `arch` for older servers that omit `arch_name`).
+    let list_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let list_addr = list_listener.local_addr().unwrap();
+    let list_handle = std::thread::spawn(move || {
+        if let Ok((mut s, _)) = list_listener.accept() {
+            let _ = read_request(&mut s);
+            let body = serde_json::json!({
+                "models": [
+                    {
+                        "id": "m_v2",
+                        "name": "v2-best",
+                        "arch": "folo-n",
+                        "arch_name": "folo2-n",
+                        "imgsz": 64,
+                        "classes": ["circle"],
+                        "params": 1000,
+                        "flops_g": 1.0,
+                        "bytes": 1024,
+                        "created": "2026-11-27T00:00:00Z",
+                        "run_id": null,
+                        "metrics": null,
+                        "head": "o2m"
+                    },
+                    {
+                        "id": "m_legacy",
+                        "name": "legacy-best",
+                        "arch": "folo-s",
+                        "imgsz": 64,
+                        "classes": ["circle"],
+                        "params": 1000,
+                        "flops_g": 1.0,
+                        "bytes": 1024,
+                        "created": "2026-11-26T00:00:00Z",
+                        "run_id": null,
+                        "metrics": null,
+                        "head": "o2m"
+                    }
+                ]
+            })
+            .to_string();
+            let _ = write!(
+                s,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: \
+                 {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = s.flush();
+        }
+    });
+    let list_proxy = HttpStore::new(&format!("http://{list_addr}"), None);
+    let listed = list_proxy.list_models_with_arch().unwrap();
+    assert_eq!(listed.len(), 2);
+    assert_eq!((listed[0].0.id.as_str(), listed[0].1.as_str()), ("m_v2", "folo2-n"));
+    assert_eq!((listed[1].0.id.as_str(), listed[1].1.as_str()), ("m_legacy", "folo-s"));
+    list_handle.join().unwrap();
+
     // Older real server (no `folo2_arch`, no `x-folo-arch` header): probing `/models/{id}/weights` detects a
     // `folo2-n` safetensors header so a weights-only MCP `train` call is rejected with `501 not_implemented`
     // rather than silently fine-tuning as v1.

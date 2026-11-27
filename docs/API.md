@@ -295,7 +295,9 @@ CLI's exit code; a test keeps the sources in line with it). Messages that wrap a
   `source` (additive, left out by older servers): `run` (a run's `best` / `last`), `file` (`<data dir>/models`) or
   `published`; `about` only for published weights. `path` (additive): the weights file on the server's machine, `/`
   separators, what `folo train --weights`, `val --model` and `export --model` take there (left out by the mock).
-- `GET /api/models/{id}` → `Model`. The weights of a run in progress are not listed, but its `m_<run suffix>-last`
+  `arch_name` (additive): exact architecture string from the weights header (`"folo-n"`..`"folo-x"` or
+  `"folo2-n"`..`"folo2-x"`), preserving the v2-Iso family alongside the legacy scale enum `arch`.
+- `GET /api/models/{id}` → `Model` (plus `arch_name` in the JSON body and the matching `x-folo-arch` response header). The weights of a run in progress are not listed, but its `m_<run suffix>-last`
   (and `m_<run suffix>`, once it has a `best.folo`) answer here and on `/weights` as soon as the file exists: how a
   cloud control plane copies a worker run's checkpoint while it trains (docs/CLOUD.md).
 - **Conditional caching on JSON model routes.** `GET /api/models`, `GET /api/models/{id}`, and `GET /api/models/{id}/eval`

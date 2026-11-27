@@ -6,7 +6,7 @@ use axum::body::Body;
 use axum::extract::State;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use folo_api::{ExportSpec, ModelList, OnnxSwitches, ValReport, ValRequest};
+use folo_api::{ExportSpec, Model, OnnxSwitches, ValReport, ValRequest};
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
@@ -72,8 +72,28 @@ fn cached_json_response(value: &impl Serialize, headers: &HeaderMap) -> Result<R
         .into_response())
 }
 
+/// Additive wire view of [`Model`] carrying the exact header architecture (`"folo-n"`..`"folo-x"` or
+/// `"folo2-n"`..`"folo2-x"`) alongside the legacy scale enum [`Model::arch`].
+#[derive(Serialize)]
+struct ModelWithArch<'a> {
+    #[serde(flatten)]
+    model: &'a Model,
+    arch_name: &'a str,
+}
+
+#[derive(Serialize)]
+struct ModelListWithArch<'a> {
+    models: Vec<ModelWithArch<'a>>,
+}
+
 pub(super) async fn list_models(State(st): State<AppState>, headers: HeaderMap) -> Result<Response> {
-    let list = ModelList { models: blocking(&st, |s| s.list_models()).await? };
+    let entries = blocking(&st, |s| s.list_models_with_arch()).await?;
+    let list = ModelListWithArch {
+        models: entries
+            .iter()
+            .map(|(model, arch_name)| ModelWithArch { model, arch_name: arch_name.as_str() })
+            .collect(),
+    };
     cached_json_response(&list, &headers)
 }
 
@@ -83,7 +103,8 @@ pub(super) async fn get_model(
     headers: HeaderMap,
 ) -> Result<Response> {
     let (model, arch) = blocking(&st, move |s| s.get_model_with_arch(&id)).await?;
-    let mut res = cached_json_response(&model, &headers)?;
+    let payload = ModelWithArch { model: &model, arch_name: &arch };
+    let mut res = cached_json_response(&payload, &headers)?;
     if let Ok(val) = HeaderValue::from_str(&arch) {
         res.headers_mut().insert(axum::http::HeaderName::from_static("x-folo-arch"), val);
     }

@@ -179,9 +179,9 @@ pub struct SynthArgs {
     /// Number of images (train + val) [1..=1000000].
     #[arg(long, default_value_t = 1000)]
     pub images: u64,
-    /// Class names (at most 8). circle, square, triangle, star, ring, cross, hexagon and heart get those shapes;
-    /// other names take the next unused shape.
-    #[arg(long, value_delimiter = ',', default_values_t = ["circle".to_string(), "square".to_string(), "triangle".to_string()])]
+    /// Comma-separated class names (at most 8). circle, square, triangle, star, ring, cross, hexagon and heart get
+    /// those shapes; other names take the next unused shape.
+    #[arg(long, value_name = "NAMES", value_delimiter = ',', default_value = "circle,square,triangle")]
     pub classes: Vec<String>,
     /// Image side in pixels [32..=8192] (the long side with --vary-aspect).
     #[arg(long, default_value_t = 640)]
@@ -404,4 +404,29 @@ pub struct ExportDatasetArgs {
     /// Optional `info.description` written to each COCO JSON file.
     #[arg(long, value_name = "TEXT")]
     pub description: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::{CommandFactory, Parser};
+
+    use crate::cli::{Cli, Command, DatasetCommand};
+
+    #[test]
+    fn dataset_synth_help_displays_comma_separated_classes_default() {
+        let mut cmd = Cli::command();
+        let synth = cmd.find_subcommand_mut("dataset").unwrap().find_subcommand_mut("synth").unwrap();
+        let help = synth.render_long_help().to_string();
+        assert!(help.contains("[default: circle,square,triangle]"), "{help}");
+        assert!(help.contains("Comma-separated"), "{help}");
+
+        let parsed = Cli::try_parse_from(["folo", "dataset", "synth", "out"]).unwrap();
+        let Command::Dataset(DatasetCommand::Synth(args)) = parsed.command else { panic!("expected synth") };
+        assert_eq!(args.classes, ["circle", "square", "triangle"]);
+
+        let custom =
+            Cli::try_parse_from(["folo", "dataset", "synth", "out", "--classes", "circle,square"]).unwrap();
+        let Command::Dataset(DatasetCommand::Synth(args)) = custom.command else { panic!("expected synth") };
+        assert_eq!(args.classes, ["circle", "square"]);
+    }
 }

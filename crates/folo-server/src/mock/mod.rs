@@ -231,47 +231,61 @@ impl MockStore {
             .ok_or_else(|| Error::not_found("run", id))
     }
 
-    fn all_models(&self) -> Vec<Model> {
-        let mut out: Vec<Model> = self.models.read().unwrap().iter().map(|m| m.model.clone()).collect();
+    fn all_models_with_arch(&self) -> Vec<(Model, String)> {
+        let mut out: Vec<(Model, String)> = self
+            .models
+            .read()
+            .unwrap()
+            .iter()
+            .map(|m| (m.model.clone(), m.model.arch.as_str().to_string()))
+            .collect();
         for (run, ds) in self.runs.read().unwrap().iter().filter(|r| r.0.user) {
             let snap = run.snap();
             let Some(id) = run.current_model(&snap) else { continue };
             let best = run.curve.best(run.epochs_done(&snap)).map_or(1, |b| b.epoch);
             let val = run.curve.val(best);
             let (params, flops_g, ..) = arch_spec(run.config.arch);
-            out.push(Model {
-                id,
-                name: format!("{}-best", run.config.name),
-                arch: run.config.arch,
-                imgsz: run.config.imgsz,
-                classes: ds.meta().classes.clone(),
-                params,
-                flops_g,
-                bytes: model_bytes(params, false),
-                created: rfc3339(snap.finished.unwrap_or(snap.created)),
-                run_id: Some(run.id.clone()),
-                metrics: Some(ModelMetrics {
-                    map50: val.map50,
-                    map50_95: val.map50_95,
-                    precision: val.precision,
-                    recall: val.recall,
-                    best_f1_conf: val.best_f1_conf,
-                }),
-                head: run.config.head,
-                trained_with: Some(TrainedWith {
-                    amp: run.config.amp,
+            let arch_name = run.arch_override.clone().unwrap_or_else(|| run.config.arch.as_str().to_string());
+            out.push((
+                Model {
+                    id,
+                    name: format!("{}-best", run.config.name),
+                    arch: run.config.arch,
                     imgsz: run.config.imgsz,
-                    epochs: run.config.epochs,
-                }),
-                precision: Some(ModelPrecision::F32),
-                fused: Some(false),
-                source: Some(ModelSource::Run),
-                about: None,
-                path: None,
-            });
+                    classes: ds.meta().classes.clone(),
+                    params,
+                    flops_g,
+                    bytes: model_bytes(params, false),
+                    created: rfc3339(snap.finished.unwrap_or(snap.created)),
+                    run_id: Some(run.id.clone()),
+                    metrics: Some(ModelMetrics {
+                        map50: val.map50,
+                        map50_95: val.map50_95,
+                        precision: val.precision,
+                        recall: val.recall,
+                        best_f1_conf: val.best_f1_conf,
+                    }),
+                    head: run.config.head,
+                    trained_with: Some(TrainedWith {
+                        amp: run.config.amp,
+                        imgsz: run.config.imgsz,
+                        epochs: run.config.epochs,
+                    }),
+                    precision: Some(ModelPrecision::F32),
+                    fused: Some(false),
+                    source: Some(ModelSource::Run),
+                    about: None,
+                    path: None,
+                },
+                arch_name,
+            ));
         }
-        out.sort_by(|a, b| b.created.cmp(&a.created).then(a.id.cmp(&b.id)));
+        out.sort_by(|(a, _), (b, _)| b.created.cmp(&a.created).then(a.id.cmp(&b.id)));
         out
+    }
+
+    fn all_models(&self) -> Vec<Model> {
+        self.all_models_with_arch().into_iter().map(|(m, _)| m).collect()
     }
 
     fn validate(&self, c: &TrainConfig) -> Result<()> {

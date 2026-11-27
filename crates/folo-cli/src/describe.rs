@@ -128,8 +128,14 @@ fn describe_arg(cmd: &Command, cmd_path: &str, arg: &Arg) -> Value {
     let takes_values = arg.get_action().takes_values();
     let multiple = matches!(arg.get_action(), ArgAction::Append)
         || arg.get_num_args().is_some_and(|r| r.max_values() > 1);
-    let defaults: Vec<String> =
-        arg.get_default_values().iter().map(|v| v.to_string_lossy().into_owned()).collect();
+    let defaults: Vec<String> = match arg.get_value_delimiter() {
+        Some(delim) => arg
+            .get_default_values()
+            .iter()
+            .flat_map(|v| v.to_string_lossy().split(delim).map(str::to_string).collect::<Vec<_>>())
+            .collect(),
+        None => arg.get_default_values().iter().map(|v| v.to_string_lossy().into_owned()).collect(),
+    };
     let default = match (takes_values, defaults.len()) {
         (false, _) => Value::Bool(false),
         (true, 0) => Value::Null,

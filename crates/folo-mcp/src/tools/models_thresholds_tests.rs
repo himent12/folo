@@ -132,7 +132,7 @@ async fn val_and_predict_wire_calibrated_thresholds_embedded_and_proxied() {
                 image_base64: None,
                 dataset_id: Some(ds_id.clone()),
                 image_id: Some(image_id.clone()),
-                conf: 0.25,
+                conf: None,
                 iou: 0.7,
                 max_det: 50,
                 tile: None,
@@ -154,7 +154,7 @@ async fn val_and_predict_wire_calibrated_thresholds_embedded_and_proxied() {
                 image_base64: None,
                 dataset_id: Some(ds_id.clone()),
                 image_id: Some(image_id.clone()),
-                conf: 0.25,
+                conf: None,
                 iou: 0.7,
                 max_det: 50,
                 tile: None,
@@ -180,7 +180,7 @@ async fn val_and_predict_wire_calibrated_thresholds_embedded_and_proxied() {
                 image_base64: Some(b64.clone()),
                 dataset_id: None,
                 image_id: None,
-                conf: 0.0,
+                conf: Some(0.0),
                 iou: 0.7,
                 max_det: 50,
                 tile: None,
@@ -204,7 +204,7 @@ async fn val_and_predict_wire_calibrated_thresholds_embedded_and_proxied() {
                     model_id: model.id.clone(),
                     paths: Some(vec!["sample.png".into()]),
                     glob: None,
-                    conf: 0.25,
+                    conf: None,
                     iou: 0.7,
                     tile: None,
                     tile_overlap: None,
@@ -226,7 +226,7 @@ async fn val_and_predict_wire_calibrated_thresholds_embedded_and_proxied() {
                     model_id: model.id.clone(),
                     paths: Some(vec!["sample.png".into()]),
                     glob: None,
-                    conf: 0.0,
+                    conf: Some(0.0),
                     iou: 0.7,
                     tile: None,
                     tile_overlap: None,
@@ -245,8 +245,9 @@ async fn val_and_predict_wire_calibrated_thresholds_embedded_and_proxied() {
         assert_eq!(batch_drop.value["boxes_total"], 0, "{}", batch_drop.value);
     }
 
-    // 3. Mutual exclusion, `--confine` (existing AND nonexistent outside paths), out-of-range class IDs, and
-    //    proxy `not_implemented` gate (for both `predict` and `predict_batch`) all fail with the expected codes.
+    // 3. Mutual exclusion (`thresholds_path` with `per_class_conf` or explicit `conf`), `--confine` (existing
+    //    AND nonexistent outside paths), out-of-range class IDs, and proxy `not_implemented` gate (for both
+    //    `predict` and `predict_batch`) all fail with the expected codes.
     let both = embedded
         .inner
         .predict(PredictArgs {
@@ -255,7 +256,7 @@ async fn val_and_predict_wire_calibrated_thresholds_embedded_and_proxied() {
             image_base64: None,
             dataset_id: Some(ds_id.clone()),
             image_id: Some(image_id.clone()),
-            conf: 0.25,
+            conf: None,
             iou: 0.7,
             max_det: 10,
             tile: None,
@@ -272,6 +273,57 @@ async fn val_and_predict_wire_calibrated_thresholds_embedded_and_proxied() {
         .unwrap();
     assert_eq!(both.body.code, "invalid_arguments");
 
+    // Passing explicit `conf` alongside `thresholds_path` is rejected on both `predict` and `predict_batch`.
+    let conf_conflict = embedded
+        .inner
+        .predict(PredictArgs {
+            model_id: model.id.clone(),
+            image_path: None,
+            image_base64: None,
+            dataset_id: Some(ds_id.clone()),
+            image_id: Some(image_id.clone()),
+            conf: Some(0.9),
+            iou: 0.7,
+            max_det: 10,
+            tile: None,
+            tile_overlap: None,
+            tile_full_image: None,
+            tta: false,
+            tta_scales: None,
+            tta_hflip: None,
+            thresholds_path: Some("keep.json".into()),
+            per_class_conf: None,
+        })
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(conf_conflict.body.code, "invalid_arguments");
+
+    let batch_conf_conflict = embedded
+        .inner
+        .predict_batch(
+            PredictBatchArgs {
+                model_id: model.id.clone(),
+                paths: Some(vec!["sample.png".into()]),
+                glob: None,
+                conf: Some(0.9),
+                iou: 0.7,
+                tile: None,
+                tile_overlap: None,
+                tile_full_image: None,
+                tta: false,
+                tta_scales: None,
+                tta_hflip: None,
+                thresholds_path: Some("keep.json".into()),
+                per_class_conf: None,
+            },
+            &mut Progress::none(),
+        )
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(batch_conf_conflict.body.code, "invalid_arguments");
+
     let escaped_file = outside.join("outside.json");
     std::fs::copy(&keep_path, &escaped_file).unwrap();
     for escaped in [
@@ -287,7 +339,7 @@ async fn val_and_predict_wire_calibrated_thresholds_embedded_and_proxied() {
                 image_base64: None,
                 dataset_id: Some(ds_id.clone()),
                 image_id: Some(image_id.clone()),
-                conf: 0.25,
+                conf: None,
                 iou: 0.7,
                 max_det: 10,
                 tile: None,
@@ -305,43 +357,21 @@ async fn val_and_predict_wire_calibrated_thresholds_embedded_and_proxied() {
         assert_eq!(confined.body.code, "path_outside_data_dir", "{escaped}");
     }
 
-    // Out-of-range class IDs rejected cleanly on both `predict` (`invalid_config`) and `predict_batch`
-    // (`invalid_arguments`, checked upfront against model metadata before iterating images).
+    // Out-of-range class IDs return the same `invalid_config` code on both `predict` and `predict_batch`,
+    // across both embedded and proxied backends.
     let oob_class = model.classes.len() as u32 + 3;
-    let oob_pred = embedded
-        .inner
-        .predict(PredictArgs {
-            model_id: model.id.clone(),
-            image_path: None,
-            image_base64: None,
-            dataset_id: Some(ds_id.clone()),
-            image_id: Some(image_id.clone()),
-            conf: 0.25,
-            iou: 0.7,
-            max_det: 10,
-            tile: None,
-            tile_overlap: None,
-            tile_full_image: None,
-            tta: false,
-            tta_scales: None,
-            tta_hflip: None,
-            thresholds_path: None,
-            per_class_conf: Some(BTreeMap::from([(oob_class, 0.5)])),
-        })
-        .await
-        .err()
-        .unwrap();
-    assert_eq!(oob_pred.body.code, "invalid_config");
-
-    let oob_batch = embedded
-        .inner
-        .predict_batch(
-            PredictBatchArgs {
+    for backend in [&embedded, &proxied] {
+        let oob_pred = backend
+            .inner
+            .predict(PredictArgs {
                 model_id: model.id.clone(),
-                paths: Some(vec!["sample.png".into()]),
-                glob: None,
-                conf: 0.25,
+                image_path: None,
+                image_base64: None,
+                dataset_id: Some(ds_id.clone()),
+                image_id: Some(image_id.clone()),
+                conf: None,
                 iou: 0.7,
+                max_det: 10,
                 tile: None,
                 tile_overlap: None,
                 tile_full_image: None,
@@ -350,13 +380,37 @@ async fn val_and_predict_wire_calibrated_thresholds_embedded_and_proxied() {
                 tta_hflip: None,
                 thresholds_path: None,
                 per_class_conf: Some(BTreeMap::from([(oob_class, 0.5)])),
-            },
-            &mut Progress::none(),
-        )
-        .await
-        .err()
-        .unwrap();
-    assert_eq!(oob_batch.body.code, "invalid_arguments");
+            })
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(oob_pred.body.code, "invalid_config");
+
+        let oob_batch = backend
+            .inner
+            .predict_batch(
+                PredictBatchArgs {
+                    model_id: model.id.clone(),
+                    paths: Some(vec!["sample.png".into()]),
+                    glob: None,
+                    conf: None,
+                    iou: 0.7,
+                    tile: None,
+                    tile_overlap: None,
+                    tile_full_image: None,
+                    tta: false,
+                    tta_scales: None,
+                    tta_hflip: None,
+                    thresholds_path: None,
+                    per_class_conf: Some(BTreeMap::from([(oob_class, 0.5)])),
+                },
+                &mut Progress::none(),
+            )
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(oob_batch.body.code, "invalid_config");
+    }
 
     let old_err = old_mcp
         .inner
@@ -366,7 +420,7 @@ async fn val_and_predict_wire_calibrated_thresholds_embedded_and_proxied() {
             image_base64: None,
             dataset_id: Some(ds_id),
             image_id: Some(image_id),
-            conf: 0.25,
+            conf: None,
             iou: 0.7,
             max_det: 10,
             tile: None,
@@ -390,7 +444,7 @@ async fn val_and_predict_wire_calibrated_thresholds_embedded_and_proxied() {
                 model_id: model.id,
                 paths: Some(vec!["sample.png".into()]),
                 glob: None,
-                conf: 0.25,
+                conf: None,
                 iou: 0.7,
                 tile: None,
                 tile_overlap: None,

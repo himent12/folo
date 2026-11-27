@@ -73,9 +73,19 @@ async fn folo2_capability_estimate_cli_and_cloud_refusal_on_mock() {
     let done: Run = ok(&app, get(&format!("/api/runs/{}", run.id))).await;
     assert_eq!(done.status, RunStatus::Completed, "{done:?}");
     let model_id = done.model_id.expect("mock folo2 model_id");
-    let (st, hdrs, _) = send(&app, get(&format!("/api/models/{model_id}"))).await;
+    let (st, hdrs, body) = send(&app, get(&format!("/api/models/{model_id}"))).await;
     assert_eq!(st, StatusCode::OK);
     assert_eq!(hdrs.get("x-folo-arch").and_then(|v| v.to_str().ok()), Some("folo2-n"));
+    let model_json: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(model_json["arch_name"], "folo2-n", "{model_json}");
+    let list_json: Value = ok(&app, get("/api/models")).await;
+    let listed = list_json["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"] == model_id)
+        .expect("mock folo2 model in GET /api/models");
+    assert_eq!(listed["arch_name"], "folo2-n", "{listed}");
 
     // Fine-tuning from a mock `folo2-n` model preserves `folo2-n` and refuses cloud on both estimate and create.
     for path in ["/api/runs/estimate", "/api/runs"] {
@@ -153,10 +163,29 @@ async fn folo2_real_store_train_val_predict_and_export_end_to_end() {
     assert_eq!(done.status, RunStatus::Completed, "{done:?}");
     let model_id = done.model_id.expect("model_id on completed run");
 
-    // `GET /api/models/{id}` exposes the exact `folo2-n` architecture in `x-folo-arch`.
-    let (status, headers, _) = send(&app, get(&format!("/api/models/{model_id}"))).await;
+    // `GET /api/models/{id}` exposes the exact `folo2-n` architecture in both `arch_name` and `x-folo-arch`,
+    // and `GET /api/models` preserves `arch_name: "folo2-n"` for run checkpoints (`best`/`last`) as well as a
+    // `folo2-n` checkpoint copied into `<data-dir>/models/fixture2.folo`.
+    let (status, headers, body) = send(&app, get(&format!("/api/models/{model_id}"))).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(headers.get("x-folo-arch").and_then(|v| v.to_str().ok()), Some("folo2-n"));
+    let model_json: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(model_json["arch_name"], "folo2-n", "{model_json}");
+
+    let models_dir = dir.join("models");
+    std::fs::create_dir_all(&models_dir).unwrap();
+    let best_path = model_json["path"].as_str().expect("real model path");
+    std::fs::copy(best_path, models_dir.join("fixture2.folo")).unwrap();
+
+    let list_json: Value = ok(&app, get("/api/models")).await;
+    let listed = list_json["models"].as_array().unwrap();
+    let run_best = listed.iter().find(|m| m["id"] == model_id).expect("best in GET /api/models");
+    assert_eq!(run_best["arch_name"], "folo2-n", "{run_best}");
+    let run_last =
+        listed.iter().find(|m| m["id"] == format!("{model_id}-last")).expect("last in GET /api/models");
+    assert_eq!(run_last["arch_name"], "folo2-n", "{run_last}");
+    let imported = listed.iter().find(|m| m["name"] == "fixture2").expect("fixture2 in GET /api/models");
+    assert_eq!(imported["arch_name"], "folo2-n", "{imported}");
 
     // Cloud runs on `folo2-n` are refused upfront with `invalid_config`.
     let e = err(

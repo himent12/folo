@@ -664,7 +664,7 @@ mod tests {
                 image_base64: None,
                 dataset_id: None,
                 image_id: None,
-                conf: 0.25,
+                conf: Some(0.25),
                 iou: 0.7,
                 max_det: 10,
                 tile: None,
