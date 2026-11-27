@@ -282,11 +282,28 @@ impl Benchmarks {
         }
         // As the server saves it.
         let listed = name.trim().to_string();
+        let chosen_id = self.supports_upload_safe().then(|| super::fresh_entry_id(id, &listed));
         let contestant = BenchContestantSpec::External { scored, open: true, predictions: first };
         let req = StartBenchEntry { contestant, name: Some(name), max_images: None, conditions: None };
-        let entry = self
-            .start_entry(id, req)
-            .map_err(|e| lost_start(rewrite_part_error(e, shown, &first_lines), &listed))?;
+        let entry = match self.start_entry_with_id(id, req, chosen_id.as_deref()) {
+            Ok(e) => e,
+            Err(e) => {
+                let e = rewrite_part_error(e, shown, &first_lines);
+                // Definitive FOLO refusal (`4xx` parsed from FOLO or `501 not_implemented` before sending):
+                // no entry was opened. Unparsed proxy `4xx` (`NOT_FOLO`) and other `5xx` are ambiguous.
+                if start_definitely_refused(&e) {
+                    return Err(e);
+                }
+                if let Some(eid) = chosen_id {
+                    let who = format!("entry '{listed}' ({eid})");
+                    let what = match self.clean_up_by_id(id, &eid, &who, false) {
+                        CleanUp::Closed(w) | CleanUp::OpenOrUnknown(w) => w,
+                    };
+                    return Err(with_hint(e, what));
+                }
+                return Err(lost_start(e, &listed));
+            }
+        };
         let sent: Result<(), Error> = (|| {
             loop {
                 let (part, part_lines) = read()?;
@@ -326,34 +343,67 @@ impl Benchmarks {
 
     fn clean_up_outcome(&self, id: &str, opened: &BenchEntry) -> CleanUp {
         let who = named(opened);
+        self.clean_up_by_id(id, &opened.id, &who, true)
+    }
+
+    fn clean_up_by_id(&self, id: &str, entry_id: &str, who: &str, existed: bool) -> CleanUp {
         let classify = |e: &BenchEntry| {
-            let msg = left(&who, e);
+            let msg = left(who, e);
             if e.status.is_active() { CleanUp::OpenOrUnknown(msg) } else { CleanUp::Closed(msg) }
         };
         let is_gone =
             |err: &Error| err.status == StatusCode::NOT_FOUND && err.body.code == "bench_entry_not_found";
-        let gone = || CleanUp::Closed(format!("{who} was already removed"));
-        let stopped = match self.entry(id, &opened.id) {
-            // A stop whose answer was lost may have worked: the entry's state says.
+        let already_removed = || CleanUp::Closed(format!("{who} was already removed"));
+        match self.entry(id, entry_id) {
             Ok(e) if e.status == BenchEntryStatus::Running => {
-                self.stop_entry(id, &opened.id).or_else(|_| self.entry(id, &opened.id))
+                // On servers supporting `bench_upload_safe`, atomically stop + remove the open entry in one
+                // request so there is never a window between stop and delete, and an ambiguous response never
+                // deletes an entry stopped by another client.
+                if self.supports_upload_safe() {
+                    return match self.discard_open_entry(id, entry_id) {
+                        Ok(_) => CleanUp::Closed(format!("{who} was removed")),
+                        Err(ref err) if is_gone(err) => already_removed(),
+                        Err(ref err)
+                            if err.status.is_client_error() && err.body.code != folo_client::NOT_FOLO =>
+                        {
+                            match self.entry(id, entry_id) {
+                                Ok(e) => classify(&e),
+                                Err(ref g) if is_gone(g) => already_removed(),
+                                Err(_) => CleanUp::OpenOrUnknown(unread(who)),
+                            }
+                        }
+                        Err(_) => match self.entry(id, entry_id) {
+                            Err(ref g) if is_gone(g) => CleanUp::Closed(format!("{who} was removed")),
+                            Ok(e) => classify(&e),
+                            Err(_) => CleanUp::OpenOrUnknown(unread(who)),
+                        },
+                    };
+                }
+                // Legacy server fallback (without `bench_upload_safe`): two-step stop then delete.
+                let stopped = self.stop_entry(id, entry_id).or_else(|_| self.entry(id, entry_id));
+                match stopped {
+                    Ok(e) if e.status == BenchEntryStatus::Stopped => match self.delete_entry(id, entry_id) {
+                        Ok(()) => CleanUp::Closed(format!("{who} was removed")),
+                        Err(ref u) if is_gone(u) => already_removed(),
+                        Err(u) => CleanUp::Closed(format!(
+                            "{who} is stopped; removing it did not succeed ({})",
+                            u.body.message
+                        )),
+                    },
+                    Ok(e) => classify(&e),
+                    Err(ref err) if is_gone(err) => already_removed(),
+                    Err(_) => CleanUp::OpenOrUnknown(unread(who)),
+                }
             }
-            Ok(e) => return classify(&e),
-            Err(ref err) if is_gone(err) => return gone(),
-            Err(_) => return CleanUp::OpenOrUnknown(unread(&who)),
-        };
-        match stopped {
-            Ok(e) if e.status == BenchEntryStatus::Stopped => match self.delete_entry(id, &opened.id) {
-                Ok(()) => CleanUp::Closed(format!("{who} was removed")),
-                Err(ref u) if is_gone(u) => gone(),
-                Err(u) => CleanUp::Closed(format!(
-                    "{who} is stopped; removing it did not succeed ({})",
-                    u.body.message
-                )),
-            },
             Ok(e) => classify(&e),
-            Err(ref err) if is_gone(err) => gone(),
-            Err(_) => CleanUp::OpenOrUnknown(unread(&who)),
+            Err(ref err) if is_gone(err) => {
+                if existed {
+                    already_removed()
+                } else {
+                    CleanUp::OpenOrUnknown(format!("{who} was not found on the server; {ENTRY_COMMANDS}"))
+                }
+            }
+            Err(_) => CleanUp::OpenOrUnknown(unread(who)),
         }
     }
 
@@ -503,10 +553,17 @@ fn unread(who: &str) -> String {
     format!("{who} may be left on the server: its state could not be read; {ENTRY_COMMANDS}")
 }
 
+/// True when an opening `POST /entries` error came cleanly from FOLO and proves no entry was created
+/// (any parsed FOLO `4xx` or `501 not_implemented`). Unparsed proxy `4xx` (`NOT_FOLO`) and other `5xx` are ambiguous.
+fn start_definitely_refused(e: &Error) -> bool {
+    e.body.code != folo_client::NOT_FOLO
+        && (e.status.is_client_error() || e.status == StatusCode::NOT_IMPLEMENTED)
+}
+
 /// The request that opens an entry failed: when the answer may be what was lost, the entry may exist, and its id is
 /// not known here.
 fn lost_start(e: Error, name: &str) -> Error {
-    if !e.status.is_server_error() {
+    if start_definitely_refused(&e) {
         return e;
     }
     let what = format!(

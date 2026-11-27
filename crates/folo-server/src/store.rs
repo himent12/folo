@@ -35,6 +35,10 @@ pub use folo_vision::{PredictOptions, TileConfig, TileMergeMetric, TtaConfig};
 /// `tile` (SAHI) and `tta` (Test-Time Augmentation) fields.
 pub const FEATURE_PREDICT_OPTIONS: &str = "predict_options";
 
+/// Server capability flag advertised on `/api/health` and `/api/system` when `/api/bench` honours client-chosen
+/// `?entry_id=<id>` on `POST .../entries` and conditional `?only_if_open=true` on `POST .../entries/{id}/stop`.
+pub const FEATURE_BENCH_UPLOAD_SAFE: &str = "bench_upload_safe";
+
 /// Maximum SAHI tiles permitted in a single server/MCP `predict` call (prevents resource exhaustion on tiny tiles).
 pub const MAX_PREDICT_TILES: usize = 256;
 /// Maximum cropped tiles predicted in a single batch in server/MCP `predict`.

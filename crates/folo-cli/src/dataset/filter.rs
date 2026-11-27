@@ -1,9 +1,10 @@
 //! `folo dataset filter`: subset filtering by class whitelist/blacklist, split selection, normalised box area,
 //! box/image pixel dimensions, and empty-image dropping on top of `folo_data::curate::write_filtered`.
 
+use std::collections::HashSet;
 use std::time::Instant;
 
-use folo_data::{DataError, FilterConfig, Split};
+use folo_data::{DataError, FilterConfig, LoadedDataset, Split};
 use serde_json::json;
 
 use crate::cli::{FilterArgs, bounds};
@@ -81,6 +82,25 @@ fn build_filter_config(args: &FilterArgs) -> Result<FilterConfig, CliError> {
     Ok(cfg)
 }
 
+/// Class names requested in `--include-class` or `--exclude-class` that do not match any class in `ds_classes`
+/// under `normalize` (deduplicated, preserving input order).
+fn find_unmatched_classes(ds_classes: &[String], cfg: &FilterConfig) -> Vec<String> {
+    let known: HashSet<String> = ds_classes.iter().map(|c| cfg.normalize.key(c)).collect();
+    let mut seen = HashSet::new();
+    let mut unmatched = Vec::new();
+    for name in cfg.include_classes.iter().flatten().chain(&cfg.exclude_classes) {
+        let key = cfg.normalize.key(name);
+        if !known.contains(&key) && seen.insert(key) {
+            unmatched.push(name.clone());
+        }
+    }
+    unmatched
+}
+
+fn total_images(ds: &LoadedDataset) -> usize {
+    Split::ALL.iter().map(|&s| ds.split(s).entries().len()).sum()
+}
+
 pub(super) fn filter(args: FilterArgs, out: Out) -> Result<(), CliError> {
     let cfg = build_filter_config(&args)?;
     let ds = open(&args.path, format_of(args.from))?;
@@ -102,18 +122,35 @@ pub(super) fn filter(args: FilterArgs, out: Out) -> Result<(), CliError> {
     check_convert_output_outside(&args.out, &args.path, &ds)?;
     ensure_empty_output(&args.out)?;
     let skipped = ds.report.skipped_images() + ds.report.skipped_label_images();
+    let src_images = total_images(&ds);
+    let unmatched = find_unmatched_classes(&ds.classes, &cfg);
     let t0 = Instant::now();
     let filtered = folo_data::filter_dataset(&ds, &cfg).map_err(|e| match e {
         DataError::Config(m) => invalid_filter(m),
         e => output_data_error(e, &args.out),
     })?;
+    if total_images(&filtered) == 0 {
+        let mut hint = "relax the split, class, box, or image dimension filters".to_string();
+        if !unmatched.is_empty() {
+            hint.push_str(&format!(" (unmatched class filter(s): {})", unmatched.join(", ")));
+        }
+        return Err(CliError::new(
+            ExitCode::Runtime,
+            "invalid_dataset",
+            format!(
+                "no images in {} matched the filter (0 of {src_images} kept)",
+                folo_api::json::path(&args.path)
+            ),
+        )
+        .hint(hint));
+    }
     let out_classes = filtered.classes.clone();
     let done = folo_data::convert::convert(&filtered, &args.out, to).map_err(|e| match e {
         DataError::Config(m) => CliError::new(ExitCode::Runtime, "invalid_dataset", m),
         e => output_data_error(e, &args.out),
     })?;
     let secs = t0.elapsed().as_secs_f64();
-    out.record(&json!({
+    let mut rec = json!({
         "input": folo_api::json::path(&args.path),
         "output": folo_api::json::path(&done.root),
         "from": format_name(ds.format),
@@ -123,7 +160,11 @@ pub(super) fn filter(args: FilterArgs, out: Out) -> Result<(), CliError> {
         "boxes": done.boxes,
         "skipped_images": skipped,
         "seconds": secs,
-    }));
+    });
+    if !unmatched.is_empty() {
+        rec["unmatched_classes"] = json!(unmatched);
+    }
+    out.record(&rec);
     let [train, val, test] = done.splits;
     out.human(format!(
         "filtered {} {} → {} at {} ({train} train / {val} val / {test} test images, {} classes, {} boxes) in \
@@ -135,6 +176,13 @@ pub(super) fn filter(args: FilterArgs, out: Out) -> Result<(), CliError> {
         out_classes.len(),
         done.boxes,
     ));
+    if !unmatched.is_empty() {
+        out.human(format!(
+            "  warning: unmatched class filter(s) not found in dataset: {} (available: {})",
+            unmatched.join(", "),
+            ds.classes.join(", "),
+        ));
+    }
     if skipped > 0 {
         out.human(format!(
             "  {skipped} image(s) were skipped (unreadable or broken labels); {}",

@@ -164,13 +164,21 @@ async fn entries(State(st): State<AppState>, ApiPath(id): ApiPath<String>) -> Re
     Ok(Json(BenchEntryList { entries: st.store.benches()?.entries(&id)? }))
 }
 
+#[derive(Deserialize)]
+struct StartEntryParams {
+    #[serde(default)]
+    entry_id: Option<String>,
+}
+
 async fn start_entry(
     State(st): State<AppState>,
     ApiPath(id): ApiPath<String>,
+    ApiQuery(p): ApiQuery<StartEntryParams>,
     ApiJson(req): ApiJson<StartBenchEntry>,
 ) -> Result<Response> {
     // An external entry is scored in the request: on the blocking pool, as everything else here.
-    let entry: BenchEntry = blocking(&st, move |s| s.benches()?.start_entry(s, &id, req)).await?;
+    let entry: BenchEntry =
+        blocking(&st, move |s| s.benches()?.start_entry_with_id(s, &id, req, p.entry_id)).await?;
     Ok((StatusCode::CREATED, Json(entry)).into_response())
 }
 
@@ -220,11 +228,35 @@ async fn entry_images(
     Ok(Json(blocking(&st, move |s| s.benches()?.entry_images(&id, &entry_id, worst, p.offset, limit)).await?))
 }
 
+#[derive(Deserialize)]
+struct StopEntryParams {
+    #[serde(default)]
+    only_if_open: bool,
+    #[serde(default)]
+    delete: bool,
+}
+
 async fn stop_entry(
     State(st): State<AppState>,
     ApiPath((id, entry_id)): ApiPath<(String, String)>,
+    ApiQuery(p): ApiQuery<StopEntryParams>,
 ) -> Result<Json<BenchEntry>> {
-    Ok(Json(blocking(&st, move |s| s.benches()?.stop_entry(&id, &entry_id)).await?))
+    if p.delete && !p.only_if_open {
+        return Err(bad_query("delete=true requires only_if_open=true"));
+    }
+    Ok(Json(
+        blocking(&st, move |s| {
+            let benches = s.benches()?;
+            if p.only_if_open && p.delete {
+                benches.discard_open_entry(&id, &entry_id)
+            } else if p.only_if_open {
+                benches.stop_open_entry(&id, &entry_id)
+            } else {
+                benches.stop_entry(&id, &entry_id)
+            }
+        })
+        .await?,
+    ))
 }
 
 /// `POST …/entries/{entry_id}/predictions`: a part of an open external entry (up to 64 MiB).

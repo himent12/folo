@@ -28,11 +28,25 @@ pub(super) fn enqueue_model(
     max_images: Option<u32>,
     conditions: bool,
 ) -> Result<BenchEntry> {
+    enqueue_model_with_id(engine, slot, resolved, name, max_images, conditions, None)
+}
+
+/// [`enqueue_model`] with an optional validated client-chosen `requested_id`.
+fn enqueue_model_with_id(
+    engine: &Engine,
+    slot: &Arc<Slot>,
+    resolved: Resolved,
+    name: Option<String>,
+    max_images: Option<u32>,
+    conditions: bool,
+    requested_id: Option<String>,
+) -> Result<BenchEntry> {
     let mut state = slot.live()?;
     let images = entry_images(max_images, state.file.images.len(), state.file.images.len())?;
     let passes = model::passes(&state.file.plan, conditions).len();
-    let entry = new_entry(
+    let entry = new_entry_with_id(
         &state,
+        requested_id,
         name.unwrap_or(resolved.name),
         resolved.contestant,
         BenchEntryStatus::Queued,
@@ -41,7 +55,7 @@ pub(super) fn enqueue_model(
         true,
         model::total(images, passes),
         resolved.missing,
-    );
+    )?;
     let cancel = Arc::new(AtomicBool::new(false));
     add_entry(slot, &mut state, entry.clone(), cancel.clone(), None, None)?;
     drop(state);
@@ -126,6 +140,83 @@ pub(super) fn stop_entry_in(engine: &Engine, slot: &Slot, id: &str) -> Result<Be
     Ok(entry)
 }
 
+/// Atomically stops entry `id` of `slot` ONLY if it is still an open external entry actively collecting parts
+/// (`e.open.is_some()` and `!fill.closed`). When `delete` is true, removes the entry from disk and memory in the
+/// same critical section so no separate `DELETE` can race with another client. If another request already
+/// finished, began grading, or stopped it, returns `409 bench_entry_not_open` without modifying the entry.
+fn stop_open_entry_in(slot: &Slot, id: &str, delete: bool) -> Result<BenchEntry> {
+    let mut state = slot.live()?;
+    let e = state.entry(id)?;
+    let Some(fill) = e.open.clone() else {
+        return Err(external::not_open(id, &e.entry));
+    };
+    // Hold `fill` across disk I/O (benchmark lock first, filling lock second — matching `expire`) so no
+    // concurrent `add` or `finish` can observe `!closed` and start grading while we stop or remove it.
+    let mut f = fill.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if f.closed {
+        return Err(external::not_open(id, &e.entry));
+    }
+    let mut entry = e.entry.clone();
+    entry.status = BenchEntryStatus::Stopped;
+    entry.finished = Some(rfc3339(unix_now()));
+    if delete {
+        slot.remove_entry(id)?;
+        f.closed = true;
+        drop(f);
+        if let Some(e) = state.entry_mut(id) {
+            e.cancel.store(true, Ordering::SeqCst);
+            e.open = None;
+        }
+        state.entries.retain(|e| e.entry.id != id);
+        slot.emit(BenchEvent::Removed(BenchRemoved { id: id.to_string() }));
+        slot.emit_bench(&state);
+        return Ok(entry);
+    }
+    slot.save_entry(&state, &entry, None)?;
+    f.closed = true;
+    drop(f);
+    let e = state.entry_mut(id).expect("looked up above, under the same lock");
+    e.cancel.store(true, Ordering::SeqCst);
+    e.open = None;
+    e.entry = entry.clone();
+    slot.emit(BenchEvent::Entry(Box::new(entry.clone())));
+    slot.emit_bench(&state);
+    Ok(entry)
+}
+
+/// Validates a client-chosen `entry_id` (`be_` followed by 4..=48 lowercase ASCII alphanumeric characters).
+pub(super) fn check_entry_id(id: &str) -> Result<String> {
+    let Some(rest) = id.strip_prefix("be_") else {
+        return Err(Error::new(
+            axum::http::StatusCode::BAD_REQUEST,
+            "invalid_query",
+            format!("entry_id '{id}' must start with `be_` followed by 4 to 48 lowercase letters or digits"),
+        ));
+    };
+    if !(4..=48).contains(&rest.len()) || !rest.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+    {
+        return Err(Error::new(
+            axum::http::StatusCode::BAD_REQUEST,
+            "invalid_query",
+            format!("entry_id '{id}' must start with `be_` followed by 4 to 48 lowercase letters or digits"),
+        ));
+    }
+    Ok(id.to_string())
+}
+
+/// Ensures `id` is not already used by an entry of `state`.
+pub(super) fn check_entry_id_free(state: &State, id: &str) -> Result<()> {
+    if state.entries.iter().any(|e| e.entry.id == id) {
+        return Err(Error::new(
+            axum::http::StatusCode::BAD_REQUEST,
+            "invalid_query",
+            format!("entry_id '{id}' already exists on benchmark '{}'", state.file.id),
+        )
+        .hint("pick a fresh entry_id or omit it to let the server choose one"));
+    }
+    Ok(())
+}
+
 pub(super) fn status_name(s: BenchEntryStatus) -> &'static str {
     match s {
         BenchEntryStatus::Queued => "queued",
@@ -147,6 +238,7 @@ fn entry_images(max_images: Option<u32>, images: usize, default: usize) -> Resul
 }
 
 /// A new entry of the benchmark in `state` with a fresh id.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn new_entry(
     state: &State,
@@ -159,15 +251,39 @@ pub(super) fn new_entry(
     total: u64,
     missing: Vec<String>,
 ) -> BenchEntry {
-    let id = unique_id("be", fnv1a(name.as_bytes()) ^ unix_now().to_bits(), |id| {
-        state.entries.iter().any(|e| e.entry.id == id)
-    });
+    new_entry_with_id(state, None, name, contestant, status, images, conditions, scored, total, missing)
+        .expect("server-generated unique_id never collides")
+}
+
+/// A new entry of the benchmark in `state`, using validated `requested_id` when given or a fresh id otherwise.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn new_entry_with_id(
+    state: &State,
+    requested_id: Option<String>,
+    name: String,
+    contestant: BenchContestant,
+    status: BenchEntryStatus,
+    images: usize,
+    conditions: bool,
+    scored: bool,
+    total: u64,
+    missing: Vec<String>,
+) -> Result<BenchEntry> {
+    let id = match requested_id {
+        Some(id) => {
+            check_entry_id_free(state, &id)?;
+            id
+        }
+        None => unique_id("be", fnv1a(name.as_bytes()) ^ unix_now().to_bits(), |id| {
+            state.entries.iter().any(|e| e.entry.id == id)
+        }),
+    };
     // To the millisecond and later than every entry the benchmark has: `created` (then the id) is the order of
     // the leaderboard's ties, and it has to be the order the entries were made in, also after a restart.
     let last = state.entries.iter().filter_map(|e| parse_rfc3339_millis(&e.entry.created)).max();
     let now = (unix_now() * 1000.0) as i64;
     let created = rfc3339_millis(last.map_or(now, |l| now.max(l + 1)));
-    BenchEntry {
+    Ok(BenchEntry {
         id,
         bench_id: state.file.id.clone(),
         name,
@@ -189,7 +305,7 @@ pub(super) fn new_entry(
         usage: None,
         error: None,
         hint: None,
-    }
+    })
 }
 
 /// Adds `entry` to the benchmark (written, sent, the benchmark's count sent too). `parts` for an entry that is
@@ -222,6 +338,18 @@ impl Benches {
 
     /// `POST /api/bench/benchmarks/{id}/entries`.
     pub fn start_entry(&self, store: &dyn Store, id: &str, req: StartBenchEntry) -> Result<BenchEntry> {
+        self.start_entry_with_id(store, id, req, None)
+    }
+
+    /// `POST /api/bench/benchmarks/{id}/entries[?entry_id=<id>]`.
+    pub fn start_entry_with_id(
+        &self,
+        store: &dyn Store,
+        id: &str,
+        req: StartBenchEntry,
+        entry_id: Option<String>,
+    ) -> Result<BenchEntry> {
+        let requested_id = entry_id.as_deref().map(check_entry_id).transpose()?;
         let slot = self.slot(id)?;
         let name =
             req.name.as_deref().map(str::trim).filter(|n| !n.is_empty()).map(check_name).transpose()?;
@@ -234,19 +362,20 @@ impl Benches {
                     ));
                 }
                 let name = name.ok_or_else(|| invalid("name is required for an external contestant"))?;
-                external::start(&slot, name, scored, open, predictions)
+                external::start(&slot, name, scored, open, predictions, requested_id)
             }
             BenchContestantSpec::Model { model_id } => {
                 let classes = slot.live()?.file.classes.clone();
                 let m = store.get_model(&model_id)?;
                 let resolved = model::resolve(&m, &classes)?;
-                enqueue_model(
+                enqueue_model_with_id(
                     &self.engine,
                     &slot,
                     resolved,
                     name,
                     req.max_images,
                     req.conditions.unwrap_or(true),
+                    requested_id,
                 )
             }
             BenchContestantSpec::Agent { agent: agent_id, model, effort } => {
@@ -264,8 +393,9 @@ impl Benches {
                 let mut state = slot.live()?;
                 let images = entry_images(req.max_images, state.file.images.len(), AGENT_IMAGES as usize)?;
                 let passes = model::passes(&state.file.plan, conditions).len();
-                let mut entry = new_entry(
+                let mut entry = new_entry_with_id(
                     &state,
+                    requested_id,
                     name,
                     BenchContestant::Agent { agent: agent_id, model: model.clone(), effort },
                     BenchEntryStatus::Running,
@@ -274,7 +404,7 @@ impl Benches {
                     true,
                     model::total(images, passes),
                     Vec::new(),
-                );
+                )?;
                 entry.usage = Some(LabelUsage::default());
                 let cancel = Arc::new(AtomicBool::new(false));
                 add_entry(&slot, &mut state, entry.clone(), cancel.clone(), None, None)?;
@@ -379,6 +509,19 @@ impl Benches {
     /// `POST …/entries/{entry_id}/stop`.
     pub fn stop_entry(&self, id: &str, entry_id: &str) -> Result<BenchEntry> {
         stop_entry_in(&self.engine, &*self.slot(id)?, entry_id)
+    }
+
+    /// `POST …/entries/{entry_id}/stop?only_if_open=true`: stops `entry_id` only if it is still an open external
+    /// entry actively collecting parts, returning `409 bench_entry_not_open` if it is already being scored or ended.
+    pub fn stop_open_entry(&self, id: &str, entry_id: &str) -> Result<BenchEntry> {
+        stop_open_entry_in(&*self.slot(id)?, entry_id, false)
+    }
+
+    /// `POST …/entries/{entry_id}/stop?only_if_open=true&delete=true`: atomically stops and removes `entry_id`
+    /// only if it is still an open external entry actively collecting parts, returning `409 bench_entry_not_open`
+    /// otherwise without canceling a score or removing an entry stopped elsewhere.
+    pub fn discard_open_entry(&self, id: &str, entry_id: &str) -> Result<BenchEntry> {
+        stop_open_entry_in(&*self.slot(id)?, entry_id, true)
     }
 
     /// `DELETE …/entries/{entry_id}`.

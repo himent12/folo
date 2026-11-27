@@ -177,10 +177,19 @@ fn append_perceptual_audit(path: &Path, report: &mut CheckReport, threshold: u32
     })
 }
 
-/// Whether `i` is a cross-split duplicate leakage warning (`folo_data::audit` / `folo_data::check`).
+/// Whether `i` is an exact-byte cross-split duplicate leakage warning (`folo_data::audit` / `folo_data::check`).
+fn is_exact_split_leakage(i: &CheckIssue) -> bool {
+    i.kind == CheckKind::DuplicateImage && i.message.starts_with("split leakage (")
+}
+
+/// Whether `i` is a perceptual dHash cross-split near-duplicate leakage warning.
+fn is_perceptual_split_leakage(i: &CheckIssue) -> bool {
+    i.kind == CheckKind::DuplicateImage && i.message.starts_with("perceptual split leakage (")
+}
+
+/// Whether `i` is any cross-split duplicate leakage warning (exact or perceptual).
 fn is_split_leakage(i: &CheckIssue) -> bool {
-    i.kind == CheckKind::DuplicateImage
-        && (i.message.starts_with("split leakage (") || i.message.starts_with("perceptual split leakage ("))
+    is_exact_split_leakage(i) || is_perceptual_split_leakage(i)
 }
 
 /// Whether `i` is `folo_data::check`'s COCO declared-vs-actual dimension mismatch warning.
@@ -334,10 +343,17 @@ fn check_lines(r: &CheckReport, fixes: bool, min_severity: SeverityArg, secs: f6
     if min_severity == SeverityArg::Error && warnings > 0 {
         l.push(format!("({warnings} warning(s) hidden by --min-severity error)"));
     }
-    let split_leakage = r.issues.iter().filter(|i| is_split_leakage(i)).count();
+    let exact_leakage = r.issues.iter().filter(|i| is_exact_split_leakage(i)).count();
+    let perceptual_leakage = r.issues.iter().filter(|i| is_perceptual_split_leakage(i)).count();
+    let split_leakage = exact_leakage + perceptual_leakage;
     if split_leakage > 0 {
+        let detail = match (exact_leakage, perceptual_leakage) {
+            (e, 0) if e > 0 => "identical image content across splits".to_string(),
+            (0, p) if p > 0 => "perceptually near-duplicate images across splits".to_string(),
+            (e, p) => format!("{e} exact and {p} perceptual near-duplicate images across splits"),
+        };
         l.push(format!(
-            "{split_leakage} cross-split duplicate leakage warning(s) (identical image content across splits; remove duplicate copies to keep evaluation unbiased)"
+            "{split_leakage} cross-split duplicate leakage warning(s) ({detail}; remove duplicate copies to keep evaluation unbiased)"
         ));
     }
     if empty > 0 {

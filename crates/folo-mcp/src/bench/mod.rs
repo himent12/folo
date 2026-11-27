@@ -11,7 +11,8 @@ pub mod hints;
 mod ops;
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use folo_api::{
     Bench, BenchCatalog, BenchEntry, BenchEntryList, BenchList, BenchPrediction, BenchPredictions,
@@ -20,6 +21,7 @@ use folo_api::{
 use folo_client::encode;
 use folo_server::Store;
 use folo_server::bench::Benches;
+use folo_server::store::FEATURE_BENCH_UPLOAD_SAFE;
 use http::StatusCode;
 
 pub use ops::{Contestant, MAX_PART_BOXES, read_predictions};
@@ -127,11 +129,37 @@ impl Benchmarks {
         }
     }
 
+    /// Whether this backend supports client-chosen `entry_id` and conditional `?only_if_open=true[&delete=true]` stops.
+    pub(super) fn supports_upload_safe(&self) -> bool {
+        match self {
+            Benchmarks::Store(s) => s.benches().is_ok(),
+            Benchmarks::Http(h) => h.has_feature(FEATURE_BENCH_UPLOAD_SAFE).unwrap_or(false),
+        }
+    }
+
     /// `POST /api/bench/benchmarks/{id}/entries`.
     pub fn start_entry(&self, id: &str, req: StartBenchEntry) -> Result<BenchEntry, Error> {
+        self.start_entry_with_id(id, req, None)
+    }
+
+    /// `POST /api/bench/benchmarks/{id}/entries[?entry_id=<entry_id>]`.
+    pub(super) fn start_entry_with_id(
+        &self,
+        id: &str,
+        req: StartBenchEntry,
+        entry_id: Option<&str>,
+    ) -> Result<BenchEntry, Error> {
         match self.via()? {
-            Via::Http(h) => h.client().post(&bench_path(id, "/entries")?, &req).map_err(store_error),
-            Via::Here(b, s) => b.start_entry(s, id, req),
+            Via::Http(h) => {
+                let path = match entry_id {
+                    Some(eid) if h.has_feature(FEATURE_BENCH_UPLOAD_SAFE)? => {
+                        format!("{}?entry_id={}", bench_path(id, "/entries")?, encode(eid))
+                    }
+                    _ => bench_path(id, "/entries")?,
+                };
+                h.client().post(&path, &req).map_err(store_error)
+            }
+            Via::Here(b, s) => b.start_entry_with_id(s, id, req, entry_id.map(str::to_string)),
         }
     }
 
@@ -175,6 +203,18 @@ impl Benchmarks {
         }
     }
 
+    /// `POST …/entries/{entry_id}/stop?only_if_open=true&delete=true`: atomically stops and deletes an external
+    /// entry only while it is still open and collecting parts (requires `bench_upload_safe`).
+    pub(super) fn discard_open_entry(&self, id: &str, entry_id: &str) -> Result<BenchEntry, Error> {
+        match self.via()? {
+            Via::Http(h) => h
+                .client()
+                .post_empty(&entry_path(id, entry_id, "/stop?only_if_open=true&delete=true")?)
+                .map_err(store_error),
+            Via::Here(b, _) => b.discard_open_entry(id, entry_id),
+        }
+    }
+
     /// `DELETE …/entries/{entry_id}`.
     pub fn delete_entry(&self, id: &str, entry_id: &str) -> Result<(), Error> {
         match self.via()? {
@@ -186,6 +226,33 @@ impl Benchmarks {
 
 fn get<T: serde::de::DeserializeOwned>(h: &HttpStore, path: &str) -> Result<T, Error> {
     h.client().get(path).map_err(store_error)
+}
+
+/// Generates a unique client-chosen benchmark entry id (`be_` + 16 lowercase hex chars) so a lost response to the
+/// request that opens an external entry still lets the client look up and clean up that exact entry.
+pub(super) fn fresh_entry_id(bench_id: &str, name: &str) -> String {
+    static SEQ: AtomicU64 = AtomicU64::new(1);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64);
+    let pid = std::process::id() as u64;
+    let mut h = 0xCBF2_9CE4_8422_2325u64;
+    let mut mix = |bytes: &[u8]| {
+        for &b in bytes {
+            h = (h ^ b as u64).wrapping_mul(0x0100_0000_01B3);
+        }
+    };
+    mix(&seq.to_le_bytes());
+    mix(&nanos.to_le_bytes());
+    mix(&pid.to_le_bytes());
+    mix(bench_id.as_bytes());
+    mix(name.as_bytes());
+    // SplitMix64 finalizer for uniform hex distribution across rapid sequential calls.
+    h ^= h >> 30;
+    h = h.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    h ^= h >> 27;
+    h = h.wrapping_mul(0x94D0_49BB_1331_11EB);
+    h ^= h >> 31;
+    format!("be_{h:016x}")
 }
 
 /// `/bench/benchmarks/{id}{rest}`.

@@ -197,7 +197,7 @@ fn a_refused_finish_removes_the_open_entry() {
         assert_eq!(e.body.code, "invalid_body", "{e:?}");
         assert!(e.body.message.contains("'4'") && hint.contains("was removed"), "{e:?}");
         assert!(http(url).entries(id).unwrap().is_empty(), "no entry is left");
-        assert_eq!(removals.load(Ordering::Relaxed), 2, "one stop and one delete");
+        assert_eq!(removals.load(Ordering::Relaxed), 1, "one atomic conditional stop+delete");
     });
 }
 
@@ -267,7 +267,7 @@ fn an_interrupt_during_a_request_stops_before_the_next_read() {
         let stop = Arc::new(AtomicBool::new(false));
         let flag = stop.clone();
         let via = Forwarder::new(url, move |line| {
-            if line.starts_with("POST") && line.contains("/entries ") {
+            if starts_entry(line) {
                 flag.store(true, Ordering::Relaxed);
             }
             false
@@ -296,7 +296,7 @@ fn an_interrupt_during_a_read_stops_before_the_next_request() {
             if line.contains("/predictions ") {
                 seen.fetch_add(1, Ordering::Relaxed);
             }
-            if line.starts_with("POST") && line.contains("/entries ") {
+            if starts_entry(line) {
                 opened.fetch_add(1, Ordering::Relaxed);
             }
             false
@@ -340,20 +340,64 @@ fn an_interrupt_during_a_read_stops_before_the_next_request() {
     });
 }
 
-/// The answer to the request that opens the entry is lost: the server did make it, and the error names it as the
-/// server lists it (trimmed).
+/// Lost answers to the request that opens an external entry:
+/// 1. Against a current server (`bench_upload_safe`), the client chooses `entry_id` upfront, finds the entry it
+///    opened, stops it conditionally and removes it (zero orphaned entries).
+/// 2. If the follow-up state read also fails, the hint names the exact `entry_id` matching the server's entry.
+/// 3. If the open request never reached the server, the follow-up read sees 404 and names the chosen `entry_id`.
+/// 4. Against a legacy server without `bench_upload_safe`, it falls back to naming the trimmed entry name.
 #[test]
 fn a_lost_answer_to_the_first_part_names_the_entry_as_listed() {
     with_server("mcp-bench-lost-start", |url, id, dir| {
-        let via = Forwarder::new(url, |line| line.starts_with("POST") && line.contains("/entries "));
+        // 1. Current server: answer to first part lost -> client knows `entry_id`, stops and removes it.
+        let via = Forwarder::new(url, starts_entry);
         let e = http(&via.url)
             .submit_in(id, " opened ".into(), true, &whole_file(dir), THREE, &AtomicBool::new(false))
             .unwrap_err();
         let hint = e.body.hint.clone().unwrap_or_default();
-        assert!(hint.contains("may have opened an entry named 'opened'"), "{e:?}");
+        assert!(hint.contains("entry 'opened' (be_") && hint.contains("was removed"), "{e:?}");
+        assert!(http(url).entries(id).unwrap().is_empty(), "lost-start entry must be cleaned up");
+
+        // 2. Both the open answer and follow-up GET are lost -> hint names the exact id created on the server.
+        let via_unread = Forwarder::new(url, |line| starts_entry(line) || reads_entry(line));
+        let e = http(&via_unread.url)
+            .submit_in(id, " stranded ".into(), true, &whole_file(dir), THREE, &AtomicBool::new(false))
+            .unwrap_err();
         let listed = http(url).entries(id).unwrap();
-        assert_eq!(listed.len(), 1, "the server made the entry");
-        assert_eq!((listed[0].name.as_str(), listed[0].status), ("opened", BenchEntryStatus::Running));
+        assert_eq!(listed.len(), 1, "server created the entry");
+        let hint = e.body.hint.clone().unwrap_or_default();
+        assert!(
+            hint.contains(&format!("entry 'stranded' ({})", listed[0].id))
+                && hint.contains("its state could not be read"),
+            "{e:?}"
+        );
+        http(url).stop_entry(id, &listed[0].id).unwrap();
+        http(url).delete_entry(id, &listed[0].id).unwrap();
+
+        // 3. Open request never reached the server -> follow-up GET sees 404, reports not found with id.
+        let via_never = Forwarder::new(url, |line| if starts_entry(line) { Fate::Never } else { Fate::Pass });
+        let e = http(&via_never.url)
+            .submit_in(id, " never ".into(), true, &whole_file(dir), THREE, &AtomicBool::new(false))
+            .unwrap_err();
+        let hint = e.body.hint.clone().unwrap_or_default();
+        assert!(hint.contains("entry 'never' (be_") && hint.contains("was not found on the server"), "{e:?}");
+        assert!(http(url).entries(id).unwrap().is_empty());
+
+        // 4. Legacy server without `bench_upload_safe`: falls back to naming the trimmed entry name.
+        let legacy = Benchmarks::Http(std::sync::Arc::new(
+            crate::proxy::HttpStore::new(&via.url, None)
+                .assume_features(vec![folo_api::FEATURE_VISION_BENCH.into()]),
+        ));
+        let e = legacy
+            .submit_in(id, " legacy ".into(), true, &whole_file(dir), THREE, &AtomicBool::new(false))
+            .unwrap_err();
+        let hint = e.body.hint.clone().unwrap_or_default();
+        assert!(hint.contains("may have opened an entry named 'legacy'"), "{e:?}");
+        let listed = http(url).entries(id).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!((listed[0].name.as_str(), listed[0].status), ("legacy", BenchEntryStatus::Running));
+        http(url).stop_entry(id, &listed[0].id).unwrap();
+        http(url).delete_entry(id, &listed[0].id).unwrap();
     });
 }
 
@@ -368,7 +412,7 @@ fn a_part_refused_after_another_client_scored_keeps_the_score() {
         let stops = Arc::new(AtomicUsize::new(0));
         let seen = stops.clone();
         let via = Forwarder::new(url, move |line| {
-            if line.contains("/stop ") {
+            if stops_entry(line) {
                 seen.fetch_add(1, Ordering::Relaxed);
             }
             if line.starts_with("POST") && line.contains("/predictions ") {
@@ -399,7 +443,7 @@ fn a_lost_answer_to_the_stop_still_removes_the_entry() {
         let lines: Vec<String> =
             ["1", "2", "3", "99"].iter().map(|i| format!(r#"{{"image":"{i}","boxes":[]}}"#)).collect();
         std::fs::write(&file, lines.join("\n")).unwrap();
-        let via = Forwarder::new(url, |line| line.starts_with("POST") && line.contains("/stop "));
+        let via = Forwarder::new(url, stops_entry);
         let e = http(&via.url)
             .submit_in(id, "bad".into(), true, &file, THREE, &AtomicBool::new(false))
             .unwrap_err();
@@ -409,6 +453,148 @@ fn a_lost_answer_to_the_stop_still_removes_the_entry() {
                 && e.body.message.contains("99")
                 && hint.contains("was removed"),
             "{e:?}"
+        );
+        assert!(http(url).entries(id).unwrap().is_empty());
+    });
+}
+
+/// Between cleanup's state read (seeing `running`) and its conditional `POST .../stop?only_if_open=true`:
+/// 1. Another client finishes the entry -> conditional stop returns `409 bench_entry_not_open`, score stays intact.
+/// 2. Another client stops the entry -> conditional stop returns `409 bench_entry_not_open`, entry is NOT deleted.
+#[test]
+fn conditional_stop_protects_entry_finished_or_stopped_between_read_and_stop() {
+    with_server("mcp-bench-conditional-stop-race", |url, id, dir| {
+        let file = dir.join("bad.jsonl");
+        let lines: Vec<String> =
+            ["1", "2", "3", "99"].iter().map(|i| format!(r#"{{"image":"{i}","boxes":[]}}"#)).collect();
+        std::fs::write(&file, lines.join("\n")).unwrap();
+
+        // 1. Another client completes and finishes the entry right before cleanup's conditional stop.
+        let (other, bench) = (http(url), id.to_string());
+        let via_finish = Forwarder::new(url, move |line| {
+            if stops_entry(line) {
+                let path = line.split(' ').nth(1).unwrap();
+                let entry_id = path.split('?').next().unwrap().rsplit('/').nth(1).unwrap();
+                other.add_predictions(&bench, entry_id, vec![record("4", 0)]).unwrap();
+                other.finish(&bench, entry_id).unwrap();
+            }
+            Fate::Pass
+        });
+        let e = http(&via_finish.url)
+            .submit_in(id, "raced-finish".into(), true, &file, THREE, &AtomicBool::new(false))
+            .unwrap_err();
+        let hint = e.body.hint.clone().unwrap_or_default();
+        assert!(hint.contains("'raced-finish'") && hint.contains("it is done"), "{e:?}");
+        let listed = http(url).entries(id).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].status, BenchEntryStatus::Done);
+        assert!(listed[0].score.is_some(), "other client's score must be preserved");
+        http(url).delete_entry(id, &listed[0].id).unwrap();
+
+        // 2. Another client stops the entry right before cleanup's conditional stop -> not deleted!
+        let (other, bench) = (http(url), id.to_string());
+        let via_stop = Forwarder::new(url, move |line| {
+            if stops_entry(line) {
+                let path = line.split(' ').nth(1).unwrap();
+                let entry_id = path.split('?').next().unwrap().rsplit('/').nth(1).unwrap();
+                other.stop_entry(&bench, entry_id).unwrap();
+            }
+            Fate::Pass
+        });
+        let e = http(&via_stop.url)
+            .submit_in(id, "raced-stop".into(), true, &file, THREE, &AtomicBool::new(false))
+            .unwrap_err();
+        let hint = e.body.hint.clone().unwrap_or_default();
+        assert!(hint.contains("'raced-stop'") && hint.contains("it is stopped"), "{e:?}");
+        let listed = http(url).entries(id).unwrap();
+        assert_eq!(listed.len(), 1, "entry stopped by another client must not be deleted");
+        assert_eq!(listed[0].status, BenchEntryStatus::Stopped);
+        http(url).delete_entry(id, &listed[0].id).unwrap();
+
+        // 3. Another client stops the entry AND the conditional discard's 409 response is lost on the wire:
+        //    the follow-up GET sees `Stopped`, and cleanup NEVER sends a separate DELETE.
+        let (other, bench) = (http(url), id.to_string());
+        let via_lost_409 = Forwarder::new(url, move |line| {
+            if stops_entry(line) {
+                let path = line.split(' ').nth(1).unwrap();
+                let entry_id = path.split('?').next().unwrap().rsplit('/').nth(1).unwrap();
+                other.stop_entry(&bench, entry_id).unwrap();
+                return Fate::LoseAnswer;
+            }
+            Fate::Pass
+        });
+        let e = http(&via_lost_409.url)
+            .submit_in(id, "raced-lost-409".into(), true, &file, THREE, &AtomicBool::new(false))
+            .unwrap_err();
+        let hint = e.body.hint.clone().unwrap_or_default();
+        assert!(hint.contains("'raced-lost-409'") && hint.contains("it is stopped"), "{e:?}");
+        let listed = http(url).entries(id).unwrap();
+        assert_eq!(listed.len(), 1, "ambiguous discard response must never delete entry stopped elsewhere");
+        assert_eq!(listed[0].status, BenchEntryStatus::Stopped);
+        http(url).delete_entry(id, &listed[0].id).unwrap();
+    });
+}
+
+/// Unparsed proxy 4xx on part 1 triggers lost-start recovery (never drops the chosen id), embedded `MockStore`
+/// returns `501 not_implemented` without bogus cleanup hints, and a post-discovery 404 after lost-start reports
+/// "was already removed" rather than "was not found on the server".
+#[test]
+fn lost_start_handles_proxy_4xx_mock_501_and_post_discovery_delete() {
+    // 1. Embedded MockStore: `501 not_implemented` without bogus `entry '...' (be_...)` hint.
+    let mock_dir = folo_test_support::TestDir::new("mcp-bench-mock-501");
+    let mock = Benchmarks::Store(std::sync::Arc::new(folo_server::MockStore::new()));
+    let err = mock
+        .submit_in(
+            "bn_1",
+            "mocked".into(),
+            true,
+            &whole_file(mock_dir.path()),
+            THREE,
+            &AtomicBool::new(false),
+        )
+        .unwrap_err();
+    assert_eq!((err.status, err.body.code.as_str()), (StatusCode::NOT_IMPLEMENTED, "not_implemented"));
+    let hint = err.body.hint.as_deref().unwrap_or_default();
+    assert!(!hint.contains("entry 'mocked'"), "501 must not run lost-start cleanup: {err:?}");
+    assert!(!hint.contains("may have opened"), "501 must not claim entry opened: {err:?}");
+
+    with_server("mcp-bench-lost-start-edges", |url, id, dir| {
+        // 2. Plain-text proxy 408 (`NOT_FOLO` 4xx) on part 1 triggers recovery and names the chosen id.
+        let via_408 = Forwarder::new(url, |line| {
+            if starts_entry(line) { Fate::Raw(408, "request timeout from proxy") } else { Fate::Pass }
+        });
+        let err = http(&via_408.url)
+            .submit_in(id, "proxy408".into(), true, &whole_file(dir), THREE, &AtomicBool::new(false))
+            .unwrap_err();
+        assert_eq!((err.status.as_u16(), err.body.code.as_str()), (408, folo_client::NOT_FOLO));
+        let hint = err.body.hint.as_deref().unwrap_or_default();
+        assert!(
+            hint.contains("entry 'proxy408' (be_") && hint.contains("was not found on the server"),
+            "proxy 408 must trigger lost-start recovery: {err:?}"
+        );
+
+        // 3. Lost start answer -> initial GET observes `Running` -> another client removes it before discard ->
+        //    reports "was already removed" (never "was not found on the server").
+        let (other, bench) = (http(url), id.to_string());
+        let via_post_del = Forwarder::new(url, move |line| {
+            if starts_entry(line) {
+                return Fate::LoseAnswer;
+            }
+            if stops_entry(line) {
+                let path = line.split(' ').nth(1).unwrap();
+                let entry_id = path.split('?').next().unwrap().rsplit('/').nth(1).unwrap();
+                let _ = other.stop_entry(&bench, entry_id);
+                let _ = other.delete_entry(&bench, entry_id);
+            }
+            Fate::Pass
+        });
+        let err = http(&via_post_del.url)
+            .submit_in(id, "postdel".into(), true, &whole_file(dir), THREE, &AtomicBool::new(false))
+            .unwrap_err();
+        let hint = err.body.hint.as_deref().unwrap_or_default();
+        assert!(
+            hint.contains("entry 'postdel' (be_") && hint.contains("was already removed"),
+            "post-discovery 404 must report 'was already removed': {err:?}"
         );
         assert!(http(url).entries(id).unwrap().is_empty());
     });
@@ -461,7 +647,7 @@ fn refused_distinguishes_unparsed_4xx_and_other_409_codes() {
             .unwrap_err();
         assert_eq!((e.status.as_u16(), e.body.code.as_str()), (409, "bench_frozen"), "{e:?}");
         assert!(e.body.hint.as_deref().unwrap_or_default().contains("was removed"), "{e:?}");
-        assert_eq!(removals.load(Ordering::Relaxed), 2, "one stop and one delete");
+        assert_eq!(removals.load(Ordering::Relaxed), 1, "one atomic conditional stop+delete");
         assert!(http(url).entries(id).unwrap().is_empty());
     });
 }

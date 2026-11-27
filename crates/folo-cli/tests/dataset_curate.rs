@@ -198,6 +198,31 @@ fn dataset_filter_filters_classes_splits_and_converts_format() {
     ]);
     assert_eq!(code, 2);
     assert_eq!(err["error"]["code"], "invalid_config");
+
+    // Unmatched class filter names are surfaced in JSON (and human warnings) so typos are caught.
+    let typo_out = dir.join("typo_out");
+    let (code, rec, stderr) =
+        folo_one(&["dataset", "filter", s(&src), "--out", s(&typo_out), "--exclude-class", "quda", "--json"]);
+    assert_eq!(code, 0, "{stderr}: {rec}");
+    assert_eq!(rec["unmatched_classes"], serde_json::json!(["quda"]));
+
+    // Filtering out every image reports that no images matched the filter (not "no readable images").
+    let empty_out = dir.join("empty_out");
+    let (code, err, _) = folo_one(&[
+        "dataset",
+        "filter",
+        s(&src),
+        "--out",
+        s(&empty_out),
+        "--min-image-width",
+        "65",
+        "--json",
+    ]);
+    assert_eq!(code, 1);
+    assert_eq!(err["error"]["code"], "invalid_dataset");
+    let msg = err["error"]["message"].as_str().unwrap();
+    assert!(msg.contains("matched the filter"), "{err}");
+    assert!(!msg.contains("no readable images"), "{err}");
 }
 
 #[test]
@@ -241,6 +266,16 @@ fn dataset_check_perceptual_detects_recompressed_split_leakage() {
     assert_eq!(report["perceptual"]["threshold"], 6);
     assert!(report["perceptual"]["near_duplicate_leakage"].as_u64().unwrap() >= 1, "{report}");
     assert_eq!(lines[1]["error"]["code"], "dataset_issues");
+
+    // Human summary distinguishes perceptual near-duplicate leakage from exact-byte duplicates.
+    let human = Command::new(env!("CARGO_BIN_EXE_folo"))
+        .args(["dataset", "check", s(&dir), "--perceptual", "--dhash-threshold", "6"])
+        .output()
+        .expect("spawn folo");
+    assert_eq!(human.status.code(), Some(1));
+    let human_out = String::from_utf8(human.stdout).unwrap();
+    assert!(human_out.contains("perceptually near-duplicate images across splits"), "{human_out}");
+    assert!(!human_out.contains("identical image content across splits"), "{human_out}");
 
     // `--perceptual` conflicts with `--headers-only` (exit 2, `usage`).
     let (code, err, _) = folo_one(&["dataset", "check", s(&dir), "--perceptual", "--headers-only", "--json"]);

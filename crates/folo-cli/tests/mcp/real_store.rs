@@ -526,6 +526,29 @@ fn s12_val_diagnostics_dynamic_export_and_dataset_curate() {
     assert!(filtered["dataset_id"].as_str().is_some(), "{filtered}");
     assert!(filtered["kept_boxes"].as_u64().unwrap() > 0, "{filtered}");
 
+    // `filter_dataset` surfaces unmatched class filters and rejects empty filtered outputs clearly.
+    let typo = checked(
+        &mut c,
+        &schemas,
+        "filter_dataset",
+        json!({
+            "dataset_id": merged_id,
+            "name": "s12_typo",
+            "exclude_classes": ["quda"]
+        }),
+    );
+    assert_eq!(typo["unmatched_classes"], json!(["quda"]), "{typo}");
+    let empty_err = c.tool_error(
+        "filter_dataset",
+        json!({
+            "dataset_id": merged_id,
+            "name": "s12_empty",
+            "min_width": 9999
+        }),
+        "invalid_dataset",
+    );
+    assert!(empty_err["message"].as_str().unwrap().contains("matched the filter"), "{empty_err}");
+
     // 5. `audit_dataset` detects perceptual dHash cross-split leakage on recompressed copy.
     let leak_dir = home.join("leak_ds");
     for sub in ["images/train", "images/val", "labels/train", "labels/val"] {
