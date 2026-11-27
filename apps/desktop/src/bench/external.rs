@@ -5,6 +5,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use folo_ui::{AppContext, Context, Focusable, Window};
 use serde::Deserialize;
@@ -421,7 +422,8 @@ pub fn check_predictions(
 }
 
 /// Uploads validated external predictions in one request or pass-by-pass parts. On any failure
-/// after opening a multi-part entry, stops and deletes the open entry so nothing is left behind.
+/// or cancellation (`cancel`) after creating an entry, stops and deletes it so nothing is left behind.
+#[allow(clippy::too_many_arguments)]
 pub fn upload_external_predictions(
     api: &dyn Backend,
     bench_id: &str,
@@ -430,7 +432,12 @@ pub fn upload_external_predictions(
     plan: &BenchPlan,
     predictions: &[BenchPrediction],
     max_bytes: usize,
+    cancel: &AtomicBool,
 ) -> ApiResult<BenchEntry> {
+    let cancelled_err = || ApiError::new("cancelled", "Import cancelled.");
+    if cancel.load(Ordering::Relaxed) {
+        return Err(cancelled_err());
+    }
     if estimate_prediction_bytes(predictions) <= max_bytes {
         let req = StartBenchEntry {
             contestant: BenchContestantSpec::External {
@@ -442,7 +449,12 @@ pub fn upload_external_predictions(
             max_images: None,
             conditions: None,
         };
-        return api.start_bench_entry(bench_id, &req);
+        let entry = api.start_bench_entry(bench_id, &req)?;
+        if cancel.load(Ordering::Relaxed) {
+            let _ = api.delete_bench_entry(bench_id, &entry.id);
+            return Err(cancelled_err());
+        }
+        return Ok(entry);
     }
     let parts = parts_of(predictions, plan, max_bytes);
     let open_req = StartBenchEntry {
@@ -456,9 +468,13 @@ pub fn upload_external_predictions(
     let retryable = |e: &ApiError| e.code == "server_unreachable" || e.status.is_some_and(|s| s >= 500);
     let result: ApiResult<BenchEntry> = (|| {
         for part in parts {
+            if cancel.load(Ordering::Relaxed) {
+                return Err(cancelled_err());
+            }
             let body = BenchPredictions { predictions: part };
             let r = api.send_bench_predictions(bench_id, &eid, &body);
             if let Err(ref e) = r
+                && !cancel.load(Ordering::Relaxed)
                 && retryable(e)
             {
                 api.send_bench_predictions(bench_id, &eid, &body)?;
@@ -466,18 +482,28 @@ pub fn upload_external_predictions(
                 r?;
             }
         }
-        match api.finish_bench_entry(bench_id, &eid) {
-            Ok(done) => Ok(done),
-            Err(e) if retryable(&e) => match api.finish_bench_entry(bench_id, &eid) {
-                Ok(done) => Ok(done),
-                Err(e2) if e2.code == "bench_entry_not_open" => {
-                    let cur = api.bench_entry(bench_id, &eid)?;
-                    if cur.status == BenchEntryStatus::Done { Ok(cur) } else { Err(e2) }
-                }
-                Err(e2) => Err(e2),
-            },
-            Err(e) => Err(e),
+        if cancel.load(Ordering::Relaxed) {
+            return Err(cancelled_err());
         }
+        let done = match api.finish_bench_entry(bench_id, &eid) {
+            Ok(done) => done,
+            Err(e) if !cancel.load(Ordering::Relaxed) && retryable(&e) => {
+                match api.finish_bench_entry(bench_id, &eid) {
+                    Ok(done) => done,
+                    Err(e2) if e2.code == "bench_entry_not_open" => {
+                        let cur = api.bench_entry(bench_id, &eid)?;
+                        if cur.status == BenchEntryStatus::Done { cur } else { return Err(e2) }
+                    }
+                    Err(e2) => return Err(e2),
+                }
+            }
+            Err(e) => return Err(e),
+        };
+        if cancel.load(Ordering::Relaxed) {
+            let _ = api.delete_bench_entry(bench_id, &eid);
+            return Err(cancelled_err());
+        }
+        Ok(done)
     })();
     if result.is_err() {
         let _ = api.stop_bench_entry(bench_id, &eid);
@@ -508,6 +534,7 @@ impl FoloApp {
             file_bytes: 0,
             check: None,
             submitting: false,
+            cancel: None,
             error: None,
             show_how: false,
         });
@@ -664,19 +691,39 @@ impl FoloApp {
         self.load_external_file_path(PathBuf::from(path), cx);
     }
 
-    /// Updates whether the external entry uses confidences; re-validates box scores if switching on.
+    /// Updates whether the external entry uses confidences; when enabling confidences after an
+    /// already-checked file, re-reads and re-validates the original file so duplicate records whose
+    /// scores differed or out-of-range scores cannot slip past.
     pub fn set_external_scored(&mut self, scored: bool, cx: &mut Context<Self>) {
-        let Some(f) = self.bench.external.as_mut() else { return };
-        f.scored = scored;
-        f.scored_edited = true;
-        f.error = None;
-        if scored
-            && let Some(Ok(checked)) = f.check.as_ref()
-            && let Err(msg) = validate_box_scores(&checked.predictions)
-        {
-            f.error = Some(ApiError::new("invalid_body", msg));
+        let should_recheck = {
+            let Some(f) = self.bench.external.as_mut() else { return };
+            if f.submitting {
+                return;
+            }
+            let was_scored = f.scored;
+            f.scored = scored;
+            f.scored_edited = true;
+            f.error = None;
+            let cur_path = f.file_path.read(cx).text().trim().to_string();
+            let same_checked =
+                !cur_path.is_empty() && f.checked_path.as_deref().map(str::trim) == Some(cur_path.as_str());
+            if scored && !was_scored && same_checked {
+                true
+            } else {
+                if scored
+                    && let Some(Ok(checked)) = f.check.as_ref()
+                    && let Err(msg) = validate_box_scores(&checked.predictions)
+                {
+                    f.error = Some(ApiError::new("invalid_body", msg));
+                }
+                false
+            }
+        };
+        if should_recheck {
+            self.check_typed_external_file(cx);
+        } else {
+            cx.notify();
         }
-        cx.notify();
     }
 
     /// Submits the validated External Predictions entry to `/api/bench`.
@@ -729,7 +776,10 @@ impl FoloApp {
         let scored = f.scored;
         let preds = checked.predictions.clone();
         let plan = bench.plan.clone();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel_bg = cancel.clone();
         f.submitting = true;
+        f.cancel = Some(cancel);
         f.error = None;
         let since = self.bench.ev_seq;
         let bid_req = bid.clone();
@@ -737,13 +787,16 @@ impl FoloApp {
         self.fetch(
             cx,
             move |api| {
-                upload_external_predictions(api, &bid_req, name_req, scored, &plan, &preds, PART_BYTES)
+                upload_external_predictions(
+                    api, &bid_req, name_req, scored, &plan, &preds, PART_BYTES, &cancel_bg,
+                )
             },
             move |this, r, cx| {
                 if let Some(f) = this.bench.external.as_mut().filter(|f| f.seq == seq) {
                     f.submitting = false;
+                    f.cancel = None;
                     match r {
-                        Ok(entry) => {
+                        Ok(entry) if entry.status == BenchEntryStatus::Done => {
                             let label = entry.name.clone();
                             let detail = entry.score.as_ref().map(|s| format!("Score {:.1}", s.total).into());
                             this.bench.external = None;
@@ -751,6 +804,22 @@ impl FoloApp {
                             this.load_bench_entries(&bid, cx);
                             this.refresh_benches(cx);
                             this.toast(Tone::Success, format!("{label} scored"), detail, cx);
+                        }
+                        Ok(entry) => {
+                            let msg = entry.error.clone().unwrap_or_else(|| {
+                                format!(
+                                    "Entry ended with status {} instead of scoring.",
+                                    entry.status.label()
+                                )
+                            });
+                            let mut err = ApiError::new("bench_entry_failed", msg);
+                            if let Some(hint) = entry.hint.clone() {
+                                err = err.with_hint(hint);
+                            }
+                            f.error = Some(err);
+                            this.apply_entry(&bid, entry, since);
+                            this.load_bench_entries(&bid, cx);
+                            this.refresh_benches(cx);
                         }
                         Err(e) => {
                             f.error = Some(e);

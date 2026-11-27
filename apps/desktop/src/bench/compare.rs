@@ -334,7 +334,13 @@ impl FoloApp {
     pub fn resolved_compare_entries(&mut self, bench_id: &str, entries: &[BenchEntry]) -> Vec<BenchEntry> {
         let pin = self.bench.pinned_entry.as_ref().filter(|(b, _)| b == bench_id).map(|(_, e)| e.as_str());
         let ids = match self.bench.compare.get(bench_id) {
-            Some(saved) => reconcile_compare_entries(saved, entries),
+            Some(saved) => {
+                let reconciled = reconcile_compare_entries(saved, entries);
+                if reconciled != *saved {
+                    self.bench.compare.insert(bench_id.to_string(), reconciled.clone());
+                }
+                reconciled
+            }
             None => {
                 let defaults = default_compare_entries(entries, pin);
                 self.bench.compare.insert(bench_id.to_string(), defaults.clone());

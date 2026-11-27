@@ -297,7 +297,11 @@ impl FoloApp {
         }
         if !matches!(self.route, Route::Bench(_)) {
             self.bench.new_loop = None;
-            self.bench.external = None;
+            if let Some(f) = self.bench.external.take()
+                && let Some(c) = f.cancel
+            {
+                c.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
         }
         if !matches!(self.route, Route::BenchCompare(_)) {
             self.bench.compare_all_classes = false;

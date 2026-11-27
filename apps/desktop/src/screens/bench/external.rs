@@ -36,7 +36,8 @@ impl FoloApp {
             f.file_bytes,
         );
         let cur_path = file_path.read(cx).text().trim().to_string();
-        let path_matches = f.checked_path.as_deref().map(str::trim) == Some(cur_path.as_str());
+        let path_matches = f.checked_path.as_deref().map(str::trim) == Some(cur_path.as_str())
+            || (f.checked_path.is_none() && cur_path.is_empty());
         let path_changed = f.checked_path.is_some() && !path_matches;
         let check_ok = if path_matches {
             f.check.as_ref().and_then(|r| r.as_ref().ok()).map(|c| c.summary.clone())

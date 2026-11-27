@@ -59,6 +59,12 @@ impl FoloApp {
                         if this.bench.new_loop.as_ref().is_some_and(|f| f.bench == bench) {
                             this.bench.new_loop = None;
                         }
+                        if let Some(f) = this.bench.external.take().filter(|f| f.bench == bench)
+                            && let Some(c) = f.cancel
+                        {
+                            c.store(true, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        this.bench.compare.remove(&bench);
                         if route_bench(&this.route) == Some(bench.as_str()) {
                             this.route_pending = Some(Route::Benches);
                         }
@@ -77,6 +83,9 @@ impl FoloApp {
                         this.bench.expanded_errors.remove(&(bench.clone(), id.clone()));
                         if this.bench.pinned_entry.as_ref().is_some_and(|(b, e)| *b == bench && e == id) {
                             this.bench.pinned_entry = None;
+                        }
+                        if let Some(cmp) = this.bench.compare.get_mut(&bench) {
+                            cmp.retain(|x| x != id);
                         }
                         if this
                             .bench

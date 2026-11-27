@@ -1,6 +1,8 @@
 //! What the Benchmarks screens hold: the tabs, the forms, an entry's paged images and the state per server.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use folo_ui::{Entity, ScrollHandle};
 
@@ -110,6 +112,8 @@ pub struct ExternalEntryForm {
     pub file_bytes: u64,
     pub check: Option<Result<super::external::CheckedExternal, String>>,
     pub submitting: bool,
+    /// Cooperative cancel flag for an in-flight upload (set when the form closes or navigates away).
+    pub cancel: Option<Arc<AtomicBool>>,
     pub error: Option<ApiError>,
     pub show_how: bool,
 }

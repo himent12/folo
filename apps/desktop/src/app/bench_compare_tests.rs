@@ -187,6 +187,7 @@ fn external_predictions_parse_validate_chunk_and_upload_end_to_end() {
     // 4. Multi-part upload (forced via tiny max_bytes) creates open entry, sends parts, finishes & scores!
     let parts = parts_of(&checked.predictions, &bench.plan, 256);
     assert!(parts.len() > 1, "tiny max_bytes splits into multiple parts");
+    let cancel = std::sync::atomic::AtomicBool::new(false);
     let done = upload_external_predictions(
         &api,
         &bench.id,
@@ -195,12 +196,29 @@ fn external_predictions_parse_validate_chunk_and_upload_end_to_end() {
         &bench.plan,
         &checked.predictions,
         256,
+        &cancel,
     )
     .unwrap();
     assert_eq!(done.status, BenchEntryStatus::Done);
     assert_eq!(done.contestant, BenchContestant::External);
     assert!(done.score.is_some());
     assert_eq!(api.bench_entry(&bench.id, &done.id).unwrap().name, "yolo26n-ext");
+
+    // 5. Cooperative cancel aborts before creating/publishing any entry.
+    let cancelled = std::sync::atomic::AtomicBool::new(true);
+    let err = upload_external_predictions(
+        &api,
+        &bench.id,
+        "should-not-exist".into(),
+        true,
+        &bench.plan,
+        &checked.predictions,
+        256,
+        &cancelled,
+    )
+    .unwrap_err();
+    assert_eq!(err.code, "cancelled");
+    assert!(api.bench_entries(&bench.id).unwrap().iter().all(|e| e.name != "should-not-exist"));
 }
 
 #[test]
@@ -359,15 +377,24 @@ fn playtest_r9_external_guards_and_compare_partial_failure_regressions() {
         let f = this.bench.external.as_ref().unwrap();
         assert!(!f.scored, "explicit No confidences must NOT silently flip back on");
         assert!(f.check.as_ref().is_some_and(Result::is_ok), "unscored check accepts score=2.0");
-        // Switching back to Uses confidences immediately flags score=2.0 and blocks submit!
+        // Switching back to Uses confidences triggers re-validation of the file and rejects score=2.0!
         this.set_external_scored(true, cx);
+    });
+    app.frame(window.into());
+    app.run_until_idle();
+    app.frame(window.into());
+    drive(&mut app, window, |this, _, cx| {
+        let f = this.bench.external.as_ref().expect("form stays open on score > 1");
+        assert!(
+            f.check.as_ref().is_some_and(|r| r.as_ref().is_err_and(|m| m.contains("between 0 and 1"))),
+            "{:?}",
+            f.check
+        );
         this.submit_external_entry(cx);
     });
     app.frame(window.into());
     app.run_until_idle();
     drive(&mut app, window, |this, _, _| {
-        let f = this.bench.external.as_ref().expect("form stays open on score > 1");
-        assert!(f.error.as_ref().is_some_and(|e| e.message.contains("between 0 and 1")), "{:?}", f.error);
         let list = this.bench.entries.get("bn_7a04").and_then(|l| l.ready()).unwrap();
         assert!(list.is_empty(), "invalid scored entry must not be submitted");
     });
@@ -406,5 +433,94 @@ fn playtest_r9_external_guards_and_compare_partial_failure_regressions() {
         assert!(
             this.bench.results.get(&("bn_3c90".into(), cmp[0].clone())).and_then(|l| l.ready()).is_some()
         );
+    });
+}
+
+/// Regression tests for PR #746 Round 1 review findings:
+/// - Deleting a compared entry persists reconciliation so Add entry can fill the freed slot.
+/// - Switching No confidences -> Uses confidences re-reads and rejects duplicate records with differing scores.
+/// - Empty-path Check file surfaces its error cleanly.
+#[test]
+fn pr746_r1_deleted_compare_slot_and_confidence_recheck_regressions() {
+    let dir = TestDir::new("folo-desktop-pr746-r1");
+    let (mut app, window) = open();
+    drive(&mut app, window, |this, w, cx| {
+        this.navigate(Route::Bench("bn_3c90".into()), w, cx);
+    });
+    app.frame(window.into());
+    app.run_until_idle();
+    app.frame(window.into());
+
+    // 1. Open Compare (4 entries), delete one entry from loaded entries, re-render, and add a 5th entry.
+    drive(&mut app, window, |this, w, cx| {
+        this.open_bench_compare("bn_3c90", None, w, cx);
+        let cmp = this.bench.compare.get("bn_3c90").cloned().unwrap();
+        assert_eq!(cmp.len(), 4);
+        let removed_id = cmp[3].clone();
+        if let Some(list) = this.bench.entries.get_mut("bn_3c90").and_then(|l| l.ready_mut()) {
+            list.retain(|e| e.id != removed_id);
+        }
+        cx.notify();
+    });
+    app.frame(window.into());
+    drive(&mut app, window, |this, _, cx| {
+        let cmp = this.bench.compare.get("bn_3c90").cloned().unwrap();
+        assert_eq!(cmp.len(), 3, "deleted entry ID must be pruned from saved compare list");
+        this.compare_add_entry("bn_3c90", "be_3c05".into(), cx);
+        assert_eq!(this.bench.compare.get("bn_3c90").unwrap().len(), 4, "freed slot accepts a new entry");
+    });
+
+    // 2. Duplicate record differing only in score passes under No confidences, then fails when toggling Uses confidences!
+    drive(&mut app, window, |this, w, cx| {
+        this.navigate(Route::Bench("bn_7a04".into()), w, cx);
+    });
+    app.frame(window.into());
+    app.run_until_idle();
+    app.frame(window.into());
+    let imgs = drive(&mut app, window, |this, _, _| {
+        this.store.api.bench_images("bn_7a04", 0, 1000, None).unwrap().images
+    });
+    let mut recs: Vec<BenchPrediction> = imgs
+        .iter()
+        .map(|im| BenchPrediction {
+            image: im.id.clone(),
+            condition: None,
+            severity: None,
+            boxes: vec![BenchDetection { class: 0, score: 0.8, x1: 8.0, y1: 8.0, x2: 32.0, y2: 32.0 }],
+        })
+        .collect();
+    recs.push(BenchPrediction {
+        image: imgs[0].id.clone(),
+        condition: None,
+        severity: None,
+        boxes: vec![BenchDetection { class: 0, score: 0.3, x1: 8.0, y1: 8.0, x2: 32.0, y2: 32.0 }],
+    });
+    let dup_path = dir.path().join("dup-diff-score.json");
+    std::fs::write(&dup_path, serde_json::to_string(&BenchPredictions { predictions: recs }).unwrap())
+        .unwrap();
+
+    drive(&mut app, window, |this, w, cx| {
+        this.open_external_entry("bn_7a04", w, cx);
+        this.check_typed_external_file(cx);
+        assert!(this.bench.external.as_ref().unwrap().check.as_ref().is_some_and(Result::is_err));
+        this.set_external_scored(false, cx);
+        let p = dup_path.to_string_lossy().to_string();
+        this.bench.external.as_ref().unwrap().file_path.update(cx, |i, cx| i.set_text(&p, cx));
+        this.check_typed_external_file(cx);
+    });
+    app.frame(window.into());
+    app.run_until_idle();
+    app.frame(window.into());
+    drive(&mut app, window, |this, _, cx| {
+        assert!(this.bench.external.as_ref().unwrap().check.as_ref().is_some_and(Result::is_ok));
+        this.set_external_scored(true, cx);
+    });
+    app.frame(window.into());
+    app.run_until_idle();
+    app.frame(window.into());
+    drive(&mut app, window, |this, _, _| {
+        let chk = this.bench.external.as_ref().unwrap().check.as_ref().expect("rechecked");
+        let err = chk.as_ref().unwrap_err();
+        assert!(err.contains("different boxes"), "recheck must catch differing-score duplicate: {err}");
     });
 }
