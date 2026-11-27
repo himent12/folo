@@ -18,6 +18,7 @@ embed-web = ["folo-server/embed-web"]
 [dependencies]
 folo-api.workspace = true
 folo-client.workspace = true
+folo-core.workspace = true
 folo-data.workspace = true
 folo-gpu.workspace = true
 folo-nn.workspace = true
@@ -36,7 +37,6 @@ ureq = { workspace = true, features = ["rustls"] }
 [dev-dependencies]
 folo-test-support.workspace = true
 base64.workspace = true
-folo-core.workspace = true
 image.workspace = true
 jsonschema.workspace = true
 rcgen.workspace = true

@@ -62,6 +62,11 @@ async fn tools_validate_paging_and_args_before_proxy_access() {
                 imgsz: Some(33),
                 conf: 0.001,
                 iou: 0.7,
+                diagnostics: false,
+                worst: None,
+                diag_conf: None,
+                diag_tp_iou: None,
+                diag_bg_iou: None,
             },
             &mut Progress::none(),
         )
@@ -353,6 +358,8 @@ async fn proxied_blank_and_dot_resource_ids_match_embedded_not_found() {
                         format: folo_api::ExportFormat::Onnx,
                         decode: false,
                         dynamic: false,
+                        dynamic_batch: false,
+                        dynamic_hw: false,
                         half: false,
                     })
                     .await

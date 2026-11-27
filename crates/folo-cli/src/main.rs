@@ -652,10 +652,11 @@ mod tests {
         let lset = describe::describe(&Cli::command(), &["label".into(), "set".into()], false).unwrap();
         assert_eq!(arg(&lset, "expect")["required"], json!(true));
 
-        // `export`: symmetric `--batch` <-> `--dynamic` conflict.
+        // `export`: symmetric `--batch` <-> `--dynamic` / `--dynamic-batch` conflicts.
         let export = describe::describe(&Cli::command(), &["export".into()], false).unwrap();
-        assert_eq!(arg(&export, "batch")["conflicts_with"], json!(["--dynamic"]));
+        assert_eq!(arg(&export, "batch")["conflicts_with"], json!(["--dynamic", "--dynamic-batch"]));
         assert_eq!(arg(&export, "dynamic")["conflicts_with"], json!(["--batch"]));
+        assert_eq!(arg(&export, "dynamic_batch")["conflicts_with"], json!(["--batch"]));
 
         // Command alias lookup works cleanly on a synthetic command tree with a visible command alias.
         let synthetic =

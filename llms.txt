@@ -8,8 +8,9 @@
 > Windows and Linux are in the GitHub release (README, Install); anywhere else, build from source.
 
 Fastest path for an agent:
-- **MCP:** `folo mcp` (stdio; `--data-dir DIR`, default `~/.folo`). It has 40 tools: folo_info, list_datasets, get_dataset,
-  list_dataset_issues, list_dataset_images, register_dataset, create_synthetic_dataset, list_models, train,
+- **MCP:** `folo mcp` (stdio; `--data-dir DIR`, default `~/.folo`). It has 43 tools: folo_info, list_datasets, get_dataset,
+  list_dataset_issues, list_dataset_images, register_dataset, create_synthetic_dataset, audit_dataset,
+  merge_datasets, filter_dataset, list_models, train,
   run_status, list_runs, stop_run, reorder_run, val, predict, predict_batch, export, compare_runs,
   cloud_connections, cloud_offers, cloud_instances, cloud_terminate, and for labeling with a Claude Code, Codex or
   Antigravity agent list_label_jobs, create_label_job, start_labeling, stop_labeling, label_status, list_label_images,
@@ -43,7 +44,7 @@ Fastest path for an agent:
   the prompts train_on_folder, label_folder and diagnose_run, and the errors: `isError` results whose text is
   `{code, message, hint}`
 - [CLI](docs/CLI.md): every `folo` command (serve, describe, doctor, train, stop, val, predict, export, quantize,
-  bench, dataset synth|stats|check|convert, weights, cloud, label, mcp), its flags and its --json records, plus the
+  bench, dataset synth|stats|check|convert|split|merge|filter, weights, cloud, label, mcp), its flags and its --json records, plus the
   error and exit-code conventions
 
 ## Reference

@@ -7,8 +7,10 @@ use std::time::Instant;
 use base64::Engine as _;
 use folo_api::{ExportSpec, Model, OnnxSwitches, ValRequest};
 use folo_server::store::{
-    DEFAULT_TTA_SCALES, PredictInput, PredictOptions, PredictSource, TileConfig, TtaConfig,
-    check_predict_options, check_predict_workload,
+    DEFAULT_TTA_SCALES, DEFAULT_VAL_DIAG_BG_IOU, DEFAULT_VAL_DIAG_CONF, DEFAULT_VAL_DIAG_TP_IOU,
+    DEFAULT_VAL_DIAG_WORST, DynamicAxes, MAX_VAL_DIAG_WORST, PredictInput, PredictOptions, PredictSource,
+    TileConfig, TtaConfig, ValDiagConfig, ValDiagnostics, check_export_axes, check_predict_options,
+    check_predict_workload, check_val_diag_config,
 };
 use rmcp::model::{ContentBlock, Resource};
 use serde_json::json;
@@ -66,6 +68,27 @@ impl Inner {
         {
             return Err(invalid_arguments(format!("imgsz must be a multiple of 32 in 32..=4096, got {s}")));
         }
+        let diag_enabled = a.diagnostics || a.worst.is_some();
+        if !diag_enabled && (a.diag_conf.is_some() || a.diag_tp_iou.is_some() || a.diag_bg_iou.is_some()) {
+            return Err(invalid_arguments(
+                "diag_conf, diag_tp_iou and diag_bg_iou require `diagnostics: true` or `worst`",
+            ));
+        }
+        let diag = if diag_enabled {
+            let cfg = ValDiagConfig {
+                worst: a.worst.unwrap_or(DEFAULT_VAL_DIAG_WORST),
+                conf: a.diag_conf.unwrap_or(DEFAULT_VAL_DIAG_CONF),
+                tp_iou: a.diag_tp_iou.unwrap_or(DEFAULT_VAL_DIAG_TP_IOU),
+                bg_iou: a.diag_bg_iou.unwrap_or(DEFAULT_VAL_DIAG_BG_IOU),
+            };
+            check_val_diag_config(&cfg).map_err(|e| {
+                invalid_arguments(e.body.message)
+                    .hint(format!("worst must be in 1..={MAX_VAL_DIAG_WORST}, thresholds in 0..=1 with diag_bg_iou <= diag_tp_iou"))
+            })?;
+            Some(cfg)
+        } else {
+            None
+        };
         self.ensure_dataset(&a.dataset_id).await?;
         progress.report(0.0, Some(1.0), false).await;
         let req = ValRequest {
@@ -76,7 +99,7 @@ impl Inner {
             conf: a.conf,
             iou: a.iou,
         };
-        let r = self.blocking(move |s| s.val(req)).await?;
+        let (r, diagnostics) = self.blocking(move |s| s.val_with_diagnostics(req, diag)).await?;
         progress.report(1.0, Some(1.0), true).await;
         // The dataset's name when the server reports it (older servers send only the id).
         let dataset = match &r.dataset_name {
@@ -84,7 +107,7 @@ impl Inner {
             None => r.dataset_id.clone(),
         };
         let at = r.val.best_f1_conf.map_or(String::new(), |c| format!(" at conf {c:.3}"));
-        let summary = format!(
+        let mut summary = format!(
             "{} on {dataset}/{} ({} images): mAP50 {:.3}, mAP50-95 {:.3}, P {:.3}, R {:.3}{at}",
             r.model_id,
             r.split.as_str(),
@@ -94,7 +117,19 @@ impl Inner {
             r.val.precision,
             r.val.recall
         );
-        out(&r, summary)
+        let mut result = ValToolResult { report: r, diagnostics: diagnostics.map(val_diagnostics_out) };
+        while json_len(&result) > MAX_RESULT_BYTES {
+            if result.diagnostics.as_mut().and_then(|d| d.worst_images.pop()).is_none() {
+                break;
+            }
+        }
+        if let Some(d) = &result.diagnostics {
+            summary.push_str(&format!(
+                "; diag: {}/{} failing (TP {}, FP {}, FN {})",
+                d.failing_images, d.images_diagnosed, d.summary.tp, d.summary.fp, d.summary.fn_count
+            ));
+        }
+        out(&result, summary)
     }
 
     pub(super) async fn predict(&self, a: PredictArgs) -> Result<Output, Error> {
@@ -348,12 +383,56 @@ impl Inner {
     }
 
     pub(super) async fn export(&self, a: ExportArgs) -> Result<Output, Error> {
+        let axes = DynamicAxes { batch: a.dynamic || a.dynamic_batch, hw: a.dynamic || a.dynamic_hw };
         let spec = ExportSpec {
             format: a.format,
-            onnx: OnnxSwitches { decode: a.decode, dynamic: a.dynamic, half: a.half },
+            onnx: OnnxSwitches { decode: a.decode, dynamic: axes.batch && axes.hw, half: a.half },
         };
-        let r = self.blocking(move |s| s.export_model(&a.model_id, spec)).await?;
+        check_export_axes(&spec, axes).map_err(|e| invalid_arguments(e.body.message))?;
+        let r = self.blocking(move |s| s.export_model_with_axes(&a.model_id, spec, axes)).await?;
         out(&r, format!("wrote {} ({} bytes)", r.path, r.bytes))
+    }
+}
+
+fn val_diagnostics_out(d: ValDiagnostics) -> ValDiagnosticsOut {
+    ValDiagnosticsOut {
+        conf: d.conf,
+        tp_iou: d.tp_iou,
+        bg_iou: d.bg_iou,
+        images_diagnosed: d.images_diagnosed,
+        failing_images: d.failing_images,
+        summary: ValDiagnosticsSummaryOut {
+            num_truths: d.summary.num_truths,
+            num_preds: d.summary.num_preds,
+            tp: d.summary.tp,
+            fp: d.summary.fp,
+            fn_count: d.summary.fn_count,
+            localization_errors: d.summary.localization_errors,
+            class_confusions: d.summary.class_confusions,
+            duplicate_errors: d.summary.duplicate_errors,
+            background_fp: d.summary.background_fp,
+            mean_f1: d.summary.mean_f1,
+            mean_tp_iou: d.summary.mean_tp_iou,
+        },
+        worst_images: d
+            .worst_images
+            .into_iter()
+            .map(|w| ImageDiagnosticsOut {
+                image_index: w.image_index,
+                image_id: w.image_id,
+                num_truths: w.num_truths,
+                num_preds: w.num_preds,
+                tp: w.tp,
+                fp: w.fp,
+                fn_count: w.fn_count,
+                localization_errors: w.localization_errors,
+                class_confusions: w.class_confusions,
+                duplicate_errors: w.duplicate_errors,
+                background_fp: w.background_fp,
+                f1: w.f1,
+                mean_tp_iou: w.mean_tp_iou,
+            })
+            .collect(),
     }
 }
 

@@ -1,14 +1,17 @@
-//! `folo dataset` subcommands and arguments (`check`, `stats`, `synth`, `convert`, `split`).
+//! `folo dataset` subcommands and arguments (`check`, `stats`, `synth`, `convert`, `split`, `merge`, `filter`).
 
 use std::path::PathBuf;
 
 use clap::{Args, Subcommand, ValueEnum};
 
+use super::SplitArg;
+
 /// `folo dataset`.
 #[derive(Debug, Subcommand)]
 pub enum DatasetCommand {
     /// Validate a dataset: broken labels, class-id overflow, out-of-range boxes, corrupt or missing images,
-    /// duplicate images, train/val split leakage and empty images. Exits 1 when there are errors or warnings.
+    /// duplicate images, train/val split leakage (plus optional perceptual `dHash` near-duplicates) and empty
+    /// images. Exits 1 when there are errors or warnings.
     Check(CheckArgs),
     /// Print dataset statistics (class counts, box sizes, boxes per image).
     Stats(StatsArgs),
@@ -18,6 +21,12 @@ pub enum DatasetCommand {
     Convert(ConvertArgs),
     /// Split a dataset into deterministic multi-label stratified train / val / optional test splits.
     Split(SplitArgs),
+    /// Merge one or more datasets (any mix of YOLO, COCO, Pascal VOC) into a unified YOLO dataset with class
+    /// unification/remapping, split policies, and collision-safe filenames.
+    Merge(MergeArgs),
+    /// Filter a dataset by class whitelist/blacklist, split selection, box area/pixel size, image dimensions, and
+    /// optional empty-image dropping.
+    Filter(FilterArgs),
 }
 
 /// Dataset format on disk.
@@ -33,7 +42,7 @@ pub enum FormatArg {
     Voc,
 }
 
-/// Target format of `folo dataset convert` and `folo dataset split`.
+/// Target format of `folo dataset convert`, `folo dataset split`, and `folo dataset filter`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum TargetFormatArg {
     /// YOLO: images/<split>/, labels/<split>/*.txt and data.yaml.
@@ -42,6 +51,61 @@ pub enum TargetFormatArg {
     Coco,
     /// Pascal VOC: JPEGImages/, Annotations/*.xml and ImageSets/Main/*.txt.
     Voc,
+}
+
+/// How class names are matched during `folo dataset merge` and `folo dataset filter`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+pub enum ClassNormalizeArg {
+    /// Exact string equality (case- and whitespace-sensitive).
+    #[default]
+    Exact,
+    /// Trim outer whitespace, collapse internal whitespace runs, and compare lowercase.
+    #[value(name = "case-and-whitespace")]
+    CaseAndWhitespace,
+}
+
+impl From<ClassNormalizeArg> for folo_data::ClassNormalize {
+    fn from(n: ClassNormalizeArg) -> Self {
+        match n {
+            ClassNormalizeArg::Exact => folo_data::ClassNormalize::Exact,
+            ClassNormalizeArg::CaseAndWhitespace => folo_data::ClassNormalize::CaseAndWhitespace,
+        }
+    }
+}
+
+/// How splits from input datasets are combined during `folo dataset merge`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+pub enum MergeSplitArg {
+    /// Keep each image in its original split (`train` -> `train`, `val` -> `val`, `test` -> `test`).
+    #[default]
+    Preserve,
+    /// Pool all images from every input split into `train`.
+    #[value(name = "pool-to-train")]
+    PoolToTrain,
+    /// Pool all images and re-split them via deterministic multi-label stratification (`--val`, optional `--test`,
+    /// `--seed`).
+    Stratified,
+}
+
+/// How filename collisions are resolved during `folo dataset merge`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+pub enum CollisionArg {
+    /// Keep original filenames when unique within a split; prefix colliding stems with `<prefix>_`.
+    #[default]
+    #[value(name = "prefix-on-collision")]
+    PrefixOnCollision,
+    /// Prefix every output image filename with its source dataset prefix (`<prefix>_<stem>.<ext>`).
+    #[value(name = "always-prefix")]
+    AlwaysPrefix,
+}
+
+impl From<CollisionArg> for folo_data::CollisionPolicy {
+    fn from(c: CollisionArg) -> Self {
+        match c {
+            CollisionArg::PrefixOnCollision => folo_data::CollisionPolicy::PrefixOnCollision,
+            CollisionArg::AlwaysPrefix => folo_data::CollisionPolicy::AlwaysPrefix,
+        }
+    }
 }
 
 /// `folo dataset check`.
@@ -56,8 +120,16 @@ pub struct CheckArgs {
     #[arg(long)]
     pub fix_dry_run: bool,
     /// Read only image headers instead of decoding every image (faster; misses truncated image data).
-    #[arg(long)]
+    #[arg(long, conflicts_with_all = ["perceptual", "dhash_threshold"])]
     pub headers_only: bool,
+    /// Also run 64-bit perceptual difference-hash (`dHash`) near-duplicate and cross-split leakage detection
+    /// (catches recompressed, resized, or lightly cropped copies). Incompatible with --headers-only.
+    #[arg(long, conflicts_with = "headers_only")]
+    pub perceptual: bool,
+    /// Maximum Hamming distance [0..=64] for perceptual `dHash` near-duplicate detection (implies `--perceptual`;
+    /// default 6 with `--perceptual`). Incompatible with --headers-only.
+    #[arg(long, value_name = "BITS", conflicts_with = "headers_only")]
+    pub dhash_threshold: Option<u32>,
     /// List only issues at least this serious (`counts` always covers every issue) [default: warning in human
     /// output, info in --json].
     #[arg(long, value_enum)]
@@ -162,4 +234,112 @@ pub struct SplitArgs {
     /// Target format [default: the input dataset's format].
     #[arg(long, value_enum)]
     pub to: Option<TargetFormatArg>,
+}
+
+/// `folo dataset merge`.
+#[derive(Debug, Args)]
+pub struct MergeArgs {
+    /// Input datasets to merge (one or more folders, data.yaml, COCO .json, or Pascal VOC .xml).
+    #[arg(required = true)]
+    pub inputs: Vec<PathBuf>,
+    /// Output YOLO dataset folder (created; must be empty if it exists).
+    #[arg(long, value_name = "DIR")]
+    pub out: PathBuf,
+    /// How class names across datasets are matched and unified.
+    #[arg(long, value_enum, default_value_t = ClassNormalizeArg::Exact)]
+    pub normalize: ClassNormalizeArg,
+    /// Explicit class remap as `SOURCE=TARGET` (repeatable), e.g. `--remap automobile=car`.
+    #[arg(long = "remap", value_name = "SRC=DST")]
+    pub remap: Vec<String>,
+    /// Drop every box of this class name from all input datasets (repeatable).
+    #[arg(long = "drop-class", value_name = "NAME")]
+    pub drop_class: Vec<String>,
+    /// Drop classes not listed in `--remap` instead of keeping them.
+    #[arg(long)]
+    pub drop_unmapped: bool,
+    /// Drop images that end up with zero boxes after class dropping.
+    #[arg(long)]
+    pub drop_empty_images: bool,
+    /// How splits from input datasets are combined.
+    #[arg(long, value_enum, default_value_t = MergeSplitArg::Preserve)]
+    pub splits: MergeSplitArg,
+    /// With --splits stratified: fraction of images assigned to `val` [0..=1].
+    #[arg(long, value_name = "RATIO")]
+    pub val: Option<f64>,
+    /// With --splits stratified: fraction of images assigned to `test` [0..=1] [default: 0.0].
+    #[arg(long, value_name = "RATIO")]
+    pub test: Option<f64>,
+    /// With --splits stratified: RNG seed for deterministic stratification.
+    #[arg(long, default_value_t = 0)]
+    pub seed: u64,
+    /// How colliding image filenames are disambiguated.
+    #[arg(long, value_enum, default_value_t = CollisionArg::PrefixOnCollision)]
+    pub collisions: CollisionArg,
+    /// Optional per-dataset filename prefixes (comma-separated or repeatable; count must match inputs).
+    #[arg(long = "prefix", value_name = "TAG", value_delimiter = ',')]
+    pub prefix: Vec<String>,
+}
+
+/// `folo dataset filter`.
+#[derive(Debug, Args)]
+pub struct FilterArgs {
+    /// Dataset to filter: a folder (YOLO, COCO or Pascal VOC), data.yaml, COCO .json or Pascal VOC .xml.
+    pub path: PathBuf,
+    /// Output dataset folder (created; must be empty if it exists).
+    #[arg(long, value_name = "DIR")]
+    pub out: PathBuf,
+    /// Format of the input.
+    #[arg(long, value_enum, default_value_t = FormatArg::Auto)]
+    pub from: FormatArg,
+    /// Target format [default: the input dataset's format].
+    #[arg(long, value_enum)]
+    pub to: Option<TargetFormatArg>,
+    /// Keep only boxes of these class names (whitelist; comma-separated or repeatable).
+    #[arg(long = "include-class", value_name = "NAME", value_delimiter = ',')]
+    pub include_class: Vec<String>,
+    /// Drop boxes of these class names (blacklist, applied after --include-class; comma-separated or repeatable).
+    #[arg(long = "exclude-class", value_name = "NAME", value_delimiter = ',')]
+    pub exclude_class: Vec<String>,
+    /// How class names in --include-class / --exclude-class are matched against the dataset's classes.
+    #[arg(long, value_enum, default_value_t = ClassNormalizeArg::Exact)]
+    pub normalize: ClassNormalizeArg,
+    /// Keep the full original class list and IDs instead of compacting to retained classes.
+    #[arg(long)]
+    pub keep_all_classes: bool,
+    /// Keep only these splits (`train`, `val`, `test`; comma-separated or repeatable).
+    #[arg(long = "split", value_enum, value_delimiter = ',')]
+    pub split: Vec<SplitArg>,
+    /// Minimum normalised box area `w * h` in [0..=1] (inclusive).
+    #[arg(long, value_name = "AREA")]
+    pub min_box_area: Option<f32>,
+    /// Maximum normalised box area `w * h` in [0..=1] (inclusive).
+    #[arg(long, value_name = "AREA")]
+    pub max_box_area: Option<f32>,
+    /// Minimum box width in pixels [>= 0] (inclusive).
+    #[arg(long, value_name = "PX")]
+    pub min_box_width: Option<f32>,
+    /// Maximum box width in pixels [>= 0] (inclusive).
+    #[arg(long, value_name = "PX")]
+    pub max_box_width: Option<f32>,
+    /// Minimum box height in pixels [>= 0] (inclusive).
+    #[arg(long, value_name = "PX")]
+    pub min_box_height: Option<f32>,
+    /// Maximum box height in pixels [>= 0] (inclusive).
+    #[arg(long, value_name = "PX")]
+    pub max_box_height: Option<f32>,
+    /// Minimum image width in pixels [>= 1] (inclusive).
+    #[arg(long, value_name = "PX")]
+    pub min_image_width: Option<u32>,
+    /// Maximum image width in pixels [>= 1] (inclusive).
+    #[arg(long, value_name = "PX")]
+    pub max_image_width: Option<u32>,
+    /// Minimum image height in pixels [>= 1] (inclusive).
+    #[arg(long, value_name = "PX")]
+    pub min_image_height: Option<u32>,
+    /// Maximum image height in pixels [>= 1] (inclusive).
+    #[arg(long, value_name = "PX")]
+    pub max_image_height: Option<u32>,
+    /// Remove images that have zero surviving boxes after filtering.
+    #[arg(long)]
+    pub drop_empty_images: bool,
 }

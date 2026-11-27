@@ -12,6 +12,8 @@ use serde_json::Value;
 
 #[path = "engine/infer.rs"]
 mod infer;
+#[path = "engine/s12_features.rs"]
+mod s12_features;
 #[path = "engine/score.rs"]
 mod score;
 

@@ -19,7 +19,7 @@ fn invalid_split(message: impl Into<String>) -> CliError {
 }
 
 /// Validates `--val` and `--test` ratios upfront before opening the input dataset.
-fn split_config(val: f64, test: f64, seed: u64) -> Result<SplitConfig, CliError> {
+pub(super) fn split_config(val: f64, test: f64, seed: u64) -> Result<SplitConfig, CliError> {
     if !bounds::UNIT_INTERVAL.contains_f64(val) {
         return Err(invalid_split(format!("--val must be in 0..=1, got {val}")));
     }

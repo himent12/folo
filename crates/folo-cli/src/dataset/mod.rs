@@ -1,13 +1,17 @@
-//! `folo dataset check | stats | synth | convert | split`, on top of folo-data.
+//! `folo dataset check | stats | synth | convert | split | merge | filter`, on top of folo-data.
 //!
 //! - `mod.rs`: command dispatch, `stats`, `convert`, and shared error / path helpers.
 //! - `check.rs`: `folo dataset check` (dangling symlink diagnostics, COCO declared-vs-actual dimension
-//!   reconciliation, split-leakage reporting, severity filtering and human/JSON formatting).
+//!   reconciliation, exact & perceptual `dHash` split-leakage reporting, severity filtering and human/JSON formatting).
 //! - `synth.rs`: `folo dataset synth` (atomic sibling-staging for new folders and clean-on-failure rollback for
 //!   pre-existing empty folders).
 //! - `split.rs`: `folo dataset split` (deterministic multi-label stratified train/val/test splitting).
+//! - `merge.rs`: `folo dataset merge` (multi-dataset class unification/remap/drop, split policies, collision-safe YOLO).
+//! - `filter.rs`: `folo dataset filter` (class whitelist/blacklist, split, box area/size, image dims, drop-empty).
 
 mod check;
+mod filter;
+mod merge;
 mod split;
 mod synth;
 
@@ -28,6 +32,8 @@ pub fn run(cmd: DatasetCommand, out: Out) -> Result<(), CliError> {
         DatasetCommand::Synth(a) => synth::synth(a, out),
         DatasetCommand::Convert(a) => convert(a, out),
         DatasetCommand::Split(a) => split::split(a, out),
+        DatasetCommand::Merge(a) => merge::merge(a, out),
+        DatasetCommand::Filter(a) => filter::filter(a, out),
     }
 }
 

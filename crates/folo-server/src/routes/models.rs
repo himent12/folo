@@ -11,7 +11,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::AppState;
 use crate::error::{ApiJson, ApiPath, ApiQuery, Error, Result};
-use crate::store::{WeightsBody, WeightsFormat};
+use crate::store::{
+    DEFAULT_VAL_DIAG_BG_IOU, DEFAULT_VAL_DIAG_CONF, DEFAULT_VAL_DIAG_TP_IOU, DEFAULT_VAL_DIAG_WORST,
+    DynamicAxes, ValDiagConfig, ValDiagnostics, WeightsBody, WeightsFormat,
+};
 
 use super::{WEIGHTS_CHUNK, blocking};
 
@@ -92,12 +95,38 @@ pub(super) async fn model_eval(
     cached_json_response(&eval, &headers)
 }
 
+#[derive(Deserialize)]
+pub(super) struct ExportModelBody {
+    #[serde(flatten)]
+    base: ExportSpec,
+    /// ONNX only: symbolic batch axis (`"batch"`).
+    #[serde(default)]
+    dynamic_batch: Option<bool>,
+    /// ONNX only: symbolic spatial axes (`"height"`, `"width"`).
+    #[serde(default)]
+    dynamic_hw: Option<bool>,
+}
+
 pub(super) async fn export_model(
     State(st): State<AppState>,
     ApiPath(id): ApiPath<String>,
-    ApiJson(spec): ApiJson<ExportSpec>,
+    ApiJson(body): ApiJson<ExportModelBody>,
 ) -> Result<Response> {
-    Ok(Json(blocking(&st, move |s| s.export_model(&id, spec)).await?).into_response())
+    let spec = body.base;
+    if spec.format != folo_api::ExportFormat::Onnx
+        && (body.dynamic_batch.is_some() || body.dynamic_hw.is_some())
+    {
+        return Err(Error::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_body",
+            "dynamic_batch and dynamic_hw only apply to format `onnx`",
+        ));
+    }
+    let axes = DynamicAxes {
+        batch: body.dynamic_batch.unwrap_or(spec.onnx.dynamic),
+        hw: body.dynamic_hw.unwrap_or(spec.onnx.dynamic),
+    };
+    Ok(Json(blocking(&st, move |s| s.export_model_with_axes(&id, spec, axes)).await?).into_response())
 }
 
 #[derive(Deserialize)]
@@ -250,11 +279,50 @@ pub(super) async fn model_weights(
     Ok(res)
 }
 
+#[derive(Deserialize)]
+pub(super) struct ValBody {
+    #[serde(flatten)]
+    base: ValRequest,
+    #[serde(default)]
+    diagnostics: bool,
+    #[serde(default)]
+    worst: Option<usize>,
+    #[serde(default)]
+    diag_conf: Option<f32>,
+    #[serde(default)]
+    diag_tp_iou: Option<f32>,
+    #[serde(default)]
+    diag_bg_iou: Option<f32>,
+}
+
+#[derive(Serialize)]
+pub(super) struct ValResponse {
+    #[serde(flatten)]
+    report: ValReport,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    diagnostics: Option<ValDiagnostics>,
+}
+
 pub(super) async fn val(
     State(st): State<AppState>,
-    ApiJson(req): ApiJson<ValRequest>,
-) -> Result<Json<ValReport>> {
-    Ok(Json(blocking(&st, move |s| s.val(req)).await?))
+    ApiJson(body): ApiJson<ValBody>,
+) -> Result<Json<ValResponse>> {
+    let enabled = body.diagnostics || body.worst.is_some();
+    if !enabled && (body.diag_conf.is_some() || body.diag_tp_iou.is_some() || body.diag_bg_iou.is_some()) {
+        return Err(Error::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_body",
+            "diag_conf, diag_tp_iou and diag_bg_iou require diagnostics: true or worst",
+        ));
+    }
+    let diag = enabled.then(|| ValDiagConfig {
+        worst: body.worst.unwrap_or(DEFAULT_VAL_DIAG_WORST),
+        conf: body.diag_conf.unwrap_or(DEFAULT_VAL_DIAG_CONF),
+        tp_iou: body.diag_tp_iou.unwrap_or(DEFAULT_VAL_DIAG_TP_IOU),
+        bg_iou: body.diag_bg_iou.unwrap_or(DEFAULT_VAL_DIAG_BG_IOU),
+    });
+    let (report, diagnostics) = blocking(&st, move |s| s.val_with_diagnostics(body.base, diag)).await?;
+    Ok(Json(ValResponse { report, diagnostics }))
 }
 
 #[cfg(test)]

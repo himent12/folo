@@ -248,7 +248,7 @@ pub(super) fn tmp_dir(name: &str) -> TestDir {
     TestDir::new(&format!("mcp-test-{name}"))
 }
 
-pub(super) const ALL_TOOLS: [&str; 40] = [
+pub(super) const ALL_TOOLS: [&str; 43] = [
     "folo_info",
     "list_datasets",
     "get_dataset",
@@ -256,6 +256,9 @@ pub(super) const ALL_TOOLS: [&str; 40] = [
     "list_dataset_images",
     "register_dataset",
     "create_synthetic_dataset",
+    "audit_dataset",
+    "merge_datasets",
+    "filter_dataset",
     "list_models",
     "train",
     "run_status",
@@ -292,7 +295,7 @@ pub(super) const ALL_TOOLS: [&str; 40] = [
 ];
 
 /// The most `tools/list` may take, and the benchmark tools of it, in bytes (docs/MCP.md states what they take).
-const TOTAL_BYTES: usize = 92 * 1024;
+const TOTAL_BYTES: usize = 108 * 1024;
 const BENCH_BYTES: usize = 11 * 1024;
 
 /// `tools/list` with schema checks; returns `name -> outputSchema`.

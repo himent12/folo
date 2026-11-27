@@ -292,6 +292,9 @@ pub const LABEL_VAL_FRACTION: NumericBounds = NumericBounds::float_range(0.0, tr
 /// `folo serve --port` (`0..=65535`; `0` picks a free port).
 pub const SERVE_PORT: NumericBounds = NumericBounds::int_range(0, u16::MAX as u64);
 
+/// `folo dataset check --dhash-threshold` (64-bit Hamming distance `0..=64`).
+pub const DHASH_THRESHOLD: NumericBounds = NumericBounds::int_range(0, 64);
+
 /// `folo bench create --max-images`.
 pub const BENCH_MAX_IMAGES: NumericBounds = NumericBounds::int_range(1, 5000);
 /// `folo bench create --seed` (exact JS safe integer limit `2^53 - 1`, matching `folo_server::bench::MAX_SEED`).
@@ -321,6 +324,10 @@ pub const ARG_BOUNDS: &[(&str, &str, NumericBounds)] = &[
     ("folo val", "iou", UNIT_INTERVAL),
     ("folo val", "max_det", POSITIVE_INT),
     ("folo val", "fusion_iou", UNIT_INTERVAL),
+    ("folo val", "worst", POSITIVE_INT),
+    ("folo val", "diag_conf", UNIT_INTERVAL),
+    ("folo val", "diag_tp_iou", UNIT_INTERVAL),
+    ("folo val", "diag_bg_iou", UNIT_INTERVAL),
     // `folo predict`
     ("folo predict", "conf", UNIT_INTERVAL),
     ("folo predict", "iou", UNIT_INTERVAL),
@@ -331,6 +338,11 @@ pub const ARG_BOUNDS: &[(&str, &str, NumericBounds)] = &[
     ("folo predict", "tile_overlap", TILE_OVERLAP),
     ("folo predict", "tile_batch", POSITIVE_INT),
     ("folo predict", "tta_scales", POSITIVE_FLOAT),
+    ("folo predict", "track_high_thresh", UNIT_INTERVAL),
+    ("folo predict", "track_low_thresh", UNIT_INTERVAL),
+    ("folo predict", "track_new_thresh", UNIT_INTERVAL),
+    ("folo predict", "track_match_iou", UNIT_INTERVAL),
+    ("folo predict", "track_min_hits", POSITIVE_INT),
     // `folo export`
     ("folo export", "imgsz", INFER_IMGSZ),
     ("folo export", "batch", POSITIVE_INT),
@@ -340,6 +352,8 @@ pub const ARG_BOUNDS: &[(&str, &str, NumericBounds)] = &[
     ("folo quantize", "tail", QUANTIZE_TAIL),
     ("folo quantize", "imgsz", INFER_IMGSZ),
     ("folo quantize", "batch", POSITIVE_INT),
+    // `folo dataset check`
+    ("folo dataset check", "dhash_threshold", DHASH_THRESHOLD),
     // `folo dataset synth`
     ("folo dataset synth", "images", SYNTH_IMAGES),
     ("folo dataset synth", "imgsz", SYNTH_IMGSZ),
@@ -347,6 +361,20 @@ pub const ARG_BOUNDS: &[(&str, &str, NumericBounds)] = &[
     // `folo dataset split`
     ("folo dataset split", "val", UNIT_INTERVAL),
     ("folo dataset split", "test", UNIT_INTERVAL),
+    // `folo dataset merge`
+    ("folo dataset merge", "val", UNIT_INTERVAL),
+    ("folo dataset merge", "test", UNIT_INTERVAL),
+    // `folo dataset filter`
+    ("folo dataset filter", "min_box_area", UNIT_INTERVAL),
+    ("folo dataset filter", "max_box_area", UNIT_INTERVAL),
+    ("folo dataset filter", "min_box_width", NON_NEGATIVE_FLOAT),
+    ("folo dataset filter", "max_box_width", NON_NEGATIVE_FLOAT),
+    ("folo dataset filter", "min_box_height", NON_NEGATIVE_FLOAT),
+    ("folo dataset filter", "max_box_height", NON_NEGATIVE_FLOAT),
+    ("folo dataset filter", "min_image_width", POSITIVE_INT),
+    ("folo dataset filter", "max_image_width", POSITIVE_INT),
+    ("folo dataset filter", "min_image_height", POSITIVE_INT),
+    ("folo dataset filter", "max_image_height", POSITIVE_INT),
     // `folo label`
     ("folo label start", "batch", LABEL_BATCH),
     ("folo label start", "parallel", LABEL_PARALLEL),
@@ -375,12 +403,22 @@ pub fn for_arg(cmd_path: &str, arg_id: &str) -> Option<NumericBounds> {
 pub const ARG_REQUIRES: &[(&str, &str, &[&str])] = &[
     ("folo serve", "tls_cert", &["tls_key"]),
     ("folo serve", "tls_key", &["tls_cert"]),
+    ("folo val", "diag_conf", &["diagnostics"]),
+    ("folo val", "diag_tp_iou", &["diagnostics"]),
+    ("folo val", "diag_bg_iou", &["diagnostics"]),
     ("folo predict", "tile_overlap", &["tile"]),
     ("folo predict", "no_tile_full_image", &["tile"]),
     ("folo predict", "tile_batch", &["tile"]),
     ("folo predict", "tile_merge", &["tile"]),
     ("folo predict", "tta_scales", &["tta"]),
     ("folo predict", "no_tta_hflip", &["tta"]),
+    ("folo predict", "track_high_thresh", &["track"]),
+    ("folo predict", "track_low_thresh", &["track"]),
+    ("folo predict", "track_new_thresh", &["track"]),
+    ("folo predict", "track_match_iou", &["track"]),
+    ("folo predict", "track_buffer", &["track"]),
+    ("folo predict", "track_min_hits", &["track"]),
+    ("folo predict", "track_class_agnostic", &["track"]),
 ];
 
 /// Looks up the peer argument ids required whenever `(cmd_path, arg_id)` is supplied.

@@ -6,13 +6,13 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use folo_data::check::{CheckIssue, CheckKind, CheckOptions, CheckReport, Severity};
-use folo_data::{Format, IssueKind, OpenOptions, Split};
+use folo_data::{AuditOptions, DEFAULT_DHASH_THRESHOLD, Format, IssueKind, OpenOptions, Split};
 pub(super) use folo_server::{
     coco_dangling_annotation_links, dangling_link_message, enrich_dangling_symlinks,
 };
 use serde_json::{Value, json};
 
-use crate::cli::{CheckArgs, SeverityArg};
+use crate::cli::{CheckArgs, SeverityArg, bounds};
 use crate::output::{CliError, ExitCode, Out};
 
 use super::{data_error, format_name, format_of, rel, splits_json};
@@ -33,6 +33,20 @@ fn issue_json(i: &CheckIssue, root: &Path, with_fix: bool) -> Value {
 }
 
 pub(super) fn check(args: CheckArgs, out: Out) -> Result<(), CliError> {
+    let perceptual_threshold = if args.perceptual || args.dhash_threshold.is_some() {
+        let thr = args.dhash_threshold.unwrap_or(DEFAULT_DHASH_THRESHOLD);
+        if !bounds::DHASH_THRESHOLD.contains_u64(u64::from(thr)) {
+            return Err(CliError::new(
+                ExitCode::Usage,
+                "invalid_config",
+                format!("--dhash-threshold must be in 0..=64, got {thr}"),
+            )
+            .hint("see `folo describe dataset check --json` for the accepted ranges"));
+        }
+        Some(thr)
+    } else {
+        None
+    };
     let t0 = Instant::now();
     let opts = CheckOptions { format: format_of(args.format), decode: !args.headers_only };
     let mut report = folo_data::check::check(&args.path, &opts).map_err(|e| data_error(e, &args.path))?;
@@ -40,6 +54,11 @@ pub(super) fn check(args: CheckArgs, out: Out) -> Result<(), CliError> {
         reconcile_coco_size_mismatches(&args.path, &mut report);
     }
     enrich_dangling_symlinks(&args.path, &mut report);
+    let perceptual_json = if let Some(thr) = perceptual_threshold {
+        Some(append_perceptual_audit(&args.path, &mut report, thr))
+    } else {
+        None
+    };
     let secs = t0.elapsed().as_secs_f64();
     let (errors, warnings, infos) =
         (report.count(Severity::Error), report.count(Severity::Warning), report.count(Severity::Info));
@@ -56,7 +75,7 @@ pub(super) fn check(args: CheckArgs, out: Out) -> Result<(), CliError> {
         .map(|i| issue_json(i, &report.root, args.fix_dry_run))
         .collect();
     let filtered_out = report.issues.len().saturating_sub(issues.len());
-    out.record(&json!({
+    let mut record = json!({
         "path": folo_api::json::path(&args.path),
         "root": folo_api::json::path(&report.root),
         "format": format_name(report.format),
@@ -76,7 +95,11 @@ pub(super) fn check(args: CheckArgs, out: Out) -> Result<(), CliError> {
         "filtered_out": filtered_out,
         "issues": issues,
         "seconds": secs,
-    }));
+    });
+    if let Some(p) = perceptual_json {
+        record["perceptual"] = p;
+    }
+    out.record(&record);
     for line in check_lines(&report, args.fix_dry_run, human_min, secs) {
         out.human(line);
     }
@@ -95,9 +118,69 @@ pub(super) fn check(args: CheckArgs, out: Out) -> Result<(), CliError> {
     }))
 }
 
+/// Runs `folo_data::audit_dataset_with` with 64-bit `dHash` perceptual near-duplicate detection, appends
+/// `DuplicateImage` warnings for every near-duplicate / cross-split leakage group, and returns a structured
+/// JSON summary.
+fn append_perceptual_audit(path: &Path, report: &mut CheckReport, threshold: u32) -> Value {
+    let Ok(ds) = folo_data::open_with(path, &OpenOptions { format: report.format, verify_images: false })
+    else {
+        return json!({
+            "threshold": threshold,
+            "near_duplicate_groups": 0,
+            "near_duplicate_leakage": 0,
+        });
+    };
+    let audit = ds.audit_with(&AuditOptions::perceptual(threshold));
+    let leakage_hashes: HashSet<&str> =
+        audit.near_duplicate_leakage.iter().map(|g| g.dhash.as_str()).collect();
+    for leak in &audit.near_duplicate_leakage {
+        let splits: Vec<&str> = leak.splits.iter().map(|s| s.as_str()).collect();
+        let Some(first) = leak.images.first() else { continue };
+        let first_rel = rel(&first.path, &report.root);
+        for img in leak.images.iter().skip(1) {
+            report.issues.push(CheckIssue {
+                kind: CheckKind::DuplicateImage,
+                file: img.path.clone(),
+                line: None,
+                message: format!(
+                    "perceptual split leakage ({}, dHash max distance {}): near-duplicate of {first_rel}",
+                    splits.join(", "),
+                    leak.max_distance,
+                ),
+                fix: Some("remove the near-duplicate image from one of the splits to prevent leakage".into()),
+            });
+        }
+    }
+    for group in &audit.near_duplicate_groups {
+        if leakage_hashes.contains(group.dhash.as_str()) {
+            continue;
+        }
+        let Some(first) = group.images.first() else { continue };
+        let first_rel = rel(&first.path, &report.root);
+        for img in group.images.iter().skip(1) {
+            report.issues.push(CheckIssue {
+                kind: CheckKind::DuplicateImage,
+                file: img.path.clone(),
+                line: None,
+                message: format!(
+                    "perceptual near-duplicate of {first_rel} (dHash max distance {})",
+                    group.max_distance,
+                ),
+                fix: Some("remove or deduplicate the near-duplicate copy".into()),
+            });
+        }
+    }
+    json!({
+        "threshold": threshold,
+        "near_duplicate_groups": audit.near_duplicate_groups.len(),
+        "near_duplicate_leakage": audit.near_duplicate_leakage.len(),
+    })
+}
+
 /// Whether `i` is a cross-split duplicate leakage warning (`folo_data::audit` / `folo_data::check`).
 fn is_split_leakage(i: &CheckIssue) -> bool {
-    i.kind == CheckKind::DuplicateImage && i.message.starts_with("split leakage (")
+    i.kind == CheckKind::DuplicateImage
+        && (i.message.starts_with("split leakage (") || i.message.starts_with("perceptual split leakage ("))
 }
 
 /// Whether `i` is `folo_data::check`'s COCO declared-vs-actual dimension mismatch warning.

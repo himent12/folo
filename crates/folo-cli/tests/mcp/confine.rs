@@ -21,6 +21,7 @@ fn read_only_hides_and_rejects_mutating_tools() {
         "get_dataset",
         "list_dataset_issues",
         "list_dataset_images",
+        "audit_dataset",
         "list_models",
         "run_status",
         "list_runs",

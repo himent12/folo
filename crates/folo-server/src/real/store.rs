@@ -336,6 +336,17 @@ impl Store for RealStore {
         self.models.export(&m, spec)
     }
 
+    fn export_model_with_axes(
+        &self,
+        id: &str,
+        spec: ExportSpec,
+        axes: crate::store::DynamicAxes,
+    ) -> Result<ExportResult> {
+        crate::store::check_export_axes(&spec, axes)?;
+        let m = self.model(id)?;
+        self.models.export_with_axes(&m, spec, axes)
+    }
+
     fn model_weights(&self, id: &str, format: WeightsFormat) -> Result<Weights> {
         let m = self.model(id)?;
         let name = weights_file_name(&m.model.name, format);
@@ -612,9 +623,20 @@ impl Store for RealStore {
     }
 
     fn val(&self, req: ValRequest) -> Result<ValReport> {
+        self.val_with_diagnostics(req, None).map(|(r, _)| r)
+    }
+
+    fn val_with_diagnostics(
+        &self,
+        req: ValRequest,
+        diag: Option<crate::store::ValDiagConfig>,
+    ) -> Result<(ValReport, Option<crate::store::ValDiagnostics>)> {
         // Validate numeric parameters upfront (matching MockStore::val) before looking up models,
         // re-indexing datasets, or initialising a GPU context.
         crate::models::check_val_params(req.imgsz, req.conf, req.iou)?;
+        if let Some(d) = &diag {
+            crate::store::check_val_diag_config(d)?;
+        }
         let _gpu = self.idle.using();
         let m = self.model(&req.model_id)?;
         let e = self.entry(&req.dataset_id)?;
@@ -623,7 +645,7 @@ impl Store for RealStore {
         let device = engine::resolve(&self.device)?;
         _gpu.on(device);
         let (ds, p) = (self.dataset_ref(&e), self.precision);
-        crate::models::val(&m, &ds, req.split, req.imgsz, req.conf, req.iou, device, p)
+        crate::models::val_with_diagnostics(&m, &ds, req.split, req.imgsz, req.conf, req.iou, device, p, diag)
     }
 
     fn labeler(&self) -> Result<&Labeler> {

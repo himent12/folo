@@ -1,16 +1,22 @@
 //! `folo predict`: recursive image walking, `--save` confinement / collision avoidance, and atomic annotated image
 //! writing.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use folo_data::ImageFormat;
+use folo_vision::fusion::ScoreRule;
+use folo_vision::model::HeadMode;
 use folo_vision::tta::DEFAULT_TTA_SCALES;
-use folo_vision::{PredictConfig, PredictOptions, Predictor, TileConfig, TileMergeMetric, TtaConfig};
+use folo_vision::{
+    ByteTracker, PredictConfig, PredictOptions, Predictor, TileConfig, TileMergeMetric, TrackConfig,
+    TrackedDetection, TtaConfig,
+};
 use serde_json::json;
 
 use crate::cli::{PredictArgs, bounds};
-use crate::draw::annotate;
+use crate::draw::{annotate, annotate_tracked};
 use crate::engine::engine_error;
 use crate::output::{CliError, ExitCode, Out};
 
@@ -272,10 +278,97 @@ fn build_predict_options(args: &PredictArgs) -> Result<PredictOptions, CliError>
     Ok(PredictOptions { tta, tile })
 }
 
+/// Builds and validates [`TrackConfig`] when `--track` is enabled, before the model is opened.
+fn build_track_config(args: &PredictArgs) -> Result<Option<TrackConfig>, CliError> {
+    if !args.track {
+        return Ok(None);
+    }
+    let invalid = |msg: String| {
+        CliError::new(ExitCode::Usage, "invalid_config", msg)
+            .hint("see `folo describe predict --json` for the accepted ranges")
+    };
+    let d = TrackConfig::default();
+    let high_thresh = args.track_high_thresh.unwrap_or(d.high_thresh);
+    if !bounds::UNIT_INTERVAL.contains_f64(f64::from(high_thresh)) {
+        return Err(invalid(format!("--track-high-thresh must be in 0..=1, got {high_thresh}")));
+    }
+    // When omitted, adapt default low / new thresholds to a custom --track-high-thresh so passing e.g.
+    // `--track --track-high-thresh 0.7` works cleanly while explicit out-of-order pairs still fail validation.
+    let low_thresh = args.track_low_thresh.unwrap_or_else(|| d.low_thresh.min(high_thresh));
+    if !bounds::UNIT_INTERVAL.contains_f64(f64::from(low_thresh)) {
+        return Err(invalid(format!("--track-low-thresh must be in 0..=1, got {low_thresh}")));
+    }
+    let new_track_thresh = args.track_new_thresh.unwrap_or_else(|| d.new_track_thresh.max(high_thresh));
+    if !bounds::UNIT_INTERVAL.contains_f64(f64::from(new_track_thresh)) {
+        return Err(invalid(format!("--track-new-thresh must be in 0..=1, got {new_track_thresh}")));
+    }
+    let match_iou = args.track_match_iou.unwrap_or(d.match_iou);
+    if !bounds::UNIT_INTERVAL.contains_f64(f64::from(match_iou)) {
+        return Err(invalid(format!("--track-match-iou must be in 0..=1, got {match_iou}")));
+    }
+    let min_hits = args.track_min_hits.unwrap_or(d.min_hits);
+    if !bounds::POSITIVE_INT.contains_u64(u64::from(min_hits)) {
+        return Err(invalid("--track-min-hits must be at least 1".into()));
+    }
+    let cfg = TrackConfig {
+        high_thresh,
+        low_thresh,
+        new_track_thresh,
+        match_iou,
+        track_buffer: args.track_buffer.unwrap_or(d.track_buffer),
+        min_hits,
+        class_aware: !args.track_class_agnostic,
+        ..d
+    };
+    cfg.validate().map_err(|e| invalid(e.to_string()))?;
+    Ok(Some(cfg))
+}
+
+/// Detector confidence floor when ByteTrack is active so stage-2 low-confidence detections down to `low_thresh`
+/// survive pre-NMS filtering (matching `folo_vision::track::sequence_det_conf`).
+fn track_det_conf(pred_conf: f32, low_thresh: f32, score_rule: ScoreRule, head_mode: HeadMode) -> f32 {
+    const CALIBRATED_LOGIT_HEADROOM: f64 = 1.5;
+    let target = pred_conf.min(low_thresh);
+    if target <= 0.0 {
+        return 0.0;
+    }
+    let strict_floor = target.next_down().max(0.0);
+    if head_mode == HeadMode::O2m && score_rule.is_calibrated() {
+        let p = (target as f64).clamp(1e-6, 1.0 - 1e-6);
+        let logit = (p / (1.0 - p)).ln() - CALIBRATED_LOGIT_HEADROOM;
+        let lowered = (1.0 / (1.0 + (-logit).exp())) as f32;
+        lowered.min(strict_floor).max(0.0)
+    } else {
+        strict_floor
+    }
+}
+
+fn tracked_boxes_json(tracks: &[TrackedDetection], classes: &[String]) -> Vec<serde_json::Value> {
+    let name = |c: u32| classes.get(c as usize).cloned().unwrap_or_else(|| c.to_string());
+    tracks
+        .iter()
+        .map(|tr| {
+            json!({
+                "x1": tr.bbox.x1,
+                "y1": tr.bbox.y1,
+                "x2": tr.bbox.x2,
+                "y2": tr.bbox.y2,
+                "score": tr.score,
+                "class": tr.class_id,
+                "name": name(tr.class_id),
+                "track_id": tr.track_id,
+                "age": tr.age,
+                "hits": tr.hits,
+            })
+        })
+        .collect()
+}
+
 pub fn predict(args: PredictArgs, out: Out) -> Result<(), CliError> {
     check_fusion_iou(args.fusion_iou)?;
     check_infer_args("predict", args.conf, args.iou, args.max_det, args.imgsz, bounds::INFER_IMGSZ, None)?;
     let predict_opts = build_predict_options(&args)?;
+    let track_cfg = build_track_config(&args)?;
     check_save_dir(args.save.as_deref())?;
     check_save_outside(args.save.as_deref(), &args.sources)?;
     let shape = format!("imgsz {:?} head {:?} tile {:?} tta {}", args.imgsz, args.head, args.tile, args.tta);
@@ -290,18 +383,28 @@ pub fn predict(args: PredictArgs, out: Out) -> Result<(), CliError> {
     let effective_imgsz = args.imgsz.unwrap_or(model.imgsz());
     predict_opts.validate(effective_imgsz).map_err(|e| engine_error("predict", e))?;
     let images = collect_images(&args.sources)?;
+    let score_rule: ScoreRule = args.score.into();
+    let effective_head = args.head.map(Into::into).unwrap_or_else(|| model.head_mode());
+    let det_conf = match &track_cfg {
+        Some(tc) => track_det_conf(args.conf, tc.low_thresh, score_rule, effective_head),
+        None => args.conf,
+    };
     let cfg = PredictConfig {
         imgsz: effective_imgsz,
-        conf: args.conf,
+        conf: det_conf,
         iou: args.iou,
         max_det: args.max_det as usize,
         rect: true,
         head: args.head.map(Into::into),
         fusion: args.fusion.into(),
         fusion_iou: args.fusion_iou,
-        score: args.score.into(),
+        score: score_rule,
     };
     let predictor = Predictor::new(model, cfg).map_err(|e| engine_error("predict", e))?;
+    let mut tracker = match &track_cfg {
+        Some(tc) => Some(ByteTracker::new(tc.clone()).map_err(|e| engine_error("predict", e))?),
+        None => None,
+    };
     let destinations = match &args.save {
         Some(dir) => Some(save_paths(dir, &images)?),
         None => None,
@@ -310,6 +413,8 @@ pub fn predict(args: PredictArgs, out: Out) -> Result<(), CliError> {
     let device = predictor.device().to_string();
     let precision = precision_of(predictor.model());
     let (mut boxes, mut failed) = (0usize, 0usize);
+    let mut frame_index = 0usize;
+    let mut unique_tracks: BTreeSet<u64> = BTreeSet::new();
     // The first image's timing (it includes pipeline compilation and the first allocations) and the sum over the
     // rest: the mean leaves the first out once there are others.
     let mut first: Option<[f64; 4]> = None;
@@ -331,6 +436,19 @@ pub fn predict(args: PredictArgs, out: Out) -> Result<(), CliError> {
             predictor.predict_with_options(&img, &predict_opts).map_err(|e| engine_error("predict", e))?;
         p.timing.preprocess_ms += decode_ms;
         p.timing.total_ms += decode_ms;
+        let tracks = if let Some(trk) = &mut tracker {
+            let t_trk = Instant::now();
+            let active = trk.update(&p.detections);
+            let trk_ms = t_trk.elapsed().as_secs_f64() * 1e3;
+            p.timing.postprocess_ms += trk_ms;
+            p.timing.total_ms += trk_ms;
+            for tr in &active {
+                unique_tracks.insert(tr.track_id);
+            }
+            Some(active)
+        } else {
+            None
+        };
         let ti = p.timing;
         let parts = [ti.preprocess_ms, ti.inference_ms, ti.postprocess_ms, ti.total_ms];
         if first.is_none() {
@@ -340,12 +458,17 @@ pub fn predict(args: PredictArgs, out: Out) -> Result<(), CliError> {
                 *s += v;
             }
         }
-        boxes += p.detections.len();
+        let count = tracks.as_ref().map_or(p.detections.len(), Vec::len);
+        boxes += count;
         let mut saved = None;
         if let Some(dests) = &destinations {
             let (dst, fmt) = &dests[i];
             let mut canvas = img;
-            annotate(&mut canvas, &p.detections);
+            if let Some(active) = &tracks {
+                annotate_tracked(&mut canvas, active);
+            } else {
+                annotate(&mut canvas, &p.detections);
+            }
             let io = |e: String| {
                 CliError::new(
                     ExitCode::Runtime,
@@ -360,19 +483,46 @@ pub fn predict(args: PredictArgs, out: Out) -> Result<(), CliError> {
                 .map_err(|e| io(e.to_string()))?;
             saved = Some(dst.clone());
         }
-        out.record(&json!({
-            "event": "prediction",
-            "file": crate::output::record_path(path),
-            "image": { "width": p.width, "height": p.height },
-            "boxes": p.scored_boxes(&classes),
-            "timing": ti.to_api(),
-            "device": device,
-            "dtype": precision,
-            "saved": saved.as_ref().map(crate::output::record_path),
-        }));
-        let summary: Vec<String> =
-            p.scored_boxes(&classes).iter().take(6).map(|b| format!("{} {:.2}", b.name, b.score)).collect();
-        out.human(image_line(&folo_api::json::path(path), p.detections.len(), &summary, ti.total_ms));
+        if let Some(active) = &tracks {
+            let boxes_json = tracked_boxes_json(active, &classes);
+            out.record(&json!({
+                "event": "prediction",
+                "frame_index": frame_index,
+                "file": crate::output::record_path(path),
+                "image": { "width": p.width, "height": p.height },
+                "boxes": boxes_json,
+                "timing": ti.to_api(),
+                "device": device,
+                "dtype": precision,
+                "saved": saved.as_ref().map(crate::output::record_path),
+            }));
+            let name = |c: u32| classes.get(c as usize).cloned().unwrap_or_else(|| c.to_string());
+            let summary: Vec<String> = active
+                .iter()
+                .take(6)
+                .map(|tr| format!("#{} {} {:.2}", tr.track_id, name(tr.class_id), tr.score))
+                .collect();
+            out.human(image_line(&folo_api::json::path(path), active.len(), &summary, ti.total_ms));
+            frame_index += 1;
+        } else {
+            out.record(&json!({
+                "event": "prediction",
+                "file": crate::output::record_path(path),
+                "image": { "width": p.width, "height": p.height },
+                "boxes": p.scored_boxes(&classes),
+                "timing": ti.to_api(),
+                "device": device,
+                "dtype": precision,
+                "saved": saved.as_ref().map(crate::output::record_path),
+            }));
+            let summary: Vec<String> = p
+                .scored_boxes(&classes)
+                .iter()
+                .take(6)
+                .map(|b| format!("{} {:.2}", b.name, b.score))
+                .collect();
+            out.human(image_line(&folo_api::json::path(path), p.detections.len(), &summary, ti.total_ms));
+        }
     }
     let done = images.len() - failed;
     if done == 1 {
@@ -382,7 +532,7 @@ pub fn predict(args: PredictArgs, out: Out) -> Result<(), CliError> {
     // Rounded like the per-image timings (`folo_api::json::round_ms`): `49.0546`, not `49.054555000000015`.
     let mean = |i: usize| folo_api::json::round_ms(sum[i] / n);
     let first_ms = |i: usize| first.map(|f| folo_api::json::round_ms(f[i]));
-    out.record(&json!({
+    let mut done_record = json!({
         "event": "done",
         "images": images.len() - failed,
         "failed": failed,
@@ -391,9 +541,16 @@ pub fn predict(args: PredictArgs, out: Out) -> Result<(), CliError> {
         "first_timing": first.map(|_| json!({ "preprocess_ms": first_ms(0), "inference_ms": first_ms(1), "postprocess_ms": first_ms(2), "total_ms": first_ms(3) })),
         "seconds": t_all.elapsed().as_secs_f64(),
         "saved_to": args.save.as_ref().map(crate::output::record_path),
-    }));
+    });
+    if tracker.is_some() {
+        done_record["tracked"] = json!(true);
+        done_record["unique_tracks"] = json!(unique_tracks.len());
+    }
+    out.record(&done_record);
+    let track_note =
+        if tracker.is_some() { format!(", {} unique track(s)", unique_tracks.len()) } else { String::new() };
     out.human(format!(
-        "{} images, {boxes} boxes; mean {:.1} ms (pre {:.1}, inference {:.1}, post {:.1}{}){}",
+        "{} images, {boxes} boxes{track_note}; mean {:.1} ms (pre {:.1}, inference {:.1}, post {:.1}{}){}",
         done,
         sum[3] / n,
         sum[0] / n,
