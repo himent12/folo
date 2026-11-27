@@ -76,27 +76,46 @@ fn deferred_and_batched_buffer_readbacks() {
     assert!(async_batch[2].is_empty());
 }
 
-/// Validation errors in `read_batch_deferred` reject before encoding or submitting anything.
+/// Validation errors in `read_batch_deferred` (including missing `COPY_SRC` usage and overflowing lengths)
+/// reject atomically before encoding or submitting anything, and never corrupt an earlier in-flight readback.
 #[test]
 fn read_batch_validation_is_atomic() {
     let _shared = gpu!();
     let ctx = GpuContext::new().unwrap();
+    ctx.set_wait_spin(std::time::Duration::ZERO);
     let buf = ctx.upload(&[1u8; 64]).unwrap();
+    let no_copy_src = ctx.wgpu_device().create_buffer(&wgpu::BufferDescriptor {
+        label: Some("no copy src"),
+        size: 64,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
     ctx.sync().unwrap();
 
+    // Start an earlier valid deferred readback, then reject invalid batches (including missing `COPY_SRC` and
+    // `u64::MAX` length overflow) before collecting the earlier handle.
+    let valid_in_flight = ctx.read_deferred(buf.raw(), 0, 64).unwrap();
     let before = ctx.work_stats();
+    // Missing COPY_SRC usage on source buffer.
+    let err = ctx.read_batch_deferred(&[(buf.raw(), 0, 16), (&no_copy_src, 0, 16)]).err();
+    assert!(matches!(err, Some(GpuError::Shape(_))), "missing COPY_SRC must fail preflight: {err:?}");
     // Unaligned offset on second entry.
     let err = ctx.read_batch_deferred(&[(buf.raw(), 0, 16), (buf.raw(), 2, 8)]).err();
     assert!(matches!(err, Some(GpuError::Shape(_))));
     // Out-of-bounds length on second entry.
     let err = ctx.read_batch_deferred(&[(buf.raw(), 0, 16), (buf.raw(), 0, 1024)]).err();
     assert!(matches!(err, Some(GpuError::Shape(_))));
+    // Overflowing `next_multiple_of` length.
+    let err = ctx.read_batch_deferred(&[(buf.raw(), 0, u64::MAX - 1)]).err();
+    assert!(matches!(err, Some(GpuError::Shape(_))));
     let after = ctx.work_stats();
     assert_eq!(after.submissions, before.submissions, "rejected batch must not submit");
+    assert_eq!(valid_in_flight.into_vec().unwrap(), vec![1u8; 64]);
 
     // Empty / all-zero batch submits nothing and returns immediately-ready handles.
+    let before_empty = ctx.work_stats();
     let empty = ctx.read_batch_deferred(&[(buf.raw(), 0, 0), (buf.raw(), 4, 0)]).unwrap();
-    assert_eq!(ctx.work_stats().submissions, before.submissions);
+    assert_eq!(ctx.work_stats().submissions, before_empty.submissions);
     for rb in empty {
         assert!(rb.is_empty());
         assert!(rb.poll_ready().unwrap());
@@ -104,19 +123,39 @@ fn read_batch_validation_is_atomic() {
     }
 }
 
-/// Dropping an unfinished `Readback` cancels / unmaps its staging buffer cleanly so the pool reuses it without
-/// wgpu validation errors.
+/// Dropping an unfinished `Readback` retires its staging buffer instead of returning it to the reuse pool while
+/// the original submission may still be in flight, so an immediately following readback of the same size class
+/// can never observe the abandoned submission's bytes.
 #[test]
 fn dropped_deferred_readback_unmaps_cleanly() {
     let _shared = gpu!();
     let ctx = GpuContext::new().unwrap();
-    let buf = ctx.upload(&[42u8; 256]).unwrap();
-    for _ in 0..4 {
-        let rb = ctx.read_deferred(buf.raw(), 0, 256).unwrap();
-        drop(rb);
+    let n = 4096usize;
+    let bytes = (n * 4) as u64;
+    let a = GpuTensor::from_slice(&ctx, &vec![1.0f32; n], &[n]).unwrap();
+    let b = GpuTensor::from_slice(&ctx, &vec![2.0f32; n], &[n]).unwrap();
+    let one = GpuTensor::from_slice(&ctx, &[0.0f32], &[1]).unwrap();
+    ctx.sync().unwrap();
+
+    for _ in 0..8 {
+        // Queue nontrivial work before the abandoned readback so its submission is still executing when dropped.
+        let mut slow = a.clone();
+        for _ in 0..32 {
+            slow = slow.add(&one).unwrap();
+        }
+        let abandoned = ctx.read_deferred(slow.raw(), 0, bytes).unwrap();
+        drop(abandoned);
+
+        // Immediately read a different buffer of the exact same size class: must return `2.0`, never `1.0`.
+        let mut second = b.clone();
+        for _ in 0..4 {
+            second = second.add(&one).unwrap();
+        }
+        let got_bytes = ctx.read(second.raw(), 0, bytes).unwrap();
+        let got: &[f32] = bytemuck::cast_slice(&got_bytes);
+        assert!(got.iter().all(|&v| v == 2.0), "stale bytes from abandoned readback leaked into next read");
     }
     ctx.sync().unwrap();
-    assert_eq!(ctx.read(buf.raw(), 0, 256).unwrap(), vec![42u8; 256]);
 }
 
 /// `poll_ready` and `finish` / `finish_async` on a `Readback` report `DeviceLost` when the device is destroyed.
@@ -128,6 +167,7 @@ fn deferred_readback_reports_device_loss() {
     ctx.sync().unwrap();
 
     let rb = ctx.read_deferred(buf.raw(), 0, 64).unwrap();
+    let rb_after = ctx.read_deferred(buf.raw(), 0, 64).unwrap();
     ctx.destroy_device();
     // Non-blocking `poll_ready` must never panic on a destroyed device; `into_vec` must report `DeviceLost`.
     let _ = rb.poll_ready();
@@ -137,7 +177,6 @@ fn deferred_readback_reports_device_loss() {
         "expected DeviceLost on finish, got {finished:?}"
     );
     // Once device loss is recorded, `poll_ready` reports `DeviceLost` deterministically.
-    let rb_after = ctx.read_deferred(buf.raw(), 0, 64).unwrap();
     assert!(matches!(rb_after.poll_ready(), Err(GpuError::DeviceLost(_))));
     assert!(matches!(rb_after.into_vec(), Err(GpuError::DeviceLost(_))));
 
@@ -145,8 +184,8 @@ fn deferred_readback_reports_device_loss() {
     let buf2 = ctx2.upload(&[9u8; 64]).unwrap();
     ctx2.sync().unwrap();
     ctx2.destroy_device();
-    let rb2 = ctx2.read_deferred(buf2.raw(), 0, 64).unwrap();
-    assert!(matches!(pollster::block_on(rb2.into_vec_async()), Err(GpuError::DeviceLost(_))));
+    let res2 = ctx2.read_deferred(buf2.raw(), 0, 64).and_then(|r| pollster::block_on(r.into_vec_async()));
+    assert!(matches!(res2, Err(GpuError::DeviceLost(_))), "expected DeviceLost, got {res2:?}");
 }
 
 /// `download_deferred`, `download_many`, and `download_many_async` handle contiguous, strided, unaligned-offset,

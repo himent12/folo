@@ -186,10 +186,12 @@ pub fn download_deferred(ctx: &GpuContext, t: &Tensor) -> Result<DeferredDownloa
     Ok(batch.pop().expect("single download"))
 }
 
-/// Starts non-blocking downloads of all `tensors` in a single command submission.
+/// Starts non-blocking downloads of all `tensors`, encoding all staging copies into a single command buffer and
+/// queue submission.
 ///
-/// Mixed CPU and GPU tensors (including strided or unaligned views) are supported: any strided gathers and all
-/// staging copies are encoded into the same batch and submitted once, sharing a single submission fence.
+/// Mixed CPU and GPU tensors (including strided or unaligned views) are supported: any strided or unaligned
+/// views first encode gather dispatches into the open command batch (which follows
+/// [`GpuContext::flush_interval`]), and then every staging copy is submitted together under one submission fence.
 pub fn download_many_deferred(ctx: &GpuContext, tensors: &[&Tensor]) -> Result<Vec<DeferredDownload>> {
     if tensors.is_empty() {
         return Ok(Vec::new());
@@ -290,12 +292,14 @@ pub async fn download_async(ctx: &GpuContext, t: &Tensor) -> Result<Tensor> {
     download_deferred(ctx, t)?.finish_async().await
 }
 
-/// Copies all `tensors` to new CPU tensors in a single GPU submission and wait (blocking; native only).
+/// Copies all `tensors` to new CPU tensors with all staging copies batched into one GPU submission and wait
+/// (blocking; native only). See [`download_many_deferred`].
 pub fn download_many(ctx: &GpuContext, tensors: &[&Tensor]) -> Result<Vec<Tensor>> {
     download_many_deferred(ctx, tensors)?.into_iter().map(DeferredDownload::finish).collect()
 }
 
-/// Copies all `tensors` to new CPU tensors in a single GPU submission without blocking.
+/// Copies all `tensors` to new CPU tensors with all staging copies batched into one GPU submission without
+/// blocking. See [`download_many_deferred`].
 pub async fn download_many_async(ctx: &GpuContext, tensors: &[&Tensor]) -> Result<Vec<Tensor>> {
     let pending = download_many_deferred(ctx, tensors)?;
     let mut out = Vec::with_capacity(pending.len());

@@ -78,10 +78,18 @@ impl GpuContext {
                 prepared.push(None);
                 continue;
             }
+            if !buf.usage().contains(wgpu::BufferUsages::COPY_SRC) {
+                return Err(GpuError::Shape("buffer cannot be read back (missing COPY_SRC usage)".into()));
+            }
             if !offset.is_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT) {
                 return Err(GpuError::Shape(format!("read offset {offset} is not 4-byte aligned")));
             }
-            let len4 = len.next_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT);
+            let Some(len4) = len.checked_next_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT) else {
+                return Err(GpuError::Shape(format!(
+                    "read of {len} bytes at {offset} overruns a {}-byte buffer",
+                    buf.size()
+                )));
+            };
             if offset.checked_add(len4).is_none_or(|end| end > buf.size()) {
                 return Err(GpuError::Shape(format!(
                     "read of {len} bytes at {offset} overruns a {}-byte buffer",
@@ -107,6 +115,12 @@ impl GpuContext {
             }
             self.submit(&mut b)
         };
+        if let Err(e) = self.take_error() {
+            for (_, mut staging, _, _) in prepared.into_iter().flatten() {
+                staging.discard();
+            }
+            return Err(self.or_lost(e));
+        }
         let mut out = Vec::with_capacity(reads.len());
         for item in prepared {
             match item {
@@ -130,6 +144,7 @@ impl GpuContext {
                             len4,
                             submission: submission.clone(),
                             state,
+                            retired: false,
                         }),
                     });
                 }
@@ -199,7 +214,7 @@ impl Readback {
     /// Waits for this readback's submission (blocking; native only), passes the mapped bytes to `f`, unmaps,
     /// and reports any captured device errors.
     pub fn finish<R>(self, f: impl FnOnce(&[u8]) -> R) -> Result<R> {
-        let Some(p) = self.inner else { return Ok(f(&[])) };
+        let Some(mut p) = self.inner else { return Ok(f(&[])) };
         p.wait_blocking()?;
         p.finish(f)
     }
@@ -212,7 +227,7 @@ impl Readback {
     /// Awaits this readback without blocking the browser, passes the mapped bytes to `f`, unmaps, and reports
     /// any captured device errors.
     pub async fn finish_async<R>(self, f: impl FnOnce(&[u8]) -> R) -> Result<R> {
-        let Some(p) = self.inner else { return Ok(f(&[])) };
+        let Some(mut p) = self.inner else { return Ok(f(&[])) };
         p.wait().await?;
         p.finish(f)
     }
@@ -246,6 +261,9 @@ pub(crate) struct PendingRead {
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     submission: Option<wgpu::SubmissionIndex>,
     state: Arc<MapSignal>,
+    /// True once the map callback has completed with `Ok(())`, guaranteeing the original submission retired
+    /// before `staging` may be returned to the buffer pool on drop.
+    retired: bool,
 }
 
 impl PendingRead {
@@ -265,15 +283,20 @@ impl PendingRead {
     /// the callbacks may still be running them after this thread's poll returned. So wait on the condition
     /// variable, polling again now and then in case no other thread is.
     #[cfg(not(target_arch = "wasm32"))]
-    fn wait_blocking(&self) -> Result<()> {
+    fn wait_blocking(&mut self) -> Result<()> {
         if let Some(r) = self.state.state.lock().expect("map state lock").result.take() {
-            return self.ctx.map_outcome(r);
+            self.ctx.map_outcome(r)?;
+            self.retired = true;
+            return Ok(());
         }
         self.ctx.wait_submission(self.submission.as_ref(), || self.is_signaled())?;
         let mut s = self.state.state.lock().expect("map state lock");
         loop {
             if let Some(r) = s.result.take() {
-                return self.ctx.map_outcome(r);
+                drop(s);
+                self.ctx.map_outcome(r)?;
+                self.retired = true;
+                return Ok(());
             }
             let (guard, timeout) = self
                 .state
@@ -292,22 +315,28 @@ impl PendingRead {
     /// In the browser the map callback only runs from the page's event loop, which a blocking call never gives
     /// a turn.
     #[cfg(target_arch = "wasm32")]
-    fn wait_blocking(&self) -> Result<()> {
+    fn wait_blocking(&mut self) -> Result<()> {
         match self.state.state.lock().expect("map state lock").result.take() {
-            Some(r) => self.ctx.map_outcome(r),
+            Some(r) => {
+                self.ctx.map_outcome(r)?;
+                self.retired = true;
+                Ok(())
+            }
             None => Err(GpuError::Unsupported(NO_BLOCKING)),
         }
     }
 
     /// Waits for the map without blocking the browser. Natively waits only on this readback's submission first,
     /// so the future is ready at once; in the browser WebGPU resolves it from the event loop.
-    pub(crate) async fn wait(&self) -> Result<()> {
+    pub(crate) async fn wait(&mut self) -> Result<()> {
         #[cfg(not(target_arch = "wasm32"))]
         if !self.is_signaled() {
             self.ctx.wait_submission(self.submission.as_ref(), || self.is_signaled())?;
         }
         let r = MapWait { state: &self.state.state }.await;
-        self.ctx.map_outcome(r)
+        self.ctx.map_outcome(r)?;
+        self.retired = true;
+        Ok(())
     }
 
     /// Hands the mapped bytes to `f`, unmaps, and reports the errors wgpu captured meanwhile.
@@ -328,9 +357,14 @@ impl PendingRead {
 
 impl Drop for PendingRead {
     fn drop(&mut self) {
-        // Unmap on every path (also a failed or abandoned wait, which cancels a pending map) so the staging
-        // buffer goes back to the pool usable.
+        // Unmap on every path (also a failed or abandoned wait, which cancels a pending map).
         self.staging.raw().unmap();
+        if !self.retired {
+            // The original submission may still be in flight in wgpu: retire the staging buffer permanently
+            // instead of returning it to the reuse pool so a later readback cannot observe this submission's
+            // map completion before its own copy finishes.
+            self.staging.discard();
+        }
     }
 }
 

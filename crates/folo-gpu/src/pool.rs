@@ -379,6 +379,17 @@ impl BufferPool {
             self.order = live.into();
         }
     }
+
+    /// Retires a buffer permanently instead of returning it to the free list (used when a staging buffer is
+    /// abandoned mid-submission so no later readback can reuse it while wgpu still tracks the original map).
+    pub(crate) fn discard(&mut self, buf: wgpu::Buffer, class: u64) {
+        self.stats.live_bytes = self.stats.live_bytes.saturating_sub(class);
+        if let Some(lent) = self.lent.get_mut(&(class, buf.usage())) {
+            lent.now = lent.now.saturating_sub(1);
+        }
+        self.retire(&buf);
+        drop(buf);
+    }
 }
 
 /// A buffer on loan from a [`BufferPool`]; it goes back to the pool when dropped.
@@ -401,6 +412,13 @@ impl GpuBuffer {
     /// Allocated size in bytes (the size class).
     pub fn size(&self) -> u64 {
         self.class
+    }
+
+    /// Retires this buffer from the pool instead of returning it to the free list on drop.
+    pub(crate) fn discard(&mut self) {
+        if let Some(buf) = self.buf.take() {
+            self.pool.lock().unwrap_or_else(|p| p.into_inner()).discard(buf, self.class);
+        }
     }
 }
 

@@ -820,10 +820,11 @@ println!("{}", loss.item::<f32>()?);                  // the only wait for the G
   (`GpuContext::read_with`), and `Tensor::to_vec` takes that storage without another copy. For pipelined workloads and
   multi-tensor readbacks, `GpuContext::read_deferred` / `read_batch_deferred` / `read_batch` / `read_batch_async`
   (returning `Readback` handles) and `folo_gpu::download_deferred` / `download_many_deferred` / `download_many` /
-  `download_many_async` (returning `DeferredDownload` handles) validate all ranges up front, encode all copies (and
-  any strided gathers) into a single command buffer and queue submission, and wait only on that submission's fence so
-  subsequent GPU work can overlap the DMA transfer. Dropping an unfinished `Readback` / `DeferredDownload` unmaps and
-  returns its staging buffer cleanly. `cargo bench -p folo-gpu --bench readback` times batched vs sequential
+  `download_many_async` (returning `DeferredDownload` handles) validate all ranges up front, encode all staging copies
+  into a single command buffer and queue submission (strided or unaligned views first encode gather dispatches into the
+  open batch under `flush_interval`), and wait only on that submission's fence so subsequent GPU work can overlap the
+  DMA transfer. Dropping an unfinished `Readback` / `DeferredDownload` unmaps and retires its staging buffer from the
+  reuse pool so no later readback can reuse it before the original submission completes. `cargo bench -p folo-gpu --bench readback` times batched vs sequential
   multi-tensor readbacks and pipelined deferred vs synchronous readbacks.
 - **No round trips.** Kernels only encode; nothing waits until a download (`to_vec`, `item`, `to_device(Cpu)`)
   or `folo_core::backend::synchronize(dev)`. Uploads flush the open batch; they do not wait. A YOLOv8n-shaped

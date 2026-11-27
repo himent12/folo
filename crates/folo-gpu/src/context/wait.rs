@@ -62,8 +62,16 @@ impl GpuContext {
         let queue_empty = if done {
             queue_empty
         } else {
-            let status = self
-                .poll_status(wgpu::PollType::Wait { submission_index: submission.cloned(), timeout: None })?;
+            let status = match self
+                .poll_status(wgpu::PollType::Wait { submission_index: submission.cloned(), timeout: None })
+            {
+                Ok(s) => s,
+                Err(GpuError::Poll(msg)) => {
+                    self.take_error()?;
+                    return Err(GpuError::Poll(msg));
+                }
+                Err(e) => return Err(e),
+            };
             status.is_queue_empty()
         };
         if queue_empty {
