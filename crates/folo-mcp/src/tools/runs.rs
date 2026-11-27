@@ -3,7 +3,9 @@
 use std::collections::{BTreeMap, HashSet};
 
 use folo_api::{LogLevel, LogLine, QueueRequest, Run, RunMetrics};
-use folo_server::store::{LogsQuery, MAX_RUN_NAME_CHARS, MetricsQuery, QueueMove};
+use folo_server::store::{
+    AutoBatchOptions, LogsQuery, MAX_RUN_NAME_CHARS, MetricsQuery, QueueMove, check_auto_batch_options,
+};
 use rmcp::model::JsonObject;
 use serde_json::Value;
 
@@ -24,13 +26,35 @@ fn run_summary(mut r: Run) -> Run {
 }
 
 impl Inner {
-    pub(super) async fn train(&self, args: JsonObject) -> Result<Output, Error> {
+    pub(super) async fn train(&self, mut args: JsonObject) -> Result<Output, Error> {
         // Resuming takes the arguments as given: the other fields must match the run's config or be omitted, so
         // they are not filled with TrainConfig's defaults (and `dataset_id` may be left out).
         if let Some(id) = args.get("resume_run_id").filter(|v| !v.is_null()) {
             let id =
                 id.as_str().ok_or_else(|| invalid_arguments("resume_run_id must be a string"))?.to_string();
             return self.resume(id, args).await;
+        }
+        let mut batch_was_auto = false;
+        if let Some(Value::String(s)) = args.get("batch") {
+            if s == "auto" {
+                if args.get("auto_batch").and_then(Value::as_bool) == Some(false) {
+                    return Err(Error::new(
+                        http::StatusCode::BAD_REQUEST,
+                        "invalid_config",
+                        "batch: \"auto\" conflicts with auto_batch: false",
+                    ));
+                }
+                batch_was_auto = true;
+                args.remove("batch");
+            } else {
+                return Err(Error::new(
+                    http::StatusCode::BAD_REQUEST,
+                    "invalid_config",
+                    format!(
+                        "invalid train config: batch must be an integer in 1..=1024 or \"auto\", got \"{s}\""
+                    ),
+                ));
+            }
         }
         // An explicit `arch` next to `weights` (a fine-tune takes the weights' architecture, as `folo train --weights`
         // does) must name that architecture.
@@ -46,6 +70,11 @@ impl Inner {
             }
             e
         })?;
+        let auto_batch = AutoBatchOptions {
+            enabled: batch_was_auto || a.auto_batch.unwrap_or(false),
+            target_utilization: a.auto_batch_target,
+        };
+        check_auto_batch_options(&auto_batch)?;
         // The server's limit (`POST /api/runs`), also in the inputSchema's `maxLength`.
         check_name_at("name", &a.config.name, MAX_RUN_NAME_CHARS)?;
         self.ensure_dataset(&a.config.dataset_id).await?;
@@ -64,15 +93,18 @@ impl Inner {
                 .hint("leave `arch` out when `weights` is set (or set it to the weights' arch)"));
             }
         }
-        let run =
-            self.blocking(move |s| s.create_run(a.config)).await.map_err(|e| self.amp_hint(e, false))?;
+        let auto_note = if auto_batch.enabled { " (auto-batch)" } else { "" };
+        let run = self
+            .blocking(move |s| s.create_run_with_auto_batch(a.config, auto_batch))
+            .await
+            .map_err(|e| self.amp_hint(e, false))?;
         // Embedded runs end with this process, so they are stopped on disconnect; proxied runs belong to the
         // `folo serve` (and Studio) and outlive the session, and so do cloud runs, which train without this process.
         if self.proxy.is_none() && run.config.compute.is_none() {
             self.created_runs.lock().unwrap().push(run.id.clone());
         }
         let summary = format!(
-            "started {} ({}): {} on {}, {} epochs; follow it with run_status or folo://runs/{}",
+            "started {} ({}): {} on {}, {} epochs{auto_note}; follow it with run_status or folo://runs/{}",
             run.id,
             run.name,
             run.config.arch.as_str(),

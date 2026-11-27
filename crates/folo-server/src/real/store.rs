@@ -144,7 +144,9 @@ impl Store for RealStore {
         // A fine-tune keeps its EMA window (made before the key: the default window, §8.5).
         let cmd = crate::cli::with_ema_run_fraction(cmd, crate::cli::recorded_ema_run_fraction(e.dir()));
         // A run continued from a distillation run's checkpoint keeps its teacher.
-        Ok(crate::cli::with_distill(cmd, crate::cli::recorded_distill(e.dir())))
+        let cmd = crate::cli::with_distill(cmd, crate::cli::recorded_distill(e.dir()));
+        // A run started with GPU VRAM-budget auto-batch repeats with `--batch auto`.
+        Ok(crate::cli::with_auto_batch(cmd, crate::cli::recorded_auto_batch(e.dir())))
     }
 
     fn benchmark(&self, req: BenchmarkRequest) -> Result<BenchmarkReport> {
@@ -365,6 +367,14 @@ impl Store for RealStore {
 
     fn create_run(&self, config: TrainConfig) -> Result<Run> {
         self.start_run(config, None)
+    }
+
+    fn create_run_with_auto_batch(
+        &self,
+        config: TrainConfig,
+        auto_batch: crate::store::AutoBatchOptions,
+    ) -> Result<Run> {
+        self.start_run_with_auto_batch(config, None, auto_batch)
     }
 
     fn continue_run(&self, checkpoint: &str, config: TrainConfig) -> Result<Run> {

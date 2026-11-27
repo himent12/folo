@@ -9,6 +9,7 @@
 //! - [`plan`]: the catalog, the default plan and plan validation.
 //! - [`score`]: every number of docs/BENCH.md's *Definitions*: accuracy with its bootstrap interval, robustness,
 //!   self-labeling, calibration, localization and the total, returned as the [`folo_api`] wire types.
+//! - [`source`]: deterministic generated-image benchmark scenes built on `folo-data`'s procedural shapes generator.
 //! - `pixels.rs` (private): the pixel kernels behind the conditions (sRGB tables, seeded noise, convolution,
 //!   resampling).
 //!
@@ -20,8 +21,13 @@ pub mod conditions;
 mod pixels;
 pub mod plan;
 pub mod score;
+pub mod source;
 
 pub use conditions::{Condition, Rendered};
+pub use source::{
+    DEFAULT_CLASSES, DEFAULT_IMAGES, DEFAULT_IMGSZ, GeneratedImage, GeneratedSourceSpec, MAX_IMGSZ,
+    MIN_IMGSZ, generate_images,
+};
 
 /// The version of what this crate computes: the pixels of every condition and every definition of the score.
 /// Bump it when a condition's pixels or a definition of the score changes: it goes into every benchmark's

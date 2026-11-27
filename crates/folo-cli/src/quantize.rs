@@ -2,17 +2,19 @@
 //! weights (fused, `f32`) with the calibration in their metadata (`folo.quant`, docs/FORMAT.md), for
 //! `val` / `predict --precision int8`.
 
+use std::collections::HashMap;
 use std::time::Instant;
 
-use folo_data::{Dataset, Split};
+use folo_core::Tensor;
+use folo_data::{DataLoader, Dataset, FileDataset, LoaderConfig, Split};
 use folo_nn::Module;
 use folo_nn::io::{FloatDType, ModelFile, write_export};
-use folo_vision::model::quant::{self, Calibration, Method};
+use folo_vision::model::quant::{self, Calibration, Method, SensitivityPolicy};
 use folo_vision::train::resolve_device;
 use folo_vision::{FoloModel, Precision};
 use serde_json::json;
 
-use crate::cli::{QuantMethodArg, QuantizeArgs, SplitArg, bounds};
+use crate::cli::{F32PolicyArg, QuantMethodArg, QuantizeArgs, SplitArg, bounds};
 use crate::engine::{engine_error, open_dataset_splits};
 use crate::output::{CliError, ExitCode, Out};
 use crate::output_file::OutputFile;
@@ -25,6 +27,66 @@ fn usage(message: String) -> CliError {
     CliError::new(ExitCode::Usage, "usage", message)
 }
 
+/// Validated selective-`f32` calibration configuration derived from [`QuantizeArgs`].
+struct SelectiveF32 {
+    policy: F32PolicyArg,
+    sensitivity: Option<SensitivityPolicy>,
+    explicit_convs: Vec<String>,
+}
+
+fn check_selective_f32(args: &QuantizeArgs) -> Result<SelectiveF32, CliError> {
+    let has_auto_tuning = args.max_f32_macs.is_some()
+        || args.sqnr_threshold.is_some()
+        || args.no_p5_head_out
+        || args.no_pair_bottlenecks;
+    if args.f32_policy != F32PolicyArg::Auto && has_auto_tuning {
+        return Err(usage(
+            "--max-f32-macs, --sqnr-threshold, --no-p5-head-out, and --no-pair-bottlenecks only apply to \
+             `--f32-policy auto`"
+                .into(),
+        )
+        .hint("remove those flags, or use `--f32-policy auto`"));
+    }
+    let sensitivity = if args.f32_policy == F32PolicyArg::Auto {
+        let mut policy = SensitivityPolicy::default();
+        if let Some(frac) = args.max_f32_macs {
+            if !bounds::UNIT_INTERVAL.contains_f64(frac) {
+                return Err(usage(format!("--max-f32-macs must be finite in 0..=1, got {frac}")));
+            }
+            policy.max_f32_mac_fraction = frac;
+        }
+        if let Some(db) = args.sqnr_threshold {
+            if !db.is_finite() {
+                return Err(usage(format!("--sqnr-threshold must be a finite number in dB, got {db}")));
+            }
+            policy.sqnr_threshold_db = db;
+        }
+        if args.no_p5_head_out {
+            policy.include_p5_head_out = false;
+        }
+        if args.no_pair_bottlenecks {
+            policy.pair_residual_bottlenecks = false;
+        }
+        policy.validate().map_err(|e| usage(e.to_string()))?;
+        Some(policy)
+    } else {
+        None
+    };
+
+    let mut explicit_convs = Vec::new();
+    for raw in &args.f32_conv {
+        let name = raw.trim();
+        if name.is_empty() {
+            return Err(usage("--f32-conv entries must not be empty".into()));
+        }
+        if !explicit_convs.iter().any(|c| c == name) {
+            explicit_convs.push(name.to_string());
+        }
+    }
+
+    Ok(SelectiveF32 { policy: args.f32_policy, sensitivity, explicit_convs })
+}
+
 pub fn quantize(args: QuantizeArgs, out: Out) -> Result<(), CliError> {
     let method = match args.method {
         QuantMethodArg::Percentile if !bounds::QUANTIZE_TAIL.contains_f64(args.tail) => {
@@ -34,6 +96,7 @@ pub fn quantize(args: QuantizeArgs, out: Out) -> Result<(), CliError> {
         QuantMethodArg::Minmax => Method::MinMax,
         QuantMethodArg::Mse => Method::Mse,
     };
+    let selective = check_selective_f32(&args)?;
     if !bounds::POSITIVE_INT.contains_u64(args.images as u64)
         || !bounds::POSITIVE_INT.contains_u64(u64::from(args.batch))
     {
@@ -78,11 +141,30 @@ pub fn quantize(args: QuantizeArgs, out: Out) -> Result<(), CliError> {
     let mut output = OutputFile::new("quantize", &path, args.output.clone(), "-int8", "folo")?;
     out.human(format!("Calibrating int8 on {n} {} images at {imgsz}px (two passes)", split.as_str()));
     let t = Instant::now();
-    let sizes = (imgsz, args.batch as usize, workers);
-    let done = quant::calibrate_sample(&model, part, args.images, args.seed, sizes, method)
-        .map_err(nn_error)
-        .and_then(|(cal, n)| write(&file, &model, &cal, imgsz, &mut output).map(|()| (cal, n)));
-    let (cal, n) = done?;
+    let (mut cal, n) =
+        calibrate_raw(&model, part, args.images, args.seed, (imgsz, args.batch as usize, workers), method)?;
+    let analysis = quant::analyze_sensitivity(&model, &cal).map_err(nn_error)?;
+    let by_name: HashMap<&str, &quant::ConvSensitivity> =
+        analysis.iter().map(|e| (e.name.as_str(), e)).collect();
+    for name in &selective.explicit_convs {
+        if !by_name.contains_key(name.as_str()) {
+            let sample: Vec<&str> = analysis.iter().take(6).map(|e| e.name.as_str()).collect();
+            return Err(usage(format!(
+                "--f32-conv `{name}` is not an int8-eligible backbone/neck conv of {}",
+                model.arch()
+            ))
+            .hint(format!("examples of eligible conv names: {}", sample.join(", "))));
+        }
+    }
+    cal.f32_convs = selective.explicit_convs.clone();
+    cal = match selective.policy {
+        F32PolicyArg::Auto => cal
+            .with_sensitivity_f32(&model, selective.sensitivity.expect("auto sets sensitivity"))
+            .map_err(nn_error)?,
+        F32PolicyArg::P5Tail => cal.with_p5_tail_f32(&model),
+        F32PolicyArg::None => cal,
+    };
+    write(&file, &model, &cal, imgsz, &mut output)?;
     let output = output.publish()?;
     let bytes = std::fs::metadata(&output).map(|m| m.len()).unwrap_or(0);
     let method_name = match args.method {
@@ -90,6 +172,40 @@ pub fn quantize(args: QuantizeArgs, out: Out) -> Result<(), CliError> {
         QuantMethodArg::Minmax => "minmax",
         QuantMethodArg::Mse => "mse",
     };
+    let policy_name = match selective.policy {
+        F32PolicyArg::Auto => "auto",
+        F32PolicyArg::P5Tail => "p5-tail",
+        F32PolicyArg::None => "none",
+    };
+    let mut f32_mac_fraction = 0.0f64;
+    let f32_layers: Vec<serde_json::Value> = cal
+        .f32_convs
+        .iter()
+        .map(|name| {
+            let explicit = selective.explicit_convs.iter().any(|c| c == name);
+            match by_name.get(name.as_str()) {
+                Some(s) => {
+                    f32_mac_fraction += s.mac_fraction;
+                    json!({
+                        "name": s.name,
+                        "mac_fraction": s.mac_fraction,
+                        "folded_weight_sqnr_db": s.folded_weight_sqnr_db,
+                        "unfolded_weight_sqnr_db": s.unfolded_weight_sqnr_db,
+                        "explicit": explicit,
+                    })
+                }
+                None => json!({ "name": name, "explicit": explicit }),
+            }
+        })
+        .collect();
+    let sensitivity_policy = selective.sensitivity.map(|p| {
+        json!({
+            "max_f32_mac_fraction": p.max_f32_mac_fraction,
+            "sqnr_threshold_db": p.sqnr_threshold_db,
+            "include_p5_head_out": p.include_p5_head_out,
+            "pair_residual_bottlenecks": p.pair_residual_bottlenecks,
+        })
+    });
     out.record(&json!({
         "path": folo_api::json::path(&output),
         "bytes": bytes,
@@ -98,16 +214,63 @@ pub fn quantize(args: QuantizeArgs, out: Out) -> Result<(), CliError> {
         "method": method_name,
         "tail": (args.method == QuantMethodArg::Percentile).then_some(args.tail),
         "boundaries": cal.ranges.len(),
+        "f32_policy": policy_name,
+        "sensitivity_policy": sensitivity_policy,
+        "f32_convs": cal.f32_convs,
+        "f32_mac_fraction": f32_mac_fraction,
+        "f32_layers": f32_layers,
         "seconds": t.elapsed().as_secs_f64(),
     }));
+    let f32_note = if cal.f32_convs.is_empty() {
+        format!("0 f32 convs ({policy_name})")
+    } else {
+        format!(
+            "{} f32 convs ({:.1}% MACs, {policy_name}: {})",
+            cal.f32_convs.len(),
+            f32_mac_fraction * 100.0,
+            cal.f32_convs.join(", ")
+        )
+    };
     out.human(format!(
-        "Wrote {} ({:.1} MB): {} int8 ranges ({method_name}) from {n} images in {:.1}s; use it with --precision int8",
+        "Wrote {} ({:.1} MB): {} int8 ranges ({method_name}), {f32_note} from {n} images in {:.1}s; use it with \
+         --precision int8",
         folo_api::json::path(&output),
         bytes as f64 / 1e6,
         cal.ranges.len(),
         t.elapsed().as_secs_f64()
     ));
     Ok(())
+}
+
+/// Runs two-pass activation calibration on `images` randomly sampled images from `part` without yet applying any
+/// selective-`f32` policy (mirroring `folo_vision::model::quant::calibrate_sample`).
+fn calibrate_raw(
+    model: &FoloModel,
+    part: &FileDataset,
+    images: usize,
+    seed: u64,
+    (imgsz, batch, workers): (u32, usize, usize),
+    method: Method,
+) -> Result<(Calibration, usize), CliError> {
+    let mut entries = part.entries().to_vec();
+    folo_core::rng::Rng::seed(seed).shuffle(&mut entries);
+    entries.truncate(images);
+    let n = entries.len();
+    let sample = FileDataset::new(part.split(), part.class_names().to_vec(), entries);
+    let data_err = |e: folo_data::DataError| folo_nn::Error::Invalid(format!("calibration images: {e}"));
+    let loader = DataLoader::new(
+        std::sync::Arc::new(sample),
+        LoaderConfig { workers, ..LoaderConfig::val(batch, imgsz) },
+    )
+    .map_err(|e| nn_error(data_err(e)))?;
+    let batches = || {
+        loader.epoch(0).map(|b| {
+            let mut b = b.map_err(data_err)?;
+            Ok(Tensor::from_vec(std::mem::take(&mut b.images), b.shape)?)
+        })
+    };
+    let cal = quant::calibrate(model, batches, method).map_err(nn_error)?;
+    Ok((cal, n))
 }
 
 /// Write `model`'s fused tensors with `cal` to `output`, then open it again and check that the weights it loads are
@@ -159,6 +322,12 @@ mod tests {
                 seed: 0,
                 method: QuantMethodArg::Percentile,
                 tail: 1e-4,
+                f32_policy: F32PolicyArg::Auto,
+                max_f32_macs: None,
+                sqnr_threshold: None,
+                no_p5_head_out: false,
+                no_pair_bottlenecks: false,
+                f32_conv: Vec::new(),
                 imgsz: Some(bad),
                 batch: 4,
                 workers: None,
@@ -168,5 +337,57 @@ mod tests {
             assert_eq!((err.exit, err.code.as_str()), (ExitCode::Usage, "usage"), "imgsz {bad}: {err:?}");
             assert!(err.message.contains("--imgsz"), "{}", err.message);
         }
+    }
+
+    #[test]
+    fn quantize_rejects_invalid_selective_f32_flags_upfront() {
+        let base = || QuantizeArgs {
+            model: PathBuf::from("nonexistent.folo"),
+            data: "nonexistent-dataset".into(),
+            split: SplitArg::Train,
+            images: 8,
+            seed: 0,
+            method: QuantMethodArg::Percentile,
+            tail: 1e-4,
+            f32_policy: F32PolicyArg::Auto,
+            max_f32_macs: None,
+            sqnr_threshold: None,
+            no_p5_head_out: false,
+            no_pair_bottlenecks: false,
+            f32_conv: Vec::new(),
+            imgsz: None,
+            batch: 4,
+            workers: None,
+            output: None,
+        };
+        // Out-of-range --max-f32-macs
+        for bad in [-0.01, 1.01, f64::NAN, f64::INFINITY] {
+            let err =
+                quantize(QuantizeArgs { max_f32_macs: Some(bad), ..base() }, Out { json: true }).unwrap_err();
+            assert_eq!((err.exit, err.code.as_str()), (ExitCode::Usage, "usage"), "{bad}: {err:?}");
+            assert!(err.message.contains("--max-f32-macs"), "{}", err.message);
+        }
+        // Non-finite --sqnr-threshold
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let err = quantize(QuantizeArgs { sqnr_threshold: Some(bad), ..base() }, Out { json: true })
+                .unwrap_err();
+            assert_eq!((err.exit, err.code.as_str()), (ExitCode::Usage, "usage"), "{bad}: {err:?}");
+            assert!(err.message.contains("--sqnr-threshold"), "{}", err.message);
+        }
+        // Auto-only flags with --f32-policy none / p5-tail
+        for policy in [F32PolicyArg::None, F32PolicyArg::P5Tail] {
+            let err = quantize(
+                QuantizeArgs { f32_policy: policy, max_f32_macs: Some(0.1), ..base() },
+                Out { json: true },
+            )
+            .unwrap_err();
+            assert_eq!((err.exit, err.code.as_str()), (ExitCode::Usage, "usage"));
+            assert!(err.message.contains("--f32-policy auto"), "{}", err.message);
+        }
+        // Empty --f32-conv entry
+        let err =
+            quantize(QuantizeArgs { f32_conv: vec!["  ".into()], ..base() }, Out { json: true }).unwrap_err();
+        assert_eq!((err.exit, err.code.as_str()), (ExitCode::Usage, "usage"));
+        assert!(err.message.contains("--f32-conv"), "{}", err.message);
     }
 }

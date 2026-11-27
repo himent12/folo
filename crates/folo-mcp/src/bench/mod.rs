@@ -20,8 +20,8 @@ use folo_api::{
 };
 use folo_client::encode;
 use folo_server::Store;
-use folo_server::bench::Benches;
-use folo_server::store::FEATURE_BENCH_UPLOAD_SAFE;
+use folo_server::bench::{Benches, CreateGeneratedBench};
+use folo_server::store::{FEATURE_BENCH_GENERATED_SOURCE, FEATURE_BENCH_UPLOAD_SAFE};
 use http::StatusCode;
 
 pub use ops::{Contestant, MAX_PART_BOXES, read_predictions};
@@ -103,6 +103,45 @@ impl Benchmarks {
             Via::Http(h) => h.client().post("/bench/benchmarks", &req).map_err(store_error),
             Via::Here(b, s) => b.create(s, req),
         }
+    }
+
+    /// `POST /api/bench/benchmarks` with `source.kind == "generated"`.
+    pub fn create_generated(&self, req: CreateGeneratedBench) -> Result<Bench, Error> {
+        match self.via()? {
+            Via::Http(h) => {
+                if !h.has_feature(FEATURE_BENCH_GENERATED_SOURCE)? {
+                    return Err(Error::new(
+                        StatusCode::NOT_IMPLEMENTED,
+                        "not_implemented",
+                        format!("the folo serve at {} is too old for generated benchmark sources", h.base()),
+                    )
+                    .hint("update folo serve, or create a benchmark from a dataset or labeling job"));
+                }
+                let body = serde_json::json!({
+                    "name": req.name,
+                    "description": req.description,
+                    "source": {
+                        "kind": "generated",
+                        "images": req.source.images,
+                        "classes": req.source.classes,
+                        "imgsz": req.source.imgsz,
+                        "seed": req.source.seed,
+                        "vary_aspect": req.source.vary_aspect,
+                    },
+                    "plan": req.plan,
+                });
+                h.client().post("/bench/benchmarks", &body).map_err(store_error)
+            }
+            Via::Here(b, _) => b.create_generated(req),
+        }
+    }
+
+    /// Makes a benchmark from deterministic generated scenes and returns its [`BenchDetail`].
+    pub fn create_generated_bench(
+        &self,
+        req: CreateGeneratedBench,
+    ) -> Result<crate::types::bench::BenchDetail, Error> {
+        Ok(ops::detail(self.create_generated(req)?, &[]))
     }
 
     /// `DELETE /api/bench/benchmarks/{id}`.

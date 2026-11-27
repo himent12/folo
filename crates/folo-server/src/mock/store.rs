@@ -399,6 +399,22 @@ impl Store for MockStore {
         Ok(runs)
     }
 
+    fn create_run_with_auto_batch(
+        &self,
+        config: TrainConfig,
+        auto_batch: crate::store::AutoBatchOptions,
+    ) -> Result<Run> {
+        crate::store::check_auto_batch_options(&auto_batch)?;
+        if auto_batch.enabled && config.compute.is_some() {
+            return Err(Error::new(
+                StatusCode::BAD_REQUEST,
+                "invalid_config",
+                "auto_batch is not supported for cloud runs yet (pass an explicit integer `batch` for cloud compute)",
+            ));
+        }
+        self.create_run(config)
+    }
+
     fn create_run(&self, mut config: TrainConfig) -> Result<Run> {
         let ds = self.dataset(&config.dataset_id)?;
         crate::store::check_run_name(&config.name)?;

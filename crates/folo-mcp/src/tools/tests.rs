@@ -603,3 +603,70 @@ async fn cloud_connections_summary_omits_json_quotes_around_status() {
     assert!(!out.summary.contains("\"ok\""), "status must not be JSON-quoted: {}", out.summary);
     assert!(!out.summary.contains("\"error\""), "status must not be JSON-quoted: {}", out.summary);
 }
+
+#[tokio::test]
+async fn train_auto_batch_schema_validation_and_proxy_capability() {
+    use folo_server::store::Store;
+    let schema = find("train").unwrap().input_schema();
+    assert_eq!(
+        schema["properties"]["batch"]["anyOf"],
+        json!([
+            { "type": "integer", "minimum": 1, "maximum": 1024 },
+            { "type": "string", "const": "auto" }
+        ])
+    );
+    assert!(schema["properties"].get("auto_batch").is_some());
+    assert!(schema["properties"].get("auto_batch_target").is_some());
+
+    let store = std::sync::Arc::new(folo_server::MockStore::new());
+    let ds = store.list_datasets().unwrap().remove(0).id;
+    let home = folo_test_support::TestDir::new("mcp-train-auto-batch");
+    let opts = crate::Options {
+        data_dir: home.to_path_buf(),
+        read_only: false,
+        confine: false,
+        device: "cpu".into(),
+        published_weights: None,
+    };
+    let server = crate::server::FoloMcp::new(store, None, opts.clone());
+    let def = find("train").unwrap();
+    let mut p = Progress::none();
+
+    // `batch: "auto"` + `auto_batch_target` succeeds and notes auto-batch in summary.
+    let res = server
+        .inner
+        .call(
+            def,
+            json!({ "dataset_id": ds, "batch": "auto", "auto_batch_target": 0.75, "epochs": 1 })
+                .as_object()
+                .unwrap()
+                .clone(),
+            &mut p,
+        )
+        .await
+        .unwrap();
+    assert!(res.summary.contains("auto-batch"), "{}", res.summary);
+
+    // Conflicts and invalid values fail cleanly with `invalid_config`.
+    for bad in [
+        json!({ "dataset_id": ds, "batch": "auto", "auto_batch": false }),
+        json!({ "dataset_id": ds, "batch": "huge" }),
+        json!({ "dataset_id": ds, "auto_batch_target": 0.75 }),
+        json!({ "dataset_id": ds, "batch": "auto", "auto_batch_target": 0.99 }),
+    ] {
+        let e = server.inner.call(def, bad.as_object().unwrap().clone(), &mut p).await.err().unwrap();
+        assert_eq!(e.body.code, "invalid_config", "{bad}: {e:?}");
+    }
+
+    // Older proxied server without `train_auto_batch` fails cleanly with `not_implemented`.
+    let http = std::sync::Arc::new(
+        crate::proxy::HttpStore::new("http://127.0.0.1:9", None).assume_features(vec!["vision_bench".into()]),
+    );
+    let e = http
+        .create_run_with_auto_batch(
+            serde_json::from_value(json!({ "dataset_id": "ds_1" })).unwrap(),
+            folo_server::store::AutoBatchOptions { enabled: true, target_utilization: Some(0.8) },
+        )
+        .unwrap_err();
+    assert_eq!(e.body.code, "not_implemented");
+}

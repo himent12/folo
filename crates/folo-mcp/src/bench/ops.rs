@@ -898,7 +898,7 @@ fn summary(b: Bench) -> BenchSummary {
     }
 }
 
-fn detail(b: Bench, entries: &[BenchEntry]) -> BenchDetail {
+pub(super) fn detail(b: Bench, entries: &[BenchEntry]) -> BenchDetail {
     let leaderboard = entries
         .iter()
         .map(|e| BenchEntryRow {

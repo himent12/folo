@@ -23,7 +23,11 @@ pub(super) fn config_of(
         data_format: crate::dataset::format_of(args.format),
         arch,
         epochs: args.epochs,
-        batch: args.batch as usize,
+        batch: args.batch.fixed_or_default() as usize,
+        auto_batch: args.batch.is_auto(),
+        auto_batch_target: args
+            .auto_batch_target
+            .unwrap_or(folo_vision::train::DEFAULT_AUTO_BATCH_UTILIZATION),
         imgsz: args.imgsz,
         device: args.device.clone(),
         optimizer: match args.optimizer {

@@ -188,6 +188,54 @@ pub struct DoctorArgs {
     pub tensor_cores: bool,
 }
 
+/// `folo train --batch`: a fixed micro-batch size (`1..=1024`) or `auto` to probe GPU VRAM at startup.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BatchArg {
+    /// Fixed physical micro-batch size (`1..=1024`).
+    Fixed(u32),
+    /// Probe GPU VRAM at startup and pick the largest safe batch size with gradient accumulation.
+    Auto,
+}
+
+impl BatchArg {
+    /// Fixed integer batch size (`16` when `Auto`, matching `TrainConfig`'s default requested batch).
+    pub fn fixed_or_default(self) -> u32 {
+        match self {
+            Self::Fixed(n) => n,
+            Self::Auto => 16,
+        }
+    }
+
+    /// True when `--batch auto` was selected.
+    pub fn is_auto(self) -> bool {
+        matches!(self, Self::Auto)
+    }
+}
+
+impl std::fmt::Display for BatchArg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Fixed(n) => write!(f, "{n}"),
+            Self::Auto => f.write_str("auto"),
+        }
+    }
+}
+
+impl std::str::FromStr for BatchArg {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let trimmed = s.trim();
+        if trimmed.eq_ignore_ascii_case("auto") {
+            return Ok(Self::Auto);
+        }
+        trimmed
+            .parse::<u32>()
+            .map(Self::Fixed)
+            .map_err(|_| format!("expected an integer in 1..=1024 or `auto`, got `{s}`"))
+    }
+}
+
 /// Optimizer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum OptimizerArg {
@@ -229,9 +277,13 @@ pub struct TrainArgs {
     /// Number of epochs [1..=10000].
     #[arg(long, default_value_t = 100)]
     pub epochs: u32,
-    /// Batch size [1..=1024].
-    #[arg(long, default_value_t = 16)]
-    pub batch: u32,
+    /// Batch size [1..=1024], or `auto` to probe GPU VRAM and pick the largest safe batch with gradient
+    /// accumulation.
+    #[arg(long, value_name = "N|auto", default_value_t = BatchArg::Fixed(16))]
+    pub batch: BatchArg,
+    /// With `--batch auto`: target GPU VRAM utilization fraction [0.25..=0.95] [default: 0.80].
+    #[arg(long, value_name = "FRACTION")]
+    pub auto_batch_target: Option<f64>,
     /// Square input size in pixels [64..=4096, multiple of 32].
     #[arg(long, default_value_t = 640)]
     pub imgsz: u32,

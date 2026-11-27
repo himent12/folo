@@ -334,7 +334,27 @@ pub struct BenchEntryArgs {
     pub wait: u32,
 }
 
-/// `create_benchmark`: from a dataset split or a labeling job's labeled images.
+/// Deterministic generated-image benchmark source (procedural shapes via `folo-data`, no dataset required).
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GeneratedBenchSourceArgs {
+    /// Number of scenes to generate (1 to 5000, default 64).
+    #[serde(default)]
+    #[schemars(range(min = 1, max = 5000))]
+    pub images: Option<u32>,
+    /// Class names (1 to 8; default ["circle", "square", "triangle"]).
+    #[serde(default)]
+    pub classes: Option<Vec<String>>,
+    /// Long side of each generated image in pixels (32 to 4096, default 640).
+    #[serde(default)]
+    #[schemars(range(min = 32, max = 4096))]
+    pub imgsz: Option<u32>,
+    /// Mix aspect ratios (1:1, 4:3, 3:4, 16:9, 3:2) instead of square images.
+    #[serde(default)]
+    pub vary_aspect: bool,
+}
+
+/// `create_benchmark`: from a dataset split, a labeling job's labeled images, or deterministic generated scenes.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct CreateBenchmarkArgs {
     /// Name.
@@ -348,13 +368,16 @@ pub struct CreateBenchmarkArgs {
     /// Or a labeling job's labeled images.
     #[serde(default)]
     pub label_job_id: Option<String>,
+    /// Or deterministic generated synthetic scenes (no dataset needed).
+    #[serde(default)]
+    pub generated: Option<GeneratedBenchSourceArgs>,
     /// What it stands for (camera, hard cases).
     #[serde(default)]
     pub description: String,
-    /// At most this many images (1 to 5000, default 500).
+    /// At most this many images (1 to 5000, default 500; for `generated`, default 64).
     #[serde(default)]
     pub max_images: Option<u32>,
-    /// Seed of the sample and the conditions.
+    /// Seed of the sample, generated scenes, and conditions.
     #[serde(default)]
     pub seed: u64,
     /// The plan (default: bench_catalog's default_plan).

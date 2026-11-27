@@ -23,7 +23,7 @@ use tokio::sync::broadcast;
 use tokio::sync::broadcast::error::RecvError;
 
 use crate::AppState;
-use crate::bench::Benches;
+use crate::bench::{Benches, CreateGeneratedBench};
 use crate::error::{ApiJson, ApiPath, ApiQuery, Error, Result};
 use crate::routes::{DEFAULT_LIMIT, KEEP_ALIVE, MAX_LIMIT, MAX_UPLOAD_BYTES, blocking, serve_image};
 use crate::store::SseFrame;
@@ -93,8 +93,93 @@ async fn list(State(st): State<AppState>) -> Result<Json<BenchList>> {
     Ok(Json(BenchList { benchmarks: st.store.benches()?.list() }))
 }
 
-async fn create(State(st): State<AppState>, ApiJson(req): ApiJson<CreateBench>) -> Result<Response> {
-    let bench: Bench = blocking(&st, move |s| s.benches()?.create(s, req)).await?;
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CreateGeneratedBody {
+    name: String,
+    #[serde(default)]
+    description: String,
+    source: GeneratedSourceBody,
+    #[serde(default)]
+    max_images: Option<u32>,
+    #[serde(default)]
+    seed: Option<u64>,
+    #[serde(default)]
+    plan: Option<folo_api::BenchPlan>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GeneratedSourceBody {
+    kind: String,
+    #[serde(default)]
+    images: Option<u32>,
+    #[serde(default)]
+    classes: Option<Vec<String>>,
+    #[serde(default)]
+    imgsz: Option<u32>,
+    #[serde(default)]
+    seed: Option<u64>,
+    #[serde(default)]
+    vary_aspect: bool,
+}
+
+fn parse_generated_bench(body: serde_json::Value) -> Result<CreateGeneratedBench> {
+    let raw: CreateGeneratedBody = serde_json::from_value(body)
+        .map_err(|e| Error::new(StatusCode::BAD_REQUEST, "invalid_body", e.to_string()))?;
+    debug_assert_eq!(raw.source.kind, "generated");
+    let images = match (raw.source.images, raw.max_images) {
+        (Some(a), Some(b)) if a != b => {
+            return Err(Error::new(
+                StatusCode::BAD_REQUEST,
+                "invalid_body",
+                format!("source.images ({a}) and max_images ({b}) disagree: give one or the same count"),
+            ));
+        }
+        (Some(n), _) | (_, Some(n)) => n,
+        (None, None) => folo_bench::DEFAULT_IMAGES,
+    };
+    let seed = match (raw.source.seed, raw.seed) {
+        (Some(a), Some(b)) if a != b => {
+            return Err(Error::new(
+                StatusCode::BAD_REQUEST,
+                "invalid_body",
+                format!("source.seed ({a}) and seed ({b}) disagree: give one or the same seed"),
+            ));
+        }
+        (Some(s), _) | (_, Some(s)) => s,
+        (None, None) => 0,
+    };
+    let classes = raw
+        .source
+        .classes
+        .unwrap_or_else(|| folo_bench::DEFAULT_CLASSES.iter().map(|s| (*s).to_string()).collect());
+    let imgsz = raw.source.imgsz.unwrap_or(folo_bench::DEFAULT_IMGSZ);
+    Ok(CreateGeneratedBench {
+        name: raw.name,
+        description: raw.description,
+        source: folo_bench::GeneratedSourceSpec {
+            images,
+            classes,
+            imgsz,
+            seed,
+            vary_aspect: raw.source.vary_aspect,
+        },
+        plan: raw.plan,
+    })
+}
+
+async fn create(State(st): State<AppState>, ApiJson(body): ApiJson<serde_json::Value>) -> Result<Response> {
+    let is_generated = body.get("source").and_then(|s| s.get("kind")).and_then(serde_json::Value::as_str)
+        == Some("generated");
+    let bench: Bench = if is_generated {
+        let req = parse_generated_bench(body)?;
+        blocking(&st, move |s| s.benches()?.create_generated(req)).await?
+    } else {
+        let req: CreateBench = serde_json::from_value(body)
+            .map_err(|e| Error::new(StatusCode::BAD_REQUEST, "invalid_body", e.to_string()))?;
+        blocking(&st, move |s| s.benches()?.create(s, req)).await?
+    };
     Ok((StatusCode::CREATED, Json(bench)).into_response())
 }
 

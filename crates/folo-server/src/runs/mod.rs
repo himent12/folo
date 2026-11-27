@@ -107,6 +107,9 @@ struct RunFile {
     /// killed during a long phase that reports nothing (a long validation pass) ends at its last report.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     alive_at: Option<f64>,
+    /// Opt-in GPU VRAM-budget auto-batch settings requested when the run was created.
+    #[serde(default, skip_serializing_if = "crate::store::AutoBatchOptions::is_default")]
+    auto_batch: crate::store::AutoBatchOptions,
 }
 
 impl RunFile {

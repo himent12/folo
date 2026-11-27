@@ -30,9 +30,49 @@ impl Runs {
         let st = e.state.lock().unwrap();
         resumable(&st, id)?;
         let stored = st.file.run.config.clone();
+        let stored_auto = st.file.auto_batch;
         let mut merged = serde_json::to_value(&stored).expect("configs serialize");
+        let mut extra_differ: Vec<&str> = Vec::new();
         for (k, v) in fields {
             if k == "resume_run_id" || (k == "name" && v.as_str() == Some("")) {
+                continue;
+            }
+            if k == "batch" && v.as_str().is_some_and(|s| s.eq_ignore_ascii_case("auto")) {
+                if !stored_auto.enabled {
+                    extra_differ.push("batch");
+                }
+                continue;
+            }
+            if k == "auto_batch" {
+                let Some(b) = v.as_bool() else {
+                    return Err(Error::new(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        "invalid_body",
+                        "auto_batch: expected a boolean",
+                    ));
+                };
+                if b != stored_auto.enabled {
+                    extra_differ.push("auto_batch");
+                }
+                continue;
+            }
+            if k == "auto_batch_target" {
+                if v.is_null() {
+                    continue;
+                }
+                let Some(t) = v.as_f64() else {
+                    return Err(Error::new(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        "invalid_body",
+                        "auto_batch_target: expected a number",
+                    ));
+                };
+                let have_t = stored_auto
+                    .target_utilization
+                    .unwrap_or(folo_vision::train::DEFAULT_AUTO_BATCH_UTILIZATION);
+                if !stored_auto.enabled || (t - have_t).abs() > 1e-12 {
+                    extra_differ.push("auto_batch_target");
+                }
                 continue;
             }
             merged[k.as_str()] = v.clone();
@@ -40,13 +80,18 @@ impl Runs {
         let wanted: TrainConfig = serde_json::from_value(merged)
             .map_err(|err| Error::new(StatusCode::UNPROCESSABLE_ENTITY, "invalid_body", err.to_string()))?;
         let (a, b) = (serde_json::to_value(&stored).unwrap(), serde_json::to_value(&wanted).unwrap());
-        let differ: Vec<&str> = a
+        let mut differ: Vec<&str> = a
             .as_object()
             .unwrap()
             .iter()
             .filter(|(k, v)| !matches!(k.as_str(), "device" | "compute") && b.get(k.as_str()) != Some(v))
             .map(|(k, _)| k.as_str())
             .collect();
+        for k in extra_differ {
+            if !differ.contains(&k) {
+                differ.push(k);
+            }
+        }
         if !differ.is_empty() {
             return Err(Error::new(
                 StatusCode::BAD_REQUEST,

@@ -400,7 +400,8 @@ static TOOL_TABLE: [ToolDef; 43] = [
     },
     ToolDef {
         name: "create_benchmark",
-        description: "Freezes a benchmark from a dataset split or a labeling job, with a plan of conditions.",
+        description: "Freezes a benchmark from a dataset split, a labeling job, or deterministic generated scenes, \
+                      with a plan of conditions.",
         mutating: true,
         input: terse_input::<CreateBenchmarkArgs>,
         output: terse_output::<BenchSummary>,

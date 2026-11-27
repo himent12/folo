@@ -15,7 +15,7 @@ pub enum BenchCommand {
     Catalog(BenchServerArgs),
     /// The benchmarks, newest first, with their best entry.
     List(BenchServerArgs),
-    /// Make a benchmark from a split of a dataset or from a labeling job's labeled images (frozen copies).
+    /// Make a benchmark from a dataset split, a labeling job, or deterministic generated scenes (frozen copies).
     Create(BenchCreateArgs),
     /// A benchmark: its plan and its leaderboard.
     Show(BenchIdArgs),
@@ -85,7 +85,7 @@ pub struct BenchStatusArgs {
 
 /// `folo bench create`.
 #[derive(Debug, Args)]
-#[command(group(clap::ArgGroup::new("source").required(true).args(["dataset", "data", "label_job"])))]
+#[command(group(clap::ArgGroup::new("source").required(true).args(["dataset", "data", "label_job", "generated"])))]
 pub struct BenchCreateArgs {
     /// The benchmark's name.
     pub name: String,
@@ -102,13 +102,29 @@ pub struct BenchCreateArgs {
     /// A labeling job's id: its labeled images, with their boxes as truth.
     #[arg(long, value_name = "ID")]
     pub label_job: Option<String>,
+    /// Deterministic generated synthetic scenes (procedural shapes via `folo-data`, no dataset required).
+    #[arg(long, visible_alias = "synthetic")]
+    pub generated: bool,
+    /// With --generated: number of scenes to generate [1..=5000] [default: 64].
+    #[arg(long, requires = "generated")]
+    pub images: Option<u32>,
+    /// With --generated: comma-separated class names (1 to 8) [default: circle,square,triangle].
+    #[arg(long, value_delimiter = ',', requires = "generated")]
+    pub classes: Option<Vec<String>>,
+    /// With --generated: long side of each generated image in pixels [32..=4096] [default: 640].
+    #[arg(long, requires = "generated")]
+    pub imgsz: Option<u32>,
+    /// With --generated: mix aspect ratios (1:1, 4:3, 3:4, 16:9, 3:2) instead of square images.
+    #[arg(long, requires = "generated")]
+    pub vary_aspect: bool,
     /// What the benchmark stands for: where the camera is, what makes the job hard.
     #[arg(long, default_value = "", hide_default_value = true)]
     pub description: String,
-    /// At most this many images (1 to 5000), sampled with --seed when the source has more [default: 500].
+    /// At most this many images (1 to 5000), sampled with --seed when the source has more [default: 500; for
+    /// --generated: 64].
     #[arg(long)]
     pub max_images: Option<u32>,
-    /// Seed of the sample and of the conditions' noise [0..=9007199254740991].
+    /// Seed of the sample, generated scenes, and conditions' noise [0..=9007199254740991].
     #[arg(long, default_value_t = 0)]
     pub seed: u64,
     /// The plan as JSON (`{"conditions":[{"condition":"haze","severities":[1,3],"weight":1}]}`), or a file that

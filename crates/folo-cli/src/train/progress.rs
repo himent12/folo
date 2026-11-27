@@ -139,16 +139,45 @@ fn duration(secs: f64) -> String {
     }
 }
 
+/// Structured JSON summary of auto-batch sizing (`Some` whenever `cfg.auto_batch` is enabled, covering both
+/// live GPU probing and CPU fallback).
+pub(super) fn auto_batch_json(
+    cfg: &TrainConfig,
+    plan: Option<&folo_vision::train::AutoBatchPlan>,
+    accumulate: usize,
+) -> Option<serde_json::Value> {
+    if !cfg.auto_batch {
+        return None;
+    }
+    if let Some(plan) = plan {
+        let mut v = serde_json::to_value(plan).expect("AutoBatchPlan serializes");
+        if let Some(obj) = v.as_object_mut() {
+            obj.insert("probed".into(), json!(true));
+        }
+        Some(v)
+    } else {
+        Some(json!({
+            "probed": false,
+            "fallback": "cpu",
+            "chosen_batch": cfg.batch,
+            "grad_accum": accumulate,
+            "effective_batch": cfg.batch.saturating_mul(accumulate),
+            "target_utilization": cfg.auto_batch_target,
+        }))
+    }
+}
+
 pub(super) fn finish(
     s: &TrainSummary,
     run_dir: &Path,
     cfg: &TrainConfig,
     resolved: &folo_api::ResolvedTrain,
+    auto_batch: Option<&serde_json::Value>,
     out: Out,
 ) {
     let best_metrics = recover_best_metrics(s, run_dir);
     let path = |p: &Option<PathBuf>| p.as_ref().map(folo_api::json::path);
-    out.record(&json!({
+    let mut done = json!({
         "event": "done",
         "status": s.status,
         "run_dir": folo_api::json::path(run_dir),
@@ -159,7 +188,11 @@ pub(super) fn finish(
         "best_metrics": best_metrics,
         "weights": { "best": path(&s.best_weights), "last": path(&s.last) },
         "resolved": resolved,
-    }));
+    });
+    if let (Some(ab), Some(obj)) = (auto_batch, done.as_object_mut()) {
+        obj.insert("auto_batch".into(), ab.clone());
+    }
+    out.record(&done);
     let verb = match s.status {
         RunStatus::Stopped => "Stopped",
         _ if s.early_stopped => "Stopped early",

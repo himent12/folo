@@ -203,6 +203,7 @@ fn queued_file(id: &str, config: TrainConfig) -> RunFile {
         last_metrics: None,
         resumed_at: None,
         alive_at: None,
+        auto_batch: Default::default(),
     }
 }
 
@@ -356,6 +357,7 @@ fn listed_queue_positions_are_one_snapshot() {
             last_metrics: None,
             resumed_at: None,
             alive_at: None,
+            auto_batch: Default::default(),
         };
         std::fs::create_dir_all(dir.join(id)).unwrap();
         let entry = Arc::new(RunEntry::new(id.clone(), dir.join(id), file));

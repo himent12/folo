@@ -259,6 +259,13 @@ pub const VAL_IMGSZ: NumericBounds = NumericBounds::int_min_multiple(IMGSZ_STRID
 pub const TRAIN_EPOCHS: NumericBounds = NumericBounds::int_range(1, 10_000);
 /// `folo train --batch`.
 pub const TRAIN_BATCH: NumericBounds = NumericBounds::int_range(1, 1024);
+/// `folo train --auto-batch-target`.
+pub const TRAIN_AUTO_BATCH_TARGET: NumericBounds = NumericBounds::float_range(
+    folo_vision::train::MIN_AUTO_BATCH_UTILIZATION,
+    true,
+    folo_vision::train::MAX_AUTO_BATCH_UTILIZATION,
+    true,
+);
 /// `folo train --imgsz`.
 pub const TRAIN_IMGSZ: NumericBounds = NumericBounds::int_range_multiple(64, 4096, IMGSZ_STRIDE);
 /// `folo train --lr0`.
@@ -295,8 +302,13 @@ pub const SERVE_PORT: NumericBounds = NumericBounds::int_range(0, u16::MAX as u6
 /// `folo dataset check --dhash-threshold` (64-bit Hamming distance `0..=64`).
 pub const DHASH_THRESHOLD: NumericBounds = NumericBounds::int_range(0, 64);
 
-/// `folo bench create --max-images`.
+/// `folo bench create --max-images` / `--images`.
 pub const BENCH_MAX_IMAGES: NumericBounds = NumericBounds::int_range(1, 5000);
+/// `folo bench create --generated --imgsz`.
+pub const BENCH_GENERATED_IMGSZ: NumericBounds = NumericBounds::int_range(
+    folo_server::bench::GENERATED_MIN_IMGSZ as u64,
+    folo_server::bench::GENERATED_MAX_IMGSZ as u64,
+);
 /// `folo bench create --seed` (exact JS safe integer limit `2^53 - 1`, matching `folo_server::bench::MAX_SEED`).
 pub const BENCH_SEED: NumericBounds = NumericBounds::int_range(0, (1u64 << 53) - 1);
 
@@ -306,7 +318,7 @@ pub const ARG_BOUNDS: &[(&str, &str, NumericBounds)] = &[
     ("folo serve", "port", SERVE_PORT),
     // `folo train`
     ("folo train", "epochs", TRAIN_EPOCHS),
-    ("folo train", "batch", TRAIN_BATCH),
+    ("folo train", "auto_batch_target", TRAIN_AUTO_BATCH_TARGET),
     ("folo train", "imgsz", TRAIN_IMGSZ),
     ("folo train", "lr0", TRAIN_LR0),
     ("folo train", "lrf", TRAIN_LRF),
@@ -352,6 +364,7 @@ pub const ARG_BOUNDS: &[(&str, &str, NumericBounds)] = &[
     ("folo quantize", "tail", QUANTIZE_TAIL),
     ("folo quantize", "imgsz", INFER_IMGSZ),
     ("folo quantize", "batch", POSITIVE_INT),
+    ("folo quantize", "max_f32_macs", UNIT_INTERVAL),
     // `folo dataset check`
     ("folo dataset check", "dhash_threshold", DHASH_THRESHOLD),
     // `folo dataset synth`
@@ -385,6 +398,8 @@ pub const ARG_BOUNDS: &[(&str, &str, NumericBounds)] = &[
     ("folo label set", "remove", POSITIVE_INT),
     ("folo label export", "val_fraction", LABEL_VAL_FRACTION),
     // `folo bench`
+    ("folo bench create", "images", BENCH_MAX_IMAGES),
+    ("folo bench create", "imgsz", BENCH_GENERATED_IMGSZ),
     ("folo bench create", "max_images", BENCH_MAX_IMAGES),
     ("folo bench create", "seed", BENCH_SEED),
     ("folo bench run", "max_images", POSITIVE_INT),
@@ -416,6 +431,10 @@ pub const ARG_REQUIRES: &[(&str, &str, &[&str])] = &[
     ("folo predict", "track_buffer", &["track"]),
     ("folo predict", "track_min_hits", &["track"]),
     ("folo predict", "track_class_agnostic", &["track"]),
+    ("folo bench create", "images", &["generated"]),
+    ("folo bench create", "classes", &["generated"]),
+    ("folo bench create", "imgsz", &["generated"]),
+    ("folo bench create", "vary_aspect", &["generated"]),
 ];
 
 /// Looks up the peer argument ids required whenever `(cmd_path, arg_id)` is supplied.

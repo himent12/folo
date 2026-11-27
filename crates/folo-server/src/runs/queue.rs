@@ -93,7 +93,8 @@ impl Runs {
     /// Registers a new run (status `queued`) and queues it. `config` is already validated, its name filled in. A
     /// `checkpoint` (a validated snapshot of a full training checkpoint) is copied to the run's `weights/last.folo`
     /// first, so the worker continues that exact snapshot as it resumes a run.
-    pub fn create(
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_with_auto_batch(
         self: &Arc<Self>,
         config: TrainConfig,
         dataset: DatasetRef,
@@ -101,8 +102,11 @@ impl Runs {
         checkpoint: Option<CheckpointSnapshot<'_>>,
         val_offset: u64,
         device: String,
+        auto_batch: crate::store::AutoBatchOptions,
     ) -> Result<Run> {
-        let entry = self.register(config, dataset, weights, checkpoint, val_offset, device, None)?;
+        let entry = self.register_with_auto_batch(
+            config, dataset, weights, checkpoint, val_offset, device, None, auto_batch,
+        )?;
         self.enqueue(&entry, 0)?;
         let run = entry.run();
         Ok(Run { queue_position: self.position(&run.id), ..run })
@@ -136,6 +140,30 @@ impl Runs {
         val_offset: u64,
         device: String,
         cloud: Option<RunCloud>,
+    ) -> Result<Arc<RunEntry>> {
+        self.register_with_auto_batch(
+            config,
+            dataset,
+            weights,
+            checkpoint,
+            val_offset,
+            device,
+            cloud,
+            crate::store::AutoBatchOptions::default(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn register_with_auto_batch(
+        &self,
+        config: TrainConfig,
+        dataset: DatasetRef,
+        weights: Option<PathBuf>,
+        checkpoint: Option<CheckpointSnapshot<'_>>,
+        val_offset: u64,
+        device: String,
+        cloud: Option<RunCloud>,
+        auto_batch: crate::store::AutoBatchOptions,
     ) -> Result<Arc<RunEntry>> {
         self.check_open()?;
         let mut list = self.list.write().unwrap();
@@ -191,6 +219,7 @@ impl Runs {
             last_metrics: None,
             resumed_at: None,
             alive_at: None,
+            auto_batch,
         };
         let entry = Arc::new(RunEntry::new(id, dir, file));
         {
