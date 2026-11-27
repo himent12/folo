@@ -254,7 +254,7 @@ Opt-in post-processing on `o2m` NMS clusters (MODEL.md §9.4, configured via `Nm
 - **Mixed precision** (`amp`, MODEL.md §8.8; GPU tensor cores only, else `not_supported`): the forward under
   `autocast` (f16 convs and products on tensor cores), the loss in f32 on f32 copies of the head, backward of the loss
   times folo-nn's `GradScaler` scale, and at the end of a window two-phase unscale, clip and overflow checking
-  (`GradAccumulator::unscale_clip_device_prepare` + `folo_gpu::download_deferred` + `unscale_clip_device_apply` +
+  (`GradAccumulator::unscale_clip_device_prepare` + `folo_gpu::download_deferred` + `DeviceUnscaleClip::apply` +
   `ctx.flush()`, or `unscale_prepare_device` when clipping is off) so in-place gradient scaling and schedule
   application overlap with the finiteness readback while preserving exact skip / loss-scale backoff semantics.
   Master weights, optimizer state, EMA and BatchNorm statistics stay f32, and the scaler is the checkpoint's `folo.amp`.

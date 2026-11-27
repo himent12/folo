@@ -81,7 +81,7 @@ is reproducible everywhere. Head priors (MODEL.md §6.5): `BOX_BIAS_PRIOR = 2.0`
   them and returns whether all are finite, with one readback on the GPU: with clipping the unscale is folded into the
   clip factors and the finiteness check is the clipping norm itself (the overflow-safe sum makes it non-finite
   exactly when a gradient is); without, it is `amp::unscale_` (below). For non-blocking GPU readbacks,
-  `GradAccumulator::unscale_clip_device_prepare` / `unscale_clip_device_apply` (returning a `DeviceUnscaleClip` with
+  `GradAccumulator::unscale_clip_device_prepare` / `DeviceUnscaleClip::apply` (returning a `DeviceUnscaleClip` with
   `finite_scalar()`) and `GradAccumulator::unscale_prepare_device` (wrapping `amp::unscale_prepare_device_`) split
   the finiteness scalar from the in-place scaling pass so callers can overlap the host readback wait with scaling and
   schedule preparation.

@@ -126,8 +126,12 @@ impl Trainer {
             let can_pipeline = ctx.is_some()
                 && teacher_batch.is_none()
                 && iou_raw.is_none()
+                && box_raw.device() == self.device
                 && device_loss_supported(&box_raw, &epoch_loss_cfg)
-                && out.o2o.as_ref().is_none_or(|(b, _)| device_loss_supported(b, &o2o_cfg));
+                && out
+                    .o2o
+                    .as_ref()
+                    .is_none_or(|(b, _)| b.device() == self.device && device_loss_supported(b, &o2o_cfg));
 
             let (finite, items, kd, wiou_batch_mean, grads_ready) = if can_pipeline {
                 let c = ctx.as_ref().expect("checked");
@@ -153,25 +157,28 @@ impl Trainer {
                     None => o2m_dev.total.clone(),
                 };
                 let bn_probe = snapshot.prepare_live_finite_check()?;
+                let bn_batched =
+                    matches!(&bn_probe, LiveFiniteCheck::DeviceScalar(s) if s.device() == self.device);
                 let mut dl_tensors: Vec<&folo_core::Tensor> = Vec::with_capacity(3);
                 dl_tensors.push(&o2m_dev.stats);
                 if let Some(o) = &o2o_dev {
                     dl_tensors.push(&o.stats);
                 }
-                if let LiveFiniteCheck::DeviceScalar(ref s) = bn_probe {
+                if bn_batched && let LiveFiniteCheck::DeviceScalar(ref s) = bn_probe {
                     dl_tensors.push(s);
                 }
                 // Submit forward + loss + BN finiteness + staging copies in one batch without blocking, then
-                // encode and flush backward immediately so the GPU never idles waiting on host stat readbacks.
+                // speculatively encode and flush backward so the GPU never idles waiting on host stat readbacks.
+                // Hold the backward result until the probes resolve so a confirmed non-finite batch always runs
+                // the bad-batch BN restore & skip handler instead of failing early on a speculative backward error.
                 let pending = folo_gpu::download_many_deferred(c, &dl_tensors)?;
-                let scaled_total = match &self.scaler {
+                let grads_res = match &self.scaler {
                     // The scale is a power of two, so the scaled loss (and every gradient before f16 rounding) is
                     // exact.
-                    Some(sc) => total.mul_scalar(sc.scale() as f32)?,
-                    None => total,
+                    Some(sc) => total.mul_scalar(sc.scale() as f32).and_then(|t| t.backward()),
+                    None => total.backward(),
                 };
-                let grads = scaled_total.backward()?;
-                drop(scaled_total);
+                drop(total);
                 drop(o2m_dev);
                 drop(o2o_dev);
                 drop(out);
@@ -194,12 +201,14 @@ impl Trainer {
                 }
                 let bn_finite = match bn_probe {
                     LiveFiniteCheck::Ready(ok) => ok,
-                    LiveFiniteCheck::DeviceScalar(_) => {
+                    LiveFiniteCheck::DeviceScalar(_) if bn_batched => {
                         dls.next().expect("bn scalar").finish()?.item::<f32>()?.is_finite()
                     }
+                    LiveFiniteCheck::DeviceScalar(s) => s.item::<f32>()?.is_finite(),
                 };
                 let finite = items.is_finite() && total_value.is_finite() && bn_finite;
-                (finite, items, None, None, Some(grads))
+                let grads = if finite { Some(grads_res?) } else { None };
+                (finite, items, None, None, grads)
             } else {
                 let need_asg = need_kd_asg || iou_raw.is_some();
                 let (mut loss, mut kd_asg) = detection_loss_for_distill_with_wiou_mean(
@@ -291,7 +300,9 @@ impl Trainer {
                 loss = step_loss(loss, kd.as_ref(), o2o.as_ref().map(|o| (o, w_m)), n)?;
                 let bn_probe = snapshot.prepare_live_finite_check()?;
                 let (iou_finite, bn_finite) = match (iou_loss, bn_probe, &ctx) {
-                    (Some(l_iou), LiveFiniteCheck::DeviceScalar(bn_s), Some(c)) => {
+                    (Some(l_iou), LiveFiniteCheck::DeviceScalar(bn_s), Some(c))
+                        if l_iou.device() == self.device && bn_s.device() == self.device =>
+                    {
                         let mut host = folo_gpu::download_many(c, &[&l_iou, &bn_s])?;
                         let bn_ok = host.pop().expect("bn scalar").item::<f32>()?.is_finite();
                         let v = host.pop().expect("iou scalar").item::<f32>()?;
@@ -528,7 +539,7 @@ impl Trainer {
                         // Submit the norm reduction and finiteness readback before in-place scaling so the
                         // scaling pass and schedule update overlap with the GPU wait.
                         let dl = folo_gpu::download_deferred(&ctx, plan.finite_scalar())?;
-                        self.acc.unscale_clip_device_apply(plan)?;
+                        plan.apply()?;
                         ctx.flush();
                         self.apply_schedule(e);
                         dl.finish()?.item::<f32>()?.is_finite()

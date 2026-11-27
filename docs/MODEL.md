@@ -927,7 +927,7 @@ for e in 0 .. epochs:
   for k, batch in enumerate(batches(e)):
     loss = L(batch)                         # §7.4
     if loss is finite: backward, adding into the gradient buffers
-    else: skip backward, emit a warning     # the batch still occupies its slot in the window
+    else: reject batch, emit a warning      # the batch still occupies its slot in the window
     if (k + 1) % accumulate == 0 or k == nb − 1:          # end of a window
       if the window had at least one finite batch:
         set every group's lr and momentum for iteration t (§8.4)
@@ -937,8 +937,11 @@ for e in 0 .. epochs:
         optimizer step; EMA update (§8.5); t += 1         # optim.__step = sched.__step = t
       zero gradients
 ```
-`t` advances only with an optimizer step, as FORMAT.md requires. A window made only of non-finite batches is
-skipped without a step, so the run can end with `t < T` (the remaining iterations are not made up).
+`t` advances only with an optimizer step, as FORMAT.md requires. Only gradients from accepted finite batches enter
+the accumulator; on a GPU the standard path may speculatively encode backward while deferred loss and BatchNorm
+finiteness probes are in flight, discarding those gradients and restoring BatchNorm statistics if the batch is
+rejected. A window made only of non-finite batches is skipped without a step, so the run can end with `t < T`
+(the remaining iterations are not made up).
 
 **Non-finite batches.** The train-mode forward updates BN running statistics before the loss is known, so at epoch
 entry the trainer validates any frozen eval-mode BN buffers (`RunningStats::all_finite_eval`) and allocates one

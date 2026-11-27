@@ -256,3 +256,173 @@ fn pipelined_f32_o2o_and_partial_window_resume_bit_exactly() {
     assert_eq!(v2.schedule().step(), 2);
     assert!(sv2.epochs[0].train_loss.total.is_finite());
 }
+
+/// Pipelined GPU non-finite batch recovery (`can_pipeline == true`):
+/// 1. Poisoning the window-ending forward inside a live accumulation window (`acc = 2`) restores BN stats,
+///    keeps `GradAccumulator` isolated to batch 1's clean gradients, steps the optimizer once cleanly, and
+///    recovers when the callback restores the poisoned weight.
+/// 2. Freezing every parameter while poisoning a forward (making speculative `backward()` return an error)
+///    still resolves the probes first, restores BN stats, and invokes the warn handler rather than aborting.
+/// 3. Consecutive non-finite batches hit `MAX_NONFINITE_BATCHES` with BN stats intact and zero optimizer steps.
+#[test]
+fn pipelined_gpu_nonfinite_mid_window_recovery_and_max_streak() {
+    use folo_core::no_grad;
+    use folo_nn::RunningStats;
+    use std::sync::Mutex;
+
+    let Some(_dev) = gpu() else { return };
+    // 1. Mid-window rejection (batch 1 finite, batch 2 poisoned -> window-end optimizer step uses batch 1 only).
+    let ds_cfg = SyntheticConfig {
+        images: 12,
+        classes: vec!["circle".into(), "square".into()],
+        imgsz: 128,
+        seed: 13,
+        min_objects: 1,
+        max_objects: 3,
+        empty_fraction: 0.0,
+        small_fraction: 0.0,
+        vary_aspect: false,
+        val_fraction: 4.0 / 12.0,
+        ..SyntheticConfig::default()
+    };
+    let td = TrainData {
+        train: Arc::new(SyntheticDataset::new(ds_cfg.clone(), Split::Train).unwrap()),
+        val: Arc::new(SyntheticDataset::new(ds_cfg.clone(), Split::Val).unwrap()),
+        classes: ds_cfg.classes,
+    };
+    assert_eq!(td.train.len(), 8); // batch 4, nbs 8 -> nb = 2, acc = 2 (1 window of 2 batches).
+
+    let stem_slot: Arc<Mutex<Option<(folo_core::Tensor, folo_core::Tensor)>>> = Arc::default();
+    let warns = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let slot_cb = stem_slot.clone();
+    let warns_cb = warns.clone();
+    let cfg = TrainConfig {
+        epochs: 1,
+        batch: 4,
+        nbs: 8,
+        imgsz: 128,
+        optimizer: OptimizerChoice::Adamw,
+        lr0: 0.002,
+        momentum: 0.9,
+        warmup_epochs: 0.0,
+        workers: 2,
+        augment: AugmentConfig::none(),
+        device: "gpu:0".into(),
+        ..TrainConfig::default()
+    };
+    let opts = TrainOptions {
+        step_interval: std::time::Duration::ZERO,
+        events: Some(Box::new(move |ev| match ev {
+            RunEvent::Step(s) if s.step == 1 => {
+                // Batch 1 is finite and accumulated; poison batch 2 (window-ending forward).
+                if let Some((w, _)) = slot_cb.lock().unwrap().as_ref() {
+                    let _g = no_grad();
+                    w.fill_assign(f32::NAN).unwrap();
+                }
+            }
+            RunEvent::Log(l) if l.message.contains("non-finite loss") => {
+                warns_cb.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if let Some((w, saved)) = slot_cb.lock().unwrap().as_ref() {
+                    let _g = no_grad();
+                    w.copy_from(saved).unwrap();
+                }
+            }
+            _ => {}
+        })),
+        ..TrainOptions::default()
+    };
+    let mut t = Trainer::new(cfg.clone(), td.clone(), opts).unwrap();
+    {
+        let _g = no_grad();
+        let w = t.model().backbone.stem.conv.weight.clone();
+        let saved = w.mul_scalar(1.0).unwrap();
+        *stem_slot.lock().unwrap() = Some((w, saved));
+    }
+    let s = t.run().unwrap();
+    assert_eq!(s.epochs_completed, 1);
+    assert_eq!(warns.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(t.schedule().step(), 1, "window must step once using batch 1's clean gradients");
+    assert_eq!(t.nonfinite_streak(), 1);
+    assert!(RunningStats::all_finite(t.model()).unwrap());
+    assert!(t.model().parameters().iter().all(|p| p.to_vec::<f32>().unwrap().iter().all(|v| v.is_finite())));
+
+    // 2. Speculative backward error on a confirmed bad batch (all params temporarily frozen + poisoned weight):
+    // must reach the warn callback and recover cleanly rather than returning a backward error.
+    type FreezeState = (folo_core::Tensor, folo_core::Tensor, Vec<folo_core::Tensor>);
+    let freeze_slot: Arc<Mutex<Option<FreezeState>>> = Arc::default();
+    let fcb = freeze_slot.clone();
+    let fwarns = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let fwarns_cb = fwarns.clone();
+    let opts_freeze = TrainOptions {
+        step_interval: std::time::Duration::ZERO,
+        events: Some(Box::new(move |ev| {
+            if let RunEvent::Log(l) = ev
+                && l.message.contains("non-finite loss")
+            {
+                fwarns_cb.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if let Some((w, saved, ps)) = fcb.lock().unwrap().as_ref() {
+                    let _g = no_grad();
+                    w.copy_from(saved).unwrap();
+                    for p in ps {
+                        p.set_requires_grad(true);
+                    }
+                }
+            }
+        })),
+        ..TrainOptions::default()
+    };
+    let mut tf = Trainer::new(cfg.clone(), td, opts_freeze).unwrap();
+    {
+        let _g = no_grad();
+        let ps = tf.model().parameters();
+        let w = tf.model().backbone.stem.conv.weight.clone();
+        let saved = w.mul_scalar(1.0).unwrap();
+        w.fill_assign(f32::NAN).unwrap();
+        for p in &ps {
+            p.set_requires_grad(false);
+        }
+        *freeze_slot.lock().unwrap() = Some((w, saved, ps));
+    }
+    let sf = tf.run().unwrap();
+    assert_eq!(sf.epochs_completed, 1);
+    assert_eq!(fwarns.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(tf.schedule().step(), 1, "batch 2 recovers and steps cleanly after unfreezing");
+    assert!(RunningStats::all_finite(tf.model()).unwrap());
+
+    // 3. `MAX_NONFINITE_BATCHES` consecutive rejected batches through the pipelined GPU path.
+    let streak_ds = SyntheticConfig {
+        images: 16,
+        classes: vec!["circle".into(), "square".into()],
+        imgsz: 64,
+        seed: 15,
+        min_objects: 1,
+        max_objects: 2,
+        empty_fraction: 0.0,
+        small_fraction: 0.0,
+        vary_aspect: false,
+        val_fraction: 4.0 / 16.0,
+        ..SyntheticConfig::default()
+    };
+    let td_streak = TrainData {
+        train: Arc::new(SyntheticDataset::new(streak_ds.clone(), Split::Train).unwrap()),
+        val: Arc::new(SyntheticDataset::new(streak_ds.clone(), Split::Val).unwrap()),
+        classes: streak_ds.classes,
+    };
+    let mut ts =
+        Trainer::new(TrainConfig { batch: 1, nbs: 2, imgsz: 64, ..cfg }, td_streak, TrainOptions::default())
+            .unwrap();
+    let bn_before: Vec<Vec<f32>> =
+        ts.model().named_buffers().iter().map(|(_, b)| b.to_vec::<f32>().unwrap()).collect();
+    {
+        let _g = no_grad();
+        ts.model().backbone.stem.conv.weight.fill_assign(f32::NAN).unwrap();
+    }
+    let err = ts.run().unwrap_err();
+    assert_eq!(err.code(), "training_failed", "{err}");
+    assert_eq!(ts.nonfinite_streak(), folo_vision::train::MAX_NONFINITE_BATCHES);
+    assert_eq!(ts.schedule().step(), 0);
+    assert!(RunningStats::all_finite(ts.model()).unwrap());
+    let bn_after: Vec<Vec<f32>> =
+        ts.model().named_buffers().iter().map(|(_, b)| b.to_vec::<f32>().unwrap()).collect();
+    assert_eq!(bn_before, bn_after);
+}

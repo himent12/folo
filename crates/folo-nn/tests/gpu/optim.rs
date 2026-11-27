@@ -237,12 +237,15 @@ fn deferred_unscale_clip_and_live_finite_probe_match_sync() {
         (ps, acc)
     };
 
-    // Empty accumulator returns None cleanly.
+    // Empty accumulator and non-positive / NaN max_norm return None cleanly.
     let empty_ps: Vec<Tensor> =
         shapes.iter().map(|s| Tensor::zeros_with(*s, DType::F32, dev).unwrap().requires_grad_()).collect();
     let mut empty_acc = GradAccumulator::new(&empty_ps);
     assert!(empty_acc.unscale_clip_device_prepare(inv, 10.0).unwrap().is_none());
     assert!(empty_acc.unscale_prepare_device(inv).unwrap().is_none());
+    let (_, mut nan_norm_acc) = build_acc(1, None, &mut rng);
+    assert!(nan_norm_acc.unscale_clip_device_prepare(inv, f64::NAN).unwrap().is_none());
+    assert!(nan_norm_acc.unscale_clip_device_prepare(inv, 0.0).unwrap().is_none());
 
     // Clipped (max_norm=1.0), unclipped (max_norm=1e9), and multi-pass accumulation (passes=3): bit-exact.
     for (passes, max_norm) in [(1, 1.0), (1, 1e9), (3, 1.0)] {
@@ -253,7 +256,7 @@ fn deferred_unscale_clip_and_live_finite_probe_match_sync() {
         let ok_sync = acc_sync.unscale_clip(inv, max_norm).unwrap();
         let plan = acc_def.unscale_clip_device_prepare(inv, max_norm).unwrap().expect("gpu plan");
         let dl = folo_gpu::download_deferred(&ctx, plan.finite_scalar()).unwrap();
-        acc_def.unscale_clip_device_apply(plan).unwrap();
+        plan.apply().unwrap();
         ctx.flush();
         let ok_def = dl.finish().unwrap().item::<f32>().unwrap().is_finite();
         assert!(ok_sync && ok_def, "passes={passes} max_norm={max_norm}");
@@ -273,7 +276,7 @@ fn deferred_unscale_clip_and_live_finite_probe_match_sync() {
         let (_, mut acc) = build_acc(2, Some(bad), &mut rng);
         let plan = acc.unscale_clip_device_prepare(inv, 10.0).unwrap().expect("gpu plan");
         let dl = folo_gpu::download_deferred(&ctx, plan.finite_scalar()).unwrap();
-        acc.unscale_clip_device_apply(plan).unwrap();
+        plan.apply().unwrap();
         ctx.flush();
         assert!(!dl.finish().unwrap().item::<f32>().unwrap().is_finite(), "missed {bad} with clip");
 

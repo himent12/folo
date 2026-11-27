@@ -7,6 +7,7 @@ use crate::Result;
 use crate::module::{Mode, Module, TensorKind};
 
 /// Result of preparing a live BatchNorm running-statistics finiteness check without blocking on a GPU device.
+#[derive(Debug)]
 pub enum LiveFiniteCheck {
     /// Already decided on the host (no buffers, CPU-only buffers, a non-finite CPU buffer, or a multi-device
     /// fallback).

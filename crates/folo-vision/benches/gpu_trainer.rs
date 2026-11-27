@@ -85,6 +85,7 @@ fn run_case(arch: &str, mode: &str, imgsz: u32, data: TrainData) {
         })),
         ..TrainOptions::default()
     };
+    let n_train = data.train.len();
     let mut trainer = match Trainer::new(cfg, data, opts) {
         Ok(t) => t,
         Err(e) => {
@@ -94,6 +95,7 @@ fn run_case(arch: &str, mode: &str, imgsz: u32, data: TrainData) {
     };
     let acc = trainer.accumulate();
     let nb = trainer.batches_per_epoch();
+    let batch = trainer.config().batch;
     let summary = trainer.run().expect("train run");
     assert_eq!(summary.epochs_completed, 2);
 
@@ -105,17 +107,40 @@ fn run_case(arch: &str, mode: &str, imgsz: u32, data: TrainData) {
         return;
     }
     let mut by_pos: Vec<Vec<f64>> = vec![Vec::new(); acc];
-    let mut all_dt = Vec::new();
+    let mut total_dt_s = 0.0f64;
+    let mut steady_images = 0usize;
+    let batch_images = |step_in_epoch: usize| -> usize {
+        let start = step_in_epoch * batch;
+        n_train.saturating_sub(start).min(batch)
+    };
+    // Only include adjacent, gap-free finite step pairs so skipped non-finite batches never inflate one slot.
     for w in ep2.windows(2) {
+        if w[1].1 != w[0].1 + 1 {
+            continue;
+        }
         let dt_ms = (w[1].2 - w[0].2).as_secs_f64() * 1e3;
         let step_in_epoch = ((w[1].1 - 1) as usize) % nb;
-        by_pos[step_in_epoch % acc].push(dt_ms);
-        all_dt.push(dt_ms);
+        total_dt_s += dt_ms * 1e-3;
+        steady_images += batch_images(step_in_epoch);
+    }
+    // Collect per-position step times strictly from complete, gap-free windows of length `acc`.
+    for i in 0..ep2.len() {
+        let step0 = ((ep2[i].1 - 1) as usize) % nb;
+        if !step0.is_multiple_of(acc) || i == 0 || ep2[i].1 != ep2[i - 1].1 + 1 || i + acc > ep2.len() {
+            continue;
+        }
+        let complete = (1..acc).all(|j| ep2[i + j].1 == ep2[i + j - 1].1 + 1);
+        if !complete {
+            continue;
+        }
+        for j in 0..acc {
+            let dt_ms = (ep2[i + j].2 - ep2[i + j - 1].2).as_secs_f64() * 1e3;
+            by_pos[j].push(dt_ms);
+        }
     }
     let pos_meds: Vec<f64> = by_pos.into_iter().map(median).collect();
     let cycle_ms: f64 = pos_meds.iter().sum();
-    let total_dt_s: f64 = all_dt.iter().sum::<f64>() * 1e-3;
-    let steady_imgs_per_s = (all_dt.len() * 16) as f64 / total_dt_s.max(1e-9);
+    let steady_imgs_per_s = steady_images as f64 / total_dt_s.max(1e-9);
     let reported_imgs_per_s = ep2.last().map_or(0.0, |r| r.3 as f64);
     let skips = trainer.loss_scaler().map_or(0, |s| s.skipped_steps());
     println!(

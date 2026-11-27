@@ -762,10 +762,70 @@ fn amp_pipelined_partial_window_flush_and_unclipped_overflow() {
     assert_eq!((c.scale, c.skip_streak), (2f64.powi(118), prev_streak + 2), "{c:?}");
 
     // 3. `folo2-n` AMP training with partial-window flush stays finite and completes cleanly.
-    let v2_cfg = TrainConfig { arch: "folo2-n".into(), epochs: 1, ..base_cfg };
-    let mut v2 = Trainer::new(v2_cfg, td, stopping_opts(None, None)).unwrap();
+    let v2_cfg = TrainConfig { arch: "folo2-n".into(), epochs: 1, ..base_cfg.clone() };
+    let mut v2 = Trainer::new(v2_cfg, td.clone(), stopping_opts(None, None)).unwrap();
     let sv2 = v2.run().unwrap();
     assert_eq!(sv2.epochs_completed, 1);
     assert!(sv2.epochs[0].train_loss.total.is_finite());
     assert_eq!(v2.schedule().step() + v2.loss_scaler().unwrap().skipped_steps(), 2);
+
+    // 4. Mid-window non-finite forward under AMP (`can_pipeline == true`, `acc = 2`):
+    // Start from a warmed-down loss scale (`1024.0`) so batch 1's gradients are finite, then poison batch 2's
+    // forward and restore in the warn callback. The window must step once with batch 1's clean gradients and
+    // record zero AMP overflow backoffs for the rejected forward.
+    let clean_ckpt = root.join("amp-midwin.folo");
+    edit_amp(&ckpt, |c| {
+        c.scale = 1024.0;
+        c.skipped_steps = 0;
+        c.skip_streak = 0;
+    });
+    std::fs::copy(&ckpt, &clean_ckpt).unwrap();
+    let stem_slot: Arc<Mutex<Option<(Tensor, Tensor)>>> = Arc::default();
+    let warns = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let scb = stem_slot.clone();
+    let wcb = warns.clone();
+    let mid_opts = TrainOptions {
+        step_interval: std::time::Duration::ZERO,
+        events: Some(Box::new(move |ev| match ev {
+            RunEvent::Step(s) if s.epoch == 2 && s.step == 4 => {
+                // First batch of epoch 2 (nb = 3 -> step 4 is batch 0 of epoch 2): poison batch 1.
+                if let Some((w, _)) = scb.lock().unwrap().as_ref() {
+                    let _g = no_grad();
+                    w.fill_assign(f32::NAN).unwrap();
+                }
+            }
+            RunEvent::Log(l) if l.message.contains("non-finite loss") => {
+                wcb.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if let Some((w, saved)) = scb.lock().unwrap().as_ref() {
+                    let _g = no_grad();
+                    w.copy_from(saved).unwrap();
+                }
+            }
+            _ => {}
+        })),
+        ..TrainOptions::default()
+    };
+    let over2 = ResumeOverrides { device: Some("gpu:0".into()), ..Default::default() };
+    let mut rm = Trainer::resume(&clean_ckpt, td, mid_opts, over2).unwrap();
+    let step_before = rm.schedule().step();
+    {
+        let _g = no_grad();
+        let w = rm.model().backbone.stem.conv.weight.clone();
+        let saved = w.mul_scalar(1.0).unwrap();
+        *stem_slot.lock().unwrap() = Some((w, saved));
+    }
+    assert_eq!(rm.run().unwrap().epochs_completed, 2);
+    assert_eq!(warns.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(
+        rm.loss_scaler().unwrap().skipped_steps(),
+        0,
+        "rejected non-finite forward must not trigger AMP overflow backoff"
+    );
+    assert_eq!(rm.loss_scaler().unwrap().scale(), 1024.0);
+    assert_eq!(
+        rm.schedule().step(),
+        step_before + 2,
+        "window 1 (batch 0 clean, batch 1 rejected) and partial window 2 (batch 2 clean) must both step"
+    );
+    assert!(folo_nn::RunningStats::all_finite(rm.model()).unwrap());
 }

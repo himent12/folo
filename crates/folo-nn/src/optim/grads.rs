@@ -14,12 +14,15 @@ use super::{GradSource, PAR_THRESHOLD, cpu_fast, storage_key};
 use crate::Result;
 
 /// Prepared device-side norm reduction for two-phase mixed-precision unscale+clip
-/// ([`GradAccumulator::unscale_clip_device_prepare`] / [`GradAccumulator::unscale_clip_device_apply`]).
+/// ([`GradAccumulator::unscale_clip_device_prepare`] / [`DeviceUnscaleClip::apply`]).
 ///
-/// Callers on a GPU backend can start a non-blocking readback of [`DeviceUnscaleClip::finite_scalar`]
-/// before calling [`GradAccumulator::unscale_clip_device_apply`], overlapping the finiteness readback
-/// wait with the in-place gradient scaling pass.
-pub struct DeviceUnscaleClip {
+/// Borrows its originating [`GradAccumulator`] mutably until [`DeviceUnscaleClip::apply`] consumes it, so
+/// callers cannot mutate or swap the accumulator between phase 1 and phase 2. Callers on a GPU backend can
+/// start a non-blocking readback of [`DeviceUnscaleClip::finite_scalar`] before calling
+/// [`DeviceUnscaleClip::apply`], overlapping the finiteness readback wait with the in-place gradient scaling
+/// pass.
+pub struct DeviceUnscaleClip<'a> {
+    acc: &'a mut GradAccumulator,
     r: Tensor,
     root: Tensor,
     h: Tensor,
@@ -28,11 +31,37 @@ pub struct DeviceUnscaleClip {
     pre: f32,
 }
 
-impl DeviceUnscaleClip {
+impl std::fmt::Debug for DeviceUnscaleClip<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeviceUnscaleClip")
+            .field("max_norm", &self.max_norm)
+            .field("pre", &self.pre)
+            .field("r_shape", self.r.shape())
+            .finish()
+    }
+}
+
+impl DeviceUnscaleClip<'_> {
     /// Device `F32` scalar whose single value is finite iff every accumulated gradient was finite.
     pub fn finite_scalar(&self) -> &Tensor {
         &self.r
     }
+
+    /// Phase 2 of device unscale+clip: derives the two-factor clip multipliers and scales every valid
+    /// accumulated gradient buffer in place.
+    pub fn apply(self) -> Result<()> {
+        let Self { acc, r, root, h, one, max_norm, pre } = self;
+        acc.apply_clip_device(&ClipPlan { r, root, h, one, max_norm, pre })
+    }
+}
+
+struct ClipPlan {
+    r: Tensor,
+    root: Tensor,
+    h: Tensor,
+    one: Tensor,
+    max_norm: f64,
+    pre: f32,
 }
 
 struct Slot {
@@ -606,27 +635,22 @@ impl GradAccumulator {
 
     /// Two-phase GPU mixed-precision unscale+clip, phase 1: when all valid accumulated gradients live on a
     /// single non-CPU device and `max_norm > 0.0`, encodes the overflow-safe norm reduction and returns a
-    /// [`DeviceUnscaleClip`] without reading anything back to the host.
+    /// [`DeviceUnscaleClip`] borrowing `self` without reading anything back to the host.
     ///
     /// Callers can start a non-blocking download of [`DeviceUnscaleClip::finite_scalar`] (which is finite iff
-    /// every accumulated gradient is finite), then call [`GradAccumulator::unscale_clip_device_apply`] so the
-    /// in-place gradient scaling overlaps with the readback wait. Returns `Ok(None)` when there are no valid
-    /// gradients, `max_norm <= 0.0`, or gradients are on the CPU / span multiple devices.
+    /// every accumulated gradient is finite), then call [`DeviceUnscaleClip::apply`] so the in-place gradient
+    /// scaling overlaps with the readback wait. Returns `Ok(None)` when there are no valid gradients,
+    /// `!(max_norm > 0.0)`, or gradients are on the CPU / span multiple devices.
     pub fn unscale_clip_device_prepare(
-        &self,
+        &mut self,
         inv_scale: f32,
         max_norm: f64,
-    ) -> Result<Option<DeviceUnscaleClip>> {
-        if max_norm <= 0.0 || !self.all_valid_on_single_device() {
+    ) -> Result<Option<DeviceUnscaleClip<'_>>> {
+        if max_norm.is_nan() || max_norm <= 0.0 || !self.all_valid_on_single_device() {
             return Ok(None);
         }
-        Ok(Some(self.prepare_clip_device(max_norm, inv_scale)?))
-    }
-
-    /// Two-phase GPU mixed-precision unscale+clip, phase 2: applies the in-place unscale and clip factors
-    /// computed by [`GradAccumulator::unscale_clip_device_prepare`] to every valid accumulated gradient buffer.
-    pub fn unscale_clip_device_apply(&mut self, plan: DeviceUnscaleClip) -> Result<()> {
-        self.apply_clip_device(&plan)
+        let ClipPlan { r, root, h, one, max_norm, pre } = self.prepare_clip_device(max_norm, inv_scale)?;
+        Ok(Some(DeviceUnscaleClip { acc: self, r, root, h, one, max_norm, pre }))
     }
 
     /// Non-blocking GPU unscale+check when clipping is disabled (`max_norm <= 0.0`): delegates to
@@ -678,7 +702,7 @@ impl GradAccumulator {
 
     /// Phase 1 of device gradient norm + clipping: computes the overflow-safe scaled norm scalar `r = n_b / s`
     /// without scaling the buffers yet.
-    fn prepare_clip_device(&self, max_norm: f64, pre: f32) -> Result<DeviceUnscaleClip> {
+    fn prepare_clip_device(&self, max_norm: f64, pre: f32) -> Result<ClipPlan> {
         let _g = no_grad();
         let bufs: Vec<&Tensor> =
             self.slots.iter().filter(|s| s.valid).map(|s| s.buf.as_ref().expect("valid")).collect();
@@ -715,12 +739,12 @@ impl GradAccumulator {
             }
         };
         let r = sum.sqrt()?; // n_b / s, the norm of the buffers as they are
-        Ok(DeviceUnscaleClip { r, root, h, one, max_norm, pre })
+        Ok(ClipPlan { r, root, h, one, max_norm, pre })
     }
 
     /// Phase 2 of device gradient norm + clipping: derives the two-factor clip multipliers from `plan` and scales
     /// every valid gradient buffer in place.
-    fn apply_clip_device(&mut self, plan: &DeviceUnscaleClip) -> Result<()> {
+    fn apply_clip_device(&mut self, plan: &ClipPlan) -> Result<()> {
         let _g = no_grad();
         let bufs: Vec<&Tensor> =
             self.slots.iter().filter(|s| s.valid).map(|s| s.buf.as_ref().expect("valid")).collect();
