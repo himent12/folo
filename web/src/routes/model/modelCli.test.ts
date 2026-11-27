@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Model } from '$lib/api/types';
-import { buildExportCli, buildPredictCli, onnxSwitchesForRequest } from './modelCli';
+import { buildExportCli, buildPredictCli, buildQuantizeCli, onnxSwitchesForRequest } from './modelCli';
 
 const baseModel: Model = {
   id: 'm_fast_n',
@@ -73,6 +73,29 @@ describe('modelCli', () => {
     expect(buildPredictCli(baseModel, 'track').line).toBe(
       'folo predict --model D:/folo/runs/fasteners-n/weights/best.folo <frames_dir> --track',
     );
+  });
+
+  it('builds real folo quantize snippets matching selective-f32 sensitivity flags', () => {
+    expect(buildQuantizeCli(baseModel, 'auto')).toEqual({
+      line: 'folo quantize --model D:/folo/runs/fasteners-n/weights/best.folo --data <dataset> --f32-policy auto --max-f32-macs 0.05 --sqnr-threshold 35',
+      placeholder: null,
+    });
+    expect(buildQuantizeCli(baseModel, 'accurate').line).toBe(
+      'folo quantize --model D:/folo/runs/fasteners-n/weights/best.folo --data <dataset> --f32-policy auto --max-f32-macs 0.10 --sqnr-threshold 40',
+    );
+    // Auto-only tuning flags must never be emitted when --f32-policy != auto.
+    expect(buildQuantizeCli(baseModel, 'p5-tail').line).toBe(
+      'folo quantize --model D:/folo/runs/fasteners-n/weights/best.folo --data <dataset> --f32-policy p5-tail',
+    );
+    expect(buildQuantizeCli(baseModel, 'none').line).toBe(
+      'folo quantize --model D:/folo/runs/fasteners-n/weights/best.folo --data <dataset> --f32-policy none',
+    );
+
+    const noPath: Model = { ...baseModel, path: undefined };
+    expect(buildQuantizeCli(noPath, 'auto')).toEqual({
+      line: 'folo quantize --model <path to fasteners-n-best.folo> --data <dataset> --f32-policy auto --max-f32-macs 0.05 --sqnr-threshold 35',
+      placeholder: 'fasteners-n-best.folo',
+    });
   });
 
   it('only emits dynamic_batch / dynamic_hw in API payloads when supportsSplitAxes is true', () => {

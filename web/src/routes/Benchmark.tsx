@@ -18,7 +18,7 @@ import { lastKnown, Now } from '$lib/api/freshness';
 import { Resource } from '$lib/api/resource';
 import type { BenchEntry, BenchLoop, BenchPlan } from '$lib/api/types';
 import { clonePlan, samePlan, editedPlanError, planCondition, unreadableWeight } from '$lib/bench/plan';
-import { isEntryActive, isLoopActive, planEditable } from '$lib/bench/rules';
+import { isEntryActive, isGeneratedBenchSource, isLoopActive, planEditable } from '$lib/bench/rules';
 import { media } from '$lib/design/tokens';
 import { ago, date, num } from '$lib/format';
 import { isTyping } from '$lib/keys';
@@ -427,7 +427,7 @@ export default function Benchmark() {
   /** The source, linked while the server still has it; a benchmark keeps its own copy either way. */
   const sourceKnown = computed(() => {
     const b = bench.get();
-    if (!b) return null;
+    if (!b || isGeneratedBenchSource(b.source)) return null;
     const s = b.source;
     if (s.kind === 'dataset') return datasets.data ? datasets.data.some((d) => d.id === s.dataset_id) : null;
     return jobs.data ? jobs.data.some((j) => j.id === s.job_id) : jobs.error ? false : null;
@@ -558,10 +558,9 @@ export default function Benchmark() {
             inlineActions
             lead={() => (
               <>
+                {isGeneratedBenchSource(b().source) ? <Badge tone="info">Generated</Badge> : null}
                 {live.connection === 'reconnecting' ? (
-                  <Badge tone="warning">
-                    <WifiOff size={12} /> {live.lost !== null ? lastKnown('Reconnecting', live.lost, now.current) : 'Reconnecting'}
-                  </Badge>
+                  <Badge tone="warning"><WifiOff size={12} /> {live.lost !== null ? lastKnown('Reconnecting', live.lost, now.current) : 'Reconnecting'}</Badge>
                 ) : null}
               </>
             )}

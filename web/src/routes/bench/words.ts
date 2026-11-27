@@ -25,7 +25,7 @@ import type {
   Model,
   RunStatus,
 } from '$lib/api/types';
-import { AXIS_NAME, TARGET_PRECISION } from '$lib/bench/rules';
+import { AXIS_NAME, isGeneratedBenchSource, TARGET_PRECISION } from '$lib/bench/rules';
 import { MIN_LABELS } from '$lib/bench/score';
 import { compact, conf, metric, ms, num, pct, sentence, usd } from '$lib/format';
 import { AGENT_NAME } from '$lib/label';
@@ -77,8 +77,9 @@ export const conditionsText = (n: number) => `${num(n)} ${n === 1 ? 'condition' 
 /** A split's name as a sentence has it: "val" → "validation split". */
 const SPLIT: Record<string, string> = { train: 'training split', val: 'validation split', test: 'test split' };
 
-/** "validation split", "labeling job". */
+/** "validation split", "labeling job", or "generated scenes". */
 export function sourceKind(s: BenchSource): string {
+  if (isGeneratedBenchSource(s)) return 'generated scenes';
   return s.kind === 'dataset' ? (SPLIT[s.split ?? 'val'] ?? `${s.split} split`) : 'labeling job';
 }
 
@@ -100,6 +101,12 @@ export function orList(names: readonly string[], max = 4): string {
  */
 export function noModelHelp(b: Pick<Bench, 'classes' | 'source' | 'source_name'>): { title: string; text: string; action: { label: string; path: string } } {
   const title = `No model here knows ${orList(b.classes)}`;
+  if (isGeneratedBenchSource(b.source))
+    return {
+      title,
+      text: 'Train a model on a dataset with these classes, or run a coding agent or another model’s predictions instead.',
+      action: { label: 'Start a training run', path: '/runs/new' },
+    };
   if (b.source.kind === 'dataset')
     return {
       title,

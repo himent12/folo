@@ -7,16 +7,29 @@
  */
 import Info from '$icons/info';
 import Plus from '$icons/plus';
+import Sparkles from '$icons/sparkles';
 import TriangleAlert from '$icons/triangle-alert';
 import { bindable, computed, createUniqueId, css, effect, onCleanup, signal, untrack } from 'fw';
 import { hub } from '$lib/api/index';
 import { Resource } from '$lib/api/resource';
-import type { Dataset, LabelJob, Split } from '$lib/api/types';
-import { benchNameError, descriptionError, IMAGES_DEFAULT, IMAGES_MAX } from '$lib/bench/rules';
+import type { CreateBench, Dataset, LabelJob, Split, SystemInfo } from '$lib/api/types';
+import {
+  BENCH_GENERATED_FEATURE,
+  benchNameError,
+  descriptionError,
+  GENERATED_CLASSES_DEFAULT,
+  GENERATED_CLASSES_MAX,
+  GENERATED_IMAGES_DEFAULT,
+  GENERATED_IMGSZ_DEFAULT,
+  IMAGES_DEFAULT,
+  IMAGES_MAX,
+} from '$lib/bench/rules';
 import { num } from '$lib/format';
 import { LABEL_FEATURE } from '$lib/label';
 import { router } from '$lib/router';
+import { parseSeed, seedArrows, seedError } from '$lib/seed';
 import Button from '$lib/ui/Button';
+import ClassChips, { addClasses } from '$lib/ui/ClassChips';
 import Dialog from '$lib/ui/Dialog';
 import ErrorState from '$lib/ui/ErrorState';
 import Field from '$lib/ui/Field.tsx';
@@ -28,7 +41,17 @@ import TextArea from '$lib/ui/TextArea';
 import { toast } from '$lib/ui/toast';
 import { imagesText, unreviewedText } from './words';
 
-const FIX: Record<string, string> = { name: 'Fix the name first', description: 'Shorten the description first', max: 'Fix the image limit first' };
+const FIX: Record<string, string> = {
+  name: 'Fix the name first',
+  description: 'Shorten the description first',
+  max: 'Fix the image limit first',
+  genImages: 'Fix the scene count first',
+  genClasses: 'Add at least one class',
+  genSeed: 'Fix the seed first',
+};
+
+const GEN_SIZES = ['320', '480', '640', '1024'] as const;
+type GenSize = (typeof GEN_SIZES)[number];
 
 /**
  * The labeled images of job `id` that are not reviewed, read 1000 at a time; null when the count of labeled images
@@ -56,15 +79,26 @@ export default function NewBenchDialog(props: { open?: boolean }) {
   // Defer source lists until the dialog actually opens, and skip labeling jobs when the server lacks agent labeling.
   const datasets = new Resource<Dataset[] | undefined>((s) => (open.get() ? hub.api.datasets(s) : Promise.resolve(undefined)));
   const jobs = new Resource<LabelJob[] | undefined>((s) => (open.get() && !noLabel.get() ? hub.api.labelJobs(s) : Promise.resolve(undefined)));
+  const system = new Resource<SystemInfo | undefined>((s) => (open.get() && hub.features === null ? hub.api.system(s) : Promise.resolve(undefined)));
   const labelOff = computed(() => noLabel.get() || !!jobs.error);
+  const generatedOff = computed(() => {
+    if (hub.features !== null) return !hub.features.includes(BENCH_GENERATED_FEATURE);
+    return !system.data?.features?.includes(BENCH_GENERATED_FEATURE);
+  });
 
   const name = signal('');
   const description = signal('');
-  const kind = signal<'dataset' | 'label_job'>('dataset');
+  const kind = signal<'dataset' | 'label_job' | 'generated'>('dataset');
   const datasetId = signal('');
   const split = signal<Split>('val');
   const jobId = signal('');
   const maxText = signal(String(IMAGES_DEFAULT));
+  const genImagesText = signal(String(GENERATED_IMAGES_DEFAULT));
+  const genClasses = signal<string[]>([...GENERATED_CLASSES_DEFAULT]);
+  const genClassDraft = signal('');
+  const genImgsz = signal<GenSize>(String(GENERATED_IMGSZ_DEFAULT) as GenSize);
+  const genSeed = signal('0');
+  const varyAspect = signal(false);
   const touched = signal(false);
   const busy = signal(false);
   const error = signal<unknown>(undefined);
@@ -86,6 +120,12 @@ export default function NewBenchDialog(props: { open?: boolean }) {
       description.set('');
       kind.set('dataset');
       maxText.set(String(IMAGES_DEFAULT));
+      genImagesText.set(String(GENERATED_IMAGES_DEFAULT));
+      genClasses.set([...GENERATED_CLASSES_DEFAULT]);
+      genClassDraft.set('');
+      genImgsz.set(String(GENERATED_IMGSZ_DEFAULT) as GenSize);
+      genSeed.set('0');
+      varyAspect.set(false);
       touched.set(false);
       busy.set(false);
       error.set(undefined);
@@ -129,45 +169,81 @@ export default function NewBenchDialog(props: { open?: boolean }) {
     return u && !unreviewed.loading && !unreviewed.error && u.job === jobId.get() && u.n ? u : null;
   });
   /** Images the source holds (a split's, or a job's labeled ones). */
-  const sourceImages = computed(() => (kind.get() === 'dataset' ? (dataset.get()?.splits[split.get()] ?? 0) : (job.get()?.counts.labeled ?? 0)));
+  const sourceImages = computed(() => (kind.get() === 'dataset' ? (dataset.get()?.splits[split.get()] ?? 0) : kind.get() === 'label_job' ? (job.get()?.counts.labeled ?? 0) : 0));
   const max = computed(() => Number(maxText.get()));
+  const genImages = computed(() => Number(genImagesText.get()));
   const taken = computed(() => {
     const m = max.get();
     return Number.isInteger(m) && m >= 1 ? Math.min(m, sourceImages.get()) : sourceImages.get();
   });
 
   const errs = computed(() => {
+    const k = kind.get();
+    if (k === 'generated') {
+      const gi = genImages.get();
+      const pending = genClassDraft.get().trim();
+      const totalClasses = pending ? addClasses(genClasses.get(), pending, GENERATED_CLASSES_MAX).length : genClasses.get().length;
+      return {
+        name: benchNameError(name.get()),
+        description: descriptionError(description.get()),
+        max: null,
+        genImages: !genImagesText.get().trim() || !Number.isInteger(gi) || gi < 1 || gi > IMAGES_MAX ? `A whole number from 1 to ${num(IMAGES_MAX)}.` : null,
+        genClasses: totalClasses === 0 ? 'Add at least one class.' : null,
+        genSeed: seedError(genSeed.get()),
+      };
+    }
     const m = max.get();
     return {
       name: benchNameError(name.get()),
       description: descriptionError(description.get()),
       max: !maxText.get().trim() || !Number.isInteger(m) || m < 1 || m > IMAGES_MAX ? `A whole number from 1 to ${num(IMAGES_MAX)}.` : null,
+      genImages: null,
+      genClasses: null,
+      genSeed: null,
     };
   });
   const show = (e: string | null) => (touched.get() ? e : null);
   /** A number field says a value out of range as soon as it is typed: the hint that reads fine for it would mislead. */
   const maxError = computed(() => (touched.get() || maxText.get().trim() ? errs.get().max : null));
+  const genImagesError = computed(() => (touched.get() || genImagesText.get().trim() ? errs.get().genImages : null));
+  const genSeedError = computed(() => (touched.get() || genSeed.get().trim() ? errs.get().genSeed : null));
   const sourceWhy = computed(() =>
-    kind.get() === 'dataset'
-      ? !datasets.data
-        ? 'Loading datasets'
-        : !dataset.get()
-          ? 'Register a dataset first'
-          : sourceImages.get() === 0
-            ? `Pick a split with images`
-            : null
-      : labelOff.get()
-        ? 'This server does not label images'
-        : !jobs.data
-          ? 'Loading labeling jobs'
-          : !job.get()
-            ? 'Make a labeling job first'
+    kind.get() === 'generated'
+      ? generatedOff.get()
+        ? 'This server does not support generated benchmarks'
+        : null
+      : kind.get() === 'dataset'
+        ? !datasets.data
+          ? 'Loading datasets'
+          : !dataset.get()
+            ? 'Register a dataset first'
             : sourceImages.get() === 0
-              ? 'Label some of its images first'
-              : null,
+              ? `Pick a split with images`
+              : null
+        : labelOff.get()
+          ? 'This server does not label images'
+          : !jobs.data
+            ? 'Loading labeling jobs'
+            : !job.get()
+              ? 'Make a labeling job first'
+              : sourceImages.get() === 0
+                ? 'Label some of its images first'
+                : null,
   );
   const missing = computed(() => (!name.get().trim() ? 'Enter a name' : sourceWhy.get()));
-  const shownError = computed(() => (touched.get() ? Object.entries(errs.get()).find(([, e]) => e)?.[0] : maxError.get() ? 'max' : undefined));
+  const shownError = computed(() =>
+    touched.get()
+      ? Object.entries(errs.get()).find(([, e]) => e)?.[0]
+      : kind.get() === 'generated'
+        ? genImagesError.get()
+          ? 'genImages'
+          : genSeedError.get()
+            ? 'genSeed'
+            : undefined
+        : maxError.get()
+          ? 'max'
+          : undefined,
+  );
   const connecting = computed(() => hub.mode === 'connecting');
   const reason = computed(() => {
     if (connecting.get()) return 'Connecting to server';
@@ -196,20 +272,40 @@ export default function NewBenchDialog(props: { open?: boolean }) {
 
   async function submit(e: SubmitEvent) {
     e.preventDefault();
+    if (kind.peek() === 'generated' && genClassDraft.peek().trim()) {
+      genClasses.set(addClasses(genClasses.peek(), genClassDraft.peek(), GENERATED_CLASSES_MAX));
+      genClassDraft.set('');
+    }
     touched.set(true);
     error.set(undefined);
     if (Object.values(errs.peek()).some((x) => x) || reason.peek() || busy.peek() || connecting.peek()) return;
     const seq = ++submitSeq;
     const epoch = hub.epoch;
     const startPath = router.location.path;
+    const k = kind.peek();
+    const body: CreateBench =
+      k === 'generated'
+        ? {
+            name: name.peek().trim(),
+            description: description.peek().trim(),
+            source: {
+              kind: 'generated',
+              images: genImages.peek(),
+              classes: genClasses.peek(),
+              imgsz: Number(genImgsz.peek()),
+              seed: parseSeed(genSeed.peek()) ?? 0,
+              vary_aspect: varyAspect.peek(),
+            },
+          }
+        : {
+            name: name.peek().trim(),
+            description: description.peek().trim(),
+            source: k === 'dataset' ? { kind: 'dataset', dataset_id: datasetId.peek(), split: split.peek() } : { kind: 'label_job', job_id: jobId.peek() },
+            max_images: max.peek(),
+          };
     busy.set(true);
     try {
-      const created = await hub.api.createBench({
-        name: name.peek().trim(),
-        description: description.peek().trim(),
-        source: kind.peek() === 'dataset' ? { kind: 'dataset', dataset_id: datasetId.peek(), split: split.peek() } : { kind: 'label_job', job_id: jobId.peek() },
-        max_images: max.peek(),
-      });
+      const created = await hub.api.createBench(body);
       if (hub.epoch !== epoch || connecting.peek()) return;
       // The dialog closes first: what was made is said over the benchmark's page it opens.
       if (alive && seq === submitSeq) open.set(false);
@@ -245,7 +341,7 @@ export default function NewBenchDialog(props: { open?: boolean }) {
                 variant="primary"
                 type="submit"
                 form={`${uid}-form`}
-                icon={Plus}
+                icon={kind.get() === 'generated' ? Sparkles : Plus}
                 loading={busy.get()}
                 disabled={!!why()}
                 aria-describedby={why()}
@@ -282,6 +378,7 @@ export default function NewBenchDialog(props: { open?: boolean }) {
             options={[
               { value: 'dataset', label: 'A dataset split' },
               { value: 'label_job', label: 'A labeling job', disabled: labelOff.get(), tip: labelOff.get() ? 'This server does not label images' : undefined },
+              { value: 'generated', label: 'Generated scenes', disabled: generatedOff.get(), tip: generatedOff.get() ? 'This server does not support generated benchmarks' : undefined },
             ]}
           />
         </Field>
@@ -311,7 +408,7 @@ export default function NewBenchDialog(props: { open?: boolean }) {
               <ErrorState error={datasets.error} title="Could not load datasets" retry={() => datasets.refresh()} compact />
             ) : null}
           </>
-        ) : (
+        ) : kind.get() === 'label_job' ? (
           <Field
             label="Labeling job"
             for={`${uid}-job`}
@@ -319,11 +416,52 @@ export default function NewBenchDialog(props: { open?: boolean }) {
           >
             <Select id={`${uid}-job`} bind:value={jobId} disabled={!jobs.data?.length} options={jobOptions.get()} />
           </Field>
+        ) : (
+          <>
+            <Field
+              label="Classes"
+              for={`${uid}-gcls`}
+              error={show(errs.get().genClasses)}
+              hint={
+                genClasses.get().length >= GENERATED_CLASSES_MAX
+                  ? `${GENERATED_CLASSES_MAX} of ${GENERATED_CLASSES_MAX}: one shape each.`
+                  : `Press Enter or comma to add. Up to ${GENERATED_CLASSES_MAX} distinct classes.`
+              }
+            >
+              <ClassChips id={`${uid}-gcls`} bind:classes={genClasses} bind:draft={genClassDraft} max={GENERATED_CLASSES_MAX} placeholder="circle, square, …" />
+            </Field>
+            <div class="gen-row">
+              <Field label="Scenes" for={`${uid}-gimg`} error={genImagesError.get()} hint={`1 to ${num(IMAGES_MAX)} scenes.`}>
+                <Input id={`${uid}-gimg`} bind:value={genImagesText} inputmode="numeric" suffix="images" invalid={!!genImagesError.get()} />
+              </Field>
+              <Field label="Seed" for={`${uid}-gseed`} error={genSeedError.get()} hint="Same seed produces byte-identical scenes.">
+                <Input id={`${uid}-gseed`} inputmode="numeric" bind:value={genSeed} onkeydown={seedArrows(genSeed)} invalid={!!genSeedError.get()} />
+              </Field>
+            </div>
+            <Field label="Image size" hint={varyAspect.get() ? `Long side ${genImgsz.get()} px with mixed aspect ratios.` : `Square images, ${genImgsz.get()} × ${genImgsz.get()} px.`}>
+              <Segmented
+                label="Image size"
+                bind:value={genImgsz}
+                options={GEN_SIZES.map((s) => ({ value: s, label: s }))}
+              />
+            </Field>
+            <label class="aspect-toggle">
+              <input type="checkbox" bind:checked={varyAspect} />
+              <span>Mix aspect ratios (1:1, 4:3, 3:4, 16:9, 3:2)</span>
+            </label>
+          </>
         )}
-        <Field label="At most" for={`${uid}-max`} error={maxError.get()} hint={sampleHint.get()}>
-          <Input id={`${uid}-max`} bind:value={maxText} inputmode="numeric" suffix="images" class="max" invalid={!!maxError.get()} />
-        </Field>
-        {kind.get() === 'dataset' && split.get() === 'train' ? (
+        {kind.get() !== 'generated' ? (
+          <Field label="At most" for={`${uid}-max`} error={maxError.get()} hint={sampleHint.get()}>
+            <Input id={`${uid}-max`} bind:value={maxText} inputmode="numeric" suffix="images" class="max" invalid={!!maxError.get()} />
+          </Field>
+        ) : null}
+        {kind.get() === 'generated' ? (
+          <p class="note">
+            <Info size={14} strokeWidth={1.75} aria-hidden="true" />
+            <span>Renders deterministic synthetic shape scenes directly into this benchmark without creating a dataset.</span>
+          </p>
+        ) : kind.get() === 'dataset' && split.get() === 'train' ? (
           <p class="note warn">
             <TriangleAlert size={14} strokeWidth={1.75} aria-hidden="true" />
             <span>A model trained on {dataset.get()?.name ?? 'this dataset'}'s training split has seen these images: on them, a benchmark measures memory, not sight. Pick the validation or test split.</span>
@@ -375,6 +513,25 @@ css`
   .form :global(.max) {
     max-width: 160px;
   }
+  .gen-row {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--space-4);
+    align-items: start;
+  }
+  .aspect-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    color: var(--text-secondary);
+    cursor: pointer;
+    justify-self: start;
+  }
+  .aspect-toggle input {
+    accent-color: var(--accent-solid);
+  }
   .note {
     display: grid;
     grid-template-columns: 14px minmax(0, 1fr);
@@ -400,7 +557,8 @@ css`
     .why {
       flex-basis: 100%;
     }
-    .pair {
+    .pair,
+    .gen-row {
       grid-template-columns: minmax(0, 1fr);
     }
   }

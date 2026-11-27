@@ -664,6 +664,27 @@ describe('ExportDialog: dynamic ONNX axes & CLI commands', () => {
     expect(predictPre.textContent).toBe('folo predict --model D:/folo/models/shapes-n-best.folo <images> --tta');
     pickPred('ByteTrack');
     expect(predictPre.textContent).toBe('folo predict --model D:/folo/models/shapes-n-best.folo <frames_dir> --track');
+
+    // Verify Quantize (int8) selective-f32 CLI presets.
+    const quantPre = target.ownerDocument.querySelector('pre[aria-label="Quantize CLI command"]')!;
+    expect(quantPre.textContent).toBe(
+      'folo quantize --model D:/folo/models/shapes-n-best.folo --data <dataset> --f32-policy auto --max-f32-macs 0.05 --sqnr-threshold 35',
+    );
+    const quantGroup = target.ownerDocument.querySelector('[role="radiogroup"][aria-label="Quantize selective-f32 policy"]')!;
+    const pickQuant = (label: string) => {
+      [...quantGroup.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === label)!.click();
+      flushSync();
+    };
+    pickQuant('10% f32');
+    expect(quantPre.textContent).toContain('--max-f32-macs 0.10 --sqnr-threshold 40');
+    pickQuant('P5 tail');
+    expect(quantPre.textContent).toBe(
+      'folo quantize --model D:/folo/models/shapes-n-best.folo --data <dataset> --f32-policy p5-tail',
+    );
+    pickQuant('Full int8');
+    expect(quantPre.textContent).toBe(
+      'folo quantize --model D:/folo/models/shapes-n-best.folo --data <dataset> --f32-policy none',
+    );
   });
 
   it('describes end-to-end detections without external NMS when decoding an o2o model to ONNX', async () => {

@@ -5,7 +5,9 @@ import { render } from '../../../framework/testing';
 import { hub } from '$lib/api/index';
 import { MockApi } from '$lib/api/mock';
 import { parse, router } from '$lib/router';
+import { pendingBlobRevokeCount, revokePendingBlobUrls } from '$lib/tableExport';
 import Playground from '../Playground';
+import * as exportMod from './export';
 import { session } from './session';
 
 let target: HTMLElement;
@@ -45,6 +47,7 @@ afterEach(() => {
   handle = undefined;
   target?.remove();
   session.set(null);
+  revokePendingBlobUrls();
   vi.restoreAllMocks();
 });
 
@@ -352,5 +355,80 @@ describe('Playground: Compare A/B and Export', () => {
     selectB!.dispatchEvent(new Event('change', { bubbles: true }));
     flushSync();
     expect(document.activeElement).toBe(selectB);
+  });
+
+  it('shows Both / Only A / Only B class-diff breakdown and one-click Compare JSON & side-by-side PNG exports without timer leaks', async () => {
+    const api = new MockApi('normal', 0);
+    api.imageUrl = async () => 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+    api.predict = async (_input, opts) => ({
+      model_id: opts.model_id,
+      image: { width: 640, height: 480 },
+      boxes:
+        opts.model_id === 'm_hard_s'
+          ? [
+              { class: 0, name: 'circle', score: 0.92, x1: 10, y1: 10, x2: 60, y2: 60 },
+              { class: 1, name: 'square', score: 0.86, x1: 70, y1: 10, x2: 120, y2: 60 },
+            ]
+          : [
+              { class: 0, name: 'circle', score: 0.95, x1: 12, y1: 12, x2: 62, y2: 62 },
+              { class: 2, name: 'triangle', score: 0.88, x1: 140, y1: 20, x2: 190, y2: 70 },
+            ],
+      timing: { preprocess_ms: 1, inference_ms: 6, postprocess_ms: 1, total_ms: 8 },
+      device: 'gpu:0',
+    });
+    hub.api = api;
+    hub.mode = 'mock';
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    history.replaceState(history.state, '', '#/playground?model=m_hard_s&compare=1&modelB=m_shapes_n&view=split');
+    router.route = parse('#/playground?model=m_hard_s&compare=1&modelB=m_shapes_n&view=split');
+    handle = render(() => <Playground />, target);
+    (await until(() => target.querySelector<HTMLButtonElement>('button.sample'), 'sample image')).click();
+    const diffStrip = await until(() => target.querySelector<HTMLElement>('[data-class-diff]'), 'class diff strip');
+
+    const pills = [...diffStrip.querySelectorAll<HTMLButtonElement>('button.diff-pill')];
+    expect(pills.map((p) => p.textContent?.replace(/\s+/g, ' ').trim())).toEqual(['Both 1', 'Only A 1', 'Only B 1']);
+
+    // Filtering by Only A shows only 'square'; clicking again resets to all 3 classes.
+    pills[1]!.click();
+    flushSync();
+    const clsNames = () => [...target.querySelectorAll('.cls-table tbody td.lead .truncate')].map((el) => el.textContent?.trim());
+    expect(clsNames()).toEqual(['square']);
+    pills[1]!.click();
+    flushSync();
+    expect(clsNames().sort()).toEqual(['circle', 'square', 'triangle']);
+
+    // One-click Side-by-side PNG inside CompareSummary exports side-by-side even when Split view is active.
+    const pngSpy = vi.spyOn(exportMod, 'exportComparePng').mockResolvedValue(true);
+    const pngBtn = target.querySelector<HTMLButtonElement>('[data-compare-export] button[aria-label="Export side-by-side annotated PNG"]')!;
+    pngBtn.click();
+    await vi.waitFor(() => expect(pngSpy).toHaveBeenCalledTimes(1));
+    expect(pngSpy.mock.calls[0]![0].view).toBe('side-by-side');
+
+    // One-click Compare JSON exports structured payload with class_diff and revokes cleanly.
+    const created: Blob[] = [];
+    const revoked: string[] = [];
+    vi.spyOn(URL, 'createObjectURL').mockImplementation((b) => {
+      created.push(b as Blob);
+      return `blob:cmp-summary/${created.length}`;
+    });
+    vi.spyOn(URL, 'revokeObjectURL').mockImplementation((u) => revoked.push(u));
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+
+    const jsonBtn = target.querySelector<HTMLButtonElement>('[data-compare-export] button[aria-label="Export A/B compare JSON"]')!;
+    jsonBtn.click();
+    flushSync();
+    expect(created).toHaveLength(1);
+    const parsed = JSON.parse(await created[0]!.text());
+    expect(parsed.mode).toBe('compare');
+    expect(parsed.comparison.class_diff).toEqual({
+      both: ['circle'],
+      only_a: ['square'],
+      only_b: ['triangle'],
+    });
+    expect(pendingBlobRevokeCount()).toBe(1);
+    revokePendingBlobUrls();
+    expect(pendingBlobRevokeCount()).toBe(0);
+    expect(revoked).toEqual(['blob:cmp-summary/1']);
   });
 });

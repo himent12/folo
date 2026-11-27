@@ -1,9 +1,11 @@
 // @vitest-environment happy-dom
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { pendingBlobRevokeCount, revokePendingBlobUrls } from '$lib/tableExport';
 import { compareBadgeText, drawAnnotations, exportDetectionsJson, exportFilename } from './export';
 import { visibleTruthBoxes } from './exportActions';
 
 afterEach(() => {
+  revokePendingBlobUrls();
   vi.restoreAllMocks();
 });
 
@@ -85,6 +87,9 @@ describe('playground/export', () => {
     expect(ok).toBe(true);
     expect(createUrl).toHaveBeenCalledTimes(1);
     expect(click).toHaveBeenCalledTimes(1);
-    expect(revokeUrl).not.toThrow();
+    expect(pendingBlobRevokeCount()).toBe(1);
+    revokePendingBlobUrls();
+    expect(pendingBlobRevokeCount()).toBe(0);
+    expect(revokeUrl).toHaveBeenCalledWith('blob:mock-json');
   });
 });

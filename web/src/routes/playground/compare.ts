@@ -7,6 +7,15 @@ import { predictionJson, type Det } from './viewState';
 
 export type CompareViewMode = 'side-by-side' | 'split';
 
+/** Which side(s) detected a class when both Model A and Model B have loaded results. */
+export type CompareClassPresence = 'both' | 'only-a' | 'only-b';
+
+export interface CompareClassDiff {
+  both: string[];
+  onlyA: string[];
+  onlyB: string[];
+}
+
 export interface CompareClassRow {
   name: string;
   /** Class index used for palette swatch color (prefers Model A's class index, then Model B's). */
@@ -14,6 +23,8 @@ export interface CompareClassRow {
   countA: number | null;
   countB: number | null;
   delta: number | null;
+  /** Presence bucket (`both`, `only-a`, `only-b`), or null when either side is unavailable. */
+  presence: CompareClassPresence | null;
 }
 
 export interface CompareSummary {
@@ -26,6 +37,8 @@ export interface CompareSummary {
   /** `latencyA / latencyB` (> 1 means B is faster than A; < 1 means B is slower than A). */
   speedupRatio: number | null;
   classes: CompareClassRow[];
+  /** Per-class overlap breakdown (`Both`, `Only A`, `Only B`) when both Model A and Model B have results; null otherwise. */
+  classDiff: CompareClassDiff | null;
 }
 
 /**
@@ -80,6 +93,7 @@ export function summarizeComparison(opts: {
       countA: hasA ? row.a : null,
       countB: hasB ? row.b : null,
       delta: hasA && hasB ? row.b - row.a : null,
+      presence: hasA && hasB ? (row.a > 0 && row.b > 0 ? ('both' as const) : row.a > 0 ? ('only-a' as const) : ('only-b' as const)) : null,
     }))
     .sort((a, b) => {
       const da = a.delta === null ? -1 : Math.abs(a.delta);
@@ -88,6 +102,15 @@ export function summarizeComparison(opts: {
       const sumB = (b.countA ?? 0) + (b.countB ?? 0);
       return db - da || sumB - sumA || a.name.localeCompare(b.name);
     });
+
+  const classDiff: CompareClassDiff | null =
+    hasA && hasB
+      ? {
+          both: classes.filter((c) => c.presence === 'both').map((c) => c.name),
+          onlyA: classes.filter((c) => c.presence === 'only-a').map((c) => c.name),
+          onlyB: classes.filter((c) => c.presence === 'only-b').map((c) => c.name),
+        }
+      : null;
 
   const countA = hasA ? boxesA.length : null;
   const countB = hasB ? boxesB.length : null;
@@ -107,6 +130,7 @@ export function summarizeComparison(opts: {
     latencyDeltaMs,
     speedupRatio,
     classes,
+    classDiff,
   };
 }
 
@@ -190,7 +214,14 @@ export function comparePredictionJson(opts: {
       latency_b_ms: opts.summary.latencyB,
       latency_delta_ms: opts.summary.latencyDeltaMs,
       speedup_ratio: opts.summary.speedupRatio,
-      classes: opts.summary.classes.map((c) => ({ name: c.name, count_a: c.countA, count_b: c.countB, delta: c.delta })),
+      class_diff: opts.summary.classDiff
+        ? {
+            both: [...opts.summary.classDiff.both],
+            only_a: [...opts.summary.classDiff.onlyA],
+            only_b: [...opts.summary.classDiff.onlyB],
+          }
+        : null,
+      classes: opts.summary.classes.map((c) => ({ name: c.name, count_a: c.countA, count_b: c.countB, delta: c.delta, presence: c.presence })),
     },
     a: a ? { ...a, model_name: opts.modelAName, run_on: opts.runOnA } : null,
     b: b ? { ...b, model_name: opts.modelBName, run_on: opts.runOnB } : null,

@@ -1,7 +1,8 @@
 /**
  * Collapsible CLI commands section for Model Detail ExportDialog: shows copy-ready `folo export`
- * (synced with the selected format, decoded/raw output, half precision, and dynamic ONNX axes) and
- * `folo predict` quick snippets (Standard, SAHI `--tile`, `--tta`, ByteTrack `--track`).
+ * (synced with the selected format, decoded/raw output, half precision, and dynamic ONNX axes),
+ * `folo predict` quick snippets (Standard, SAHI `--tile`, `--tta`, ByteTrack `--track`), and
+ * `folo quantize` selective-f32 int8 calibration presets.
  */
 import ChevronRight from '$icons/chevron-right';
 import { computed, css, effect, For, signal } from 'fw';
@@ -11,10 +12,13 @@ import Segmented from '$lib/ui/Segmented';
 import {
   buildExportCli,
   buildPredictCli,
+  buildQuantizeCli,
   ONNX_AXES_OPTIONS,
   PREDICT_SNIPPET_OPTIONS,
+  QUANTIZE_PRESET_OPTIONS,
   type OnnxDynamicAxes,
   type PredictSnippetMode,
+  type QuantizePreset,
 } from './modelCli';
 
 export interface ExportCliPanelProps {
@@ -29,10 +33,12 @@ export interface ExportCliPanelProps {
 
 const AXES_SEG = ONNX_AXES_OPTIONS.map((o) => ({ value: o.value, label: o.label }));
 const PREDICT_SEG = PREDICT_SNIPPET_OPTIONS.map((o) => ({ value: o.value, label: o.label }));
+const QUANTIZE_SEG = QUANTIZE_PRESET_OPTIONS.map((o) => ({ value: o.value, label: o.label }));
 
 export default function ExportCliPanel(props: ExportCliPanelProps) {
   const open = signal(false);
   const predictMode = signal<PredictSnippetMode>('sahi');
+  const quantizePreset = signal<QuantizePreset>('auto');
   /** Local CLI-only dynamic axis override when the server does not expose split dynamic axes. */
   const cliAxes = signal<OnnxDynamicAxes>(props.axes);
   effect(() => {
@@ -53,7 +59,11 @@ export default function ExportCliPanel(props: ExportCliPanelProps) {
   const predictDesc = computed(
     () => PREDICT_SNIPPET_OPTIONS.find((o) => o.value === predictMode.get())?.desc ?? '',
   );
-  const placeholder = computed(() => exportCmd.get().placeholder ?? predictCmd.get().placeholder);
+  const quantizeCmd = computed(() => buildQuantizeCli(props.model, quantizePreset.get()));
+  const quantizeDesc = computed(
+    () => QUANTIZE_PRESET_OPTIONS.find((o) => o.value === quantizePreset.get())?.desc ?? '',
+  );
+  const placeholder = computed(() => exportCmd.get().placeholder ?? predictCmd.get().placeholder ?? quantizeCmd.get().placeholder);
 
   return (
     <div class="cli-wrap" data-export-cli>
@@ -65,7 +75,7 @@ export default function ExportCliPanel(props: ExportCliPanelProps) {
       >
         <ChevronRight size={14} class={open.get() ? 'chev open' : 'chev'} aria-hidden="true" />
         <span class="cli-title">CLI commands</span>
-        <span class="cli-meta">export &amp; predict</span>
+        <span class="cli-meta">export, predict &amp; quantize</span>
       </button>
       {open.get() ? (
         <div class="cli-body">
@@ -95,6 +105,23 @@ export default function ExportCliPanel(props: ExportCliPanelProps) {
             />
             <p class="cli-hint">
               <For each={predictDesc.get().split('`')} key={(_, i) => i}>
+                {(part, i) => <>{i() % 2 ? <span class="mono">{part()}</span> : part()}</>}
+              </For>
+            </p>
+          </div>
+
+          <div class="cli-block">
+            <div class="cli-head">
+              <span class="cli-label">Quantize (int8)</span>
+              <Segmented label="Quantize selective-f32 policy" size="sm" bind:value={quantizePreset} options={QUANTIZE_SEG} />
+            </div>
+            <CommandLine
+              command={quantizeCmd.get().line}
+              label="Quantize CLI command"
+              copied="Run this command to calibrate int8 weights with selective-f32 sensitivity."
+            />
+            <p class="cli-hint">
+              <For each={quantizeDesc.get().split('`')} key={(_, i) => i}>
                 {(part, i) => <>{i() % 2 ? <span class="mono">{part()}</span> : part()}</>}
               </For>
             </p>

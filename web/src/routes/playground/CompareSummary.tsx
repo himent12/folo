@@ -1,13 +1,17 @@
 /**
- * Instant Model A vs Model B comparison summary: detection count delta, latency A vs B comparison, per-class counts
- * table, and a quick side switcher so users can inspect Model A or Model B rows in the detections panel.
+ * Instant Model A vs Model B comparison summary: detection count delta, latency A vs B comparison, per-class diff
+ * breakdown (`Both`, `Only A`, `Only B`), per-class counts table, one-click side-by-side PNG & Compare JSON export,
+ * and a quick side switcher so users can inspect Model A or Model B rows in the detections panel.
  */
-import { css, For } from 'fw';
+import Download from '$icons/download';
+import FileJson from '$icons/file-json';
+import { computed, css, effect, For, signal } from 'fw';
 import { classColor } from '$lib/design/tokens';
 import { ms } from '$lib/format';
+import Button from '$lib/ui/Button';
 import Panel from '$lib/ui/Panel';
 import Segmented from '$lib/ui/Segmented';
-import { formatLatencyComparison, formatSignedDelta, type CompareSummary } from './compare';
+import { formatLatencyComparison, formatSignedDelta, type CompareClassPresence, type CompareSummary } from './compare';
 import Swatch from './Swatch';
 
 export interface CompareSummaryPanelProps {
@@ -20,11 +24,30 @@ export interface CompareSummaryPanelProps {
   predictingB: boolean;
   inspectSide: 'a' | 'b';
   onInspectSide: (side: 'a' | 'b') => void;
+  canExport?: boolean;
+  exportingPng?: boolean;
+  onExportSideBySidePng?: () => void;
+  onExportCompareJson?: () => void;
 }
 
 export default function CompareSummaryPanel(props: CompareSummaryPanelProps) {
   const deltaTone = (d: number | null) => (d === null || d === 0 ? 'zero' : d > 0 ? 'pos' : 'neg');
   const countText = (n: number | null) => (n === null ? '—' : String(n));
+  const diffFilter = signal<'all' | CompareClassPresence>('all');
+
+  effect(() => {
+    if (!props.summary.classDiff) diffFilter.set('all');
+  });
+
+  const filteredClasses = computed(() => {
+    const f = diffFilter.get();
+    if (f === 'all' || !props.summary.classDiff) return props.summary.classes;
+    return props.summary.classes.filter((r) => r.presence === f);
+  });
+
+  function toggleFilter(bucket: CompareClassPresence) {
+    diffFilter.set(diffFilter.peek() === bucket ? 'all' : bucket);
+  }
 
   const body = () => (
     <div class="ab-sum">
@@ -65,7 +88,45 @@ export default function CompareSummaryPanel(props: CompareSummaryPanelProps) {
             </div>
           </div>
 
-          {props.summary.classes.length ? (
+          {props.summary.classDiff && props.summary.classes.length ? (
+            <div class="diff-strip" role="group" aria-label="Filter classes by model overlap" data-class-diff>
+              <button
+                type="button"
+                class="diff-pill"
+                class:on={diffFilter.get() === 'both'}
+                aria-pressed={diffFilter.get() === 'both'}
+                disabled={!props.summary.classDiff.both.length}
+                onclick={() => toggleFilter('both')}
+              >
+                <span>Both</span>{' '}
+                <b class="num">{props.summary.classDiff.both.length}</b>
+              </button>
+              <button
+                type="button"
+                class="diff-pill only-a"
+                class:on={diffFilter.get() === 'only-a'}
+                aria-pressed={diffFilter.get() === 'only-a'}
+                disabled={!props.summary.classDiff.onlyA.length}
+                onclick={() => toggleFilter('only-a')}
+              >
+                <span>Only A</span>{' '}
+                <b class="num">{props.summary.classDiff.onlyA.length}</b>
+              </button>
+              <button
+                type="button"
+                class="diff-pill only-b"
+                class:on={diffFilter.get() === 'only-b'}
+                aria-pressed={diffFilter.get() === 'only-b'}
+                disabled={!props.summary.classDiff.onlyB.length}
+                onclick={() => toggleFilter('only-b')}
+              >
+                <span>Only B</span>{' '}
+                <b class="num">{props.summary.classDiff.onlyB.length}</b>
+              </button>
+            </div>
+          ) : null}
+
+          {filteredClasses.get().length ? (
             <div class="cls-wrap">
               <table class="table dense cls-table">
                 <thead>
@@ -83,13 +144,22 @@ export default function CompareSummaryPanel(props: CompareSummaryPanelProps) {
                   </tr>
                 </thead>
                 <tbody>
-                  <For each={props.summary.classes} key={(r) => r.name}>
+                  <For each={filteredClasses.get()} key={(r) => r.name}>
                     {(r) => (
                       <tr>
                         <td class="lead">
                           <span class="cls">
                             <Swatch color={classColor(r().colorClass)} />
                             <span class="truncate">{r().name}</span>
+                            {r().presence === 'only-a' ? (
+                              <span class="only-tag only-a" title="Detected only by Model A">
+                                A
+                              </span>
+                            ) : r().presence === 'only-b' ? (
+                              <span class="only-tag only-b" title="Detected only by Model B">
+                                B
+                              </span>
+                            ) : null}
                           </span>
                         </td>
                         <td class="r num">{countText(r().countA)}</td>
@@ -103,11 +173,41 @@ export default function CompareSummaryPanel(props: CompareSummaryPanelProps) {
             </div>
           ) : (
             <p class="hint">
-              {props.summary.countA !== null && props.summary.countB !== null
-                ? 'Neither model kept any detections at the current thresholds.'
-                : 'No detections kept yet at the current thresholds.'}
+              {props.summary.classes.length
+                ? 'No classes in this filter.'
+                : props.summary.countA !== null && props.summary.countB !== null
+                  ? 'Neither model kept any detections at the current thresholds.'
+                  : 'No detections kept yet at the current thresholds.'}
             </p>
           )}
+
+          {props.onExportSideBySidePng || props.onExportCompareJson ? (
+            <div class="exp-row" data-compare-export>
+              {props.onExportSideBySidePng ? (
+                <Button
+                  size="sm"
+                  icon={Download}
+                  disabled={!props.canExport || !!props.exportingPng}
+                  loading={!!props.exportingPng}
+                  aria-label="Export side-by-side annotated PNG"
+                  onclick={props.onExportSideBySidePng}
+                >
+                  Side-by-side PNG
+                </Button>
+              ) : null}
+              {props.onExportCompareJson ? (
+                <Button
+                  size="sm"
+                  icon={FileJson}
+                  disabled={!props.canExport}
+                  aria-label="Export A/B compare JSON"
+                  onclick={props.onExportCompareJson}
+                >
+                  Compare JSON
+                </Button>
+              ) : null}
+            </div>
+          ) : null}
 
           <div class="inspect-row">
             <span class="k-label">Inspect table</span>
@@ -227,6 +327,70 @@ css`
     align-items: center;
     gap: var(--space-2);
     max-width: 140px;
+  }
+  .diff-strip {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: var(--space-1);
+  }
+  .diff-pill {
+    display: inline-flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-1);
+    min-height: 28px;
+    padding: 0 var(--space-2);
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--line-subtle);
+    background: var(--bg-inset);
+    color: var(--text-secondary);
+    font-size: var(--type-sm-size);
+    cursor: pointer;
+    transition:
+      border-color var(--dur-fast) var(--ease-standard),
+      background-color var(--dur-fast) var(--ease-standard);
+  }
+  .diff-pill:hover:not(:disabled) {
+    border-color: var(--line-strong);
+    color: var(--text-primary);
+  }
+  .diff-pill.on {
+    border-color: var(--line-strong);
+    background: var(--bg-raised);
+    color: var(--text-primary);
+  }
+  .diff-pill:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+  .diff-pill b {
+    font-weight: var(--weight-semibold);
+    color: var(--text-primary);
+  }
+  .diff-pill.only-a b {
+    color: var(--accent-text);
+  }
+  .diff-pill.only-b b {
+    color: var(--info-text);
+  }
+  .only-tag {
+    flex-shrink: 0;
+    padding: 0 4px;
+    border-radius: var(--radius-xs);
+    font-size: var(--type-sm-size);
+    font-weight: var(--weight-semibold);
+    background: var(--bg-raised);
+  }
+  .only-tag.only-a {
+    color: var(--accent-text);
+  }
+  .only-tag.only-b {
+    color: var(--info-text);
+  }
+  .exp-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
   }
   .inspect-row {
     display: flex;

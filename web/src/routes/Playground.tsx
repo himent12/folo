@@ -466,7 +466,7 @@ export default function Playground() {
     );
   });
   const activeJson = computed(() => (cmp.compare.get() ? cmp.compareJson.get() : singleJson.get()));
-  const { exportingPng, predAMatches, predBMatches, canExport, onExportPng, onExportJson } = usePlaygroundExport({
+  const { exportingPng, predAMatches, predBMatches, canExport, onExportPng, onExportCompareSideBySidePng, onExportJson } = usePlaygroundExport({
     source,
     src,
     dims: () => dims.get(),
@@ -688,6 +688,10 @@ export default function Playground() {
       predictingB={cmp.predictingB.get()}
       inspectSide={cmp.inspectSide.get()}
       onInspectSide={(side) => cmp.inspectSide.set(side)}
+      canExport={canExport.get()}
+      exportingPng={exportingPng.get()}
+      onExportSideBySidePng={() => void onExportCompareSideBySidePng()}
+      onExportCompareJson={onExportJson}
     />
   );
 

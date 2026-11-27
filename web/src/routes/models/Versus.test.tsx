@@ -1,10 +1,13 @@
 // @vitest-environment happy-dom
 import { flush as flushSync, tick } from 'fw';
 import { render } from '../../../framework/testing';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { comparable, unlike, unlikeCondition, versusYolo26n } from '$lib/benchmarks';
 import { MockApi } from '$lib/api/mock';
+import { pendingBlobRevokeCount, revokePendingBlobUrls } from '$lib/tableExport';
+import { toast } from '$lib/ui/toast';
 import Versus from './Versus';
+import { versusCsv, versusMarkdown } from './versusExport';
 
 /** Port of `mount(C, { target, props })`: renders into `target`; `unmount(c)` is `c.unmount()`. */
 const mount = <P extends object>(C: (p: P) => JSX.Element, o: { target: HTMLElement; props?: P }) => render(() => C(o.props ?? ({} as P)), o.target);
@@ -24,6 +27,10 @@ afterEach(() => {
   if (c) unmount(c);
   c = undefined;
   target.remove();
+  revokePendingBlobUrls();
+  toast.items = [];
+  vi.useRealTimers();
+  vi.restoreAllMocks();
 });
 
 describe('Engine speed table', () => {
@@ -89,5 +96,60 @@ describe('Engine speed table', () => {
     c = mount(Versus, { target, props: { table: null } });
     flushSync();
     expect(target.querySelectorAll('table.vs tbody')).toHaveLength(1);
+  });
+
+  it('copies a complete Markdown report table and downloads CSV with safe blob cleanup', async () => {
+    const table = await new MockApi('normal', 0).throughput();
+    const md = versusMarkdown(table);
+    expect(md).toContain('| Measured | folo-n | YOLO26n | folo-n vs YOLO26n | Notes |');
+    expect(md).toContain('GPU forward, batch 1 (ms)');
+    expect(md).toContain('## Measured on this server');
+    expect(md).toContain('5.90 ms');
+
+    const csv = versusCsv(table);
+    expect(csv.headers).toEqual(['source', 'device', 'metric', 'unit', 'folo_n', 'yolo26n', 'comparison', 'note']);
+    expect(csv.rows).toHaveLength(versusYolo26n.length + 2);
+    expect(versusCsv(null).rows).toHaveLength(versusYolo26n.length);
+
+    let copiedText = '';
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: {
+        writeText: vi.fn(async (s: string) => {
+          copiedText = s;
+        }),
+      },
+    });
+    const created: Blob[] = [];
+    const revoked: string[] = [];
+    vi.spyOn(URL, 'createObjectURL').mockImplementation((b) => {
+      created.push(b as Blob);
+      return `blob:versus/${created.length}`;
+    });
+    vi.spyOn(URL, 'revokeObjectURL').mockImplementation((u) => revoked.push(u));
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+
+    c = mount(Versus, { target, props: { table } });
+    flushSync();
+
+    const copyBtn = [...target.querySelectorAll<HTMLButtonElement>('header button')].find((b) => b.textContent?.includes('Copy Markdown'))!;
+    copyBtn.click();
+    await vi.waitFor(() => {
+      flushSync();
+      expect(copiedText).toBe(md);
+      expect(copyBtn.textContent).toContain('Copied');
+    });
+
+    const csvBtn = [...target.querySelectorAll<HTMLButtonElement>('header button')].find((b) => b.textContent?.includes('Download CSV'))!;
+    csvBtn.click();
+    flushSync();
+    expect(click).toHaveBeenCalledTimes(1);
+    expect(created).toHaveLength(1);
+    expect(await created[0]!.text()).toContain('folo_n,yolo26n');
+    expect(pendingBlobRevokeCount()).toBe(1);
+
+    revokePendingBlobUrls();
+    expect(pendingBlobRevokeCount()).toBe(0);
+    expect(revoked).toEqual(['blob:versus/1']);
   });
 });

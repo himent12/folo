@@ -41,7 +41,15 @@ import {
   BENCH_NAME_MAX,
   DESCRIPTION_MAX,
   DESIGN_NOTE_MAX,
+  GENERATED_CLASSES_DEFAULT,
+  GENERATED_CLASSES_MAX,
+  GENERATED_IMAGES_DEFAULT,
+  GENERATED_IMGSZ_DEFAULT,
+  GENERATED_IMGSZ_MAX,
+  GENERATED_IMGSZ_MIN,
+  GENERATED_SOURCE_ID,
   GENERATIONS_MAX,
+  generatedSourceName,
   IMAGES_DEFAULT,
   IMAGES_MAX,
   IMAGES_PAGE_MAX,
@@ -137,9 +145,95 @@ export class MockBench extends MockBenchState {
   create(body: CreateBench, now: number): Bench {
     this.#checkFields({ name: body.name, description: body.description });
     if (!body.name?.trim()) throw new ApiError(400, 'invalid_body', 'field `name`: must not be blank');
+    if (body.plan) this.#checkPlan(body.plan);
+
+    if (body.source.kind === 'generated') {
+      const gs = body.source;
+      if (gs.images != null && body.max_images != null && gs.images !== body.max_images) {
+        throw new ApiError(400, 'invalid_body', `source.images (${gs.images}) and max_images (${body.max_images}) disagree: give one or the same count`);
+      }
+      const imagesCount = gs.images ?? body.max_images ?? GENERATED_IMAGES_DEFAULT;
+      if (!Number.isInteger(imagesCount) || imagesCount < 1 || imagesCount > IMAGES_MAX) {
+        throw new ApiError(400, 'invalid_body', `field \`source.images\`: 1 to ${IMAGES_MAX}`);
+      }
+      if (gs.seed != null && body.seed != null && gs.seed !== body.seed) {
+        throw new ApiError(400, 'invalid_body', `source.seed (${gs.seed}) and seed (${body.seed}) disagree: give one or the same seed`);
+      }
+      const seed = gs.seed ?? body.seed ?? 0;
+      if (!Number.isSafeInteger(seed) || seed < 0) {
+        throw new ApiError(400, 'invalid_body', `field \`seed\`: a whole number from 0 to ${SEED_MAX}`);
+      }
+      const imgsz = gs.imgsz ?? GENERATED_IMGSZ_DEFAULT;
+      if (!Number.isInteger(imgsz) || imgsz < GENERATED_IMGSZ_MIN || imgsz > GENERATED_IMGSZ_MAX) {
+        throw new ApiError(400, 'invalid_body', `field \`source.imgsz\`: ${GENERATED_IMGSZ_MIN} to ${GENERATED_IMGSZ_MAX}`);
+      }
+      const rawClasses = gs.classes ?? [...GENERATED_CLASSES_DEFAULT];
+      const classes = rawClasses.map((c) => c.trim());
+      if (!classes.length || classes.length > GENERATED_CLASSES_MAX || classes.some((c) => !c)) {
+        throw new ApiError(400, 'invalid_body', `field \`source.classes\`: 1 to ${GENERATED_CLASSES_MAX} non-empty class names`);
+      }
+      if (new Set(classes.map((c) => c.toLowerCase())).size !== classes.length) {
+        throw new ApiError(400, 'invalid_body', 'field `source.classes`: class names must be distinct');
+      }
+      const varyAspect = !!gs.vary_aspect;
+      const frames = varyAspect
+        ? [
+            { width: imgsz, height: imgsz, weight: 3 },
+            { width: imgsz, height: Math.max(GENERATED_IMGSZ_MIN, Math.round((imgsz * 3) / 4)), weight: 2 },
+            { width: Math.max(GENERATED_IMGSZ_MIN, Math.round((imgsz * 3) / 4)), height: imgsz, weight: 2 },
+            { width: imgsz, height: Math.max(GENERATED_IMGSZ_MIN, Math.round((imgsz * 9) / 16)), weight: 2 },
+            { width: imgsz, height: Math.max(GENERATED_IMGSZ_MIN, Math.round((imgsz * 2) / 3)), weight: 1 },
+          ]
+        : undefined;
+      const spec: MockDatasetSpec = {
+        id: `gen_${seed}_${imgsz}_${classes.join('_')}`,
+        name: generatedSourceName({ images: imagesCount, imgsz, seed, vary_aspect: varyAspect }),
+        path: 'generated',
+        format: 'yolo',
+        classes,
+        classWeights: classes.map(() => 1),
+        classShape: classes.map((c) => (c.toLowerCase() === 'circle' || c.toLowerCase() === 'ring' ? 'round' : 'square')),
+        splits: { train: 0, val: imagesCount, test: 0 },
+        width: imgsz,
+        height: imgsz,
+        frames,
+        meanBoxes: 4.5,
+        emptyRate: 0.02,
+        sizeRange: [0.08, 0.36],
+        brokenLabels: 0,
+        createdAgoS: 0,
+        style: 'shapes',
+        seed,
+      };
+      const images: BenchImg[] = Array.from({ length: imagesCount }, (_, i) => {
+        const d = image(spec, i);
+        return {
+          id: String(i + 1),
+          file: `${String(i).padStart(6, '0')}.jpg`,
+          width: d.width,
+          height: d.height,
+          boxes: d.boxes,
+          from: { spec, index: i },
+        };
+      });
+      const b: MBench = {
+        id: this.id('bn', body.name + now, 12),
+        name: body.name.trim(),
+        description: body.description ?? '',
+        classes,
+        createdAt: now,
+        source: { kind: 'dataset', dataset_id: GENERATED_SOURCE_ID, split: null },
+        sourceName: generatedSourceName({ images: imagesCount, imgsz, seed, vary_aspect: varyAspect }),
+        images,
+        plan: clonePlan(body.plan ?? catalog().default_plan),
+        seed,
+      };
+      this.addBench(b);
+      return this.toBench(b);
+    }
+
     const max = body.max_images ?? IMAGES_DEFAULT;
     if (!Number.isInteger(max) || max < 1 || max > IMAGES_MAX) throw new ApiError(400, 'invalid_body', `field \`max_images\`: 1 to ${IMAGES_MAX}`);
-    if (body.plan) this.#checkPlan(body.plan);
     const src = this.sourceImages(body.source, now);
     const where = body.source.kind === 'dataset' ? `the ${body.source.split ?? 'val'} split of ${src.name}` : src.name;
     if (!src.images.length) throw new ApiError(400, 'invalid_dataset', `${where[0]!.toUpperCase()}${where.slice(1)} has no labeled image.`, body.source.kind === 'label_job' ? 'Label some of its images first.' : 'Pick a split that has images.');
