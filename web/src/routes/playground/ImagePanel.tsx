@@ -124,6 +124,10 @@ export interface ImagePanelProps {
   liveStage?: (() => JSX.Element) | null;
   /** Inline video scrubber or live webcam status bar rendered directly beneath the stage. */
   mediaBar?: (() => JSX.Element) | null;
+  /** Optional stable zoom reset key so video frame stepping preserves zoom/pan. */
+  zoomResetKey?: string;
+  /** Keep previous frame opaque across local video/webcam frame swaps (avoids blank flicker). */
+  keepPrevious?: boolean;
   /** Opens the local video file picker. */
   onOpenVideo?: () => void;
   /** Starts live webcam detection mode. */
@@ -306,7 +310,7 @@ export default function ImagePanel(props: ImagePanelProps) {
               ) : props.compareStage ? (
                 props.compareStage
               ) : (
-                <ZoomStage resetKey={sourceImageKey(props.source)}>
+                <ZoomStage resetKey={props.zoomResetKey ?? sourceImageKey(props.source)}>
                   <DetectionView
                     src={props.src}
                     width={props.dims.width}
@@ -323,6 +327,7 @@ export default function ImagePanel(props: ImagePanelProps) {
                     onhover={(i) => hover.set(i === null ? null : (props.kept[i] ?? null))}
                     onselect={props.pickFromImage}
                     onload={props.onImageLoad}
+                    keepPrevious={props.keepPrevious}
                     alt={props.sourceName}
                   />
                 </ZoomStage>

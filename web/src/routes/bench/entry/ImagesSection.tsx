@@ -169,16 +169,26 @@ export default function ImagesSection(props: ImagesSectionProps) {
   });
 
   async function step(d: number) {
-    const at = openIdx.peek();
+    const currentId = openId.peek();
+    if (currentId === null || loading.peek()) return;
+    const list = visible.peek();
+    const at = list.findIndex((v) => v.item.image.id === currentId);
     if (at < 0) return;
     const next = at + d;
     if (next < 0) return;
-    if (next >= visible.peek().length) {
+    if (next >= list.length) {
       const t = total.peek();
       if (t !== null && images.peek().length >= t) return;
       await load(false);
+      // Never reopen a closed modal or jump if the user switched images while loading.
+      if (openId.peek() !== currentId) return;
+      const updated = visible.peek();
+      const idxNow = updated.findIndex((v) => v.item.image.id === currentId);
+      const target = idxNow >= 0 ? updated[idxNow + d] : undefined;
+      if (target) openId.set(target.item.image.id);
+      return;
     }
-    const target = visible.peek()[next];
+    const target = list[next];
     if (target) openId.set(target.item.image.id);
   }
 
@@ -460,27 +470,32 @@ export default function ImagesSection(props: ImagesSectionProps) {
               <p class="legend">{legend()}</p>
               <ul class="v-list" aria-label={`Boxes of ${shown.get()!.image.file}`}>
                 <For each={shownEntry.get()!.diag.boxes} key={(r) => r.key} fallback={<li class="v-none">No true box and no detection.</li>}>
-                  {(r) => (
-                    <li
-                      tabindex={0}
-                      class:on={active.get() === r().key}
-                      onpointerenter={() => active.set(r().key)}
-                      onpointerleave={() => active.set(null)}
-                      onfocus={() => active.set(r().key)}
-                      onblur={() => active.set(null)}
-                    >
-                      <i class={`k ${r().outcome}`} aria-hidden="true">
-                        {r().outcome === 'wrong' ? <b></b> : null}
-                      </i>
-                      <div class="v-info">
-                        <span class="v-cls">{name(r().cls)}</span>
-                        <span class="v-what" class:mismatch={r().cause === 'class-mismatch'}>
-                          {r().detail}
-                        </span>
-                      </div>
-                      <span class="v-sc num">{r().score !== null && props.entry.scored ? conf(r().score!) : ''}</span>
-                    </li>
-                  )}
+                  {(r) => {
+                    const isPredRow = () => r().key.startsWith('d');
+                    const canHighlight = () => (isPredRow() ? showPred.get() : showTruth.get());
+                    const swatchClass = () => (showErrors.get() ? r().outcome : isPredRow() ? 'plain-pred' : 'plain-truth');
+                    return (
+                      <li
+                        tabindex={0}
+                        class:on={active.get() === r().key}
+                        onpointerenter={() => canHighlight() && active.set(r().key)}
+                        onpointerleave={() => active.set(null)}
+                        onfocus={() => canHighlight() && active.set(r().key)}
+                        onblur={() => active.set(null)}
+                      >
+                        <i class={`k ${swatchClass()}`} aria-hidden="true">
+                          {showErrors.get() && r().outcome === 'wrong' ? <b></b> : null}
+                        </i>
+                        <div class="v-info">
+                          <span class="v-cls">{name(r().cls)}</span>
+                          <span class="v-what" class:mismatch={showErrors.get() && r().cause === 'class-mismatch'}>
+                            {showErrors.get() ? r().detail : isPredRow() ? 'Predicted' : 'Ground truth'}
+                          </span>
+                        </div>
+                        <span class="v-sc num">{r().score !== null && props.entry.scored ? conf(r().score!) : ''}</span>
+                      </li>
+                    );
+                  }}
                 </For>
               </ul>
             </div>

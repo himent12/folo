@@ -27,7 +27,8 @@ export default function MediaBar(props: MediaBarProps) {
 
   function onVideoKey(e: KeyboardEvent) {
     if (m.mode.peek() !== 'video' || !m.videoReady.peek()) return;
-    if ((e.target as HTMLElement | null)?.closest('input[type="range"]')) return;
+    // Never hijack native keys (Space/Arrow/Enter) from interactive buttons, switches, sliders, or inputs.
+    if ((e.target as HTMLElement | null)?.closest('button, input, select, textarea, a, [role="switch"], [role="slider"]')) return;
     if (e.key === ' ' || e.key === 'k') {
       e.preventDefault();
       m.togglePlay();

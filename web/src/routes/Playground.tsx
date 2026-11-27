@@ -26,7 +26,6 @@ import MediaInputs from './playground/MediaInputs';
 import PlaygroundActions from './playground/PlaygroundActions';
 import PlaygroundTiming from './playground/PlaygroundTiming';
 import { formatCompareTimingMeta, formatSignedDelta } from './playground/compare';
-import { runJsonExport, runPngExport } from './playground/exportActions';
 import { holdNoticeFocus } from './playground/noticeFocus';
 import ModelPickers from './playground/ModelPickers';
 import ImagePanel from './playground/ImagePanel';
@@ -42,6 +41,7 @@ import { keepSession } from './playground/keepSession';
 import { sampleImages } from './playground/samples';
 import { playgroundPath } from './playground/session';
 import { createCompareController } from './playground/useCompare';
+import { usePlaygroundExport } from './playground/useExport';
 import { useLocalWeights } from './playground/useLocalWeights';
 import { useMediaSession } from './playground/useMediaSession';
 import { useModelCatalog } from './playground/useModelCatalog';
@@ -79,6 +79,7 @@ export default function Playground() {
   let videoInput!: HTMLInputElement;
 
   const pred = signal<Prediction | null>(null);
+  const predSourceKey = signal<string | null>(null);
   const runOn = signal<RunOn>('server');
   const engine = new BrowserEngine();
   onCleanup(() => engine.dispose());
@@ -102,7 +103,6 @@ export default function Playground() {
   const picked = signal<Det | null>(null);
   const tbody = signal<HTMLTableSectionElement>();
   const tab = signal<'detections' | 'classes' | 'json'>('detections');
-  const exportingPng = signal(false);
 
   let syncModelUrl: ((id: string) => void) | null = null;
   let clearCompare: () => void = () => {};
@@ -137,6 +137,7 @@ export default function Playground() {
     retryImage,
     choose,
     setSource,
+    prepareMediaSource,
     setLiveFrame,
     setFile,
     clear,
@@ -151,6 +152,7 @@ export default function Playground() {
     hasModels: () => ranked.peek().length > 0,
     onResetState: () => {
       pred.set(null);
+      predSourceKey.set(null);
       error.set(null);
       weightsMissing.set(false);
       hover.set(null);
@@ -223,6 +225,7 @@ export default function Playground() {
     chooseModelA: chooseModel,
     runOnA: runOn,
     predA: pred,
+    predSourceKeyA: predSourceKey,
     hoverA: hover,
     pickedA: picked,
     resultA: () => result.get(),
@@ -247,16 +250,22 @@ export default function Playground() {
   const mediaSession = useMediaSession({
     onFrame: (f) => setLiveFrame(f.blob, f.name, f.width, f.height, mediaSession.mode.peek() === 'webcam' ? 'webcam' : 'video'),
     isPredicting: () => predicting.get() || (cmp.compare.get() && cmp.predictingB.get()),
+    isInferenceBlocked: () =>
+      !modelId.peek() ||
+      !!error.peek() ||
+      weightsMissing.peek() ||
+      (cmp.compare.peek() && (!cmp.modelBId.peek() || !!cmp.errorB.peek() || cmp.weightsMissingB.peek())),
+    hasValidResult: () => !!pred.peek() && (!cmp.compare.peek() || !!cmp.predB.peek()),
     lastLatencyMs: () => pred.peek()?.timing.total_ms ?? null,
     onStopped: () => seg.set(source.peek()?.kind ?? 'file'),
   });
   stopMedia = () => mediaSession.stopAll(false);
   loadVideoFile = (f) => {
-    seg.set('video');
+    prepareMediaSource('video');
     mediaSession.loadVideo(f);
   };
   startWebcamFn = () => {
-    seg.set('webcam');
+    prepareMediaSource('webcam');
     void mediaSession.startWebcam();
   };
   isLiveStreamFn = () => mediaSession.liveStreaming.get();
@@ -311,6 +320,7 @@ export default function Playground() {
     restored,
     consumeReuse: cmp.consumeReuseA,
     pred,
+    predSourceKey,
     predicting,
     error,
     weightsMissing,
@@ -406,54 +416,41 @@ export default function Playground() {
     );
   });
   const activeJson = computed(() => (cmp.compare.get() ? cmp.compareJson.get() : singleJson.get()));
-  const canExport = computed(() => !!source.get() && !!dims.get() && (cmp.compare.get() ? !!result.get() || !!cmp.resultB.get() : !!result.get()));
+  const { exportingPng, predAMatches, canExport, onExportPng, onExportJson } = usePlaygroundExport({
+    source,
+    src,
+    dims: () => dims.get(),
+    shortName: () => shortName.peek(),
+    modelA: () => model.peek(),
+    modelB: () => cmp.modelB.peek(),
+    predA: pred,
+    predB: cmp.predB,
+    predSourceKeyA: predSourceKey,
+    predSourceKeyB: cmp.predBSourceKey,
+    resultA: () => result.get(),
+    resultB: () => cmp.resultB.get(),
+    rowsA: () => rows.peek(),
+    rowsB: () => cmp.rowsB.peek(),
+    classesA: () => classes.peek(),
+    classesB: () => cmp.classesB.peek(),
+    truthOnly: () => truthOnly.peek(),
+    truthBoxes: () => truthBoxes.peek(),
+    labels,
+    scores,
+    predictingA: predicting,
+    predictingB: cmp.predictingB,
+    errorA: error,
+    errorB: cmp.errorB,
+    weightsMissingA: weightsMissing,
+    weightsMissingB: cmp.weightsMissingB,
+    compare: cmp.compare,
+    compareView: cmp.compareView,
+    splitPct: cmp.splitPct,
+    zoom: cmp.zoom,
+    activeJson: () => activeJson.peek(),
+    isUnsyncedVideoPreview: () => mediaSession.mode.get() === 'video' && !mediaSession.frameSynced.get(),
+  });
   const effectiveO2o = computed(() => (cmp.compare.get() ? o2o.get() && cmp.o2oB.get() : o2o.get()));
-
-  async function onExportPng() {
-    const s = source.peek();
-    const d = dims.peek();
-    if (!s || !d || exportingPng.peek()) return;
-    exportingPng.set(true);
-    try {
-      await runPngExport({
-        compare: cmp.compare.peek(),
-        compareView: cmp.compareView.peek(),
-        splitPct: cmp.splitPct.peek(),
-        viewportW: cmp.zoom.viewportW.peek(),
-        viewportH: cmp.zoom.viewportH.peek(),
-        zoomZ: cmp.zoom.z.peek(),
-        zoomNx: cmp.zoom.nx.peek(),
-        source: s,
-        src: src.peek(),
-        dims: d,
-        shortName: shortName.peek(),
-        modelA: model.peek(),
-        modelB: cmp.modelB.peek(),
-        predA: pred.peek(),
-        predB: cmp.predB.peek(),
-        boxesA: rows.peek().map((r) => r.b),
-        boxesB: cmp.rowsB.peek().map((r) => r.b),
-        classesA: classes.peek(),
-        classesB: cmp.classesB.peek(),
-        truthOnly: truthOnly.peek(),
-        truthBoxes: truthBoxes.peek(),
-        labels: labels.peek(),
-        scores: scores.peek(),
-      });
-    } finally {
-      exportingPng.set(false);
-    }
-  }
-
-  function onExportJson() {
-    runJsonExport({
-      shortName: shortName.peek(),
-      compare: cmp.compare.peek(),
-      modelAName: model.peek()?.name,
-      modelBName: cmp.modelB.peek()?.name,
-      payload: activeJson.peek(),
-    });
-  }
 
   function toggleClass(c: number) {
     const next = new Set(hidden.peek());
@@ -520,6 +517,13 @@ export default function Playground() {
     />
   );
 
+  const zoomResetKey = computed(() => {
+    const m = mediaSession.mode.get();
+    if (m === 'video') return `video:${mediaSession.videoUrl.get() ?? ''}`;
+    if (m === 'webcam') return 'webcam';
+    return undefined;
+  });
+
   // Stable snippet reference so `<CompareStage>` never remounts when Model A's `pred` or `dims` object identity changes.
   const compareStage = () => (
     <CompareStage
@@ -531,6 +535,8 @@ export default function Playground() {
       view={cmp.compareView.get()}
       bind:splitPct={cmp.splitPct}
       zoom={cmp.zoom}
+      zoomResetKey={zoomResetKey.get()}
+      keepPrevious={mediaSession.mode.get() !== 'none'}
       labels={labels.get()}
       scores={scores.get()}
       truthBoxes={truthBoxes.get()}
@@ -590,27 +596,38 @@ export default function Playground() {
   const useLiveCanvas = computed(() => {
     const m = mediaSession.mode.get();
     if (m === 'webcam') return !cmp.compare.get() || !!mediaSession.camErr.get() || mediaSession.camStarting.get() || !source.get();
-    if (m === 'video') return mediaSession.playing.get() || !!mediaSession.videoErr.get() || !source.get();
+    if (m === 'video') {
+      if (mediaSession.videoErr.get() || !source.get()) return true;
+      if (!mediaSession.frameSynced.get()) return true;
+      return !cmp.compare.get() && mediaSession.playing.get();
+    }
     return false;
   });
-  const liveStage = () => (
-    <LiveMediaCanvas
-      video={mediaSession.videoEl.get()}
-      mode={mediaSession.mode.get() === 'webcam' ? 'webcam' : 'video'}
-      active={mediaSession.mode.get() === 'webcam' ? mediaSession.camActive.get() : mediaSession.playing.get()}
-      starting={mediaSession.mode.get() === 'webcam' && mediaSession.camStarting.get()}
-      paused={mediaSession.mode.get() === 'webcam' && mediaSession.camPaused.get()}
-      error={mediaSession.mode.get() === 'webcam' ? mediaSession.camErr.get() : mediaSession.videoErr.get()}
-      boxes={rows.get().map((r) => r.b)}
-      classes={classes.get()}
-      labels={labels.get()}
-      scores={scores.get()}
-      fps={mediaSession.fps.get()}
-      latencyMs={mediaSession.latencyMs.get()}
-      onRetry={() => void mediaSession.startWebcam()}
-      onDismiss={() => mediaSession.stopWebcam()}
-    />
-  );
+  const liveStage = () => {
+    const isCam = mediaSession.mode.get() === 'webcam';
+    const isPreview = !isCam && !mediaSession.frameSynced.get() && !mediaSession.playing.get();
+    const showBoxes = isCam ? predAMatches.get() || mediaSession.camActive.get() : mediaSession.frameSynced.get();
+    return (
+      <LiveMediaCanvas
+        video={mediaSession.videoEl.get()}
+        mode={isCam ? 'webcam' : 'video'}
+        active={isCam ? mediaSession.camActive.get() : mediaSession.playing.get()}
+        starting={isCam && mediaSession.camStarting.get()}
+        paused={isCam && mediaSession.camPaused.get()}
+        preview={isPreview}
+        renderTick={mediaSession.previewTick.get()}
+        error={isCam ? mediaSession.camErr.get() : mediaSession.videoErr.get()}
+        boxes={showBoxes ? rows.get().map((r) => r.b) : []}
+        classes={classes.get()}
+        labels={labels.get()}
+        scores={scores.get()}
+        fps={mediaSession.fps.get()}
+        latencyMs={mediaSession.latencyMs.get()}
+        onRetry={() => void mediaSession.startWebcam()}
+        onDismiss={() => mediaSession.stopWebcam()}
+      />
+    );
+  };
   const mediaBar = () => <MediaBar media={mediaSession} predicting={predicting.get() || (cmp.compare.get() && cmp.predictingB.get())} />;
 
   const intro = () => <span>Run a model on any image, video, or live camera. Thresholds re-filter instantly in the browser.</span>;
@@ -782,6 +799,8 @@ export default function Playground() {
                 mediaLabel={mediaSession.mode.get() === 'webcam' ? 'Live camera' : mediaSession.videoName.get()}
                 liveStage={useLiveCanvas.get() ? liveStage : null}
                 mediaBar={mediaSession.mode.get() !== 'none' ? mediaBar : null}
+                zoomResetKey={zoomResetKey.get()}
+                keepPrevious={mediaSession.mode.get() !== 'none'}
                 onOpenVideo={() => videoInput.click()}
                 onStartWebcam={startWebcamFn}
                 runOnNote={runOnNote.get()}

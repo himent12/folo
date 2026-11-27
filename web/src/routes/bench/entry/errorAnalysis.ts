@@ -74,6 +74,7 @@ export function diagnoseImage(im: BenchEntryImage, classes: readonly string[]): 
   let iouCount = 0;
   let minIou = Infinity;
   let scoreSum = 0;
+  let scoreCount = 0;
   let minScore = Infinity;
 
   const boxes: BoxDiagnostic[] = [];
@@ -82,6 +83,7 @@ export function diagnoseImage(im: BenchEntryImage, classes: readonly string[]): 
     const sc = d.det.score ?? null;
     if (sc !== null && Number.isFinite(sc)) {
       scoreSum += sc;
+      scoreCount++;
       if (sc < minScore) minScore = sc;
     }
 
@@ -102,16 +104,17 @@ export function diagnoseImage(im: BenchEntryImage, classes: readonly string[]): 
       continue;
     }
 
-    // False positive: classify why it failed to match a GT box (duplicate, localization, class mismatch, or background).
+    // False positive: classify why it failed to match a GT box (duplicate, class mismatch, localization, or background).
     let bestSameIou = 0;
-    let bestAnyIou = 0;
-    let bestAnyCls: number | null = null;
+    let bestDiffIou = 0;
+    let bestDiffCls: number | null = null;
     for (const gt of truth) {
       const v = iou(gt, d.det);
-      if (gt.class === d.det.class && v > bestSameIou) bestSameIou = v;
-      if (v > bestAnyIou) {
-        bestAnyIou = v;
-        bestAnyCls = gt.class;
+      if (gt.class === d.det.class) {
+        if (v > bestSameIou) bestSameIou = v;
+      } else if (v > bestDiffIou) {
+        bestDiffIou = v;
+        bestDiffCls = gt.class;
       }
     }
 
@@ -126,6 +129,17 @@ export function diagnoseImage(im: BenchEntryImage, classes: readonly string[]): 
         iou: bestSameIou,
         detail: `Duplicate · IoU ${num(bestSameIou, 2)}`,
       });
+    } else if (bestDiffIou >= OVERLAP_FLOOR && bestDiffCls !== null && bestDiffIou >= bestSameIou) {
+      boxes.push({
+        key: `d${d.index}`,
+        outcome: 'wrong',
+        cause: 'class-mismatch',
+        cls: d.det.class,
+        otherCls: bestDiffCls,
+        score: sc,
+        iou: bestDiffIou,
+        detail: `Class mismatch (GT: ${clsName(classes, bestDiffCls)}) · IoU ${num(bestDiffIou, 2)}`,
+      });
     } else if (bestSameIou >= OVERLAP_FLOOR) {
       boxes.push({
         key: `d${d.index}`,
@@ -136,17 +150,6 @@ export function diagnoseImage(im: BenchEntryImage, classes: readonly string[]): 
         score: sc,
         iou: bestSameIou,
         detail: `Localization · IoU ${num(bestSameIou, 2)}`,
-      });
-    } else if (bestAnyIou >= OVERLAP_FLOOR && bestAnyCls !== null && bestAnyCls !== d.det.class) {
-      boxes.push({
-        key: `d${d.index}`,
-        outcome: 'wrong',
-        cause: 'class-mismatch',
-        cls: d.det.class,
-        otherCls: bestAnyCls,
-        score: sc,
-        iou: bestAnyIou,
-        detail: `Class mismatch (GT: ${clsName(classes, bestAnyCls)}) · IoU ${num(bestAnyIou, 2)}`,
       });
     } else {
       boxes.push({
@@ -227,8 +230,8 @@ export function diagnoseImage(im: BenchEntryImage, classes: readonly string[]): 
     truthCount: truth.length,
     meanIou: iouCount > 0 ? iouSum / iouCount : null,
     minIou: iouCount > 0 ? minIou : null,
-    minScore: minScore < Infinity ? minScore : null,
-    meanScore: dets.length > 0 && minScore < Infinity ? scoreSum / dets.length : null,
+    minScore: scoreCount > 0 ? minScore : null,
+    meanScore: scoreCount > 0 ? scoreSum / scoreCount : null,
     boxes,
   };
 }

@@ -82,15 +82,29 @@ export function usePlaygroundSource(input: UseSourceInput) {
   }
 
   /**
-   * Updates Playground's active frame from a local video or live webcam without resetting hidden classes,
-   * Compare A/B zoom, or flashing previous detections away while the next frame runs.
+   * Clears any previous still/dataset image and invalidates pending image decodes or URL lookups before
+   * entering local video or live webcam mode so stale frames/metadata never leak onto the new media stage.
    */
-  function setLiveFrame(blob: Blob, name: string, width: number, height: number, segKind: 'video' | 'webcam') {
+  function prepareMediaSource(segKind: 'video' | 'webcam') {
     decodeSeq++;
     toast.clear('image');
     const old = source.peek();
     if (old?.kind === 'file') URL.revokeObjectURL(old.url);
     input.engine.clearImageCache();
+    source.set(null);
+    imageRetry.set(0);
+    seg.set(segKind);
+    input.onResetState();
+  }
+
+  /**
+   * Updates Playground's active frame from a local video or live webcam without invalidating an explicit
+   * user still-image pick/drop (`decodeSeq`), resetting hidden classes/zoom, or tearing down the decode canvas.
+   */
+  function setLiveFrame(blob: Blob, name: string, width: number, height: number, segKind: 'video' | 'webcam') {
+    toast.clear('image');
+    const old = source.peek();
+    if (old?.kind === 'file') URL.revokeObjectURL(old.url);
     source.set({ kind: 'file', file: blob, name, url: URL.createObjectURL(blob), width, height });
     imageRetry.set(0);
     seg.set(segKind);
@@ -195,6 +209,7 @@ export function usePlaygroundSource(input: UseSourceInput) {
     retryImage,
     choose,
     setSource,
+    prepareMediaSource,
     setLiveFrame,
     setFile,
     clear,

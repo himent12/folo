@@ -175,7 +175,14 @@ describe('Playground: Local Video Frame Scrubber & Live Webcam', () => {
       atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=='),
       (ch) => ch.charCodeAt(0),
     );
-    const ctxStub = { drawImage: vi.fn() } as unknown as CanvasRenderingContext2D;
+    const ctxStub = {
+      drawImage: vi.fn(),
+      save: vi.fn(),
+      beginPath: vi.fn(),
+      rect: vi.fn(),
+      clip: vi.fn(),
+      restore: vi.fn(),
+    } as unknown as CanvasRenderingContext2D;
     vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(ctxStub);
     vi.spyOn(HTMLCanvasElement.prototype, 'toBlob').mockImplementation((cb) => {
       cb(new Blob([png1x1], { type: 'image/png' }));
@@ -233,6 +240,146 @@ describe('Playground: Local Video Frame Scrubber & Live Webcam', () => {
       flushSync();
       expect(target.querySelector('[data-media-bar="video"]')).toBeNull();
       expect(revokeSpy).toHaveBeenCalled();
+    } finally {
+      URL.createObjectURL = origCreateUrl;
+      URL.revokeObjectURL = origRevokeUrl;
+    }
+  });
+
+  it('surfaces video.play() errors instead of swallowing them and isolates concurrent webcam restarts', async () => {
+    const stopFirst = vi.fn();
+    const stopSecond = vi.fn();
+    const stream1 = { getTracks: () => [{ stop: stopFirst, addEventListener: vi.fn(), removeEventListener: vi.fn() }] } as unknown as MediaStream;
+    const stream2 = { getTracks: () => [{ stop: stopSecond, addEventListener: vi.fn(), removeEventListener: vi.fn() }] } as unknown as MediaStream;
+    const origMediaDevices = navigator.mediaDevices;
+    const origSrcObject = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'srcObject');
+    let assigned: MediaProvider | null = null;
+    Object.defineProperty(HTMLMediaElement.prototype, 'srcObject', {
+      configurable: true,
+      get: () => assigned,
+      set: (v: MediaProvider | null) => {
+        assigned = v;
+      },
+    });
+    let callIdx = 0;
+    Object.defineProperty(navigator, 'mediaDevices', {
+      configurable: true,
+      value: { getUserMedia: vi.fn(async () => (++callIdx === 1 ? stream1 : stream2)) },
+    });
+    let rejectPlay1!: (e: Error) => void;
+    let playCall = 0;
+    vi.spyOn(HTMLMediaElement.prototype, 'play').mockImplementation(() => {
+      playCall++;
+      if (playCall === 1) return new Promise<void>((_, rej) => (rejectPlay1 = rej));
+      return Promise.reject(new Error('Autoplay blocked'));
+    });
+    vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => {});
+
+    try {
+      mountPlayground('#/playground?model=m_hard_s');
+      const camBtn = await until(
+        () => [...target.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('Live camera')),
+        'Live camera button',
+      );
+      camBtn.click();
+      flushSync();
+      await until(() => playCall === 1, 'first play pending');
+
+      // Click Camera segment again to restart webcam while play #1 is still pending.
+      const camRadio = [...target.querySelectorAll<HTMLButtonElement>('[role="radio"]')].find((b) => b.textContent?.includes('Camera') || b.getAttribute('aria-label') === 'Camera')!;
+      camRadio.click();
+      flushSync();
+
+      // Play #2 rejects -> must surface inline error (never swallowed!).
+      const alert = await until(() => target.querySelector('[data-live-media="webcam"] [role="alert"]'), 'play error surfaced');
+      expect(alert.textContent).toContain('Autoplay blocked');
+      expect(stopSecond).toHaveBeenCalledTimes(1);
+
+      // Now reject stale play #1 -> must not crash or touch stream 2.
+      rejectPlay1(new Error('Stale play failure'));
+      await new Promise((r) => setTimeout(r, 10));
+      expect(stopFirst).toHaveBeenCalled();
+      expect(stopSecond).toHaveBeenCalledTimes(1);
+    } finally {
+      Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: origMediaDevices });
+      if (origSrcObject) Object.defineProperty(HTMLMediaElement.prototype, 'srcObject', origSrcObject);
+    }
+  });
+
+  it('pauses live webcam loop when inference fails instead of hammering /api/predict and lets Auto-off video scrub visually', async () => {
+    const origCreateUrl = URL.createObjectURL;
+    const origRevokeUrl = URL.revokeObjectURL;
+    let urlSeq = 0;
+    URL.createObjectURL = vi.fn(() => `blob:mock-auto-${++urlSeq}`);
+    URL.revokeObjectURL = vi.fn();
+    const ctxStub = {
+      drawImage: vi.fn(),
+      save: vi.fn(),
+      beginPath: vi.fn(),
+      rect: vi.fn(),
+      clip: vi.fn(),
+      restore: vi.fn(),
+    } as unknown as CanvasRenderingContext2D;
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(ctxStub);
+    vi.spyOn(HTMLCanvasElement.prototype, 'toBlob').mockImplementation((cb) => {
+      cb(new Blob(['img'], { type: 'image/jpeg' }));
+    });
+    vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => {});
+    vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => {});
+
+    try {
+      const { api } = mountPlayground('#/playground?model=m_hard_s');
+      let resolvePred!: (p: Awaited<ReturnType<typeof api.predict>>) => void;
+      const predictSpy = vi.spyOn(api, 'predict').mockImplementation(
+        () => new Promise((r) => (resolvePred = r)),
+      );
+      await until(() => target.querySelector('input[accept*="video/mp4"]'), 'video file input');
+
+      const videoInput = [...target.querySelectorAll<HTMLInputElement>('input[type="file"]')].find((i) => i.accept.startsWith('video/mp4'))!;
+      const clip = new File(['video-bytes'], 'scrub.mp4', { type: 'video/mp4' });
+      Object.defineProperty(videoInput, 'files', { configurable: true, value: [clip] });
+      videoInput.dispatchEvent(new Event('change', { bubbles: true }));
+      flushSync();
+
+      const bar = await until(() => target.querySelector('[data-media-bar="video"]'), 'video bar');
+      const decoder = target.querySelector<HTMLVideoElement>('video.media-decoder')!;
+      Object.defineProperty(decoder, 'videoWidth', { configurable: true, value: 320 });
+      Object.defineProperty(decoder, 'videoHeight', { configurable: true, value: 180 });
+      Object.defineProperty(decoder, 'duration', { configurable: true, value: 5 });
+      Object.defineProperty(decoder, 'readyState', { configurable: true, value: 4 });
+      decoder.dispatchEvent(new Event('loadedmetadata'));
+      decoder.dispatchEvent(new Event('loadeddata'));
+      await until(() => predictSpy.mock.calls.length === 1, 'initial predict in flight');
+
+      // While prediction is in flight, Export buttons stay disabled/hidden so stale exports cannot fire.
+      expect(target.querySelector('button[aria-label="Export annotated PNG"]')).toBeNull();
+
+      resolvePred({
+        model_id: 'm_hard_s',
+        image: { width: 320, height: 180 },
+        boxes: [{ class: 0, name: 'circle', score: 0.9, x1: 10, y1: 10, x2: 50, y2: 50 }],
+        timing: { preprocess_ms: 1, inference_ms: 4, postprocess_ms: 1, total_ms: 6 },
+        device: 'gpu:0',
+      });
+      await until(() => target.querySelector('button[aria-label="Export annotated PNG"]'), 'export enabled after settle');
+
+      // Turn Auto OFF via switch (Space key on switch must NOT be hijacked by video play/pause).
+      const autoSwitch = bar.querySelector<HTMLInputElement>('input[role="switch"]')!;
+      const spaceEv = new KeyboardEvent('keydown', { key: ' ', bubbles: true, cancelable: true });
+      autoSwitch.dispatchEvent(spaceEv);
+      expect(spaceEv.defaultPrevented).toBe(false);
+      autoSwitch.click();
+      flushSync();
+      expect(autoSwitch.checked).toBe(false);
+
+      // Step +1 frame with Auto OFF -> renders LiveMediaCanvas in PREVIEW mode without calling predict!
+      bar.querySelector<HTMLButtonElement>('button[aria-label="Step forward 1 frame"]')!.click();
+      flushSync();
+      decoder.dispatchEvent(new Event('seeked'));
+      flushSync();
+      const hud = await until(() => target.querySelector('[data-live-media="video"] .live-hud'), 'video PREVIEW HUD');
+      expect(hud.textContent).toContain('PREVIEW');
+      expect(predictSpy).toHaveBeenCalledTimes(1);
     } finally {
       URL.createObjectURL = origCreateUrl;
       URL.revokeObjectURL = origRevokeUrl;

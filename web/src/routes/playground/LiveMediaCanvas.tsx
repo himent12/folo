@@ -22,6 +22,10 @@ export interface LiveMediaCanvasProps {
   starting?: boolean;
   /** True when live webcam is frozen on one frame. */
   paused?: boolean;
+  /** True when showing a scrubbed/paused video preview whose detections have not run yet (Auto off). */
+  preview?: boolean;
+  /** Monotonic tick bumped on video seeked/loadeddata so paused previews repaint immediately. */
+  renderTick?: number;
   /** Inline camera or video decode error message. */
   error?: string | null;
   /** Filtered visible detection boxes in native video pixel coordinates. */
@@ -65,13 +69,14 @@ export default function LiveMediaCanvas(props: LiveMediaCanvasProps) {
     );
   }
 
-  // Repaint whenever boxes, labels, scores, or active state change; animate smoothly at rAF while streaming.
+  // Repaint whenever boxes, labels, scores, renderTick, or active state change; animate smoothly at rAF while streaming.
   effect(() => {
     void props.video;
     void props.boxes;
     void props.classes;
     void props.labels;
     void props.scores;
+    void props.renderTick;
     const running = props.active && !props.paused && !props.error;
     paintOnce();
     if (!running) return;
@@ -112,10 +117,12 @@ export default function LiveMediaCanvas(props: LiveMediaCanvasProps) {
         <>
           <canvas ref={canvasEl} class="live-canvas" aria-label={props.mode === 'webcam' ? 'Live webcam detection feed' : 'Playing video detection feed'}></canvas>
           <div class="live-hud num" aria-live="off">
-            <span class="dot" class:paused={!!props.paused} aria-hidden="true"></span>
-            <span class="badge-label">{props.mode === 'webcam' ? (props.paused ? 'PAUSED' : 'LIVE') : 'PLAYING'}</span>
-            {props.fps > 0 ? <span class="metric">{props.fps.toFixed(1)} FPS</span> : null}
-            {props.latencyMs > 0 ? <span class="metric">{Math.round(props.latencyMs)} ms</span> : null}
+            <span class="dot" class:paused={!!props.paused || !!props.preview} aria-hidden="true"></span>
+            <span class="badge-label">
+              {props.mode === 'webcam' ? (props.paused ? 'PAUSED' : 'LIVE') : props.preview ? 'PREVIEW' : 'PLAYING'}
+            </span>
+            {props.fps > 0 && !props.preview ? <span class="metric">{props.fps.toFixed(1)} FPS</span> : null}
+            {props.latencyMs > 0 && !props.preview ? <span class="metric">{Math.round(props.latencyMs)} ms</span> : null}
           </div>
         </>
       )}

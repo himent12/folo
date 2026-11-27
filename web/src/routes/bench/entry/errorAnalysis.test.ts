@@ -121,4 +121,26 @@ describe('Per-image error-analysis diagnostics', () => {
     expect(ids('all', 'lowest-iou')).toEqual(['low_iou_fp', 'mixed', 'heavy_fn', 'clean']);
     expect(ids('all', 'lowest-score')).toEqual(['low_iou_fp', 'mixed', 'heavy_fn', 'clean']);
   });
+
+  it('prefers higher-IoU class mismatch over weak same-class overlap and excludes unscored detections from meanScore', () => {
+    const im = makeImage(
+      'precedence',
+      [
+        { class: 0, x1: 0, y1: 0, x2: 40, y2: 40 }, // weak same-class neighbor (IoU ~0.14)
+        { class: 1, x1: 30, y1: 0, x2: 70, y2: 40 }, // exact class-mismatch target (IoU 1.0)
+      ],
+      [
+        { class: 0, score: 0.8, x1: 30, y1: 0, x2: 70, y2: 40 }, // overlaps class 1 by 1.0, class 0 by 10*40 / (3200 - 400) = 0.14
+        { class: 2, score: Number.NaN, x1: 120, y1: 120, x2: 140, y2: 140 }, // unscored/non-finite detection
+      ],
+      2,
+      2,
+    );
+    const d = diagnoseImage(im, CLASSES);
+    const det0 = d.boxes.find((b) => b.key === 'd0')!;
+    expect(det0.cause).toBe('class-mismatch');
+    expect(det0.detail).toContain('GT: nut');
+    // meanScore only averages the 1 scored detection (0.8), not 0.8 / 2.
+    expect(d.meanScore).toBeCloseTo(0.8, 5);
+  });
 });

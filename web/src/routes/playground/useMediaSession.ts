@@ -1,6 +1,7 @@
 // Reactive session controller for Playground Local Video Frame Scrubber and Live Webcam Detection.
-// Guarantees single-flight / throttled frame inference (zero stale backlog while scrubbing or streaming)
-// and immediate MediaStream + object URL teardown on exit, source switch, unmount, or pagehide.
+// Guarantees single-flight / throttled frame inference (zero stale backlog while scrubbing or streaming),
+// stops the live loop on inference failure/missing weights, preserves visual scrubbing with Auto off,
+// snapshots timestamps before async encoding, and ensures immediate MediaStream + object URL teardown.
 import { computed, effect, onCleanup, onWindow, signal, untrack } from 'fw';
 import {
   captureVideoFrame,
@@ -24,8 +25,6 @@ export interface MediaFramePayload {
   name: string;
   width: number;
   height: number;
-  /** True during continuous playback / live webcam ticks (preserves previous boxes while next frame runs). */
-  live: boolean;
 }
 
 export interface UseMediaSessionInput {
@@ -33,9 +32,13 @@ export interface UseMediaSessionInput {
   onFrame: (frame: MediaFramePayload) => void;
   /** True while Model A (or Model B in Compare mode) is currently running inference. */
   isPredicting: () => boolean;
-  /** Latest inference latency (ms) reported by Playground once a tick finishes, or null if failed. */
+  /** True when inference cannot run or failed (no model, prediction error, or missing browser weights). */
+  isInferenceBlocked: () => boolean;
+  /** True when the latest prediction produced a valid result for the active model(s). */
+  hasValidResult: () => boolean;
+  /** Latest inference latency (ms) reported by Playground once a tick finishes, or null if unavailable. */
   lastLatencyMs: () => number | null;
-  /** Called when clearing media mode without replacing it with another source. */
+  /** Called when stopping media mode cleanly without replacing it with another source. */
   onStopped?: () => void;
 }
 
@@ -54,6 +57,10 @@ export function useMediaSession(input: UseMediaSessionInput) {
   const videoErr = signal<string | null>(null);
   const autoDetect = signal(true);
   const videoDims = signal<{ width: number; height: number } | null>(null);
+  /** True when Playground's active `source` & detections match the decoder's current scrubbed video frame. */
+  const frameSynced = signal(false);
+  /** Bumped on every visual frame change (loadeddata/seeked/pause/ended) so LiveMediaCanvas repaints even with Auto off. */
+  const previewTick = signal(0);
 
   // Live webcam state
   const camActive = signal(false);
@@ -67,7 +74,9 @@ export function useMediaSession(input: UseMediaSessionInput) {
   const latencyMs = signal(0);
 
   const canCamera = computed(() => typeof navigator !== 'undefined' && !!navigator.mediaDevices?.getUserMedia);
-  const liveStreaming = computed(() => (mode.get() === 'webcam' && camActive.get() && !camPaused.get()) || (mode.get() === 'video' && playing.get()));
+  const liveStreaming = computed(
+    () => (mode.get() === 'webcam' && camActive.get() && !camPaused.get()) || (mode.get() === 'video' && playing.get() && autoDetect.get()),
+  );
 
   let alive = true;
   let camSeq = 0;
@@ -101,6 +110,24 @@ export function useMediaSession(input: UseMediaSessionInput) {
     clearLiveTimer();
   }
 
+  function isCurrentWebcam(seq: number): boolean {
+    return alive && seq === camSeq && mode.peek() === 'webcam';
+  }
+
+  /** Releases one specific MediaStream attempt without disturbing a newer replacement stream. */
+  function releaseOwnedStream(owned: MediaStream, ownedCleanups: (() => void)[], targetEl?: HTMLVideoElement) {
+    for (const off of ownedCleanups) off();
+    stopMediaStream(owned);
+    if (targetEl && targetEl.srcObject === owned) {
+      targetEl.pause();
+      targetEl.srcObject = null;
+    }
+    if (stream === owned) {
+      stream = null;
+      streamTrackCleanups = [];
+    }
+  }
+
   const scrubThrottle = createFrameThrottle({
     minIntervalMs: SCRUB_THROTTLE_MS,
     onTrigger: () => {
@@ -116,6 +143,8 @@ export function useMediaSession(input: UseMediaSessionInput) {
     if (m === 'webcam' && (!camActive.peek() || el.readyState < 2)) return false;
 
     const seq = ++captureSeq;
+    // Snapshot media timestamp alongside pixel copy so a seek during async encoding never mislabels the frame.
+    const capturedTime = el.currentTime;
     scrubThrottle.beginFlight();
     try {
       const frame = await captureVideoFrame(el, { mime: 'image/jpeg', quality: live ? 0.88 : 0.94 });
@@ -123,13 +152,17 @@ export function useMediaSession(input: UseMediaSessionInput) {
         scrubThrottle.endFlight();
         return false;
       }
-      if (m === 'video') videoDims.set({ width: frame.width, height: frame.height });
-      else camDims.set({ width: frame.width, height: frame.height });
-      const name = m === 'video' ? videoFrameName(videoName.peek(), el.currentTime) : 'webcam-live.jpg';
+      if (m === 'video') {
+        videoDims.set({ width: frame.width, height: frame.height });
+        frameSynced.set(true);
+      } else {
+        camDims.set({ width: frame.width, height: frame.height });
+      }
+      const name = m === 'video' ? videoFrameName(videoName.peek(), capturedTime) : 'webcam-live.jpg';
       frameSentAt = performance.now();
       waitingForInference = true;
-      input.onFrame({ blob: frame.blob, name, width: frame.width, height: frame.height, live });
-      // If inference completed synchronously or was skipped (e.g. no model), release flight on next microtask.
+      input.onFrame({ blob: frame.blob, name, width: frame.width, height: frame.height });
+      // If inference completed synchronously or was blocked/skipped, settle on the next microtask.
       queueMicrotask(() => {
         if (!alive || seq !== captureSeq) return;
         if (!input.isPredicting() && waitingForInference) settleInferenceTick();
@@ -149,18 +182,18 @@ export function useMediaSession(input: UseMediaSessionInput) {
 
   function scheduleNextLiveTick() {
     clearLiveTimer();
-    if (!alive) return;
+    if (!alive || input.isInferenceBlocked()) return;
     const m = mode.peek();
     const shouldLoop = (m === 'webcam' && camActive.peek() && !camPaused.peek()) || (m === 'video' && playing.peek() && autoDetect.peek());
     if (!shouldLoop || waitingForInference) return;
     liveTimer = setTimeout(() => {
       liveTimer = null;
-      if (!alive) return;
+      if (!alive || input.isInferenceBlocked()) return;
       const curMode = mode.peek();
       const stillLoop = (curMode === 'webcam' && camActive.peek() && !camPaused.peek()) || (curMode === 'video' && playing.peek() && autoDetect.peek());
       if (!stillLoop || waitingForInference) return;
       void captureAndEmit(true).then((sent) => {
-        if (!sent && alive) scheduleNextLiveTick();
+        if (!sent && alive && !input.isInferenceBlocked()) scheduleNextLiveTick();
       });
     }, LIVE_LOOP_FLOOR_MS);
   }
@@ -169,13 +202,32 @@ export function useMediaSession(input: UseMediaSessionInput) {
     if (!waitingForInference) return;
     waitingForInference = false;
     scrubThrottle.endFlight();
+
+    // Stop the live loop immediately when inference fails or weights are missing (prevents 30 ms error storms / focus theft).
+    if (input.isInferenceBlocked()) {
+      clearLiveTimer();
+      tracker.reset();
+      fps.set(0);
+      latencyMs.set(0);
+      const m = mode.peek();
+      if (m === 'webcam' && camActive.peek() && !camPaused.peek()) {
+        camPaused.set(true);
+        videoEl.peek()?.pause();
+      } else if (m === 'video' && playing.peek()) {
+        videoEl.peek()?.pause();
+      }
+      return;
+    }
+
     const m = mode.peek();
-    const isLiveMode = (m === 'webcam' && camActive.peek() && !camPaused.peek()) || (m === 'video' && playing.peek());
+    const isLiveMode = (m === 'webcam' && camActive.peek() && !camPaused.peek()) || (m === 'video' && playing.peek() && autoDetect.peek());
     if (isLiveMode) {
-      const measured = input.lastLatencyMs() ?? Math.max(0, performance.now() - frameSentAt);
-      const snap = tracker.record(measured);
-      fps.set(snap.fps);
-      latencyMs.set(snap.latencyMs);
+      if (input.hasValidResult()) {
+        const measured = input.lastLatencyMs() ?? Math.max(0, performance.now() - frameSentAt);
+        const snap = tracker.record(measured);
+        fps.set(snap.fps);
+        latencyMs.set(snap.latencyMs);
+      }
       scheduleNextLiveTick();
     }
   }
@@ -186,6 +238,30 @@ export function useMediaSession(input: UseMediaSessionInput) {
     if (!busy && waitingForInference) {
       untrack(() => settleInferenceTick());
     }
+  });
+
+  // React to toggling Auto ON/OFF while a video is loaded (restarts live loop if playing or captures paused frame).
+  effect(() => {
+    const auto = autoDetect.get();
+    if (mode.peek() !== 'video') return;
+    if (!auto) {
+      untrack(() => {
+        clearLiveTimer();
+        scrubThrottle.cancel();
+        tracker.reset();
+        fps.set(0);
+        latencyMs.set(0);
+      });
+      return;
+    }
+    untrack(() => {
+      if (playing.peek()) {
+        tracker.reset();
+        scheduleNextLiveTick();
+      } else if (videoReady.peek() && !seeking.peek() && !frameSynced.peek()) {
+        scrubThrottle.schedule(true);
+      }
+    });
   });
 
   function stopCameraTracksOnly() {
@@ -222,6 +298,7 @@ export function useMediaSession(input: UseMediaSessionInput) {
     seeking.set(false);
     videoErr.set(null);
     videoDims.set(null);
+    frameSynced.set(false);
     initialVideoCaptured = false;
   }
 
@@ -269,10 +346,12 @@ export function useMediaSession(input: UseMediaSessionInput) {
     const seq = ++camSeq;
     camStarting.set(true);
     let acquired: MediaStream | null = null;
+    let ownedCleanups: (() => void)[] = [];
     try {
       try {
         acquired = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false });
       } catch (firstErr) {
+        if (!isCurrentWebcam(seq)) return;
         if (firstErr instanceof Error && (firstErr.name === 'OverconstrainedError' || firstErr.name === 'ConstraintNotSatisfiedError')) {
           acquired = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
         } else {
@@ -280,18 +359,25 @@ export function useMediaSession(input: UseMediaSessionInput) {
         }
       }
 
-      // Guard against unmount, Stop, or mode switch while getUserMedia was pending.
-      if (!alive || seq !== camSeq || mode.peek() !== 'webcam') {
+      // Guard against unmount, Stop, or a newer startWebcam() while getUserMedia was pending.
+      if (!isCurrentWebcam(seq)) {
         stopMediaStream(acquired);
         return;
       }
 
-      stream = acquired;
+      const el = videoEl.peek();
+      if (!el) {
+        stopMediaStream(acquired);
+        return;
+      }
+
+      const owned = acquired;
+      stream = owned;
       // If the browser or hardware ends the camera track externally, clean up cleanly.
-      const tracks = acquired.getTracks();
-      streamTrackCleanups = tracks.map((track) => {
+      const tracks = owned.getTracks();
+      ownedCleanups = tracks.map((track) => {
         const onEnded = () => {
-          if (!alive || stream !== acquired) return;
+          if (!alive || stream !== owned) return;
           stopCameraTracksOnly();
           resetTelemetry();
           camErr.set('Camera stream ended unexpectedly.');
@@ -299,22 +385,20 @@ export function useMediaSession(input: UseMediaSessionInput) {
         track.addEventListener?.('ended', onEnded);
         return () => track.removeEventListener?.('ended', onEnded);
       });
+      streamTrackCleanups = ownedCleanups;
 
-      const el = videoEl.peek();
-      if (!el) {
-        stopCameraTracksOnly();
-        return;
-      }
-      el.srcObject = acquired;
+      el.srcObject = owned;
       try {
         await el.play();
       } catch (playErr) {
-        stopCameraTracksOnly();
-        if (!alive || seq !== camSeq || mode.peek() !== 'webcam') return;
+        releaseOwnedStream(owned, ownedCleanups, el);
+        if (!isCurrentWebcam(seq)) return;
+        camActive.set(false);
+        camPaused.set(false);
         throw playErr;
       }
-      if (!alive || seq !== camSeq || mode.peek() !== 'webcam') {
-        stopCameraTracksOnly();
+      if (!isCurrentWebcam(seq)) {
+        releaseOwnedStream(owned, ownedCleanups, el);
         return;
       }
 
@@ -325,7 +409,7 @@ export function useMediaSession(input: UseMediaSessionInput) {
       camPaused.set(false);
       scheduleNextLiveTick();
     } catch (err) {
-      if (!alive || seq !== camSeq || mode.peek() !== 'webcam') return;
+      if (!isCurrentWebcam(seq)) return;
       camErr.set(describeCameraError(err));
     } finally {
       if (alive && seq === camSeq) camStarting.set(false);
@@ -360,7 +444,9 @@ export function useMediaSession(input: UseMediaSessionInput) {
     const el = videoEl.peek();
     if (!el || !Number.isFinite(clamped)) return;
     if (Math.abs(el.currentTime - clamped) > 0.001) {
+      captureSeq++;
       seeking.set(true);
+      if (!autoDetect.peek()) frameSynced.set(false);
       el.currentTime = clamped;
     } else if (autoDetect.peek()) {
       scrubThrottle.schedule(immediate);
@@ -387,6 +473,7 @@ export function useMediaSession(input: UseMediaSessionInput) {
         currentTime.set(0);
       }
       tracker.reset();
+      if (!autoDetect.peek()) frameSynced.set(false);
       void el.play().catch(() => {});
     } else {
       el.pause();
@@ -422,6 +509,7 @@ export function useMediaSession(input: UseMediaSessionInput) {
       if (v.videoWidth > 0 && v.videoHeight > 0) videoDims.set({ width: v.videoWidth, height: v.videoHeight });
       const ready = v.videoWidth > 0 && v.readyState >= 2;
       videoReady.set(ready);
+      previewTick.set((t) => t + 1);
       if (ready && !initialVideoCaptured) {
         initialVideoCaptured = true;
         void captureAndEmit(false);
@@ -438,7 +526,10 @@ export function useMediaSession(input: UseMediaSessionInput) {
       }
     },
     onseeking: () => {
-      if (mode.peek() === 'video') seeking.set(true);
+      if (mode.peek() === 'video') {
+        captureSeq++;
+        seeking.set(true);
+      }
     },
     onseeked: (e: Event & { currentTarget: HTMLVideoElement }) => {
       if (mode.peek() !== 'video') return;
@@ -446,8 +537,11 @@ export function useMediaSession(input: UseMediaSessionInput) {
       seeking.set(false);
       currentTime.set(v.currentTime);
       videoReady.set(v.videoWidth > 0 && v.readyState >= 2);
+      previewTick.set((t) => t + 1);
       if (autoDetect.peek() && !playing.peek()) {
         scrubThrottle.schedule(false);
+      } else if (!autoDetect.peek()) {
+        frameSynced.set(false);
       }
     },
     ontimeupdate: (e: Event & { currentTarget: HTMLVideoElement }) => {
@@ -457,19 +551,23 @@ export function useMediaSession(input: UseMediaSessionInput) {
       if (mode.peek() !== 'video') return;
       playing.set(true);
       if (autoDetect.peek()) scheduleNextLiveTick();
+      else frameSynced.set(false);
     },
     onpause: () => {
       if (mode.peek() !== 'video') return;
       playing.set(false);
       clearLiveTimer();
-      // Snapshot the exact paused frame so zoom, inspection, Compare A/B, and PNG/JSON export match it.
+      previewTick.set((t) => t + 1);
       if (videoReady.peek() && autoDetect.peek()) scrubThrottle.schedule(true);
+      else if (!autoDetect.peek()) frameSynced.set(false);
     },
     onended: () => {
       if (mode.peek() !== 'video') return;
       playing.set(false);
       clearLiveTimer();
+      previewTick.set((t) => t + 1);
       if (videoReady.peek() && autoDetect.peek()) scrubThrottle.schedule(true);
+      else if (!autoDetect.peek()) frameSynced.set(false);
     },
     onerror: () => {
       if (mode.peek() !== 'video') return;
@@ -501,6 +599,8 @@ export function useMediaSession(input: UseMediaSessionInput) {
     videoErr,
     autoDetect,
     videoDims,
+    frameSynced,
+    previewTick,
     camActive,
     camStarting,
     camPaused,
