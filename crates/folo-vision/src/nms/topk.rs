@@ -47,6 +47,8 @@ pub fn topk_detections(
         return Vec::new();
     }
     let k = cfg.max_det.min(boxes.len());
+    let has_per_class = cfg.per_class_conf.is_some();
+    let min_conf = cfg.min_conf();
     // (best score, (anchor, best class)): the class is a function of the anchor, so ties rank by anchor.
     let mut anchors: Vec<(f32, (u32, u32))> = Vec::new();
     for (a, row) in scores.chunks_exact(num_classes).enumerate() {
@@ -56,7 +58,13 @@ pub fn topk_detections(
                 (bc, bs) = (c, s);
             }
         }
-        if bs > cfg.conf {
+        let keep = if cfg.multi_label {
+            bs > min_conf
+                && (!has_per_class || row.iter().enumerate().any(|(c, &s)| s > cfg.conf_for_class(c as u32)))
+        } else {
+            bs > cfg.conf_for_class(bc as u32)
+        };
+        if keep {
             anchors.push((bs, (a as u32, bc as u32)));
         }
     }
@@ -66,7 +74,7 @@ pub fn topk_detections(
         for (rank, &(_, (a, _))) in anchors.iter().enumerate() {
             let row = &scores[a as usize * num_classes..(a as usize + 1) * num_classes];
             for (c, &s) in row.iter().enumerate() {
-                if s > cfg.conf {
+                if s > cfg.conf_for_class(c as u32) {
                     pairs.push((s, (rank as u32, c as u32)));
                 }
             }
@@ -94,7 +102,7 @@ pub fn topk_candidates(cands: &[Candidate], cfg: &NmsConfig) -> Vec<Detection> {
     let mut ranked: Vec<(f32, (u32, u32))> = cands
         .iter()
         .enumerate()
-        .filter(|(_, c)| c.score > cfg.conf)
+        .filter(|(_, c)| c.score > cfg.conf_for_class(c.class))
         .map(|(i, c)| (c.score, (c.anchor, i as u32)))
         .collect();
     top_sorted(&mut ranked, cfg.max_det);

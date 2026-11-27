@@ -1,4 +1,7 @@
-//! Per-image object detection error diagnosis wired into [`crate::Evaluator`].
+//! Evaluation helpers wired into [`crate::Evaluator`]:
+//! - Per-image object detection error diagnosis ([`ImageDiagnostics`], [`diagnose_image`], [`worst_images`]).
+//! - Global and per-class F1-optimal confidence threshold calibration ([`ThresholdCalibration`],
+//!   [`OperatingPoint`], [`ClassThreshold`], [`validate_per_class_conf`]).
 //!
 //! While aggregate mAP summarises a dataset split, diagnosing *why* a model underperforms requires seeing the exact
 //! images where it fails and whether its false positives come from poor box localization, class confusion,
@@ -12,6 +15,10 @@
 //!
 //! [`worst_images`] ranks failing images (`fp + fn_count > 0`) worst-first so CLI, Studio, and Desktop can surface
 //! failure cases immediately.
+
+mod thresholds;
+
+pub use thresholds::{ClassThreshold, OperatingPoint, ThresholdCalibration, validate_per_class_conf};
 
 use serde::{Deserialize, Serialize};
 

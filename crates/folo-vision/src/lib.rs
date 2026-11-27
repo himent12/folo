@@ -10,7 +10,8 @@
 //! - [`fusion`]: cluster box fusion after NMS (docs/MODEL.md §9.4), opt-in through [`NmsConfig`].
 //! - [`metrics`]: COCO-style mAP, precision / recall / F1, PR curves and a confusion matrix (`docs/METRICS.md`).
 //! - [`eval`]: per-image error diagnosis ([`ImageDiagnostics`], [`eval::diagnose_image`], [`eval::worst_images`])
-//!   wired into [`Evaluator`].
+//!   and F1-optimal confidence threshold calibration ([`ThresholdCalibration`], [`OperatingPoint`],
+//!   [`ClassThreshold`]) wired into [`Evaluator`].
 //! - [`cocoeval`]: the full pycocotools `COCOeval` (crowd regions, area buckets, AR) for reporting on COCO splits.
 //! - [`assign`]: the task-aligned assigner and DFL target encoding.
 //! - [`loss`]: the detection loss (BCE + CIoU + DFL) on folo-core tensors, with autograd. The assigner runs on
@@ -58,7 +59,7 @@ pub use assign::{Assignment, TalConfig};
 pub use boxes::{Cxcywh, IouKind, Letterbox, Xyxy};
 pub use decode::Anchors;
 pub use error::{Error, Result};
-pub use eval::ImageDiagnostics;
+pub use eval::{ClassThreshold, ImageDiagnostics, OperatingPoint, ThresholdCalibration};
 pub use loss::{DistillConfig, ImageTargets, LossConfig, LossItems, LossOutput, detection_loss};
 pub use metrics::{EvalConfig, EvalReport, Evaluator, Truth};
 pub use model::v2::{FoloV2Config, FoloV2Model};

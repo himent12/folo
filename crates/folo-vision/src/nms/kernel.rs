@@ -58,6 +58,17 @@ pub fn soft_nms_sorted(
     sigma: Option<f32>,
     limit: usize,
 ) -> Vec<(usize, f32)> {
+    soft_nms_sorted_inner(boxes, scores, iou_thr, |_| score_thr, sigma, limit)
+}
+
+fn soft_nms_sorted_inner(
+    boxes: &[Xyxy],
+    scores: &[f32],
+    iou_thr: f32,
+    score_thr_of: impl Fn(usize) -> f32,
+    sigma: Option<f32>,
+    limit: usize,
+) -> Vec<(usize, f32)> {
     assert_eq!(boxes.len(), scores.len(), "soft_nms_sorted: boxes/scores length mismatch");
     if let Some(s) = sigma {
         assert!(s.is_finite() && s > 0.0, "soft_nms_sorted: sigma must be finite and > 0, got {s}");
@@ -70,7 +81,7 @@ pub fn soft_nms_sorted(
     let sigma64 = sigma.map(|s| s as f64);
     let mut work_scores = scores.to_vec();
     let mut active: Vec<usize> =
-        (0..n).filter(|&i| work_scores[i].is_finite() && work_scores[i] > score_thr).collect();
+        (0..n).filter(|&i| work_scores[i].is_finite() && work_scores[i] > score_thr_of(i)).collect();
     let mut kept: Vec<(usize, f32)> = Vec::with_capacity(active.len().min(limit));
 
     while kept.len() < limit && !active.is_empty() {
@@ -87,8 +98,8 @@ pub fn soft_nms_sorted(
             }
         }
         active.swap_remove(best_pos);
-        if !best_score.is_finite() || best_score <= score_thr {
-            break;
+        if !best_score.is_finite() || best_score <= score_thr_of(best_idx) {
+            continue;
         }
         kept.push((best_idx, best_score));
         if kept.len() == limit {
@@ -155,7 +166,7 @@ pub fn soft_nms_sorted(
                 }
             };
             work_scores[idx] = decayed;
-            if !decayed.is_finite() || decayed <= score_thr {
+            if !decayed.is_finite() || decayed <= score_thr_of(idx) {
                 active.swap_remove(pos);
             }
         }
@@ -715,6 +726,20 @@ pub(super) fn batched_soft_nms(
     max_det: usize,
     agnostic: bool,
 ) -> Vec<(usize, f32)> {
+    batched_soft_nms_with_thr(boxes, scores, classes, iou_thr, &|_| score_thr, sigma, max_det, agnostic)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn batched_soft_nms_with_thr(
+    boxes: &[Xyxy],
+    scores: &[f32],
+    classes: &[u32],
+    iou_thr: f32,
+    score_thr_for: &(dyn Fn(u32) -> f32 + Sync),
+    sigma: Option<f32>,
+    max_det: usize,
+    agnostic: bool,
+) -> Vec<(usize, f32)> {
     assert_eq!(boxes.len(), scores.len(), "batched_soft_nms: boxes/scores length mismatch");
     assert_eq!(boxes.len(), classes.len(), "batched_soft_nms: boxes/classes length mismatch");
     if let Some(s) = sigma {
@@ -726,15 +751,17 @@ pub(super) fn batched_soft_nms(
     }
     assert!(n <= u32::MAX as usize, "batched_soft_nms: too many boxes");
     if agnostic {
-        return soft_nms_sorted(boxes, scores, iou_thr, score_thr, sigma, max_det);
+        return soft_nms_sorted_inner(boxes, scores, iou_thr, |i| score_thr_for(classes[i]), sigma, max_det);
     }
     let order: Vec<u32> = (0..n as u32).collect();
     let (bucketed, ranges) = bucket_by_class(&order, classes);
     let run_bucket = |&(lo, hi): &(usize, usize)| -> Vec<(usize, f32)> {
         let ids = &bucketed[lo..hi];
+        let cls = classes[ids[0] as usize];
+        let thr = score_thr_for(cls);
         let b: Vec<Xyxy> = ids.iter().map(|&i| boxes[i as usize]).collect();
         let s: Vec<f32> = ids.iter().map(|&i| scores[i as usize]).collect();
-        soft_nms_sorted(&b, &s, iou_thr, score_thr, sigma, max_det)
+        soft_nms_sorted(&b, &s, iou_thr, thr, sigma, max_det)
             .into_iter()
             .map(|(k, sc)| (ids[k] as usize, sc))
             .collect()

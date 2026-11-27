@@ -506,7 +506,7 @@ impl Predictor {
         }
 
         let det_conf = sequence_det_conf(
-            self.config().conf,
+            self.min_effective_conf(),
             track_cfg.low_thresh,
             self.config().score,
             self.detector().head_mode(),

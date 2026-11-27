@@ -16,7 +16,8 @@
 
 use crate::boxes::Xyxy;
 use crate::eval::{
-    ImageDiagnostics, diagnose_image, normalize_diag_thresholds, worst_images as rank_worst_images,
+    ClassThreshold, ImageDiagnostics, OperatingPoint, ThresholdCalibration, diagnose_image,
+    normalize_diag_thresholds, worst_images as rank_worst_images,
 };
 use crate::nms::Detection;
 use rayon::prelude::*;
@@ -527,6 +528,45 @@ impl Evaluator {
             }
         }
 
+        // Per-class F1-optimal confidence thresholds from the same IoU 0.5 sweep (zero extra passes; highest
+        // threshold on ties, matching the global operating point).
+        let mut per_class_thresholds: Vec<ClassThreshold> = Vec::with_capacity(n_eval);
+        let mut macro_f1_sum = 0.0f64;
+        for &(c, e) in &evaluated {
+            let mut c_best_i = 0usize;
+            let mut c_best_f1 = f64::NEG_INFINITY;
+            for (i, &f) in e.f1.iter().enumerate() {
+                if f >= c_best_f1 {
+                    c_best_f1 = f;
+                    c_best_i = i;
+                }
+            }
+            macro_f1_sum += e.f1[c_best_i];
+            per_class_thresholds.push(ClassThreshold {
+                class: c as u32,
+                best_conf: conf_grid(c_best_i),
+                best_f1: e.f1[c_best_i] as f32,
+                precision: e.p[c_best_i] as f32,
+                recall: e.r[c_best_i] as f32,
+                truths: self.gt_counts[c],
+                preds: self.dets[c].len() as u64,
+            });
+        }
+        let global_precision = mean(&|e| e.p[best_i]);
+        let global_recall = mean(&|e| e.r[best_i]);
+        let global_f1 = mean(&|e| e.f1[best_i]);
+        let global_best_conf = conf_grid(best_i);
+        let thresholds = ThresholdCalibration {
+            global: OperatingPoint {
+                best_conf: global_best_conf,
+                best_f1: global_f1,
+                precision: global_precision,
+                recall: global_recall,
+            },
+            per_class: per_class_thresholds,
+            macro_f1: if n_eval > 0 { (macro_f1_sum / n_eval as f64) as f32 } else { 0.0 },
+        };
+
         let per_class: Vec<ClassReport> = evaluated
             .iter()
             .map(|&(c, e)| ClassReport {
@@ -583,10 +623,10 @@ impl Evaluator {
         EvalReport {
             map50: mean(&|e| e.ap[0]),
             map50_95: mean(&|e| e.ap_mean()),
-            precision: mean(&|e| e.p[best_i]),
-            recall: mean(&|e| e.r[best_i]),
-            f1: mean(&|e| e.f1[best_i]),
-            best_conf: conf_grid(best_i),
+            precision: global_precision,
+            recall: global_recall,
+            f1: global_f1,
+            best_conf: global_best_conf,
             map_per_iou: (0..NUM_IOU_THRESHOLDS).map(|t| mean(&|e| e.ap[t])).collect(),
             iou_thresholds: self.thresholds.iter().map(|&t| t as f32).collect(),
             num_images: self.num_images,
@@ -601,6 +641,7 @@ impl Evaluator {
                 matrix: self.confusion.chunks(stride).map(<[u64]>::to_vec).collect(),
             },
             image_diagnostics: self.diagnostics.clone(),
+            thresholds,
         }
     }
 }
@@ -837,6 +878,9 @@ pub struct EvalReport {
     /// Per-image error breakdowns recorded when [`EvalConfig::record_diagnostics`] is enabled (empty otherwise).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub image_diagnostics: Vec<ImageDiagnostics>,
+    /// Global and per-class F1-optimal confidence thresholds computed from the IoU 0.5 confidence sweep.
+    #[serde(default)]
+    pub thresholds: ThresholdCalibration,
 }
 
 impl EvalReport {
@@ -844,6 +888,11 @@ impl EvalReport {
     /// worst-first ([`crate::eval::worst_images`]).
     pub fn worst_images(&self, top_k: usize) -> Vec<&ImageDiagnostics> {
         rank_worst_images(&self.image_diagnostics, top_k)
+    }
+
+    /// Global and per-class F1-optimal confidence threshold calibration from this evaluation run.
+    pub fn calibrated_thresholds(&self) -> &ThresholdCalibration {
+        &self.thresholds
     }
 }
 

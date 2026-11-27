@@ -79,12 +79,18 @@ pub(super) fn needing_boxes(
 ) -> [Vec<Found>; 3] {
     let allowed = |f: &Found| class_allowed(nms, f.1);
     match mode {
-        HeadMode::O2m => found.map(|v| v.into_iter().filter(allowed).collect()),
+        HeadMode::O2m => found.map(|v| {
+            v.into_iter().filter(|f| f.2 > nms.candidate_conf_for_class(f.1) && allowed(f)).collect()
+        }),
         HeadMode::O2o => {
             // (score, global anchor, level, found): every global anchor is distinct, so the order is total.
             let mut all: Vec<(f32, usize, usize, Found)> = Vec::new();
             for (l, v) in found.iter().enumerate() {
-                all.extend(v.iter().map(|f| (f.2, offsets[l] + f.0 as usize, l, *f)));
+                all.extend(
+                    v.iter()
+                        .filter(|f| f.2 > nms.conf_for_class(f.1))
+                        .map(|f| (f.2, offsets[l] + f.0 as usize, l, *f)),
+                );
             }
             let rank = |x: &(f32, usize, usize, Found), y: &(f32, usize, usize, Found)| {
                 y.0.total_cmp(&x.0).then(x.1.cmp(&y.1))

@@ -5,6 +5,7 @@
 //! [`ValConfig::samples`] images of the split are also returned as [`ValSample`]s (truth and predictions mapped back
 //! to the original image), the fixed sample set of docs/API.md's `/samples`.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
@@ -16,6 +17,7 @@ use serde::Serialize;
 
 use crate::boxes::Xyxy;
 use crate::error::{Error, Result};
+use crate::eval::{ThresholdCalibration, validate_per_class_conf};
 #[cfg(test)]
 use crate::fusion::BoxFusion;
 use crate::metrics::{EvalConfig, EvalReport, Evaluator, Truth};
@@ -95,6 +97,20 @@ pub struct ValResult {
     pub detections: Vec<(usize, Vec<Detection>)>,
     /// Wall time in seconds.
     pub seconds: f64,
+}
+
+impl ValResult {
+    /// Global and per-class F1-optimal confidence thresholds computed during validation (zero extra inference
+    /// passes).
+    pub fn thresholds(&self) -> &ThresholdCalibration {
+        &self.report.thresholds
+    }
+
+    /// Per-class F1-optimal confidence threshold map ready for [`crate::Predictor::with_per_class_conf`] or
+    /// [`crate::NmsConfig::per_class_conf`].
+    pub fn per_class_conf(&self) -> BTreeMap<u32, f32> {
+        self.report.thresholds.per_class_map()
+    }
 }
 
 /// Wrap a loader batch as an `[n, 3, h, w]` tensor of `dtype` (`F32`, or `F16` for a half-precision model) in
@@ -356,6 +372,9 @@ fn check_config_inner(model: &ValModel<'_>, classes: usize, cfg: &ValConfig) -> 
             n.conf, n.iou, n.fusion_iou, cfg.sample_conf, n.max_det, n.max_candidates
         )));
     }
+    if let Some(map) = &n.per_class_conf {
+        validate_per_class_conf(map)?;
+    }
     if let crate::nms::NmsKind::SoftGaussian { sigma } | crate::nms::NmsKind::MatrixGaussian { sigma } =
         n.nms_kind
         && (!sigma.is_finite() || sigma <= 0.0)
@@ -419,7 +438,7 @@ enum Outputs {
 /// Whether validation's NMS can start from the device's candidate pairs: multi-label, and a threshold that is a
 /// normal float (a GPU may flush subnormal scores to zero, where the host compares them exactly).
 fn pairs_apply(nms: &NmsConfig) -> bool {
-    nms.multi_label && nms.conf >= f32::MIN_POSITIVE
+    nms.multi_label && nms.candidate_conf() >= f32::MIN_POSITIVE
 }
 
 /// Candidate pairs per image the next batch makes room for, with `a` anchors and `nc` classes: a quarter more than
