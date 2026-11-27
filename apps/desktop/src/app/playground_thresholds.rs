@@ -38,7 +38,11 @@ impl FoloApp {
         } else {
             let min_override =
                 per_class.values().copied().filter(|v| v.is_finite()).fold(self.play_conf, f32::min);
-            (min_override.min(PLAY_CONF_FLOOR), None, false, self.play_conf)
+            let raw_floor = min_override.min(PLAY_CONF_FLOOR);
+            // Older servers filter strictly (`score > conf`), so step slightly below positive
+            // cutoffs so boxes sitting right on the class cutoff reach Desktop's inclusive filter.
+            let req_floor = if raw_floor > 0.0 { (raw_floor - 1e-4).max(0.0) } else { 0.0 };
+            (req_floor, None, false, self.play_conf)
         }
     }
 

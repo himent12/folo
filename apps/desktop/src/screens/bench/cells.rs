@@ -26,19 +26,31 @@ pub(super) fn name_with_badges(
     let mut measure = |s: &str| f32::from(text_width(window, s, ty::SM.size)) * 1.04;
     let status_w = status.map_or(0., |(_, w)| measure(w) + 8. + 6. + 8.);
     let badge_w: f32 = badges.iter().map(|(l, _, _)| measure(l) + 12. + 8.).sum::<f32>() + status_w;
-    let name_w = (measure(name) + 2.).min((width - badge_w).max(48.));
+    let full_w = measure(name) + 2.;
+    let avail_w = (width - badge_w).max(48.);
+    let name_w = full_w.min(avail_w);
+    let truncated = full_w > avail_w + 0.5;
+    let name_text = text(ty::SM, t.text_primary)
+        .font_weight(FontWeight::MEDIUM)
+        .w(px(name_w))
+        .ellipsis()
+        .child(name.to_string());
+    let name_el: AnyElement = if truncated {
+        div()
+            .id(SharedString::from(format!("{id}-name")))
+            .w(px(name_w))
+            .tooltip(crate::controls::tip(name.to_string(), None))
+            .child(name_text)
+            .into_any_element()
+    } else {
+        name_text.into_any_element()
+    };
     div()
         .flex()
         .items_center()
         .gap(px(8.))
         .w(px(width))
-        .child(
-            text(ty::SM, t.text_primary)
-                .font_weight(FontWeight::MEDIUM)
-                .w(px(name_w))
-                .ellipsis()
-                .child(name.to_string()),
-        )
+        .child(name_el)
         .children(status.map(|(k, w)| status_cell(t, k, w.to_string(), format!("nb-{id}")).flex_none()))
         .children(badges.iter().enumerate().map(|(i, (l, tone, tip))| {
             let b = badge(t, l.to_string(), *tone);

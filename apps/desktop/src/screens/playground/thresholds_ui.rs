@@ -237,6 +237,23 @@ impl FoloApp {
                 .bg(t.accent_muted)
                 .child(text(ty::XS, t.accent_text).whitespace_normal().child(msg))
         });
+        let legacy_note = (!self.play_thresholds.per_class.is_empty()
+            && self.play_target.is_none()
+            && !self.store.supports_threshold_calibration())
+        .then(|| {
+            div()
+                .px(px(8.))
+                .py(px(5.))
+                .rounded(px(radius::SM))
+                .bg(t.bg_raised)
+                .border_1()
+                .border_color(t.line_subtle)
+                .child(
+                    text(ty::XS, t.text_secondary)
+                        .whitespace_normal()
+                        .child("This server filters per-class overrides after its 300-box cap; switch to Local inference or update folo serve for exact pre-cap filtering."),
+                )
+        });
 
         let filter_query = if classes.len() > 8 {
             self.play_thresh_filter.read(cx).text().trim().to_ascii_lowercase()
@@ -452,6 +469,7 @@ impl FoloApp {
                 )
                 .children(import_box)
                 .children(note)
+                .children(legacy_note)
                 .children(filter_box)
                 .child(list_body)
                 .into_any_element(),

@@ -821,8 +821,28 @@ impl FoloApp {
 
         let conf = self.model_cli.predict_conf;
         let conf_control: AnyElement = if self.model_cli.predict_use_thresholds {
-            text(ty::SM, t.text_tertiary)
-                .child("Per-class thresholds file replaces --conf")
+            let splits = [Split::Val, Split::Test, Split::Train];
+            let s_labels = ["val", "test", "train"];
+            let s_idx = splits.iter().position(|&s| s == self.model_cli.val_split).unwrap_or(0);
+            let s_seg = self.segmented(
+                "model-cli-predict-thr-split",
+                &s_labels,
+                s_idx,
+                window,
+                cx,
+                Rc::new(move |this, i, _, cx| {
+                    this.model_cli.val_split = splits[i.min(splits.len() - 1)];
+                    cx.notify();
+                }),
+            );
+            div()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap(px(8.))
+                .child(text(ty::SM, t.text_tertiary).child("Calibration split"))
+                .child(s_seg)
+                .child(text(ty::SM, t.text_tertiary).child("(replaces --conf)"))
                 .into_any_element()
         } else {
             let conf_slider = self.slider(

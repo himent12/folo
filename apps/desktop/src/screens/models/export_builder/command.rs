@@ -483,12 +483,14 @@ fn resolve_quant_output_arg(
     (Some(format!("<model-{suffix}.folo>")), None)
 }
 
-/// Derives a consistent, precision- and checkpoint-scoped thresholds JSON path shared by
-/// `folo val --save-thresholds` and `folo predict --thresholds` so f32, f16, and different INT8
-/// quantization variants never silently overwrite or load each other's thresholds.
+/// Derives a consistent, split-, precision-, and checkpoint-scoped thresholds JSON path shared by
+/// `folo val --save-thresholds` and `folo predict --thresholds` so different splits (`val`,
+/// `test`, `train`), precisions (f32/f16/int8), and INT8 quantization variants never silently
+/// overwrite or load each other's thresholds.
 /// Returns `(arg_token, unquotable_raw_path)`.
 pub(super) fn derive_thresholds_path(
     m: &Model,
+    split: Split,
     precision: PredictPrecision,
     use_quantized_output: bool,
     method: QuantMethod,
@@ -528,10 +530,15 @@ pub(super) fn derive_thresholds_path(
             }
         }
     };
+    let split_tag = match split {
+        Split::Val => "",
+        Split::Test => "-test",
+        Split::Train => "-train",
+    };
     let candidate = if stem.is_empty() {
-        format!("thresholds{prec_tag}.json")
+        format!("thresholds{prec_tag}{split_tag}.json")
     } else {
-        format!("{stem}{prec_tag}-thresholds.json")
+        format!("{stem}{prec_tag}{split_tag}-thresholds.json")
     };
     match folo_api::json::quote_path(&candidate) {
         Some(quoted) => (quoted, None),
@@ -754,6 +761,7 @@ pub fn build_model_cli_with_arch(
             if state.val_save_thresholds {
                 let (thresh_arg, unquoted_thresh) = derive_thresholds_path(
                     m,
+                    state.val_split,
                     state.predict_precision,
                     use_quantized_output,
                     state.quant_method,
@@ -800,6 +808,7 @@ pub fn build_model_cli_with_arch(
             if state.predict_use_thresholds {
                 let (thresh_arg, unquoted_thresh) = derive_thresholds_path(
                     m,
+                    state.val_split,
                     state.predict_precision,
                     use_quantized_output,
                     state.quant_method,

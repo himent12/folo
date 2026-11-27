@@ -249,12 +249,21 @@ impl FoloApp {
             return;
         }
         if self.play_compare.model_b.is_some() {
-            if self.play_image.is_some()
-                && !self.play_compare.pred_b_pending
-                && matches!(self.play_compare.pred_b, Load::Ready(_))
-                && !self.pred_b_is_fresh()
-            {
-                self.run_predict_b(cx);
+            if self.play_image.is_some() {
+                let per_b = self.play_per_class_b();
+                let b_thresholds_changed = !crate::screens::playground::thresholds_match(
+                    &self.play_compare.fetched_per_class_b,
+                    self.play_compare.fetched_floor_b,
+                    self.play_conf,
+                    &per_b,
+                );
+                if b_thresholds_changed
+                    || (!self.play_compare.pred_b_pending
+                        && matches!(self.play_compare.pred_b, Load::Ready(_))
+                        && !self.pred_b_is_fresh())
+                {
+                    self.run_predict_b(cx);
+                }
             }
             return;
         }
