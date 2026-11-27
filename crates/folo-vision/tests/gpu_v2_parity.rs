@@ -165,6 +165,14 @@ fn v2_gpu_lazy_head_matches_dense_bit_for_bit_f32_and_f16() {
                 NmsConfig { conf: 0.0, iou: 0.7, max_det: 300, multi_label: false, ..NmsConfig::default() };
             check_lazy_vs_dense(&m, &x_big, &overflow_nms, &format!("{dtype:?} {} overflow", head.as_str()));
 
+            // Plans are opt-in on standalone `FoloV2Model`: zero replays before `set_forward_plans(true)`.
+            assert_eq!(
+                m.plan_replays(),
+                0,
+                "{dtype:?} {} standalone model must start with plans off",
+                head.as_str()
+            );
+
             // Recorded ForwardPlans on the candidate-first GPU path: 1st call warms, 2nd records, 3rd+ replays.
             m.set_forward_plans(true);
             let plan_nms = NmsConfig {
@@ -180,6 +188,7 @@ fn v2_gpu_lazy_head_matches_dense_bit_for_bit_f32_and_f16() {
                 let _g = no_grad();
                 m.forward(&x).unwrap().detections(&plan_nms, 0.0).unwrap()
             };
+            let replays_before_sites = m.plan_replays();
             for step in 0..4 {
                 let cands = m.predict_candidates(&x, &plan_nms).unwrap();
                 let got: Vec<Vec<Detection>> =
@@ -188,11 +197,11 @@ fn v2_gpu_lazy_head_matches_dense_bit_for_bit_f32_and_f16() {
                     assert_eq!(bits(g), bits(w), "{dtype:?} {} plan step {step} img {i}", head.as_str());
                 }
             }
+            let site_replays = m.plan_replays() - replays_before_sites;
             assert!(
-                m.plan_replays() >= 2,
-                "{dtype:?} {} expected >= 2 site plan replays, got {} (refusal: {:?})",
+                site_replays >= 2,
+                "{dtype:?} {} expected >= 2 site plan replays, got {site_replays} (refusal: {:?})",
                 head.as_str(),
-                m.plan_replays(),
                 m.plan_refusal()
             );
         }
@@ -237,6 +246,9 @@ fn v2_gpu_forward_plans_dense_iou_head_and_predictor_parity() {
     assert!(max_diff(&ref_c, &cpu_c) < 2e-3, "cls_raw GPU vs CPU: {}", max_diff(&ref_c, &cpu_c));
     assert!(max_diff(&ref_i, &cpu_i) < 2e-3, "iou_raw GPU vs CPU: {}", max_diff(&ref_i, &cpu_i));
 
+    // Plans must be off by default on a standalone `FoloV2Model`.
+    assert_eq!(m_gpu.plan_replays(), 0, "standalone FoloV2Model must start with plans off");
+
     // Enable plans: 4 calls -> warmup + record + 2 replays, bit-exact with un-planned reference.
     m_gpu.set_forward_plans(true);
     for step in 0..4 {
@@ -266,6 +278,57 @@ fn v2_gpu_forward_plans_dense_iou_head_and_predictor_parity() {
         "expected >= 2 dense iou_head plan replays, got {} (refusal: {:?})",
         m_gpu.plan_replays(),
         m_gpu.plan_refusal()
+    );
+
+    // Mutating a public layer activation while plans are enabled must never replay stale dispatches
+    // (on either dense `forward` or candidate-first `predict_candidates`).
+    let mut m_mut = v2_model(3, HeadMode::O2m, false, dev, DType::F32, -0.3);
+    m_mut.set_forward_plans(true);
+    let mut_nms = NmsConfig { conf: 0.35, iou: 0.7, max_det: 100, ..NmsConfig::default() };
+    for _ in 0..3 {
+        let _g = no_grad();
+        let _ = m_mut.forward(&x_gpu).unwrap();
+        let _ = m_mut.predict_candidates(&x_gpu, &mut_nms).unwrap();
+    }
+    let before_box = {
+        let _g = no_grad();
+        m_mut.forward(&x_gpu).unwrap().box_raw.to_device(Device::Cpu).unwrap().to_vec::<f32>().unwrap()
+    };
+    let before_cands: Vec<Vec<Detection>> = m_mut
+        .predict_candidates(&x_gpu, &mut_nms)
+        .unwrap()
+        .iter()
+        .map(|c| m_mut.finish_candidates(c, &mut_nms))
+        .collect();
+    m_mut.head.levels[0].box_branch.conv0.act = folo_nn::Activation::Identity;
+    let after_planned_box = {
+        let _g = no_grad();
+        m_mut.forward(&x_gpu).unwrap().box_raw.to_device(Device::Cpu).unwrap().to_vec::<f32>().unwrap()
+    };
+    let after_planned_cands: Vec<Vec<Detection>> = m_mut
+        .predict_candidates(&x_gpu, &mut_nms)
+        .unwrap()
+        .iter()
+        .map(|c| m_mut.finish_candidates(c, &mut_nms))
+        .collect();
+    m_mut.set_forward_plans(false);
+    let after_unplanned_box = {
+        let _g = no_grad();
+        m_mut.forward(&x_gpu).unwrap().box_raw.to_device(Device::Cpu).unwrap().to_vec::<f32>().unwrap()
+    };
+    let after_unplanned_cands: Vec<Vec<Detection>> = m_mut
+        .predict_candidates(&x_gpu, &mut_nms)
+        .unwrap()
+        .iter()
+        .map(|c| m_mut.finish_candidates(c, &mut_nms))
+        .collect();
+    assert_ne!(before_box, after_unplanned_box, "activation change must alter box_raw");
+    assert_eq!(after_planned_box, after_unplanned_box, "dense plan must not replay stale activation");
+    assert_ne!(bits(&before_cands[0]), bits(&after_unplanned_cands[0]), "activation change must alter boxes");
+    assert_eq!(
+        bits(&after_planned_cands[0]),
+        bits(&after_unplanned_cands[0]),
+        "site plan must not replay stale activation"
     );
 
     // 2) End-to-end `Predictor::new_v2` on GPU (both candidate-first and dense `iou_head`) replays plans

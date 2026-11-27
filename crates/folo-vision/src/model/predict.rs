@@ -552,12 +552,28 @@ impl HeadOutput {
         dfl_moments(&self.box_raw, self.reg_max)
     }
 
-    /// The CPU half of [`HeadOutput::detections`]: straight from the channel-major outputs (borrowed, not
-    /// copied), [`single_label_block`]'s extraction, and the DFL decode ([`dfl_box`]) only for the anchors that
-    /// pass. Like the GPU candidate kernel, anchors are processed in independent blocks
-    /// ([`CPU_DECODE_BLOCK`]) on the rayon pool, and the blocks' candidates are joined in anchor order, so the
-    /// result does not depend on the split. `None` for shapes (or dtypes) the full path should report.
+    /// The CPU half of [`HeadOutput::detections`]: delegates to [`HeadOutput::candidates_on_cpu`] and runs
+    /// [`finish_candidates`] per image. `None` for shapes (or dtypes) the full path should report.
     fn detections_on_cpu(&self, nms: &NmsConfig) -> Result<Option<Vec<Vec<Detection>>>> {
+        Ok(self.candidates_on_cpu(nms)?.map(|imgs| {
+            imgs.into_par_iter()
+                .map(|c| {
+                    let dfl = DflInputs {
+                        precision: c.precisions.as_deref(),
+                        bin_precision: c.bin_precisions.as_deref(),
+                        entropy: c.entropies.as_deref(),
+                        strides: c.strides.as_deref(),
+                    };
+                    finish_candidates(self.mode, &c.cands, dfl, nms)
+                })
+                .collect()
+        }))
+    }
+
+    /// Single-label CPU candidate extraction straight from channel-major `F32` outputs (borrowed, not copied),
+    /// matching [`HeadOutput::candidates_on_device`] and [`HeadOutput::decode_images`]. `None` when shapes or
+    /// dtypes require the full path.
+    pub(crate) fn candidates_on_cpu(&self, nms: &NmsConfig) -> Result<Option<Vec<ImageCandidates>>> {
         let (b, a, nc, rm) = (self.batch(), self.num_anchors(), self.num_classes, self.reg_max);
         if self.box_raw.dims() != [b, 4 * rm, a] || self.cls_raw.dims() != [b, nc, a] || a == 0 || nc == 0 {
             return Ok(None);
@@ -569,7 +585,6 @@ impl HeadOutput {
         let wants = self.dfl_wants(nms);
         let want_strides = self.wants_strides(nms);
         let cand_conf = nms.candidate_conf_for(self.mode);
-        // The candidates among anchors `j0..j1` of one image, plus any requested DFL stats and strides.
         let block = |cl: &[f32], rg: &[f32], j0: usize, j1: usize| {
             let mut found = Vec::new();
             single_label_block(cl, a, j0, j1, cand_conf, &mut found);
@@ -596,7 +611,7 @@ impl HeadOutput {
             (cands, precs, bprecs, ents, sts)
         };
         let blocks = a.div_ceil(CPU_DECODE_BLOCK);
-        let images = |reg: &[f32], cls: &[f32]| -> Vec<Vec<Detection>> {
+        let images = |reg: &[f32], cls: &[f32]| -> Vec<ImageCandidates> {
             (0..b)
                 .into_par_iter()
                 .map(|i| {
@@ -618,25 +633,25 @@ impl HeadOutput {
                         ents.extend(en);
                         sts.extend(st);
                     }
-                    let dfl = DflInputs {
-                        precision: wants.side.then_some(precs.as_slice()),
-                        bin_precision: wants.bin.then_some(bprecs.as_slice()),
-                        entropy: wants.ent.then_some(ents.as_slice()),
-                        strides: want_strides.then_some(sts.as_slice()),
-                    };
-                    finish_candidates(self.mode, &cands, dfl, nms)
+                    ImageCandidates {
+                        cands,
+                        precisions: wants.side.then_some(precs),
+                        bin_precisions: wants.bin.then_some(bprecs),
+                        entropies: wants.ent.then_some(ents),
+                        strides: want_strides.then_some(sts),
+                    }
                 })
                 .collect()
         };
         // Views of one storage (e.g. channel slices of one `[B, 4·reg_max + nc, A]` tensor) are not borrowed
         // twice: a second read lock on a storage while a writer queues for it could deadlock. Copy one instead.
-        let dets = if self.box_raw.same_storage(&self.cls_raw) {
+        let imgs = if self.box_raw.same_storage(&self.cls_raw) {
             let cls = self.cls_raw.to_vec::<f32>()?;
             self.box_raw.with_f32_slice(|reg| images(reg, &cls))?
         } else {
             self.box_raw.with_f32_slice(|reg| self.cls_raw.with_f32_slice(|cls| images(reg, cls)))??
         };
-        Ok(Some(dets))
+        Ok(Some(imgs))
     }
 
     /// The anchors as `[3, A]` on `dev`: point x, point y (grid units), stride.

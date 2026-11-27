@@ -377,7 +377,7 @@ impl FoloV2Model {
             mode: Mode::new(),
             fused: false,
             head_mode,
-            plans: folo_gpu::ForwardPlans::new(),
+            plans: folo_gpu::ForwardPlans::with_enabled(false),
             int8: None,
             backbone,
             neck,
@@ -770,7 +770,8 @@ impl FoloV2Model {
         let o2o = mode == HeadMode::O2o && self.has_o2o();
         let has_iou = self.head.has_iou_head;
         let tensors = |f: &mut dyn FnMut(&Tensor)| crate::model::each_tensor(self, f);
-        let mut out = self.plans.run(&[0, o2o as u64, has_iou as u64], x, &tensors, |x| {
+        let sig = self.plan_signature();
+        let mut out = self.plans.run(&[0, o2o as u64, has_iou as u64, sig], x, &tensors, |x| {
             let feats = self.forward_features(x)?;
             let o = self.head_from_features(feats, h, w, mode)?;
             let mut tensors = Vec::with_capacity(if o.iou_raw.is_some() { 3 } else { 2 });

@@ -5,15 +5,92 @@
 //! and one decode emits the candidate record buffer (plus optional DFL stats) in a single recorded
 //! [`folo_gpu::ForwardPlans`] replay when plans are enabled.
 
-use folo_core::{ClassSites, Tensor, no_grad};
-use folo_nn::{Error, Forward, Result};
+use folo_core::{ClassSites, DType, Device, Tensor, no_grad};
+use folo_nn::{Activation, Conv2d, ConvBnAct, Error, Forward, Result};
 
-use super::blocks::WsQARepConv3x3;
+use super::blocks::{FoloBlock, WsQARepConv3x3};
+use super::head::ClsBranchV2;
 use super::{FoloV2Model, HeadMode};
 use crate::model::lazy_gpu::{GPU_SITE_SLOTS, device_bins, read_sites_for_strides};
 use crate::model::predict::{DflWants, dfl_stats_with};
 use crate::model::{HeadOutput, ImageCandidates, each_tensor};
 use crate::nms::NmsConfig;
+
+/// FNV-1a mixer for non-tensor mutable layer settings in [`FoloV2Model::plan_signature`].
+struct Sig(u64);
+
+impl Sig {
+    fn new() -> Self {
+        Self(0xcbf2_9ce4_8422_2325)
+    }
+
+    fn u64(&mut self, v: u64) {
+        self.0 = (self.0 ^ v).wrapping_mul(0x0100_0000_01b3);
+    }
+
+    fn act(&mut self, a: Activation) {
+        let (tag, extra) = match a {
+            Activation::Identity => (0, 0),
+            Activation::Silu => (1, 0),
+            Activation::Relu => (2, 0),
+            Activation::LeakyRelu(s) => (3, s.to_bits() as u64),
+            Activation::Sigmoid => (4, 0),
+            Activation::Tanh => (5, 0),
+            Activation::Hardswish => (6, 0),
+        };
+        self.u64(tag);
+        self.u64(extra);
+    }
+
+    fn conv2d(&mut self, c: &Conv2d) {
+        let cfg = c.config();
+        self.u64(cfg.in_channels as u64);
+        self.u64(cfg.out_channels as u64);
+        self.u64(cfg.kernel as u64);
+        self.u64(cfg.stride as u64);
+        self.u64(cfg.padding as u64);
+        self.u64(cfg.dilation as u64);
+        self.u64(cfg.groups as u64);
+        self.u64(cfg.bias as u64);
+    }
+
+    fn conv_bn_act(&mut self, c: &ConvBnAct) {
+        self.act(c.act);
+        self.u64(c.bn.is_some() as u64);
+        self.conv2d(&c.conv);
+    }
+
+    fn ws_qarep(&mut self, r: &WsQARepConv3x3) {
+        self.act(r.act);
+        self.u64(r.in_channels as u64);
+        self.u64(r.out_channels as u64);
+        self.u64(r.bn.is_some() as u64);
+        self.u64(r.branches.is_some() as u64);
+        self.u64(r.fused.is_some() as u64);
+        if let Some(f) = &r.fused {
+            self.conv2d(f);
+        }
+    }
+
+    fn folo_block(&mut self, b: &FoloBlock) {
+        self.conv_bn_act(&b.cv1);
+        self.u64(b.c_mid as u64);
+        self.u64(b.reps.len() as u64);
+        for r in b.reps.iter() {
+            self.ws_qarep(r);
+        }
+        self.conv_bn_act(&b.cv2);
+    }
+
+    fn cls_branch(&mut self, c: &ClsBranchV2) {
+        self.u64(c.align.is_some() as u64);
+        if let Some(a) = &c.align {
+            self.conv_bn_act(a);
+        }
+        self.ws_qarep(&c.conv0);
+        self.conv2d(&c.out);
+    }
+}
 
 /// One level's site outputs for GPU candidate decode:
 /// `(box_raw [B, 4·reg_max, cap], sites [B, 1 + cap], class_records, map_w, stride, level_anchor_offset)`.
@@ -32,6 +109,75 @@ fn rep_conv_sites(rep: &WsQARepConv3x3, x: &Tensor, sites: &Tensor, to_map: bool
 }
 
 impl FoloV2Model {
+    /// Hash of every mutable non-tensor kernel setting on this model (activations, conv configs, `stem.spd`,
+    /// `sppf.k`, `hyper` dims, `pad_p3`/`pad_p4` presence, head strides/flags) mixed into GPU
+    /// [`folo_gpu::ForwardPlans`] keys so mutating public layer fields never replays stale dispatches.
+    pub(super) fn plan_signature(&self) -> u64 {
+        let mut s = Sig::new();
+        let b = &self.backbone;
+        s.u64(b.stem.spd as u64);
+        s.conv_bn_act(&b.stem.conv);
+        s.conv_bn_act(&b.down2);
+        s.u64(b.stage2.len() as u64);
+        for r in b.stage2.iter() {
+            s.ws_qarep(r);
+        }
+        s.conv_bn_act(&b.down3);
+        s.folo_block(&b.stage3);
+        s.conv_bn_act(&b.down4);
+        s.folo_block(&b.stage4);
+        s.conv_bn_act(&b.down5);
+        s.folo_block(&b.stage5);
+        s.conv_bn_act(&b.sppf.cv1);
+        s.conv_bn_act(&b.sppf.cv2);
+        s.u64(b.sppf.k as u64);
+        s.conv_bn_act(&b.hyper.av_proj);
+        s.conv_bn_act(&b.hyper.out_proj);
+        s.u64(b.hyper.m_edges as u64);
+        s.u64(b.hyper.c_g as u64);
+        let n = &self.neck;
+        s.folo_block(&n.td4);
+        s.conv_bn_act(&n.p2_proj);
+        s.folo_block(&n.out3);
+        s.conv_bn_act(&n.down3);
+        s.folo_block(&n.out4);
+        s.conv_bn_act(&n.down4);
+        s.folo_block(&n.out5);
+        for g in [&n.pad_p3, &n.pad_p4] {
+            s.u64(g.is_some() as u64);
+            if let Some(g) = g {
+                s.u64(g.c_tgt as u64);
+            }
+        }
+        let h = &self.head;
+        s.u64(h.reg_max as u64);
+        s.u64(h.num_classes as u64);
+        s.u64(h.has_iou_head as u64);
+        s.u64(h.o2o_detach as u64);
+        s.u64(h.levels.len() as u64);
+        for lv in &h.levels {
+            s.u64(lv.stride as u64);
+            s.ws_qarep(&lv.box_branch.conv0);
+            s.ws_qarep(&lv.box_branch.conv1);
+            s.conv2d(&lv.box_branch.out);
+            s.u64(lv.box_branch.iou_out.is_some() as u64);
+            if let Some(iou) = &lv.box_branch.iou_out {
+                s.conv2d(iou);
+            }
+            s.cls_branch(&lv.cls_branch);
+        }
+        s.u64(h.o2o_cls.is_some() as u64);
+        if let Some(o2o) = &h.o2o_cls {
+            s.u64(o2o.len() as u64);
+            for ol in o2o {
+                s.cls_branch(&ol.cls_branch);
+                s.conv2d(&ol.suppress.gate);
+                s.u64(ol.suppress.num_classes as u64);
+            }
+        }
+        s.0
+    }
+
     /// GPU candidate-first prediction for [`FoloV2Model`]: evaluates `BoxBranchV2` only at above-threshold
     /// class sites (recorded into [`Self::plans`] when enabled), falling back to the dense GPU head for any
     /// image that overflows [`GPU_SITE_SLOTS`] or on devices lacking site kernels.
@@ -49,7 +195,8 @@ impl FoloV2Model {
         };
         let [s3, s4, s5] = GPU_SITE_SLOTS.map(|s| s as u64);
         let stats_bits = (wants.moments() as u64) | ((wants.ent as u64) << 1);
-        let key = [SITES_PLAN, o2o as u64, stats_bits, cand_conf.to_bits() as u64, s3, s4, s5];
+        let sig = self.plan_signature();
+        let key = [SITES_PLAN, o2o as u64, stats_bits, cand_conf.to_bits() as u64, s3, s4, s5, sig];
         let mut unsited = None;
         let out = self.plans.run(&key, x, &tensors, |x| {
             let feats = self.forward_features(x)?;
@@ -106,8 +253,17 @@ impl FoloV2Model {
             reg_max: self.head.reg_max,
             num_classes: self.head.num_classes,
         };
-        out.candidates_on_device(nms)?
-            .ok_or_else(|| Error::Invalid(format!("no candidate kernel on {:?}", x.device())))
+        if let Some(cands) = out.candidates_on_device(nms)? {
+            return Ok(cands);
+        }
+        // Host fallback for non-CPU backends that implement dense inference without candidate kernels.
+        let host = HeadOutput {
+            box_raw: out.box_raw.to_device(Device::Cpu)?.to_dtype(DType::F32)?,
+            cls_raw: out.cls_raw.to_device(Device::Cpu)?.to_dtype(DType::F32)?,
+            ..out
+        };
+        host.candidates_on_cpu(nms)?
+            .ok_or_else(|| Error::Invalid(format!("candidate fallback failed on {:?}", x.device())))
     }
 
     fn sites_on_device(
