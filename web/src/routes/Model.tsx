@@ -207,6 +207,7 @@ export default function Model() {
 
   effect(() => {
     void id.get();
+    void hub.epoch;
     calAbort?.abort();
     calAbort = null;
     calSeq++;
