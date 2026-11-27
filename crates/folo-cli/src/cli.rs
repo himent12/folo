@@ -259,7 +259,7 @@ pub struct TrainArgs {
     /// Format of --data: auto (detect from the files), or yolo / coco / voc for a folder that has multiple.
     #[arg(long, value_enum, default_value_t = FormatArg::Auto)]
     pub format: FormatArg,
-    /// Architecture (folo-n, folo-s, folo-m, folo-l, folo-x), or .folo weights / a published name to fine-tune.
+    /// Architecture (folo-n, folo-s, folo-m, folo-l, folo-x, folo2-n, folo2-s, folo2-m, folo2-l, folo2-x), or .folo weights / a published name to fine-tune.
     #[arg(long, visible_alias = "arch", default_value = "folo-n")]
     pub model: String,
     /// Start from these weights (transfer learning; the architecture is theirs): a .folo file or a published name

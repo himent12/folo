@@ -1,8 +1,11 @@
 //! Model exports (`POST /api/models/{id}/export`) to `<data dir>/exports/` and shared [`onnx_export`] options.
 
+use std::path::Path;
+
 use folo_api::{ExportFormat, ExportResult, ExportSpec};
-use folo_nn::io::FloatDType;
+use folo_nn::io::{FloatDType, ModelFile, Purpose};
 use folo_vision::export::onnx::{self, DynamicAxes, OnnxOptions};
+use folo_vision::model::v2::FoloV2Model;
 
 use crate::engine::{self, engine_error, nn_error};
 use crate::error::{Error, Result};
@@ -48,7 +51,7 @@ impl Models {
         let creating = |e: std::io::Error| Error::internal(format!("creating {}: {e}", name(1).display()));
         let tmp = folo_nn::io::temp_path(&dir).map_err(creating)?;
         let written = match format {
-            ExportFormat::FoloF16 => file.export(&tmp, FloatDType::F16).map_err(nn_error),
+            ExportFormat::FoloF16 => export_folo_f16(&file, &tmp),
             ExportFormat::Onnx => onnx_export_with_axes(&file, spec.onnx, axes)
                 .and_then(|x| x.write_to(&tmp).map_err(engine_error)),
         }
@@ -83,24 +86,47 @@ fn export_stem(name: &str) -> String {
     stem
 }
 
+/// Exports a `.folo` file (v1 `folo-*` or v2-Iso `folo2-*`) as fused `F16` weights to `path`, preserving
+/// non-checkpoint metadata (`folo.metrics`, `folo.created`, unknown `folo.*` keys).
+pub(crate) fn export_folo_f16(file: &ModelFile, path: &Path) -> Result<()> {
+    if file.metadata().config.is_v2() {
+        let (mut model, _) = FoloV2Model::from_file(file, Purpose::Inference).map_err(nn_error)?;
+        model.fuse().map_err(nn_error)?;
+        let mut meta = file.metadata().clone();
+        meta.fused = true;
+        folo_nn::io::export_tensors(path, &meta, model.state(), FloatDType::F16).map_err(nn_error)
+    } else {
+        file.export(path, FloatDType::F16).map_err(nn_error)
+    }
+}
+
 /// The `onnx` export of `POST /api/models/{id}/export` (and `/weights?format=onnx`): `folo export --format onnx`'s
 /// defaults (f32, batch 1, the model's training imgsz, raw head outputs) unless a switch says otherwise, with the
-/// file's metadata. A model the exporter cannot map is `501 not_implemented`.
-pub fn onnx_export(
-    file: &folo_nn::io::ModelFile,
-    switches: folo_api::OnnxSwitches,
-) -> Result<onnx::OnnxExport> {
+/// file's metadata. Supports both v1 `folo-*` and v2-Iso `folo2-*`. A model the exporter cannot map is `501
+/// not_implemented`.
+pub fn onnx_export(file: &ModelFile, switches: folo_api::OnnxSwitches) -> Result<onnx::OnnxExport> {
     onnx_export_with_axes(file, switches, DynamicAxes::from_dynamic(switches.dynamic))
 }
 
 /// [`onnx_export`] with independent dynamic batch and spatial height/width axes.
 pub fn onnx_export_with_axes(
-    file: &folo_nn::io::ModelFile,
+    file: &ModelFile,
     switches: folo_api::OnnxSwitches,
     axes: DynamicAxes,
 ) -> Result<onnx::OnnxExport> {
     let mut opts = OnnxOptions::new(file.metadata().imgsz);
     (opts.decode, opts.dynamic, opts.half) = (switches.decode, axes.batch && axes.hw, switches.half);
     opts.metadata = file.metadata().for_weights().to_map();
-    onnx::export_file_with_axes(file, &opts, axes).map_err(engine_error)
+    if file.metadata().config.is_v2() {
+        let names: std::collections::BTreeMap<String, &str> =
+            file.metadata().classes.iter().enumerate().map(|(i, c)| (i.to_string(), c.as_str())).collect();
+        if let Ok(json_names) = serde_json::to_string(&names) {
+            opts.metadata.insert("names".into(), json_names);
+        }
+        let (mut model, _) = FoloV2Model::from_file(file, Purpose::Inference).map_err(nn_error)?;
+        model.fuse().map_err(nn_error)?;
+        onnx::export_v2_with_axes(&model, &opts, axes).map_err(engine_error)
+    } else {
+        onnx::export_file_with_axes(file, &opts, axes).map_err(engine_error)
+    }
 }

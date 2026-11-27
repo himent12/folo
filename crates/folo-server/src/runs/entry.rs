@@ -85,6 +85,11 @@ impl RunEntry {
         self.state.lock().unwrap().file.auto_batch
     }
 
+    /// Optional FOLO v2-Iso architecture override (`"folo2-n"`..`"folo2-x"`) requested when the run was created.
+    pub fn arch_override(&self) -> Option<String> {
+        self.state.lock().unwrap().file.arch_override.clone()
+    }
+
     pub(super) fn persist(&self, st: &RunState) {
         let bytes = serde_json::to_vec_pretty(&st.file).expect("runs serialize");
         let path = self.dir.join("run.json");

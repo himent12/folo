@@ -16,10 +16,10 @@ use folo_api::{
 };
 use folo_client::{Client, encode};
 use folo_server::store::{
-    AutoBatchOptions, DynamicAxes, FEATURE_EXPORT_DYNAMIC_AXES, FEATURE_TRAIN_AUTO_BATCH,
+    AutoBatchOptions, DynamicAxes, FEATURE_EXPORT_DYNAMIC_AXES, FEATURE_FOLO2_ARCH, FEATURE_TRAIN_AUTO_BATCH,
     FEATURE_VAL_DIAGNOSTICS, ImageData, ImageQuery, IssueQuery, LogsQuery, MetricsQuery, PredictInput,
-    PredictSource, QueueMove, Store, Subscription, ValDiagConfig, ValDiagnostics, check_auto_batch_options,
-    check_export_axes, check_val_diag_config,
+    PredictSource, QueueMove, RunOptions, Store, Subscription, ValDiagConfig, ValDiagnostics,
+    check_arch_override, check_auto_batch_options, check_export_axes, check_val_diag_config,
 };
 use http::StatusCode;
 use serde::Serialize;
@@ -270,6 +270,74 @@ impl HttpStore {
     fn delete(&self, path: &str) -> Result<(), Error> {
         self.client.delete(path).map_err(store_error)
     }
+
+    /// Reads the canonical detector architecture (`folo-*` or `folo2-*`) from the safetensors header of
+    /// `GET /api/models/{id}/weights` via bounded `Range` requests. Used only against older real servers that do
+    /// not advertise `folo2_arch` or emit `x-folo-arch`, so a weights-only fine-tune of a `folo2-*` file never
+    /// silently runs as v1.
+    fn probe_weights_arch(&self, id: &str) -> Result<String, Error> {
+        const INITIAL_BYTES: u64 = 64 * 1024;
+        const MAX_HEADER_BYTES: u64 = 4 * 1024 * 1024;
+        let path = format!("/models/{}/weights", encode(id));
+        let fail_unverified = |detail: &str| {
+            Error::new(
+                StatusCode::NOT_IMPLEMENTED,
+                "not_implemented",
+                format!(
+                    "the folo serve at {} is too old to report `x-folo-arch` for weights '{id}' ({detail})",
+                    self.base()
+                ),
+            )
+            .hint("update folo serve so it advertises `folo2_arch` and `x-folo-arch`")
+        };
+        let first = self
+            .client
+            .get_range(&path, 0..INITIAL_BYTES, None)
+            .map_err(|e| fail_unverified(&e.error.message))?;
+        let mut buf = first.bytes;
+        if buf.len() < 8 {
+            return Err(fail_unverified("weights header truncated"));
+        }
+        let header_len = u64::from_le_bytes(buf[..8].try_into().unwrap());
+        if header_len == 0 || header_len > MAX_HEADER_BYTES {
+            return Err(fail_unverified("invalid weights header length"));
+        }
+        let need = 8u64.saturating_add(header_len);
+        if (buf.len() as u64) < need {
+            let rest = self
+                .client
+                .get_range(&path, (buf.len() as u64)..need, (!first.etag.is_empty()).then_some(&first.etag))
+                .map_err(|e| fail_unverified(&e.error.message))?;
+            buf.extend_from_slice(&rest.bytes);
+            if (buf.len() as u64) < need {
+                return Err(fail_unverified("weights header truncated"));
+            }
+        }
+        let header: serde_json::Value = serde_json::from_slice(&buf[8..(need as usize)])
+            .map_err(|_| fail_unverified("unreadable weights header"))?;
+        let cfg_str = header
+            .get("__metadata__")
+            .and_then(|m| m.get("folo.config"))
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| fail_unverified("missing folo.config metadata"))?;
+        let cfg: serde_json::Value =
+            serde_json::from_str(cfg_str).map_err(|_| fail_unverified("invalid folo.config metadata"))?;
+        let family = cfg
+            .get("family")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| fail_unverified("missing family in folo.config"))?;
+        let scale = cfg
+            .get("scale")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| fail_unverified("missing scale in folo.config"))?;
+        let canonical = match family {
+            "folo2" => format!("folo2-{scale}"),
+            "folo" => format!("folo-{scale}"),
+            _ => return Err(fail_unverified("unknown model family in folo.config")),
+        };
+        check_arch_override(Some(&canonical))?;
+        Ok(canonical)
+    }
 }
 
 fn static_content_type(ct: &str) -> &'static str {
@@ -442,6 +510,22 @@ impl Store for HttpStore {
         self.get(&format!("/models/{}", encode(id)))
     }
 
+    fn model_arch(&self, id: &str) -> Result<String, Error> {
+        check_segment("model", id)?;
+        let (headers, model) =
+            self.client.get_with_headers::<Model>(&format!("/models/{}", encode(id))).map_err(store_error)?;
+        if let Some(arch) = headers.get("x-folo-arch").and_then(|v| v.to_str().ok()).filter(|v| !v.is_empty())
+        {
+            return Ok(arch.to_string());
+        }
+        if self.has_feature(FEATURE_FOLO2_ARCH)? || self.is_mock() {
+            return Ok(model.arch.as_str().to_string());
+        }
+        // Older real servers list `folo2-*` weights under their v1 scale and omit `x-folo-arch`. Probe the
+        // safetensors header via a bounded Range read so a weights-only fine-tune never silently runs as v1.
+        self.probe_weights_arch(id)
+    }
+
     fn model_eval(&self, id: &str) -> Result<ModelEval, Error> {
         check_segment("model", id)?;
         self.get(&format!("/models/{}/eval", encode(id)))
@@ -518,11 +602,25 @@ impl Store for HttpStore {
         config: TrainConfig,
         auto_batch: AutoBatchOptions,
     ) -> Result<Run, Error> {
-        check_auto_batch_options(&auto_batch)?;
-        if !auto_batch.enabled {
+        self.create_run_with_options(config, RunOptions { auto_batch, arch: None })
+    }
+
+    fn create_run_with_options(
+        &self,
+        mut config: TrainConfig,
+        mut options: RunOptions,
+    ) -> Result<Run, Error> {
+        check_auto_batch_options(&options.auto_batch)?;
+        if let Some(parsed) = check_arch_override(options.arch.as_deref())? {
+            config.arch = parsed;
+            if !options.arch.as_deref().is_some_and(|a| a.starts_with("folo2-")) {
+                options.arch = None;
+            }
+        }
+        if options.is_default() {
             return self.create_run(config);
         }
-        if !self.has_feature(FEATURE_TRAIN_AUTO_BATCH)? {
+        if options.auto_batch.enabled && !self.has_feature(FEATURE_TRAIN_AUTO_BATCH)? {
             return Err(Error::new(
                 StatusCode::NOT_IMPLEMENTED,
                 "not_implemented",
@@ -533,10 +631,26 @@ impl Store for HttpStore {
             )
             .hint("update folo serve, or pass an explicit integer `batch`"));
         }
+        if options.arch.is_some() && !self.has_feature(FEATURE_FOLO2_ARCH)? {
+            return Err(Error::new(
+                StatusCode::NOT_IMPLEMENTED,
+                "not_implemented",
+                format!(
+                    "the folo serve at {} is too old for FOLO v2-Iso architectures (`folo2-*`)",
+                    self.base()
+                ),
+            )
+            .hint("update folo serve, or use a `folo-n..folo-x` architecture"));
+        }
         let mut body = serde_json::to_value(config).map_err(|e| Error::internal(e.to_string()))?;
-        body["auto_batch"] = serde_json::json!(true);
-        if let Some(target) = auto_batch.target_utilization {
-            body["auto_batch_target"] = serde_json::json!(target);
+        if let Some(arch) = options.arch {
+            body["arch"] = serde_json::json!(arch);
+        }
+        if options.auto_batch.enabled {
+            body["auto_batch"] = serde_json::json!(true);
+            if let Some(target) = options.auto_batch.target_utilization {
+                body["auto_batch_target"] = serde_json::json!(target);
+            }
         }
         self.post("/runs", &body)
     }
@@ -562,6 +676,22 @@ impl Store for HttpStore {
                 ),
             )
             .hint("update folo serve, or omit auto-batch fields when resuming"));
+        }
+        if let Some(raw_arch) = fields.get("arch").filter(|v| !v.is_null())
+            && let Some(s) = raw_arch.as_str()
+        {
+            check_arch_override(Some(s))?;
+            if s.starts_with("folo2-") && !self.has_feature(FEATURE_FOLO2_ARCH)? {
+                return Err(Error::new(
+                    StatusCode::NOT_IMPLEMENTED,
+                    "not_implemented",
+                    format!(
+                        "the folo serve at {} is too old for FOLO v2-Iso architectures (`folo2-*`)",
+                        self.base()
+                    ),
+                )
+                .hint("update folo serve, or omit `arch` when resuming"));
+            }
         }
         let mut body = fields.clone();
         // Strip explicit `null` auto-batch keys so older servers without `train_auto_batch` do not reject them
@@ -743,6 +873,56 @@ impl Store for HttpStore {
 
     fn estimate_run(&self, config: TrainConfig) -> Result<RunEstimate, Error> {
         self.post("/runs/estimate", &config)
+    }
+
+    fn estimate_run_with_options(
+        &self,
+        mut config: TrainConfig,
+        mut options: RunOptions,
+    ) -> Result<RunEstimate, Error> {
+        check_auto_batch_options(&options.auto_batch)?;
+        if let Some(parsed) = check_arch_override(options.arch.as_deref())? {
+            config.arch = parsed;
+            if !options.arch.as_deref().is_some_and(|a| a.starts_with("folo2-")) {
+                options.arch = None;
+            }
+        }
+        if options.is_default() {
+            return self.estimate_run(config);
+        }
+        if options.auto_batch.enabled && !self.has_feature(FEATURE_TRAIN_AUTO_BATCH)? {
+            return Err(Error::new(
+                StatusCode::NOT_IMPLEMENTED,
+                "not_implemented",
+                format!(
+                    "the folo serve at {} is too old for GPU VRAM auto-batch (`batch: \"auto\"` / `auto_batch`)",
+                    self.base()
+                ),
+            )
+            .hint("update folo serve, or pass an explicit integer `batch`"));
+        }
+        if options.arch.is_some() && !self.has_feature(FEATURE_FOLO2_ARCH)? {
+            return Err(Error::new(
+                StatusCode::NOT_IMPLEMENTED,
+                "not_implemented",
+                format!(
+                    "the folo serve at {} is too old for FOLO v2-Iso architectures (`folo2-*`)",
+                    self.base()
+                ),
+            )
+            .hint("update folo serve, or use a `folo-n..folo-x` architecture"));
+        }
+        let mut body = serde_json::to_value(config).map_err(|e| Error::internal(e.to_string()))?;
+        if let Some(arch) = options.arch {
+            body["arch"] = serde_json::json!(arch);
+        }
+        if options.auto_batch.enabled {
+            body["auto_batch"] = serde_json::json!(true);
+            if let Some(target) = options.auto_batch.target_utilization {
+                body["auto_batch_target"] = serde_json::json!(target);
+            }
+        }
+        self.post("/runs/estimate", &body)
     }
 
     fn cloud_providers(&self) -> Result<Vec<CloudProvider>, Error> {

@@ -281,6 +281,39 @@ pub fn with_distill(mut cmd: CliCommand, distill: Option<folo_vision::DistillCon
     cmd
 }
 
+/// Architecture recorded in a run's `config.json` / checkpoint (`arch`), `None` when unrecorded.
+pub fn recorded_arch(run_dir: &std::path::Path) -> Option<String> {
+    recorded_train(run_dir)?.get("arch")?.as_str().map(str::to_string)
+}
+
+/// `cmd` with `--model <arch>` when `arch` names a `folo2-*` architecture (and the command has no `--weights`,
+/// which excludes `--model`). Replaces any existing `--model` value emitted from `TrainConfig.arch`.
+pub fn with_arch(mut cmd: CliCommand, arch: Option<&str>) -> CliCommand {
+    let Some(arch) = arch.filter(|a| a.starts_with("folo2-")) else { return cmd };
+    if starts_from_weights(&cmd) {
+        return cmd;
+    }
+    if let Some(pos) = cmd.argv.iter().position(|a| a == "--model") {
+        if pos + 1 < cmd.argv.len() {
+            cmd.argv[pos + 1] = arch.to_string();
+        }
+    } else if let Some(pos) = cmd.argv.iter().position(|a| a.starts_with("--model=")) {
+        cmd.argv[pos] = format!("--model={arch}");
+    } else {
+        // Insert right after `--format <v>` if present, else after `--data <v>` (matching `train_command`).
+        let insert_at = cmd
+            .argv
+            .iter()
+            .position(|a| a == "--format")
+            .or_else(|| cmd.argv.iter().position(|a| a == "--data"))
+            .map_or(cmd.argv.len(), |i| (i + 2).min(cmd.argv.len()));
+        cmd.argv.insert(insert_at, arch.to_string());
+        cmd.argv.insert(insert_at, "--model".to_string());
+    }
+    cmd.cli = shell_join(&cmd.argv);
+    cmd
+}
+
 /// Auto-batch sizing recorded in a run's `config.json` / checkpoint (`auto_batch`, `auto_batch_target`),
 /// `None` when disabled or unrecorded.
 pub fn recorded_auto_batch(run_dir: &std::path::Path) -> Option<crate::store::AutoBatchOptions> {

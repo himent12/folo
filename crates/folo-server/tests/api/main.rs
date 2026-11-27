@@ -2,6 +2,7 @@
 //! the real store, static files, CORS and compression.
 
 mod datasets;
+mod folo2;
 mod harness;
 mod http;
 mod metrics;

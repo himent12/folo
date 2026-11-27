@@ -40,18 +40,29 @@ impl RealStore {
         config: TrainConfig,
         checkpoint: Option<CheckpointSnapshot<'_>>,
     ) -> Result<Run> {
-        self.start_run_with_auto_batch(config, checkpoint, crate::store::AutoBatchOptions::default())
+        self.start_run_with_options(config, checkpoint, crate::store::RunOptions::default())
     }
 
     /// Like [`RealStore::start_run`], with optional GPU VRAM-budget auto-batch sizing (`auto_batch`).
     pub(super) fn start_run_with_auto_batch(
         &self,
-        mut config: TrainConfig,
+        config: TrainConfig,
         checkpoint: Option<CheckpointSnapshot<'_>>,
         auto_batch: crate::store::AutoBatchOptions,
     ) -> Result<Run> {
-        crate::store::check_auto_batch_options(&auto_batch)?;
-        if auto_batch.enabled && config.compute.is_some() {
+        self.start_run_with_options(config, checkpoint, crate::store::RunOptions { auto_batch, arch: None })
+    }
+
+    /// Like [`RealStore::start_run`], with optional auto-batch and `folo2-*` architecture overrides.
+    pub(super) fn start_run_with_options(
+        &self,
+        mut config: TrainConfig,
+        checkpoint: Option<CheckpointSnapshot<'_>>,
+        mut options: crate::store::RunOptions,
+    ) -> Result<Run> {
+        crate::store::check_auto_batch_options(&options.auto_batch)?;
+        crate::store::check_arch_override(options.arch.as_deref())?;
+        if options.auto_batch.enabled && config.compute.is_some() {
             return Err(Error::new(
                 StatusCode::BAD_REQUEST,
                 "invalid_config",
@@ -66,11 +77,14 @@ impl RealStore {
         let e = self.entry(&config.dataset_id)?;
         let idx = self.fresh_index(&e)?;
         check_trainable(&idx)?;
-        let (weights, target) = self.run_settings(&mut config)?;
+        let (weights, target) = self.run_settings(&mut config, &mut options.arch)?;
         let weights = weights.map(|m| m.path);
         let ds = self.dataset_ref(&e);
         if config.name.trim().is_empty() {
-            config.name = crate::store::default_run_name(&ds.name, config.arch);
+            config.name = crate::store::default_run_name_for_arch(
+                &ds.name,
+                crate::store::effective_arch(config.arch, options.arch.as_deref()),
+            );
         }
         let val_offset = if idx.splits.val == 0 { 0 } else { idx.splits.train };
         match target {
@@ -83,37 +97,63 @@ impl RealStore {
                     self.runs.create_cloud(config, ds, weights, checkpoint, val_offset, device, cloud)?;
                 self.start_cloud(entry, connected, Some(fingerprint))
             }
-            RunTarget::Local(device) => self.runs.create_with_auto_batch(
+            RunTarget::Local(device) => self.runs.create_with_options(
                 config,
                 ds,
                 weights,
                 checkpoint,
                 val_offset,
                 engine::describe(device),
-                auto_batch,
+                options,
             ),
         }
     }
 
     /// The checks of `POST /api/runs` that do not need the dataset: the starting weights (a fine-tune takes their
-    /// architecture, as `folo train --weights` does, so `config.arch` changes), the settings (on the CPU, so a
-    /// rejected config never initialises a GPU), and where the run would train: a cloud run's target, else the
-    /// device, with `amp` checked as `folo train --amp` checks it (the same answer `/api/system`'s
+    /// architecture, as `folo train --weights` does, so `config.arch` and `arch_override` change), the settings
+    /// (on the CPU, so a rejected config never initialises a GPU), and where the run would train: a cloud run's
+    /// target, else the device, with `amp` checked as `folo train --amp` checks it (the same answer `/api/system`'s
     /// `capabilities.amp` gives). Returns the weights file and the target.
-    pub(super) fn run_settings(&self, config: &mut TrainConfig) -> Result<(Option<ModelRef>, RunTarget)> {
+    pub(super) fn run_settings(
+        &self,
+        config: &mut TrainConfig,
+        arch_override: &mut Option<String>,
+    ) -> Result<(Option<ModelRef>, RunTarget)> {
         let weights = match &config.weights {
             Some(w) => {
                 let m = self.model(w)?;
                 config.arch = m.model.arch;
+                *arch_override = m.arch_name.starts_with("folo2-").then(|| m.arch_name.clone());
                 Some(m)
             }
-            None => None,
+            None => {
+                if let Some(raw) = arch_override.as_deref() {
+                    if let Some(parsed) = crate::store::check_arch_override(Some(raw))? {
+                        config.arch = parsed;
+                    }
+                    if !raw.starts_with("folo2-") {
+                        *arch_override = None;
+                    }
+                }
+                None
+            }
         };
         let mut check = folo_vision::TrainConfig::from_api(config).map_err(engine_error)?;
+        if let Some(arch) = arch_override.as_deref() {
+            check.arch = arch.to_string();
+        }
         check.device = "cpu".into();
         check.validate().map_err(engine_error)?;
         // A cloud run's device and `amp` are the worker's to check (docs/CLOUD.md, worker check).
         if let Some(compute) = config.compute.clone() {
+            if arch_override.is_some() {
+                return Err(Error::new(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_config",
+                    "folo2 architectures are not supported for cloud runs yet (train locally, or use folo-n..folo-x for cloud compute)",
+                )
+                .hint("omit `compute` to train folo2 locally, or select a folo-n..folo-x architecture for cloud runs"));
+            }
             cloud::check_device(config)?;
             let (connected, offer) = self.cloud.target(&compute)?;
             return Ok((weights, RunTarget::Cloud(Box::new((compute, connected, offer)))));

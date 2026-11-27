@@ -130,6 +130,17 @@ fn close_objects(s: &mut JsonObject) {
 /// given (a resume may leave every other field out). `name` says the server's limit (`maxLength`).
 pub(super) fn train_input() -> JsonObject {
     let mut s = input::<TrainArgs>();
+    if let Some(Value::Object(arch_def)) = s.get_mut("$defs").and_then(|d| d.get_mut("Arch")) {
+        arch_def.remove("oneOf");
+        arch_def.insert("type".into(), json!("string"));
+        arch_def.insert(
+            "enum".into(),
+            json!([
+                "folo-n", "folo-s", "folo-m", "folo-l", "folo-x", "folo2-n", "folo2-s", "folo2-m", "folo2-l",
+                "folo2-x"
+            ]),
+        );
+    }
     if let Some(Value::Object(name)) = s.get_mut("properties").and_then(|p| p.get_mut("name")) {
         name.insert("maxLength".into(), json!(folo_server::store::MAX_RUN_NAME_CHARS));
     }

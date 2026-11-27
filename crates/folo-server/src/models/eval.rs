@@ -9,8 +9,8 @@ use folo_api::{ModelEval, PrCurve, SplitFallback, ValReport, ValTiming};
 use folo_core::Device;
 use folo_data::{Dataset as _, Split};
 use folo_vision::eval::{ImageDiagnostics, diagnose_image, worst_images};
-use folo_vision::val::{ValConfig, val_metrics, validate};
-use folo_vision::{NmsConfig, Truth, Xyxy};
+use folo_vision::val::{ValConfig, val_metrics, validate_detector};
+use folo_vision::{Detector, NmsConfig, Truth, Xyxy};
 use serde::{Deserialize, Serialize};
 
 use crate::engine::{self, FileKey, engine_error};
@@ -188,7 +188,7 @@ impl Models {
 }
 
 /// Opens `dataset` for validating `model`, whose classes it must have (in the same order).
-fn open_for(model: &folo_vision::FoloModel, dataset: &DatasetRef) -> Result<folo_data::LoadedDataset> {
+fn open_for(model: &Detector, dataset: &DatasetRef) -> Result<folo_data::LoadedDataset> {
     let opts = folo_data::OpenOptions { format: data_format(dataset.format), verify_images: true };
     let ds = folo_data::open_with(Path::new(&dataset.path), &opts)
         .map_err(|e| crate::index::data_error(e, &dataset.path))?;
@@ -221,7 +221,7 @@ fn evaluate(path: &Path, dataset: &DatasetRef, device: Device) -> Result<ModelEv
         ));
     }
     let cfg = ValConfig { samples: 0, ..ValConfig::new(model.imgsz(), EVAL_BATCH) };
-    let r = validate(&model, Arc::new(part.clone()), &cfg).map_err(engine_error)?;
+    let r = validate_detector(&model, Arc::new(part.clone()), &cfg).map_err(engine_error)?;
     let used = if split == Split::Val { folo_api::Split::Val } else { folo_api::Split::Train };
     let fallback = (used != folo_api::Split::Val).then(|| {
         let f = SplitFallback::empty_split(folo_api::Split::Val, used, &dataset.name, part.len() as u64);
@@ -295,7 +295,7 @@ pub fn val_with_diagnostics(
         nms: NmsConfig { conf, iou, ..NmsConfig::val() },
         ..ValConfig::new(imgsz, EVAL_BATCH)
     };
-    let r = validate(&model, Arc::new(part.clone()), &cfg).map_err(engine_error)?;
+    let r = validate_detector(&model, Arc::new(part.clone()), &cfg).map_err(engine_error)?;
     let diagnostics = diag.map(|d| compute_diagnostics(part, &ds.root, &r.detections, d));
     let images = r.report.num_images;
     let total_s = t0.elapsed().as_secs_f64();

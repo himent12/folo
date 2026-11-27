@@ -79,16 +79,25 @@ impl Store for RealStore {
     }
 
     fn estimate_run(&self, config: TrainConfig) -> Result<RunEstimate> {
-        self.estimate_run_with_auto_batch(config, crate::store::AutoBatchOptions::default())
+        self.estimate_run_with_options(config, crate::store::RunOptions::default())
     }
 
     fn estimate_run_with_auto_batch(
         &self,
-        mut config: TrainConfig,
+        config: TrainConfig,
         auto_batch: crate::store::AutoBatchOptions,
     ) -> Result<RunEstimate> {
-        crate::store::check_auto_batch_options(&auto_batch)?;
-        if auto_batch.enabled && config.compute.is_some() {
+        self.estimate_run_with_options(config, crate::store::RunOptions { auto_batch, arch: None })
+    }
+
+    fn estimate_run_with_options(
+        &self,
+        mut config: TrainConfig,
+        mut options: crate::store::RunOptions,
+    ) -> Result<RunEstimate> {
+        crate::store::check_auto_batch_options(&options.auto_batch)?;
+        crate::store::check_arch_override(options.arch.as_deref())?;
+        if options.auto_batch.enabled && config.compute.is_some() {
             return Err(Error::new(
                 StatusCode::BAD_REQUEST,
                 "invalid_config",
@@ -101,7 +110,7 @@ impl Store for RealStore {
         // POST /api/runs' own checks, except the name's length: Studio's New run asks with the name as it is being
         // typed, says a long one at its field, and keeps showing the estimate meanwhile.
         check_trainable(&idx)?;
-        let (weights, target) = self.run_settings(&mut config)?;
+        let (weights, target) = self.run_settings(&mut config, &mut options.arch)?;
         let check = folo_vision::TrainConfig::from_api(&config).map_err(engine_error)?;
         // A cloud run's time is the reference's: nothing measured here says how fast the offer's GPU is.
         let (device, cloud) = match target {
@@ -118,7 +127,12 @@ impl Store for RealStore {
             e.reg().format,
             weights.as_ref().map(cli_weights).as_deref(),
         );
-        let cli = crate::cli::with_auto_batch(cli, &config, auto_batch.enabled.then_some(auto_batch));
+        let cli = crate::cli::with_arch(cli, options.arch.as_deref());
+        let cli = crate::cli::with_auto_batch(
+            cli,
+            &config,
+            options.auto_batch.enabled.then_some(options.auto_batch),
+        );
         let mut estimate = self.throughput.estimate(&EstimateInput {
             device,
             arch: config.arch,
@@ -150,6 +164,8 @@ impl Store for RealStore {
         };
         let ds = e.dataset();
         let cmd = crate::cli::train_command(&config, &ds.path, ds.format, weights.as_deref());
+        let arch = crate::cli::recorded_arch(e.dir()).or_else(|| e.arch_override());
+        let cmd = crate::cli::with_arch(cmd, arch.as_deref());
         // An `auto` run repeats with the rule it trained with (made before rule 3: SGD, not MuSGD, for long runs),
         // and every run with its warmup floor (made before the key: 100 iterations).
         let rule = crate::cli::recorded_auto_rule(e.dir());
@@ -345,6 +361,15 @@ impl Store for RealStore {
         Ok(self.model(id)?.model)
     }
 
+    fn model_arch(&self, id: &str) -> Result<String> {
+        Ok(self.model(id)?.arch_name)
+    }
+
+    fn get_model_with_arch(&self, id: &str) -> Result<(Model, String)> {
+        let m = self.model(id)?;
+        Ok((m.model, m.arch_name))
+    }
+
     fn model_eval(&self, id: &str) -> Result<ModelEval> {
         let _gpu = self.idle.using();
         let m = self.model(id)?;
@@ -397,6 +422,10 @@ impl Store for RealStore {
         auto_batch: crate::store::AutoBatchOptions,
     ) -> Result<Run> {
         self.start_run_with_auto_batch(config, None, auto_batch)
+    }
+
+    fn create_run_with_options(&self, config: TrainConfig, options: crate::store::RunOptions) -> Result<Run> {
+        self.start_run_with_options(config, None, options)
     }
 
     fn continue_run(&self, checkpoint: &str, config: TrainConfig) -> Result<Run> {
@@ -491,7 +520,13 @@ impl Store for RealStore {
                 target_utilization: Some(c.auto_batch_target),
             })
             .unwrap_or_default();
-        self.start_run_with_auto_batch(config, Some(snapshot), ckpt_auto)
+        let ckpt_meta_cfg = &file.metadata().config;
+        let ckpt_arch = ckpt_meta_cfg.is_v2().then(|| format!("folo2-{}", ckpt_meta_cfg.scale));
+        self.start_run_with_options(
+            config,
+            Some(snapshot),
+            crate::store::RunOptions { auto_batch: ckpt_auto, arch: ckpt_arch },
+        )
     }
 
     fn resume_run(&self, id: &str, fields: &serde_json::Map<String, serde_json::Value>) -> Result<Run> {
@@ -504,6 +539,13 @@ impl Store for RealStore {
                 StatusCode::BAD_REQUEST,
                 "invalid_config",
                 "auto_batch is not supported for cloud runs yet (resume this run locally, or start a new cloud run with an explicit integer `batch`)",
+            ));
+        }
+        if entry.arch_override().is_some() {
+            return Err(Error::new(
+                StatusCode::BAD_REQUEST,
+                "invalid_config",
+                "folo2 architectures are not supported for cloud runs yet (resume this run locally)",
             ));
         }
         cloud::check_device(&wanted)?;
@@ -618,7 +660,7 @@ impl Store for RealStore {
         let warm = guard.warm;
         let p = &mut guard.predictor;
         let cfg = PredictConfig {
-            imgsz: p.model().imgsz(),
+            imgsz: p.imgsz(),
             conf: input.conf,
             iou: input.iou,
             max_det: input.max_det as usize,
@@ -628,11 +670,7 @@ impl Store for RealStore {
             ..PredictConfig::default()
         };
         p.set_config(cfg).map_err(engine_error)?;
-        crate::store::check_predict_workload(
-            &options,
-            p.model().imgsz(),
-            Some((decoded.width, decoded.height)),
-        )?;
+        crate::store::check_predict_workload(&options, p.imgsz(), Some((decoded.width, decoded.height)))?;
         let mut pred = p.predict_with_options(&decoded, &options).map_err(engine_error)?;
         // A model's first successful prediction includes warm-up; rejected requests never flip `warm`.
         guard.warm = true;
@@ -642,7 +680,13 @@ impl Store for RealStore {
         timing.preprocess_ms += decode_ms;
         timing.total_ms += decode_ms;
         let single_pass = options.tile.is_none() && options.tta.is_none();
-        if single_pass && warm && idle && !self.runs.busy() && self.runs.activity() == activity {
+        if single_pass
+            && warm
+            && idle
+            && !self.runs.busy()
+            && self.runs.activity() == activity
+            && !m.arch_name.starts_with("folo2-")
+        {
             let precision = match p.precision() {
                 folo_vision::Precision::F16 => InferPrecision::F16,
                 _ => InferPrecision::F32,
@@ -651,7 +695,7 @@ impl Store for RealStore {
                 key: InferKey {
                     device: engine::device_id(p.device()),
                     arch: m.model.arch,
-                    imgsz: p.model().imgsz(),
+                    imgsz: p.imgsz(),
                     precision,
                     tensor_cores: engine::tensor_cores_on(p.device()),
                 },
@@ -711,7 +755,7 @@ impl Store for RealStore {
     }
 
     fn check_run(&self, config: &TrainConfig) -> Result<()> {
-        self.run_settings(&mut config.clone()).map(|_| ())
+        self.run_settings(&mut config.clone(), &mut None).map(|_| ())
     }
 
     fn dataset_image_path(&self, id: &str, image_id: &str) -> Result<PathBuf> {

@@ -112,6 +112,20 @@ pub fn quantize(args: QuantizeArgs, out: Out) -> Result<(), CliError> {
     }
     let path = crate::weights::resolve(&args.model)?;
     let file = ModelFile::open(&path).map_err(|e| crate::infer::weights_error("quantize", &path, e))?;
+    if file.metadata().config.is_v2() {
+        return Err(CliError::new(
+            ExitCode::NotImplemented,
+            "not_supported",
+            format!(
+                "{} ({}) does not support int8 quantization yet",
+                folo_api::json::path(&path),
+                file.metadata().arch
+            ),
+        )
+        .hint(
+            "int8 calibration currently supports v1 `folo-*` models; use f32 or f16 inference for `folo2-*`",
+        ));
+    }
     let model = open_cpu(&file)?;
     if !selective.explicit_convs.is_empty() {
         validate_explicit_convs(&model, &selective.explicit_convs)?;

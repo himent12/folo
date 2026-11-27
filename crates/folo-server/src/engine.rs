@@ -9,10 +9,10 @@ use std::time::SystemTime;
 use axum::http::StatusCode;
 use folo_api::{AmpSupport, Capabilities, GpuBackend, GpuInfo, TensorCoreSupport};
 use folo_core::Device;
-use folo_nn::io::{ModelFile, Purpose};
+use folo_nn::io::ModelFile;
 use folo_vision::predict::f16_unavailable;
-use folo_vision::train::{can_place, place_model, resolve_device};
-use folo_vision::{FoloModel, Precision, PredictConfig, Predictor};
+use folo_vision::train::{can_place, resolve_device};
+use folo_vision::{Detector, Precision, PredictConfig, Predictor};
 
 use crate::error::{Error, Result};
 use crate::util::Flight;
@@ -287,20 +287,15 @@ pub fn gpu_pool() -> Option<folo_api::GpuPool> {
     })
 }
 
-/// Opens `.folo` weights for inference (EMA when present, fused, eval mode) on `device` at `precision`
-/// ([`effective_precision`]: f16 only where the device computes in it).
-pub fn open_model(path: &Path, device: Device, precision: Precision) -> Result<FoloModel> {
+/// Opens `.folo` weights (`folo-*` or `folo2-*`) for inference (EMA when present, fused, eval mode) on `device`
+/// at `precision` ([`effective_precision`]: f16 only where the device computes in it).
+pub fn open_model(path: &Path, device: Device, precision: Precision) -> Result<Detector> {
     let file = read_model_file(path)?;
     // The forward kernels an earlier server used with this model compile on every core while it loads.
     let dtype = effective_precision(device, precision).dtype();
     folo_vision::precompile::precompile_inference(&file, device, dtype, "serve", "");
-    if precision == Precision::F32 {
-        let mut model = FoloModel::from_file(&file, Purpose::Inference).map_err(nn_error)?.0;
-        model.fuse().map_err(nn_error)?;
-        return place_model(model, device).map_err(engine_error);
-    }
     can_place(device).map_err(engine_error)?;
-    FoloModel::from_file_for_inference(&file, device, dtype).map_err(nn_error)
+    Detector::from_file_for_inference(&file, device, dtype).map_err(nn_error)
 }
 
 /// The precision a model runs in on `device` when `wanted` is asked for: f16 falls back to f32 (with a warning
@@ -370,7 +365,7 @@ impl Predictors {
         self.get_or_load(key, device, precision, || {
             let model = open_model(path, device, precision)?;
             let cfg = PredictConfig { imgsz: model.imgsz(), ..PredictConfig::default() };
-            let predictor = Predictor::new(model, cfg).map_err(engine_error)?;
+            let predictor = Predictor::from_detector(model, cfg).map_err(engine_error)?;
             Ok(Arc::new(Mutex::new(Loaded { predictor, warm: false })))
         })
     }
@@ -485,6 +480,8 @@ impl Predictors {
 mod tests {
     use std::sync::Barrier;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    use folo_vision::FoloModel;
 
     use super::*;
 

@@ -5,14 +5,12 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock, Weak};
 
-use folo_nn::io::FloatDType;
-
-use crate::engine::{self, FileKey, engine_error, nn_error};
+use crate::engine::{self, FileKey, engine_error};
 use crate::error::{Error, Result};
 use crate::store::{WeightsFormat, weights_io};
 use crate::util::fnv1a;
 
-use super::export::onnx_export;
+use super::export::{export_folo_f16, onnx_export};
 use super::{ModelRef, Models};
 
 /// Per-model and per-`(model, variant)` locks for `cache/weights/`:
@@ -124,7 +122,7 @@ impl Models {
                 WeightsFormat::Onnx(switches) => {
                     onnx_export(&file, switches)?.write_to(&out).map_err(engine_error)?
                 }
-                _ => file.export(&out, FloatDType::F16).map_err(nn_error)?,
+                _ => export_folo_f16(&file, &out)?,
             }
             // Opened before releasing the locks; if a concurrent export for a newer file version pruned this
             // stale output between rename and open, retry against the newer version.

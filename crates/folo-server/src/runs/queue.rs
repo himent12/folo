@@ -92,9 +92,10 @@ impl Runs {
 
     /// Registers a new run (status `queued`) and queues it. `config` is already validated, its name filled in. A
     /// `checkpoint` (a validated snapshot of a full training checkpoint) is copied to the run's `weights/last.folo`
-    /// first, so the worker continues that exact snapshot as it resumes a run.
+    /// first, so the worker continues that exact snapshot as it resumes a run. Carries optional auto-batch and
+    /// `folo2-*` architecture overrides.
     #[allow(clippy::too_many_arguments)]
-    pub fn create_with_auto_batch(
+    pub fn create_with_options(
         self: &Arc<Self>,
         config: TrainConfig,
         dataset: DatasetRef,
@@ -102,18 +103,17 @@ impl Runs {
         checkpoint: Option<CheckpointSnapshot<'_>>,
         val_offset: u64,
         device: String,
-        auto_batch: crate::store::AutoBatchOptions,
+        options: crate::store::RunOptions,
     ) -> Result<Run> {
-        let entry = self.register_with_auto_batch(
-            config, dataset, weights, checkpoint, val_offset, device, None, auto_batch,
-        )?;
+        let entry = self
+            .register_with_options(config, dataset, weights, checkpoint, val_offset, device, None, options)?;
         self.enqueue(&entry, 0)?;
         let run = entry.run();
         Ok(Run { queue_position: self.position(&run.id), ..run })
     }
 
-    /// Registers a new cloud run (status `queued`, with `cloud`) like [`Runs::create`], but outside the queue: it
-    /// is claimed at once, for [`crate::cloud`] to execute.
+    /// Registers a new cloud run (status `queued`, with `cloud`) like [`Runs::create_with_options`], but outside
+    /// the queue: it is claimed at once, for [`crate::cloud`] to execute.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn create_cloud(
         &self,
@@ -141,7 +141,7 @@ impl Runs {
         device: String,
         cloud: Option<RunCloud>,
     ) -> Result<Arc<RunEntry>> {
-        self.register_with_auto_batch(
+        self.register_with_options(
             config,
             dataset,
             weights,
@@ -149,12 +149,12 @@ impl Runs {
             val_offset,
             device,
             cloud,
-            crate::store::AutoBatchOptions::default(),
+            crate::store::RunOptions::default(),
         )
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn register_with_auto_batch(
+    pub(super) fn register_with_options(
         &self,
         config: TrainConfig,
         dataset: DatasetRef,
@@ -163,7 +163,7 @@ impl Runs {
         val_offset: u64,
         device: String,
         cloud: Option<RunCloud>,
-        auto_batch: crate::store::AutoBatchOptions,
+        options: crate::store::RunOptions,
     ) -> Result<Arc<RunEntry>> {
         self.check_open()?;
         let mut list = self.list.write().unwrap();
@@ -219,7 +219,8 @@ impl Runs {
             last_metrics: None,
             resumed_at: None,
             alive_at: None,
-            auto_batch,
+            auto_batch: options.auto_batch,
+            arch_override: options.arch,
         };
         let entry = Arc::new(RunEntry::new(id, dir, file));
         {

@@ -4,7 +4,8 @@ use std::collections::{BTreeMap, HashSet};
 
 use folo_api::{LogLevel, LogLine, QueueRequest, Run, RunMetrics};
 use folo_server::store::{
-    AutoBatchOptions, LogsQuery, MAX_RUN_NAME_CHARS, MetricsQuery, QueueMove, check_auto_batch_options,
+    AutoBatchOptions, LogsQuery, MAX_RUN_NAME_CHARS, MetricsQuery, QueueMove, RunOptions,
+    check_auto_batch_options, parse_arch_override,
 };
 use rmcp::model::JsonObject;
 use serde_json::Value;
@@ -26,7 +27,7 @@ fn run_summary(mut r: Run) -> Run {
 }
 
 impl Inner {
-    pub(super) async fn train(&self, mut args: JsonObject) -> Result<Output, Error> {
+    pub(crate) async fn train(&self, mut args: JsonObject) -> Result<Output, Error> {
         // Resuming takes the arguments as given: the other fields must match the run's config or be omitted, so
         // they are not filled with TrainConfig's defaults (and `dataset_id` may be left out).
         if let Some(id) = args.get("resume_run_id").filter(|v| !v.is_null()) {
@@ -57,8 +58,22 @@ impl Inner {
             }
         }
         // An explicit `arch` next to `weights` (a fine-tune takes the weights' architecture, as `folo train --weights`
-        // does) must name that architecture.
+        // does) must name that architecture. Also normalize `folo2-*` arch strings before deserializing `TrainConfig`.
         let explicit_arch = args.get("arch").and_then(|v| v.as_str()).map(str::to_string);
+        let mut arch_override = None;
+        if let Some(raw) = &explicit_arch {
+            let (api_arch, ov) = parse_arch_override(raw).map_err(|e| {
+                Error::new(
+                    http::StatusCode::BAD_REQUEST,
+                    "invalid_config",
+                    format!("invalid train config: {}", e.body.message),
+                )
+            })?;
+            if ov.is_some() {
+                args.insert("arch".into(), Value::String(api_arch.as_str().to_string()));
+                arch_override = ov;
+            }
+        }
         // A TrainConfig value the trainer cannot use (`arch: "folo-q"`, a negative `epochs`) is `invalid_config`,
         // as in the CLI and `POST /api/runs`' range checks; a missing `dataset_id` stays `invalid_arguments`.
         let a: TrainArgs = parse_args(args).map_err(|mut e| {
@@ -78,24 +93,31 @@ impl Inner {
         // The server's limit (`POST /api/runs`), also in the inputSchema's `maxLength`.
         check_name_at("name", &a.config.name, MAX_RUN_NAME_CHARS)?;
         self.ensure_dataset(&a.config.dataset_id).await?;
-        if let (Some(arch), Some(w)) = (explicit_arch, a.config.weights.clone()) {
-            let model = self.blocking(move |s| s.get_model(&w)).await?;
-            if model.arch.as_str() != arch {
+        let mut summary_arch = arch_override.clone();
+        if let Some(w) = a.config.weights.clone() {
+            let w_id = w.clone();
+            let model_arch = self.blocking(move |s| s.model_arch(&w_id)).await?;
+            if let Some(arch) = explicit_arch
+                && model_arch != arch
+            {
                 return Err(Error::new(
                     http::StatusCode::BAD_REQUEST,
                     "invalid_config",
                     format!(
-                        "arch is {arch}, but the weights {} are {}: a fine-tune takes the weights' architecture",
-                        model.id,
-                        model.arch.as_str()
+                        "arch is {arch}, but the weights {w} are {model_arch}: a fine-tune takes the weights' architecture",
                     ),
                 )
                 .hint("leave `arch` out when `weights` is set (or set it to the weights' arch)"));
             }
+            if model_arch.starts_with("folo2-") {
+                summary_arch = Some(model_arch.clone());
+                arch_override = Some(model_arch);
+            }
         }
         let auto_note = if auto_batch.enabled { " (auto-batch)" } else { "" };
+        let options = RunOptions { auto_batch, arch: arch_override };
         let run = self
-            .blocking(move |s| s.create_run_with_auto_batch(a.config, auto_batch))
+            .blocking(move |s| s.create_run_with_options(a.config, options))
             .await
             .map_err(|e| self.amp_hint(e, false))?;
         // Embedded runs end with this process, so they are stopped on disconnect; proxied runs belong to the
@@ -103,14 +125,10 @@ impl Inner {
         if self.proxy.is_none() && run.config.compute.is_none() {
             self.created_runs.lock().unwrap().push(run.id.clone());
         }
+        let arch_label = summary_arch.as_deref().unwrap_or_else(|| run.config.arch.as_str());
         let summary = format!(
             "started {} ({}): {} on {}, {} epochs{auto_note}; follow it with run_status or folo://runs/{}",
-            run.id,
-            run.name,
-            run.config.arch.as_str(),
-            run.config.dataset_id,
-            run.epochs,
-            run.id
+            run.id, run.name, arch_label, run.config.dataset_id, run.epochs, run.id
         );
         out(&TrainResult { run_id: run.id, status: run.status }, summary)
     }

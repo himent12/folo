@@ -17,8 +17,10 @@ use crate::util::{fnv1a, rfc3339};
 /// What a `.folo` file says about itself (the parts of `Model` that come from the file).
 #[derive(Clone, Debug)]
 pub struct FileMeta {
-    /// `folo.arch`.
+    /// `folo.arch` mapped to the API scale enum (`folo-n..x`).
     pub arch: Arch,
+    /// Exact `folo.arch` string from the header (e.g. `"folo-n"` or `"folo2-n"`).
+    pub arch_name: String,
     /// `folo.imgsz`.
     pub imgsz: u32,
     /// `folo.classes`.
@@ -134,9 +136,14 @@ pub(crate) fn read_meta(path: &Path) -> Result<FileMeta> {
         .ok()
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map_or(0.0, |d| d.as_secs_f64());
+    let canonical_arch = if m.config.is_v2() {
+        format!("folo2-{}", m.config.scale)
+    } else {
+        format!("folo-{}", m.config.scale)
+    };
     Ok(FileMeta {
-        arch: Arch::parse(&m.arch)
-            .unwrap_or_else(|| Arch::parse(&format!("folo-{}", m.config.scale)).unwrap_or_default()),
+        arch: Arch::parse(&format!("folo-{}", m.config.scale)).unwrap_or_default(),
+        arch_name: canonical_arch,
         imgsz: m.imgsz,
         classes: m.classes.clone(),
         params,
@@ -161,6 +168,8 @@ pub(crate) fn read_meta(path: &Path) -> Result<FileMeta> {
 pub struct ModelRef {
     /// The API record.
     pub model: Model,
+    /// Exact architecture name from the weights header (e.g. `"folo-n"` or `"folo2-n"`).
+    pub arch_name: String,
     /// The weights file.
     pub path: PathBuf,
     /// The dataset it was trained on (run models).
@@ -171,7 +180,14 @@ impl ModelRef {
     /// A model and its file; `Model.path` is the file (`/` separators).
     pub fn new(mut model: Model, path: PathBuf, dataset: Option<DatasetRef>) -> ModelRef {
         model.path = Some(folo_api::json::path(&path));
-        ModelRef { model, path, dataset }
+        let arch_name = model.arch.as_str().to_string();
+        ModelRef { model, arch_name, path, dataset }
+    }
+
+    /// Sets the exact architecture name from the weights header (e.g. `"folo2-n"`).
+    pub fn with_arch_name(mut self, arch_name: String) -> ModelRef {
+        self.arch_name = arch_name;
+        self
     }
 }
 

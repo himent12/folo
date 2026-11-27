@@ -52,11 +52,17 @@ impl Measure {
 
 /// Trains one run on the worker thread.
 pub(super) fn execute(e: &Arc<RunEntry>, throughput: &Arc<Throughput>, hold: &Arc<EpochHold>) {
-    let (config, dataset, weights, auto_batch) = {
+    let (config, dataset, weights, auto_batch, arch_override) = {
         let st = e.state.lock().unwrap();
-        (st.file.run.config.clone(), st.file.dataset.clone(), st.file.weights.clone(), st.file.auto_batch)
+        (
+            st.file.run.config.clone(),
+            st.file.dataset.clone(),
+            st.file.weights.clone(),
+            st.file.auto_batch,
+            st.file.arch_override.clone(),
+        )
     };
-    let trainer = build(e, &config, &dataset, weights, auto_batch, hold);
+    let trainer = build(e, &config, &dataset, weights, auto_batch, arch_override, hold);
     let mut trainer = match trainer {
         Ok(t) => t,
         Err((code, msg)) => {
@@ -85,25 +91,28 @@ pub(super) fn execute(e: &Arc<RunEntry>, throughput: &Arc<Throughput>, hold: &Ar
     let rc = trainer.run_config();
     let count = |k: &str| rc[k].as_u64().unwrap_or(0);
     let (train_images, val_images) = (count("train_images"), count("val_images"));
-    *e.measure.lock().unwrap() = Some(Measure {
-        throughput: throughput.clone(),
-        key: TrainKey {
-            device: engine::device_id(device),
-            arch: config.arch,
-            imgsz: config.imgsz,
-            batch: actual_batch,
-            amp: config.amp,
-        },
-        train_images,
-        // An empty val split validates the training split.
-        val_images: if val_images == 0 { train_images } else { val_images },
-        epochs: config.epochs,
-        mosaic: config.augment.mosaic > 0.0,
-        close_mosaic_epochs: count("close_mosaic_epochs") as u32,
-        device,
-        first: None,
-        last_step: None,
-    });
+    // Keep `folo2-*` timing/VRAM samples out of the v1 scale-keyed throughput table so v1 estimates stay pure.
+    if e.arch_override().is_none() {
+        *e.measure.lock().unwrap() = Some(Measure {
+            throughput: throughput.clone(),
+            key: TrainKey {
+                device: engine::device_id(device),
+                arch: config.arch,
+                imgsz: config.imgsz,
+                batch: actual_batch,
+                amp: config.amp,
+            },
+            train_images,
+            // An empty val split validates the training split.
+            val_images: if val_images == 0 { train_images } else { val_images },
+            epochs: config.epochs,
+            mosaic: config.augment.mosaic > 0.0,
+            close_mosaic_epochs: count("close_mosaic_epochs") as u32,
+            device,
+            first: None,
+            last_step: None,
+        });
+    }
     // The trainer reports the outcome itself (the final `status` event, the error as a log line); the worker
     // publishes it after dropping the trainer (and with it the run's open files).
     if let Err(err) = trainer.run() {
@@ -121,6 +130,7 @@ fn build(
     dataset: &DatasetRef,
     weights: Option<PathBuf>,
     auto_batch: crate::store::AutoBatchOptions,
+    arch_override: Option<String>,
     hold: &Arc<EpochHold>,
 ) -> std::result::Result<Trainer, (String, String)> {
     let device =
@@ -159,6 +169,9 @@ fn build(
     } else {
         let mut cfg = folo_vision::TrainConfig::from_api(config)
             .map_err(|err| (err.code().to_string(), err.summary()))?;
+        if let Some(arch) = arch_override {
+            cfg.arch = arch;
+        }
         cfg.device = device.to_string();
         cfg.dataset = dataset.id.clone();
         cfg.data_format = format;

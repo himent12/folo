@@ -195,6 +195,8 @@ pub struct SimRun {
     cloud: Option<SimCloud>,
     /// Opt-in GPU VRAM-budget auto-batch settings requested when the run was created.
     pub auto_batch: crate::store::AutoBatchOptions,
+    /// Optional FOLO v2-Iso architecture override (`"folo2-n"`..`"folo2-x"`).
+    pub arch_override: Option<String>,
 }
 
 /// Why a live (cloud) run failed.
@@ -231,12 +233,19 @@ impl SimRun {
             notes: Mutex::default(),
             cloud: None,
             auto_batch: crate::store::AutoBatchOptions::default(),
+            arch_override: None,
         }
     }
 
     /// Attaches opt-in auto-batch settings to this simulated run.
     pub fn with_auto_batch(mut self, auto_batch: crate::store::AutoBatchOptions) -> SimRun {
         self.auto_batch = auto_batch;
+        self
+    }
+
+    /// Attaches an optional `folo2-*` architecture override to this simulated run.
+    pub fn with_arch_override(mut self, arch_override: Option<String>) -> SimRun {
+        self.arch_override = arch_override;
         self
     }
 
@@ -292,7 +301,10 @@ impl SimRun {
 
     /// Sets `Run.resolved` to what the real trainer resolves this run's config to on `train_images` training images.
     pub fn resolved_for(mut self, train_images: u64) -> SimRun {
-        let cfg = folo_vision::TrainConfig::from_api(&self.config).expect("mock configs are known");
+        let mut cfg = folo_vision::TrainConfig::from_api(&self.config).expect("mock configs are known");
+        if let Some(arch) = &self.arch_override {
+            cfg.arch = arch.clone();
+        }
         self.resolved = Some(cfg.resolved_train(train_images as usize, self.classes.len()));
         self
     }

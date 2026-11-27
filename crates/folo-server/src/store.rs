@@ -26,9 +26,10 @@ mod diag;
 pub use diag::{
     AutoBatchOptions, DEFAULT_VAL_DIAG_BG_IOU, DEFAULT_VAL_DIAG_CONF, DEFAULT_VAL_DIAG_TP_IOU,
     DEFAULT_VAL_DIAG_WORST, DynamicAxes, FEATURE_BENCH_GENERATED_SOURCE, FEATURE_EXPORT_DYNAMIC_AXES,
-    FEATURE_TRAIN_AUTO_BATCH, FEATURE_VAL_DIAGNOSTICS, ImageDiagnostics, MAX_VAL_DIAG_WORST, ValDiagConfig,
-    ValDiagnostics, ValDiagnosticsSummary, check_auto_batch_options, check_export_axes,
-    check_val_diag_config,
+    FEATURE_FOLO2_ARCH, FEATURE_TRAIN_AUTO_BATCH, FEATURE_VAL_DIAGNOSTICS, ImageDiagnostics,
+    MAX_VAL_DIAG_WORST, RunOptions, ValDiagConfig, ValDiagnostics, ValDiagnosticsSummary,
+    check_arch_override, check_auto_batch_options, check_export_axes, check_val_diag_config,
+    default_run_name_for_arch, effective_arch, parse_arch_override,
 };
 pub use folo_vision::tta::DEFAULT_TTA_SCALES;
 pub use folo_vision::{PredictOptions, TileConfig, TileMergeMetric, TtaConfig};
@@ -643,6 +644,24 @@ pub trait Store: Send + Sync + 'static {
         }
         self.estimate_run(config)
     }
+    /// Like [`Store::estimate_run_with_auto_batch`], with optional `folo2-*` architecture override (`options.arch`).
+    fn estimate_run_with_options(
+        &self,
+        mut config: TrainConfig,
+        mut options: RunOptions,
+    ) -> Result<RunEstimate> {
+        check_auto_batch_options(&options.auto_batch)?;
+        if let Some(parsed) = check_arch_override(options.arch.as_deref())? {
+            config.arch = parsed;
+            if !options.arch.as_deref().is_some_and(|a| a.starts_with("folo2-")) {
+                options.arch = None;
+            }
+        }
+        if options.arch.is_none() {
+            return self.estimate_run_with_auto_batch(config, options.auto_batch);
+        }
+        Err(crate::error::Error::not_implemented("folo2 architectures"))
+    }
     /// A few-second probe of training and inference speed (`POST /api/system/benchmark`); `409 run_active` while
     /// a run is queued or training.
     fn benchmark(&self, req: BenchmarkRequest) -> Result<BenchmarkReport> {
@@ -697,6 +716,14 @@ pub trait Store: Send + Sync + 'static {
     fn list_models(&self) -> Result<Vec<Model>>;
     /// One model.
     fn get_model(&self, id: &str) -> Result<Model>;
+    /// Exact architecture name of model `id` (e.g. `"folo-n"` or `"folo2-n"`).
+    fn model_arch(&self, id: &str) -> Result<String> {
+        Ok(self.get_model(id)?.arch.as_str().to_string())
+    }
+    /// One model together with its canonical architecture name (avoids double lookup in `GET /api/models/{id}`).
+    fn get_model_with_arch(&self, id: &str) -> Result<(Model, String)> {
+        Ok((self.get_model(id)?, self.model_arch(id)?))
+    }
     /// Validation results of a model.
     fn model_eval(&self, id: &str) -> Result<ModelEval>;
     /// Exports a model.
@@ -721,6 +748,21 @@ pub trait Store: Send + Sync + 'static {
             return self.create_run(config);
         }
         Err(crate::error::Error::not_implemented("auto-batch training"))
+    }
+    /// Starts a run with optional auto-batch and `folo2-*` architecture override (`options`).
+    /// When `options.arch` is `None` (or a v1 `folo-*` scale), delegates to [`Store::create_run_with_auto_batch`].
+    fn create_run_with_options(&self, mut config: TrainConfig, mut options: RunOptions) -> Result<Run> {
+        check_auto_batch_options(&options.auto_batch)?;
+        if let Some(parsed) = check_arch_override(options.arch.as_deref())? {
+            config.arch = parsed;
+            if !options.arch.as_deref().is_some_and(|a| a.starts_with("folo2-")) {
+                options.arch = None;
+            }
+        }
+        if options.arch.is_none() {
+            return self.create_run_with_auto_batch(config, options.auto_batch);
+        }
+        Err(crate::error::Error::not_implemented("folo2 architectures"))
     }
     /// Resumes a `stopped` or `failed` run (same id) from its last checkpoint: `POST /api/runs` with
     /// `resume_run_id`. `fields` are the body's other fields, which must match the run's config (`device` may

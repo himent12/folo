@@ -1,11 +1,8 @@
 //! Sprint 12 end-to-end CLI tests: `folo predict --track` (ByteTrack), `folo val --diagnostics` / `--worst`,
 //! and `folo export --dynamic-batch` / `--dynamic-hw` + FOLO v2-Iso (`folo2-*`) ONNX export.
 
-use std::collections::BTreeMap;
 use std::path::Path;
 
-use folo_nn::Module as _;
-use folo_nn::io::safetensors::write;
 use folo_test_support::TestDir;
 use folo_vision::model::v2::{FoloV2Config, FoloV2Model};
 
@@ -243,21 +240,11 @@ fn export_independent_dynamic_axes_and_folo2_v2_onnx() {
 
     // 4. FOLO v2-Iso (`folo2-n`) `.folo` file exported to ONNX with `--dynamic-batch`.
     let v2_cfg = FoloV2Config::new("n", 2).unwrap();
-    let v2_model = FoloV2Model::new(v2_cfg.clone()).unwrap();
+    let mut v2_model = FoloV2Model::new(v2_cfg).unwrap();
+    v2_model.set_classes(vec!["circle".into(), "square".into()]).unwrap();
+    v2_model.set_imgsz(64);
     let v2_path = root.join("folo2-n.folo");
-    let mut meta = BTreeMap::new();
-    meta.insert("folo.format".into(), "1".into());
-    meta.insert("folo.arch".into(), "folo2-n".into());
-    meta.insert("folo.config".into(), serde_json::to_string(&v2_cfg).unwrap());
-    meta.insert("folo.classes".into(), serde_json::to_string(&["circle", "square"]).unwrap());
-    meta.insert("folo.imgsz".into(), "64".into());
-    meta.insert("folo.kind".into(), "checkpoint".into());
-    meta.insert("folo.dtype".into(), "F32".into());
-    meta.insert("folo.fused".into(), "false".into());
-    let named: Vec<(String, folo_core::Tensor)> =
-        v2_model.named_tensors().into_iter().map(|nt| (nt.name, nt.tensor)).collect();
-    let mut file = std::fs::File::create(&v2_path).unwrap();
-    write(&mut file, Some(&meta), &named).unwrap();
+    v2_model.save(&v2_path).unwrap();
 
     let v2_onnx = root.join("folo2-n.onnx");
     let (code, lines, stderr) = folo(&[
@@ -281,8 +268,14 @@ fn export_independent_dynamic_axes_and_folo2_v2_onnx() {
     assert_eq!(rec["inputs"][0]["shape"], serde_json::json!(["batch", 3, 64, 64]));
     assert!(v2_onnx.is_file() && std::fs::metadata(&v2_onnx).unwrap().len() > 0);
 
-    // Non-ONNX export of `folo2-n` returns `not_supported` (exit 4).
-    let (code, err_lines, _) = folo(&["export", "--json", "--model", s(&v2_path), "--format", "folo-f16"]);
-    assert_eq!(code, 4);
-    assert_eq!(err_lines.last().unwrap()["error"]["code"], "not_supported");
+    // Non-ONNX export (`folo-f16`) of `folo2-n` fuses the model and writes a smaller f16 `.folo` file.
+    let v2_f16 = root.join("folo2-n-f16.folo");
+    let (code, f16_lines, stderr) =
+        folo(&["export", "--json", "--model", s(&v2_path), "--format", "folo-f16", "--output", s(&v2_f16)]);
+    assert_eq!(code, 0, "{stderr}");
+    let f16_rec = f16_lines.last().unwrap();
+    assert_eq!(f16_rec["arch"], "folo2-n");
+    assert_eq!(f16_rec["dtype"], "f16");
+    assert_eq!(f16_rec["fused"], true);
+    assert!(v2_f16.is_file() && std::fs::metadata(&v2_f16).unwrap().len() > 0);
 }
