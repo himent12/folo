@@ -444,6 +444,15 @@ describe('useTracking lifecycle: update, reset on seek/model/source/toggle, free
     flushSync();
     expect(spy.updates).toHaveLength(1);
 
+    // Transient error / backend switch clears pred to null then emits a new pred for the same frameKey -> Track IDs MUST resume cleanly.
+    pred.set(null);
+    flushSync();
+    const f1Retry = { ...predFrame(12), backend: 'webgpu' as const };
+    pred.set(f1Retry);
+    flushSync();
+    expect(spy.updates).toHaveLength(2);
+    expect(ctrl.boxesFor(f1Retry)?.[0]?.track_id).toBe(1);
+
     // Switching models with a new class table resets and emits the new model's class name.
     modelId.set('m2');
     classes.set(['bolt']);

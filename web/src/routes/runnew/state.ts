@@ -126,7 +126,12 @@ export function runNewState() {
   // Fused weights (an export) load for inference only, so they are never a starting point.
   // Real servers list models with wire `folo-*` arch; `resolvedModelArchs` overlays canonical `folo2-*` discovered via `model(id)` / `runCli`.
   const resolvedModelArchs = signal<Record<string, Arch>>({});
-  const resolvingWeights = signal(false);
+  const resolvingModelId = signal<string | null>(null);
+  const checkedModelsTick = signal(0);
+  const resolvingWeights = computed(() => {
+    const id = resolvingModelId.get();
+    return id !== null && weights.get() === id;
+  });
   const startable = computed(() => {
     const overrides = resolvedModelArchs.get();
     return (models.data ?? [])
@@ -235,15 +240,6 @@ export function runNewState() {
     const p = picked.get();
     return p && isPublished(p) ? p : null;
   });
-  effect(() => {
-    const a = arch.get();
-    const list = startable.get();
-    if (!models.data || pendingWeights.get() !== null) return;
-    const w = untrack(() => weights.get());
-    if (w === 'none') return;
-    const m = list.find((x) => x.id === w);
-    if (!m || m.arch !== a) weights.set('none');
-  });
   const checkedModels = new Set<string>();
   const inFlightModels = new Set<string>();
   let resolveSeq = 0;
@@ -251,7 +247,7 @@ export function runNewState() {
     if (hub.api.mock || isFolo2Arch(m.arch) || checkedModels.has(m.id) || inFlightModels.has(m.id)) return;
     inFlightModels.add(m.id);
     const seq = ++resolveSeq;
-    resolvingWeights.set(true);
+    resolvingModelId.set(m.id);
     try {
       const detail = await hub.api.model(m.id).catch(() => null);
       let resolved: Arch = detail && isFolo2Arch(detail.arch) ? detail.arch : m.arch;
@@ -262,16 +258,40 @@ export function runNewState() {
         const cliArch = archFromCli(cli);
         if (cliArch && isFolo2Arch(cliArch)) resolved = cliArch;
       }
-      if (detail || cliOk) checkedModels.add(m.id);
+      void cliOk;
+      checkedModels.add(m.id);
       if (mounted && resolved !== m.arch) {
         resolvedModelArchs.set({ ...resolvedModelArchs.peek(), [m.id]: resolved });
         if (weights.peek() === m.id && arch.peek() !== resolved) arch.set(resolved);
       }
+      if (mounted) checkedModelsTick.set((t) => t + 1);
     } finally {
       inFlightModels.delete(m.id);
-      if (mounted && seq === resolveSeq) resolvingWeights.set(false);
+      if (mounted && seq === resolveSeq) resolvingModelId.set(null);
     }
   }
+  effect(() => {
+    const a = arch.get();
+    const list = startable.get();
+    void checkedModelsTick.get();
+    if (!models.data || pendingWeights.get() !== null) return;
+    const w = untrack(() => weights.get());
+    if (w === 'none') return;
+    const m = list.find((x) => x.id === w);
+    if (!m) {
+      weights.set('none');
+      return;
+    }
+    if (m.arch !== a) {
+      // On a real server, a restored `folo2-*` draft may pair with a checkpoint listed as wire `folo-*`:
+      // resolve its canonical arch once before clearing `weights` as a mismatch.
+      if (!hub.api.mock && isFolo2Arch(a) && !isFolo2Arch(m.arch) && !checkedModels.has(m.id)) {
+        untrack(() => void resolveModelArch(m));
+        return;
+      }
+      weights.set('none');
+    }
+  });
   effect(() => {
     const p = picked.get();
     if (p && !hub.api.mock && !isFolo2Arch(p.arch) && !checkedModels.has(p.id)) {

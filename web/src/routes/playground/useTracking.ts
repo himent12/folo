@@ -205,17 +205,27 @@ export function useTracking(input: UseTrackingInput) {
     void trackerReadyTick.get();
     if (!on || mode === 'none' || !p) {
       untrack(() => {
-        if (!p) trackedFrame.set(null);
+        if (!p) {
+          trackedFrame.set(null);
+          lastProcessedFrameKey = null;
+        }
       });
       return;
     }
     untrack(() => {
       if (!tracker || p === lastProcessedPred) return;
-      if (fk !== null && fk === lastProcessedFrameKey) {
-        // Same physical frame (e.g. candidate completion or repeat Detect frame): keep existing tracked boxes without advancing ByteTrack.
+      const cur = trackedFrame.peek();
+      if (
+        fk !== null &&
+        fk === lastProcessedFrameKey &&
+        cur &&
+        cur.frameKey === fk &&
+        cur.pred.model_id === p.model_id &&
+        (cur.pred.backend ?? 'server') === (p.backend ?? 'server')
+      ) {
+        // Same physical frame & model/backend (e.g. candidate completion or repeat Detect frame): keep existing tracked boxes without advancing ByteTrack.
         lastProcessedPred = p;
-        const cur = trackedFrame.peek();
-        if (cur && cur.frameKey === fk) trackedFrame.set({ pred: p, frameKey: fk, boxes: cur.boxes });
+        trackedFrame.set({ pred: p, frameKey: fk, boxes: cur.boxes });
         return;
       }
       lastProcessedPred = p;
