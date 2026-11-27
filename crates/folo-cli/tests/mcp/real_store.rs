@@ -847,6 +847,22 @@ fn dataset_export_coco_modes_and_guards() {
     assert!(hint.contains("output directory inside --data-dir"), "expected write-specific hint: {conf_err}");
     assert!(!hint.contains("only reads"), "hint must not say read-only for an output path: {conf_err}");
     assert!(!outside.exists(), "confined refusal must not create target directory");
+
+    // A confined `out` traversing through a missing directory outside `--data-dir` and back in via `..` writes
+    // only to the resolved in-bounds destination without creating the stray outside directory.
+    let home_name = home.file_name().unwrap().to_str().unwrap();
+    let stray_traversal = format!("../stray_outside/../{home_name}/confined_dotdot_out");
+    let confined_ok = checked(
+        &mut confined,
+        &schemas,
+        "dataset_export",
+        json!({ "dataset_id": ds_id, "out": stray_traversal, "images": "reference" }),
+    );
+    assert!(home.join("confined_dotdot_out/annotations/instances_train.json").is_file(), "{confined_ok}");
+    assert!(
+        !dir.join("stray_outside").exists(),
+        "stray intermediate dir outside data dir must not be created"
+    );
     confined.finish();
 
     // `--mock` (also with `--confine` and explicit `out`) refuses `dataset_export` without creating export dirs.

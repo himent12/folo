@@ -135,7 +135,7 @@ pub(super) fn output_data_error(e: DataError, out_dir: &Path) -> CliError {
 /// Canonical path of `p`, resolving each existing prefix with filesystem semantics before applying any subsequent
 /// `..` (so `<symlink>/../out` resolves `<symlink>` first instead of collapsing `<symlink>/..` lexically), and
 /// keeping any remaining non-existent suffix components. Returns `None` when not even an ancestor root exists.
-fn canonical_target(p: &Path) -> Option<PathBuf> {
+pub(super) fn canonical_target(p: &Path) -> Option<PathBuf> {
     let p = if p.as_os_str().is_empty() { Path::new(".") } else { p };
     let abs = std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
     let mut cur = PathBuf::new();

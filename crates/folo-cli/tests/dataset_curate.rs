@@ -416,4 +416,21 @@ fn dataset_export_coco_modes_splits_and_errors() {
     assert_eq!(code, 1);
     assert_eq!(err["error"]["code"], "invalid_dataset");
     assert!(!out_missing.join(".folo-unfinished").exists(), "failed export must not leave unfinished marker");
+
+    // A `--out` traversing through a missing intermediate directory inside `src` and back out via `..` writes
+    // only to the resolved destination without creating the stray intermediate directory inside `src`.
+    let stray_via_src = src.join("stray_missing").join("..").join("..").join("coco_via_dotdot");
+    let (code, rec, stderr) = folo_one(&[
+        "dataset",
+        "export",
+        s(&src),
+        "--out",
+        s(&stray_via_src),
+        "--images",
+        "reference",
+        "--json",
+    ]);
+    assert_eq!(code, 0, "{stderr}: {rec}");
+    assert!(!src.join("stray_missing").exists(), "stray intermediate dir inside source must not be created");
+    assert!(dir.join("coco_via_dotdot/annotations/instances_train.json").is_file());
 }

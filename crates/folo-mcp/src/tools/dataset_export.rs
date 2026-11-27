@@ -169,7 +169,7 @@ fn ensure_empty_export_target(out_dir: &Path) -> Result<(), Error> {
     }
 }
 
-fn export_error(e: DataError, confined: bool) -> Error {
+fn export_error(e: DataError) -> Error {
     match &e {
         DataError::Io { source, .. }
             if matches!(
@@ -178,9 +178,6 @@ fn export_error(e: DataError, confined: bool) -> Error {
             ) =>
         {
             Error::new(StatusCode::CONFLICT, "output_exists", e.to_string())
-        }
-        DataError::Io { source, .. } if source.kind() == std::io::ErrorKind::PermissionDenied && confined => {
-            Error::new(StatusCode::FORBIDDEN, "path_outside_data_dir", e.to_string())
         }
         DataError::Io { .. } => Error::internal(e.to_string()),
         DataError::Config(m) => Error::new(StatusCode::BAD_REQUEST, "invalid_dataset", m.clone()),
@@ -246,7 +243,6 @@ impl Inner {
         let src_fmt = to_data_format(ds.format);
         let ds_name = ds.name.clone();
         let confine_paths = self.confinement.active().then(|| self.paths.clone());
-        let confined = confine_paths.is_some();
         let splits: Vec<folo_data::Split> =
             a.splits.unwrap_or_default().into_iter().map(to_data_split).collect();
         let image_mode = to_coco_image_mode(a.images);
@@ -259,13 +255,20 @@ impl Inner {
                     check_export_out_inside(paths, dir)?;
                 }
                 let loaded = open_with(&path, &OpenOptions { format: src_fmt, verify_images: true })
-                    .map_err(|e| export_error(e, confined))?;
+                    .map_err(export_error)?;
                 check_unreadable_splits(&loaded, &path)?;
                 let (out_dir, cleanup_on_err) = match explicit_out {
                     Some(dir) => {
                         check_output_outside_input(&dir, &path, &loaded)?;
-                        ensure_empty_export_target(&dir)?;
-                        (dir, false)
+                        // Use the resolved `..`-free path so `create_dir_all` can never create a stray
+                        // missing intermediate directory outside `--data-dir` or inside the source dataset.
+                        let write_dir = std::fs::canonicalize(&dir)
+                            .ok()
+                            .or_else(|| crate::paths::resolve_nonexistent(&dir, 0))
+                            .map(|p| PathBuf::from(folo_api::json::path(&p)))
+                            .unwrap_or_else(|| folo_data::paths::normalize(&dir));
+                        ensure_empty_export_target(&write_dir)?;
+                        (write_dir, false)
                     }
                     None => {
                         check_dir_not_inside_input(&write_root.join("exports"), &path, &loaded)?;
@@ -281,7 +284,7 @@ impl Inner {
                     if cleanup_on_err {
                         let _ = std::fs::remove_dir_all(&out_dir);
                     }
-                    export_error(e, confined)
+                    export_error(e)
                 })
             })
             .await

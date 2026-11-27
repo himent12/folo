@@ -1,6 +1,7 @@
 //! `folo dataset export --format coco`: spec-compliant COCO instances JSON export with selectable splits and
 //! `copy` / `link` / `reference` image handling on top of `folo_data::convert::export_coco`.
 
+use std::path::PathBuf;
 use std::time::Instant;
 
 use folo_data::convert::{CocoExportOptions, CocoImageMode, export_coco};
@@ -11,8 +12,8 @@ use crate::cli::{CocoImageModeArg, ExportDatasetArgs, ExportDatasetFormatArg};
 use crate::output::{CliError, ExitCode, Out};
 
 use super::{
-    check_convert_output_outside, ensure_empty_output, format_name, format_of, open, output_data_error, rel,
-    splits_json, unreadable_split_manifests,
+    canonical_target, check_convert_output_outside, ensure_empty_output, format_name, format_of, open,
+    output_data_error, rel, splits_json, unreadable_split_manifests,
 };
 
 fn image_mode_name(mode: CocoImageMode) -> &'static str {
@@ -41,7 +42,12 @@ pub(super) fn export(args: ExportDatasetArgs, out: Out) -> Result<(), CliError> 
         ));
     }
     check_convert_output_outside(&args.out, &args.path, &ds)?;
-    ensure_empty_output(&args.out)?;
+    // Use the resolved `..`-free path so `create_dir_all` can never create a stray missing intermediate
+    // directory inside the input dataset before traversing back out via `..`.
+    let write_out = canonical_target(&args.out)
+        .map(|p| PathBuf::from(folo_api::json::path(&p)))
+        .unwrap_or_else(|| folo_data::paths::normalize(&args.out));
+    ensure_empty_output(&write_out)?;
     let skipped = ds.report.skipped_images() + ds.report.skipped_label_images();
     let image_mode: CocoImageMode = args.images.into();
     let opts = CocoExportOptions {
@@ -51,9 +57,9 @@ pub(super) fn export(args: ExportDatasetArgs, out: Out) -> Result<(), CliError> 
         description: args.description.clone(),
     };
     let t0 = Instant::now();
-    let report = export_coco(&ds, &args.out, &opts).map_err(|e| match e {
+    let report = export_coco(&ds, &write_out, &opts).map_err(|e| match e {
         DataError::Config(m) => CliError::new(ExitCode::Runtime, "invalid_dataset", m),
-        e => output_data_error(e, &args.out),
+        e => output_data_error(e, &write_out),
     })?;
     let seconds = t0.elapsed().as_secs_f64();
     let exported_splits: Vec<serde_json::Value> = report
