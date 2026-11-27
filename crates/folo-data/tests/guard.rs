@@ -61,4 +61,53 @@ fn refused_reads_are_reported_and_not_descended() {
     folo_data::set_scan_cache_dir(None);
     assert_eq!(ds.train.entries().len(), folo_data::SCAN_CACHE_MIN_FILES + 4);
     assert_eq!(std::fs::read_dir(&*cache).map(|r| r.count()).unwrap_or(0), 0, "nothing cached under a guard");
+
+    // Pascal VOC also obeys the read guard under both verify_images=true and verify_images=false.
+    let voc = tmp("voc");
+    image(&voc.join("JPEGImages/ok.png"));
+    image(&voc.join("forbidden/secret.png"));
+    std::fs::create_dir_all(voc.join("Annotations")).unwrap();
+    std::fs::write(
+        voc.join("Annotations/ok.xml"),
+        "<annotation><filename>ok.png</filename><size><width>16</width><height>12</height></size>\
+         <object><name>box</name><bndbox><xmin>1</xmin><ymin>1</ymin><xmax>10</xmax><ymax>10</ymax></bndbox></object></annotation>",
+    )
+    .unwrap();
+    std::fs::write(
+        voc.join("Annotations/bad.xml"),
+        "<annotation><folder>forbidden</folder><filename>secret.png</filename><size><width>16</width><height>12</height></size>\
+         <object><name>box</name><bndbox><xmin>1</xmin><ymin>1</ymin><xmax>10</xmax><ymax>10</ymax></bndbox></object></annotation>",
+    )
+    .unwrap();
+    for verify in [true, false] {
+        let ds = folo_data::open_with(
+            &voc,
+            &folo_data::OpenOptions { format: folo_data::Format::Voc, verify_images: verify },
+        )
+        .unwrap();
+        assert_eq!(ds.train.entries().len(), 1, "forbidden VOC image must not load (verify={verify})");
+    }
+    // `convert` also refuses to copy a forbidden source file.
+    let forbidden_ds = folo_data::LoadedDataset {
+        format: folo_data::Format::Yolo,
+        root: voc.to_path_buf(),
+        classes: vec!["x".into()],
+        train: folo_data::FileDataset::new(
+            folo_data::Split::Train,
+            vec!["x".into()],
+            vec![folo_data::ImageEntry {
+                image: voc.join("forbidden/secret.png"),
+                label: None,
+                size: Some((16, 12)),
+                boxes: vec![],
+            }],
+        ),
+        val: folo_data::FileDataset::new(folo_data::Split::Val, vec!["x".into()], vec![]),
+        test: folo_data::FileDataset::new(folo_data::Split::Test, vec!["x".into()], vec![]),
+        report: Default::default(),
+        sources: vec![],
+    };
+    let out = tmp("voc-out");
+    let err = folo_data::convert::convert(&forbidden_ds, out.path(), folo_data::Format::Yolo).unwrap_err();
+    assert!(err.to_string().contains(folo_data::guard::DENIED), "{err}");
 }

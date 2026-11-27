@@ -95,8 +95,8 @@ pub(crate) fn decode_entities(raw: &str, line: usize) -> Result<String, String> 
             "quot" => out.push('"'),
             "apos" => out.push('\''),
             num if let Some(hex) = num.strip_prefix("#x").or_else(|| num.strip_prefix("#X")) => {
-                if hex.is_empty() {
-                    return Err(format!("line {cur_line}: empty hex character reference '&#x;'"));
+                if hex.is_empty() || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    return Err(format!("line {cur_line}: invalid hex character reference '&{num};'"));
                 }
                 let code = u32::from_str_radix(hex, 16)
                     .map_err(|_| format!("line {cur_line}: invalid hex character reference '&{num};'"))?;
@@ -105,8 +105,8 @@ pub(crate) fn decode_entities(raw: &str, line: usize) -> Result<String, String> 
                 out.push(ch);
             }
             num if let Some(dec) = num.strip_prefix('#') => {
-                if dec.is_empty() {
-                    return Err(format!("line {cur_line}: empty numeric character reference '&#;'"));
+                if dec.is_empty() || !dec.bytes().all(|b| b.is_ascii_digit()) {
+                    return Err(format!("line {cur_line}: invalid numeric character reference '&{num};'"));
                 }
                 let code = dec
                     .parse::<u32>()
@@ -431,6 +431,8 @@ mod tests {
         assert_eq!(escape_text("a < b & \"c\" 'd' > e"), "a &lt; b &amp; &quot;c&quot; &apos;d&apos; &gt; e");
         assert!(decode_entities("&unknown;", 3).unwrap_err().contains("line 3"));
         assert!(decode_entities("&#0;", 1).is_err());
+        assert!(decode_entities("&#+65;", 1).is_err());
+        assert!(decode_entities("&#x+41;", 1).is_err());
         assert!(decode_entities("&amp", 2).unwrap_err().contains("line 2"));
     }
 

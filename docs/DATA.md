@@ -80,9 +80,12 @@ produces plain buffers that the trainer wraps in tensors.
   `&#xHHH;`) with line-numbered diagnostics on malformed markup.
 - `<size>` (`<width>`, `<height>`) is validated against the actual image dimensions when `verify_images` is on (and
   probed from the image when absent or zero). `<object>` requires `<name>` and `<bndbox>` (`xmin`, `ymin`, `xmax`,
-  `ymax`, clipped to the image; zero-area boxes are dropped with a warning). `<difficult>` is parsed cleanly and kept
-  by default in `open` / `open_with`; `open_voc_with(path, &VocOptions { include_difficult: false, .. })` excludes
-  difficult objects.
+  `ymax`). By default (`VocCoordMode::OneBased`, the VOC2007/VOC2012 devkit convention), 1-based inclusive pixel
+  coordinates `[1..=width]` map to 0-based edges `[(xmin - 1).max(0), (ymin - 1).max(0), xmax, ymax]` so a
+  full-image box `(1, 1, width, height)` covers the whole image and a 1-pixel box `(x, y, x, y)` is preserved;
+  `open_voc_with` also supports `VocCoordMode::ZeroBased` for zero-based exporters. Boxes are clipped to the image and
+  zero-area boxes are dropped with a warning. `<difficult>` is parsed cleanly and kept by default in `open` /
+  `open_with`; `open_voc_with(path, &VocOptions { include_difficult: false, .. })` excludes difficult objects.
 - Class names follow `classes.txt` when present at the root, with any additional `<name>` values appended in sorted
   order across all splits (so `open_splits` produces the same class ids as `open`).
 
@@ -157,8 +160,8 @@ rebuilds its dataset indexes then). Nothing installs one by default; `folo mcp
   image (fully decoded unless `decode: false`) and returns a `CheckReport` with one `CheckIssue { kind, file, line,
   message, fix }` per problem: `broken_label`, `class_overflow`, `out_of_range_box`, `corrupt_image`, `missing_image`
   (errors: the loader skips the image), `clipped_box`, `zero_size_box`, `duplicate_label`, `duplicate_image` (exact
-  byte duplicates via streaming 128-bit content hash; cross-split duplicates are flagged explicitly as `split leakage`
-  between splits), `other` (warnings) and `empty_image` (info). A YOLO label file no image reads is a `missing_image`
+  byte duplicates via 128-bit content hash over each file's bytes; cross-split duplicates are flagged explicitly as
+  `split leakage` between splits), `other` (warnings) and `empty_image` (info). A YOLO label file no image reads is a `missing_image`
   too when its folder is a label folder inside the dataset root that the loader pairs with a separate folder still
   holding at least one image the dataset reads (`labels/train` with `images/train`), and no file of its stem (any
   extension or case) is in those image folders; links to one folder count as one, `classes.txt` is not a label. Other
@@ -174,8 +177,9 @@ rebuilds its dataset indexes then). Nothing installs one by default; `folo mcp
   `train` / `val` / optional `test`, processing rarest classes first with relative-deficit scoring so rare classes and
   background images keep balanced representation across splits.
 - `convert::convert(&loaded, out, Format::Yolo | Format::Coco | Format::Voc)` writes an opened dataset in the target
-  format (images copied unchanged, stems made unique per split for YOLO/COCO and across all splits for VOC, COCO
-  category ids 1-based).
+  format (images copied unchanged, stems made unique per split for YOLO/COCO and whitespace-free/unique across all
+  splits for VOC, COCO category ids 1-based; note `folo dataset convert --to` in the CLI currently targets `yolo | coco`,
+  while `Format::Voc` export is exposed through the `folo-data` library API).
 - `detect_format(path, format)` finds the format without reading labels; a path with nothing recognisable fails with
   a `DataError::Format` whose message starts with `UNDETECTED`. A folder a writer has not finished (below) is refused
   as unfinished first, whatever it holds.

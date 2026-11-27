@@ -362,10 +362,13 @@ fn check_voc(path: &Path, opts: &CheckOptions) -> Result<CheckReport> {
         splits[s as usize] = entries.len();
         images.extend(entries.iter().map(|e| (s, e)));
     }
-    let results: Vec<ImageCheck> = images
+    let mut stale_label_warnings: HashSet<PathBuf> = HashSet::new();
+    let results: Vec<(ImageCheck, Option<PathBuf>)> = images
         .par_iter()
         .map(|(_, e)| {
             let mut c = read_image_file(&e.image, opts);
+            let mut reconciled_label = None;
+            let mut effective_boxes = e.boxes.len();
             if let (Some(declared), Some(actual)) = (e.size, c.size)
                 && declared != actual
             {
@@ -382,8 +385,39 @@ fn check_voc(path: &Path, opts: &CheckOptions) -> Result<CheckReport> {
                         actual.0, actual.1
                     )),
                 ));
+                // Re-evaluate boxes against the actual image dimensions so zero-size drops and empty-image
+                // diagnostics match what `open(..., verify_images: true)` produces.
+                if let Some(xml_path) = e.label.as_deref()
+                    && let Ok(ann) = crate::dataset::voc::read_and_parse_xml(xml_path)
+                {
+                    reconciled_label = Some(xml_path.to_path_buf());
+                    let (fw, fh) = (actual.0 as f32, actual.1 as f32);
+                    let mut kept = 0usize;
+                    let mut dropped = 0usize;
+                    for obj in ann.objects {
+                        let [x1, y1, x2, y2] =
+                            crate::dataset::voc::voc_box_to_xyxy(obj.bbox, crate::VocCoordMode::default());
+                        let clamped =
+                            [x1.clamp(0.0, fw), y1.clamp(0.0, fh), x2.clamp(0.0, fw), y2.clamp(0.0, fh)];
+                        if clamped[2] - clamped[0] <= 0.0 || clamped[3] - clamped[1] <= 0.0 {
+                            dropped += 1;
+                        } else {
+                            kept += 1;
+                        }
+                    }
+                    effective_boxes = kept;
+                    if dropped > 0 {
+                        c.issues.push(CheckIssue::new(
+                            CheckKind::ZeroSizeBox,
+                            xml_path,
+                            None,
+                            format!("{dropped} zero-size box(es) dropped"),
+                            Some("remove the degenerate annotation".into()),
+                        ));
+                    }
+                }
             }
-            if e.boxes.is_empty() && c.hash.is_some() {
+            if effective_boxes == 0 && c.hash.is_some() {
                 c.issues.push(CheckIssue::new(
                     CheckKind::EmptyImage,
                     &e.image,
@@ -392,10 +426,20 @@ fn check_voc(path: &Path, opts: &CheckOptions) -> Result<CheckReport> {
                     None,
                 ));
             }
-            c
+            (c, reconciled_label)
         })
         .collect();
-    merge(&mut issues, images.iter().map(|(s, e)| (*s, e.image.as_path())), results, &ds.root);
+    let mut checks = Vec::with_capacity(results.len());
+    for (c, reconciled) in results {
+        if let Some(p) = reconciled {
+            stale_label_warnings.insert(p);
+        }
+        checks.push(c);
+    }
+    if !stale_label_warnings.is_empty() {
+        issues.retain(|i| !(i.kind == CheckKind::ZeroSizeBox && stale_label_warnings.contains(&i.file)));
+    }
+    merge(&mut issues, images.iter().map(|(s, e)| (*s, e.image.as_path())), checks, &ds.root);
     Ok(CheckReport { format: Format::Voc, root: ds.root, classes: ds.classes, splits, issues })
 }
 
@@ -414,7 +458,15 @@ fn merge<'a>(
             match seen.get(&key) {
                 Some(&(first_split, first)) => {
                     let rel = crate::paths::relative_to(first, root);
-                    let (message, fix) = if first_split != split {
+                    let same_file = crate::paths::normalize(first) == crate::paths::normalize(path);
+                    let (message, fix) = if first_split != split && same_file {
+                        (
+                            format!("split leakage ({split} shares the same file as {first_split}): {rel}"),
+                            format!(
+                                "remove {rel} from the {split} split list so it belongs to only one split"
+                            ),
+                        )
+                    } else if first_split != split {
                         (
                             format!("split leakage ({split} duplicates {first_split}): same bytes as {rel}"),
                             format!(

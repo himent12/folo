@@ -87,9 +87,9 @@ pub use bbox::BBox;
 pub use dataset::cache::{MIN_FILES as SCAN_CACHE_MIN_FILES, scan_cache_dir, set_scan_cache_dir};
 pub use dataset::{
     CocoAnnotation, CocoGroundTruth, CocoImage, Dataset, FileDataset, Format, ImageEntry, InMemoryDataset,
-    Issue, IssueKind, LoadReport, LoadedDataset, OpenOptions, Split, UNDETECTED, VocAnnotation, VocObject,
-    VocOptions, coco_annotation_files, detect_format, label_path_for, open, open_coco_ground_truth,
-    open_splits, open_voc_with, open_with, parse_voc_xml, read_coco_ground_truth,
+    Issue, IssueKind, LoadReport, LoadedDataset, OpenOptions, Split, UNDETECTED, VocAnnotation, VocCoordMode,
+    VocObject, VocOptions, coco_annotation_files, detect_format, label_path_for, open,
+    open_coco_ground_truth, open_splits, open_voc_with, open_with, parse_voc_xml, read_coco_ground_truth,
 };
 pub use error::{DataError, Result};
 pub use image::{

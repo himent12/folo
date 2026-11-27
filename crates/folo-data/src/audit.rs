@@ -115,8 +115,13 @@ pub fn audit_dataset(dataset: &LoadedDataset) -> AuditReport {
         })
         .collect();
 
-    let hashed: Vec<std::result::Result<(u128, u64), String>> =
-        entries.par_iter().map(|(_, _, path)| hash128_file(path).map_err(|e| e.to_string())).collect();
+    let hashed: Vec<std::result::Result<(u128, u64), String>> = entries
+        .par_iter()
+        .map_init(
+            || vec![0u8; 64 * 1024],
+            |buf, (_, _, path)| hash128_file_with_buf(path, buf).map_err(|e| e.to_string()),
+        )
+        .collect();
 
     let mut unreadable = Vec::new();
     // Preserve first-seen deterministic order of groups.
@@ -249,20 +254,22 @@ pub(crate) fn hash128(bytes: &[u8]) -> u128 {
     h.finish()
 }
 
-/// Streams a file through [`Hasher128`] using a 64 KiB stack/heap buffer, returning `(hash, byte_len)`.
-pub(crate) fn hash128_file(path: &Path) -> std::io::Result<(u128, u64)> {
+/// Streams a file through [`Hasher128`] using a reusable scratch buffer, returning `(hash, byte_len)`.
+fn hash128_file_with_buf(path: &Path, buf: &mut [u8]) -> std::io::Result<(u128, u64)> {
     crate::guard::check(path)?;
     let mut file = std::fs::File::open(path)?;
-    let mut buf = vec![0u8; 64 * 1024];
     let mut h = Hasher128::new();
     let mut total = 0u64;
     loop {
-        let n = file.read(&mut buf)?;
-        if n == 0 {
-            break;
+        match file.read(buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                h.update(&buf[..n]);
+                total += n as u64;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
         }
-        h.update(&buf[..n]);
-        total += n as u64;
     }
     Ok((h.finish(), total))
 }

@@ -68,7 +68,7 @@ pub fn convert(ds: &LoadedDataset, out: &Path, to: Format) -> Result<Converted> 
         if to == Format::Voc {
             let img_dir = out.join("JPEGImages");
             let ann_dir = out.join("Annotations");
-            let names = unique_names_with(&mut voc_taken, d.entries().iter().map(|e| e.image.as_path()));
+            let names = unique_voc_names(&mut voc_taken, d.entries().iter().map(|e| e.image.as_path()));
             d.entries()
                 .par_iter()
                 .zip(&names)
@@ -180,6 +180,7 @@ fn mkdir(p: &Path) -> Result<()> {
 }
 
 fn copy(from: &Path, to: &Path) -> Result<()> {
+    crate::guard::check(from).map_err(|e| DataError::io(from, e))?;
     std::fs::copy(from, to).map(|_| ()).map_err(|e| DataError::io(from, e))
 }
 
@@ -190,7 +191,7 @@ pub(crate) fn image_extension(p: &Path) -> String {
         return p.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default();
     }
     let mut head = Vec::with_capacity(64);
-    if let Ok(f) = std::fs::File::open(p) {
+    if let Ok(f) = crate::guard::check(p).and_then(|_| std::fs::File::open(p)) {
         use std::io::Read;
         let _ = f.take(64).read_to_end(&mut head);
     }
@@ -215,6 +216,35 @@ fn unique_names_with<'a>(taken: &mut HashSet<String>, paths: impl Iterator<Item 
         .map(|p| {
             let stem =
                 p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "image".into());
+            let ext = format!(".{}", image_extension(p));
+            let mut candidate = stem.clone();
+            let mut n = 0;
+            while !taken.insert(candidate.to_lowercase()) {
+                n += 1;
+                candidate = format!("{stem}_{n}");
+            }
+            format!("{candidate}{ext}")
+        })
+        .collect()
+}
+
+/// Generates whitespace-free, `#`-free, extension-safe VOC image filenames (unique across all splits) so
+/// `ImageSets/Main/*.txt` IDs round-trip cleanly in both FOLO and external Pascal VOC tools.
+fn unique_voc_names<'a>(taken: &mut HashSet<String>, paths: impl Iterator<Item = &'a Path>) -> Vec<String> {
+    paths
+        .map(|p| {
+            let raw_stem =
+                p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "image".into());
+            let mut stem: String = raw_stem
+                .chars()
+                .map(|c| if c.is_whitespace() || c == '.' || c == '/' || c == '\\' { '_' } else { c })
+                .collect();
+            while stem.starts_with('#') {
+                stem.replace_range(..1, "_");
+            }
+            if stem.is_empty() {
+                stem = "image".into();
+            }
             let ext = format!(".{}", image_extension(p));
             let mut candidate = stem.clone();
             let mut n = 0;

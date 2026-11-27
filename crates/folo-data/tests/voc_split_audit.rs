@@ -6,9 +6,9 @@ use common::{TempDir, write, write_png};
 use folo_data::check::{CheckKind, CheckOptions, check};
 use folo_data::convert::convert;
 use folo_data::{
-    BBox, Dataset, Format, IssueKind, OpenOptions, Split, SplitConfig, VocOptions, detect_format, open,
-    open_splits, open_voc_with, open_with, parse_voc_xml, split_dataset, split_file_dataset, split_indices,
-    write_split,
+    DataError, Dataset, Format, IssueKind, OpenOptions, Split, SplitConfig, VocCoordMode, VocOptions,
+    detect_format, open, open_splits, open_voc_with, open_with, parse_voc_xml, split_dataset,
+    split_file_dataset, split_indices, write_split,
 };
 
 fn approx(a: f32, b: f32) -> bool {
@@ -33,7 +33,7 @@ fn voc_xml(filename: &str, size: Option<(u32, u32)>, objects: &[(&str, [f32; 4],
 }
 
 #[test]
-fn voc_classic_layout_with_imagesets_entities_difficult_and_roundtrip() {
+fn voc_classic_layout_with_imagesets_entities_difficult_one_based_and_roundtrip() {
     let t = TempDir::new("voc-classic");
     let r = t.path();
     write_png(&r.join("JPEGImages/000001.png"), 100, 50, [200, 10, 10]);
@@ -41,12 +41,20 @@ fn voc_classic_layout_with_imagesets_entities_difficult_and_roundtrip() {
     write_png(&r.join("JPEGImages/000003.png"), 60, 60, [10, 10, 200]);
     write_png(&r.join("JPEGImages/000004.png"), 40, 40, [100, 100, 100]);
 
+    // Classic 1-based inclusive VOC coordinates:
+    // - (11, 6, 50, 25) -> 0-based [10, 5, 50, 25] -> cx=0.3, cy=0.3, w=0.4, h=0.4
+    // - (1, 1, 100, 50) -> full image [0, 0, 100, 50] -> cx=0.5, cy=0.5, w=1.0, h=1.0
+    // - (1, 1, 1, 1) -> 1-pixel box [0, 0, 1, 1] -> NOT dropped!
     write(
         &r.join("Annotations/000001.xml"),
         voc_xml(
             "000001.png",
             Some((100, 50)),
-            &[("cat &amp; kitten", [10.0, 5.0, 50.0, 25.0], false), ("dog", [60.0, 10.0, 90.0, 40.0], true)],
+            &[
+                ("cat &amp; kitten", [11.0, 6.0, 50.0, 25.0], false),
+                ("dog", [1.0, 1.0, 100.0, 50.0], true),
+                ("dog", [1.0, 1.0, 1.0, 1.0], false),
+            ],
         ),
     );
     // Missing <size>: dimensions probed from image; float coords & CDATA class name.
@@ -55,7 +63,7 @@ fn voc_classic_layout_with_imagesets_entities_difficult_and_roundtrip() {
         "\u{feff}<!-- comment -->\n<annotation>\n\
          <filename>000002.png</filename>\n\
          <object><name><![CDATA[dog]]></name><difficult>0</difficult>\
-         <bndbox><xmin>8.5</xmin><ymin>4.0</ymin><xmax>48.5</xmax><ymax>24.0</ymax></bndbox></object>\n\
+         <bndbox><xmin>9.0</xmin><ymin>5.0</ymin><xmax>48.0</xmax><ymax>24.0</ymax></bndbox></object>\n\
          </annotation>\n",
     );
     // Background image (zero objects).
@@ -63,7 +71,7 @@ fn voc_classic_layout_with_imagesets_entities_difficult_and_roundtrip() {
     // Test image.
     write(
         &r.join("Annotations/000004.xml"),
-        voc_xml("000004.png", Some((40, 40)), &[("cat &amp; kitten", [4.0, 4.0, 20.0, 20.0], false)]),
+        voc_xml("000004.png", Some((40, 40)), &[("cat &amp; kitten", [5.0, 5.0, 20.0, 20.0], false)]),
     );
 
     // Classic VOC ships train.txt, val.txt, trainval.txt, and test.txt; trainval.txt must NOT duplicate train+val.
@@ -79,19 +87,35 @@ fn voc_classic_layout_with_imagesets_entities_difficult_and_roundtrip() {
     assert_eq!(ds.split_sizes(), [2, 1, 1], "{:#?}", ds.report);
     assert!(ds.report.issues.is_empty(), "{:#?}", ds.report);
 
-    // Verify box geometry and entity decoding.
+    // Verify 1-based inclusive box geometry: regular, full-image, and 1-pixel boxes.
     let b0 = ds.train.boxes(0);
-    assert_eq!(b0.len(), 2);
+    assert_eq!(b0.len(), 3);
     assert_eq!(b0[0].class, 0);
     assert!(approx(b0[0].cx, 0.3) && approx(b0[0].cy, 0.3) && approx(b0[0].w, 0.4) && approx(b0[0].h, 0.4));
     assert_eq!(b0[1].class, 1);
+    assert!(approx(b0[1].cx, 0.5) && approx(b0[1].cy, 0.5) && approx(b0[1].w, 1.0) && approx(b0[1].h, 1.0));
+    assert_eq!(b0[2].class, 1);
+    assert!(approx(b0[2].w, 0.01) && approx(b0[2].h, 0.02));
     assert_eq!(ds.train.image_size(1), Some((80, 40)));
     assert!(ds.val.boxes(0).is_empty());
 
+    // Zero-based coordinate mode via `open_voc_with` drops the (1,1,1,1) box as zero-area and keeps (11..50).
+    let zb = open_voc_with(
+        r,
+        &VocOptions { include_difficult: true, verify_images: true, coord_mode: VocCoordMode::ZeroBased },
+    )
+    .unwrap();
+    assert_eq!(zb.train.boxes(0).len(), 2);
+    assert!(approx(zb.train.boxes(0)[0].w, 0.39));
+
     // Filtering out <difficult>1</difficult> objects via `open_voc_with`.
-    let no_diff = open_voc_with(r, &VocOptions { include_difficult: false, verify_images: true }).unwrap();
+    let no_diff = open_voc_with(
+        r,
+        &VocOptions { include_difficult: false, verify_images: true, coord_mode: VocCoordMode::OneBased },
+    )
+    .unwrap();
     assert_eq!(no_diff.classes, vec!["cat & kitten", "dog"]);
-    assert_eq!(no_diff.train.boxes(0).len(), 1);
+    assert_eq!(no_diff.train.boxes(0).len(), 2);
     assert_eq!(no_diff.train.boxes(0)[0].class, 0);
 
     // `open_splits` loads only the requested split while keeping consistent classes.
@@ -113,38 +137,78 @@ fn voc_classic_layout_with_imagesets_entities_difficult_and_roundtrip() {
     assert_eq!(from_coco.split_sizes(), ds.split_sizes());
 
     let voc2_dir = t.join("as_voc2");
-    convert(&from_yolo, &voc2_dir, Format::Voc).unwrap();
+    let conv_voc = convert(&from_yolo, &voc2_dir, Format::Voc).unwrap();
+    assert_eq!(conv_voc.splits, ds.split_sizes());
     assert_eq!(detect_format(&voc2_dir, Format::Auto).unwrap(), Format::Voc);
     let from_voc2 = open(&voc2_dir).unwrap();
     assert_eq!(from_voc2.classes, ds.classes);
     assert_eq!(from_voc2.split_sizes(), ds.split_sizes());
-    for (a, b) in ds.train.boxes(0).iter().zip(from_voc2.train.boxes(0)) {
-        assert_eq!(a.class, b.class);
-        assert!(approx(a.cx, b.cx) && approx(a.cy, b.cy) && approx(a.w, b.w) && approx(a.h, b.h));
+    for split in Split::ALL {
+        let (a_ds, b_ds) = (ds.split(split), from_voc2.split(split));
+        assert_eq!(a_ds.len(), b_ds.len(), "split {split}");
+        for i in 0..a_ds.len() {
+            assert_eq!(a_ds.boxes(i).len(), b_ds.boxes(i).len(), "split {split} img {i}");
+            for (a, b) in a_ds.boxes(i).iter().zip(b_ds.boxes(i)) {
+                assert_eq!(a.class, b.class);
+                assert!(approx(a.cx, b.cx) && approx(a.cy, b.cy) && approx(a.w, b.w) && approx(a.h, b.h));
+            }
+        }
     }
 }
 
 #[test]
-fn voc_trainval_fallback_colocated_split_dirs_and_single_xml() {
-    // 1. trainval.txt fallback when train.txt and val.txt are absent.
+fn voc_convert_roundtrip_handles_spaces_dots_and_hash_filenames() {
+    let t = TempDir::new("voc-tricky-names");
+    let src = t.join("yolo");
+    write(&src.join("data.yaml"), "train: images/train\nval: images/val\nnames: [zebra, apple]\n");
+    for (split, name, rgb) in [
+        ("train", "street scene.png", [10, 20, 30]),
+        ("train", "frame.jpg.png", [40, 50, 60]),
+        ("train", "#1.png", [70, 80, 90]),
+        ("val", "foo 1.png", [100, 110, 120]),
+        ("val", "street scene.png", [130, 140, 150]),
+    ] {
+        write_png(&src.join(format!("images/{split}/{name}")), 40, 40, rgb);
+        let stem = std::path::Path::new(name).file_stem().unwrap().to_string_lossy();
+        write(&src.join(format!("labels/{split}/{stem}.txt")), "0 0.5 0.5 0.5 0.5\n");
+    }
+    let ds = open(&src).unwrap();
+    assert_eq!(ds.split_sizes(), [3, 2, 0]);
+    let voc_out = t.join("voc");
+    let c = convert(&ds, &voc_out, Format::Voc).unwrap();
+    assert_eq!(c.splits, [3, 2, 0]);
+    assert_eq!(c.boxes, 5);
+    let back = open(&voc_out).unwrap();
+    assert!(back.report.issues.is_empty(), "{:#?}", back.report);
+    assert_eq!(back.classes, vec!["zebra", "apple"], "classes.txt preserves order");
+    assert_eq!(back.split_sizes(), [3, 2, 0]);
+    assert_eq!(back.stats().boxes, 5);
+}
+
+#[test]
+fn voc_trainval_fallback_colocated_split_dirs_stem_only_and_unfinished_marker() {
+    // 1. trainval.txt fallback + stem-only background image + missing stem.
     let t = TempDir::new("voc-layouts");
     let tv = t.join("trainval");
     write_png(&tv.join("JPEGImages/a.png"), 32, 32, [1, 2, 3]);
+    write_png(&tv.join("JPEGImages/bg_only.png"), 32, 32, [4, 5, 6]);
     write(
         &tv.join("Annotations/a.xml"),
         voc_xml("a.png", Some((32, 32)), &[("bird", [2.0, 2.0, 16.0, 16.0], false)]),
     );
-    write(&tv.join("ImageSets/Main/trainval.txt"), "a\n");
+    write(&tv.join("ImageSets/Main/trainval.txt"), "a\nbg_only\nmissing_id\n");
     let ds = open(&tv).unwrap();
     assert_eq!(ds.format, Format::Voc);
-    assert_eq!(ds.split_sizes(), [1, 0, 0]);
+    assert_eq!(ds.split_sizes(), [2, 0, 0]);
+    assert!(ds.train.boxes(1).is_empty(), "stem-only image becomes background");
+    assert_eq!(ds.report.count(IssueKind::MissingImage), 1);
 
     // 2. Colocated Roboflow-style split directories (train/, valid/).
     let rf = t.join("roboflow");
     write_png(&rf.join("train/x.png"), 20, 20, [10, 20, 30]);
     write(
         &rf.join("train/x.xml"),
-        voc_xml("x.png", Some((20, 20)), &[("car", [0.0, 0.0, 10.0, 10.0], false)]),
+        voc_xml("x.png", Some((20, 20)), &[("car", [1.0, 1.0, 10.0, 10.0], false)]),
     );
     write_png(&rf.join("valid/y.png"), 20, 20, [40, 50, 60]);
     write(
@@ -176,10 +240,50 @@ fn voc_trainval_fallback_colocated_split_dirs_and_single_xml() {
     let other = t.join("not-voc");
     write(&other.join("pom.xml"), "<project><modelVersion>4.0.0</modelVersion></project>");
     assert!(detect_format(&other, Format::Auto).is_err());
+
+    // 6. Unfinished marker refuses VOC root, `Annotations/` dir, and single `.xml` file.
+    write(&tv.join(folo_data::unfinished::MARKER), "wip");
+    for p in [tv.clone(), tv.join("Annotations"), tv.join("Annotations/a.xml")] {
+        assert!(matches!(detect_format(&p, Format::Auto), Err(DataError::Unfinished(_))), "{}", p.display());
+        assert!(matches!(open(&p), Err(DataError::Unfinished(_))), "{}", p.display());
+        assert!(matches!(open_voc_with(&p, &VocOptions::default()), Err(DataError::Unfinished(_))));
+    }
 }
 
 #[test]
-fn voc_malformed_xml_errors_and_check_diagnostics() {
+fn voc_rejects_path_traversal_and_drive_prefix_escape() {
+    let t = TempDir::new("voc-traversal");
+    write_png(&t.join("outside.png"), 16, 16, [255, 0, 0]);
+    let r = t.join("ds");
+    write_png(&r.join("JPEGImages/legit.png"), 16, 16, [0, 255, 0]);
+    write(
+        &r.join("Annotations/legit.xml"),
+        voc_xml("legit.png", Some((16, 16)), &[("ok", [1.0, 1.0, 10.0, 10.0], false)]),
+    );
+    // XML attempting path traversal or Windows drive-relative path.
+    write(
+        &r.join("Annotations/evil_rel.xml"),
+        "<annotation><folder>..</folder><filename>../outside.png</filename>\
+         <object><name>bad</name><bndbox><xmin>1</xmin><ymin>1</ymin><xmax>5</xmax><ymax>5</ymax></bndbox></object></annotation>",
+    );
+    write(
+        &r.join("Annotations/evil_drive.xml"),
+        "<annotation><filename>C:outside.png</filename>\
+         <object><name>bad</name><bndbox><xmin>1</xmin><ymin>1</ymin><xmax>5</xmax><ymax>5</ymax></bndbox></object></annotation>",
+    );
+    write(
+        &r.join("ImageSets/Main/train.txt"),
+        "legit\n../../outside\n/abs/outside\nC:outside\nevil_rel\nevil_drive\n",
+    );
+    let ds = open(&r).unwrap();
+    // Only legit.png loads; none of the traversal/drive-prefix entries escape to t/outside.png.
+    assert_eq!(ds.train.len(), 1);
+    assert!(ds.train.entries()[0].image.ends_with("legit.png"));
+    assert!(ds.report.issues.iter().any(|i| i.message.contains("unsafe image ID")));
+}
+
+#[test]
+fn voc_malformed_xml_errors_check_reconciliation_and_shared_file_leakage() {
     let err = parse_voc_xml(
         "<annotation><object><name>a</name><bndbox><xmin>10</xmax></bndbox></object></annotation>",
     )
@@ -210,23 +314,48 @@ fn voc_malformed_xml_errors_and_check_diagnostics() {
         &r.join("Annotations/good.xml"),
         voc_xml("good.png", Some((32, 32)), &[("cat", [2.0, 2.0, 12.0, 12.0], false)]),
     );
+    // Declares 64x64 for a 16x16 image, with a box entirely past x=16 (becomes zero-area & empty image).
     write(
         &r.join("Annotations/mismatch.xml"),
-        voc_xml("mismatch.png", Some((64, 64)), &[("cat", [2.0, 2.0, 12.0, 12.0], false)]),
+        voc_xml("mismatch.png", Some((64, 64)), &[("cat", [25.0, 2.0, 40.0, 12.0], false)]),
     );
     write(&r.join("Annotations/bad.xml"), "<annotation><object><name>cat</object></annotation>");
+    // Put `good` in BOTH train.txt and val.txt to test shared-file leakage advice.
+    write(&r.join("ImageSets/Main/train.txt"), "good\nmismatch\nbad\n");
+    write(&r.join("ImageSets/Main/val.txt"), "good\n");
 
     let ds = open(r).unwrap();
-    assert_eq!(ds.split_sizes(), [2, 0, 0]);
+    assert_eq!(ds.split_sizes(), [2, 1, 0]);
     assert_eq!(ds.report.count(IssueKind::BrokenLabel), 1);
     assert_eq!(ds.report.count(IssueKind::Other), 1);
+    assert!(ds.train.boxes(1).is_empty(), "box outside 16x16 image is dropped on open");
 
     let rep = check(r, &CheckOptions::default()).unwrap();
     assert_eq!(rep.format, Format::Voc);
     assert!(rep.issues.iter().any(|i| i.kind == CheckKind::BrokenLabel));
-    assert!(rep.issues.iter().any(|i| i.kind == CheckKind::Other
-        && i.message.contains("XML says 64x64")
-        && i.message.contains("16x16")));
+    assert!(rep.issues.iter().any(|i| {
+        i.kind == CheckKind::Other && i.message.contains("XML says 64x64") && i.message.contains("16x16")
+    }));
+    // Reconciled diagnostics for mismatch.png match `open`: ZeroSizeBox + EmptyImage.
+    assert!(
+        rep.issues.iter().any(|i| i.kind == CheckKind::ZeroSizeBox && i.file.ends_with("mismatch.xml")),
+        "{:#?}",
+        rep.issues
+    );
+    assert!(
+        rep.issues.iter().any(|i| i.kind == CheckKind::EmptyImage && i.file.ends_with("mismatch.png")),
+        "{:#?}",
+        rep.issues
+    );
+    // Shared-file leakage advises removing split membership, NOT deleting the file!
+    let leak = rep.issues.iter().find(|i| i.kind == CheckKind::DuplicateImage).unwrap();
+    assert!(leak.message.contains("shares the same file as train"), "{}", leak.message);
+    assert!(
+        leak.fix.as_deref().unwrap().contains("from the val split list")
+            && !leak.fix.as_deref().unwrap().contains("remove this val copy"),
+        "{:?}",
+        leak.fix
+    );
 }
 
 #[test]
@@ -345,5 +474,4 @@ fn audit_and_check_detect_duplicates_and_cross_split_leakage() {
     let after = ds.audit();
     assert_eq!(after.unreadable.len(), 1);
     assert_eq!(after.unreadable[0].split, Split::Val);
-    let _ = BBox::new(0, 0.5, 0.5, 0.1, 0.1);
 }

@@ -16,7 +16,7 @@ pub use coco::{
     CocoAnnotation, CocoGroundTruth, CocoImage, coco_annotation_files, open_coco_ground_truth,
     read_coco_ground_truth,
 };
-pub use voc::{VocAnnotation, VocObject, VocOptions, open_voc_with, parse_voc_xml};
+pub use voc::{VocAnnotation, VocCoordMode, VocObject, VocOptions, open_voc_with, parse_voc_xml};
 pub(crate) mod labels;
 pub(crate) mod yolo;
 
@@ -135,7 +135,7 @@ pub trait Dataset: Send + Sync {
 pub struct ImageEntry {
     /// Image file.
     pub image: PathBuf,
-    /// YOLO label file, when there is one on disk.
+    /// YOLO `.txt` or Pascal VOC `.xml` label file, when there is one on disk.
     pub label: Option<PathBuf>,
     /// `(width, height)` after EXIF orientation, when known.
     pub size: Option<(u32, u32)>,
@@ -143,7 +143,7 @@ pub struct ImageEntry {
     pub boxes: Vec<BBox>,
 }
 
-/// A split of an on-disk dataset (YOLO or COCO).
+/// A split of an on-disk dataset (YOLO, COCO, or Pascal VOC).
 #[derive(Clone, Debug)]
 pub struct FileDataset {
     split: Split,
@@ -393,9 +393,10 @@ pub fn open(path: impl AsRef<Path>) -> Result<LoadedDataset> {
 
 /// Opens a dataset.
 ///
-/// `path` may be a YOLO `data.yaml`, a COCO instances `.json`, or a directory. In a directory, a `data.yaml` (or
-/// another YAML with a `train` key) means YOLO; COCO JSON under `annotations/`, the root or `train|val|test/` means
-/// COCO; `images/` + `labels/` folders without a YAML mean YOLO as well.
+/// `path` may be a YOLO `data.yaml`, a COCO instances `.json`, a Pascal VOC `.xml`, or a directory. In a directory,
+/// a `data.yaml` (or another YAML with a `train` key) means YOLO; COCO JSON under `annotations/`, the root or
+/// `train|val|test/` means COCO; `Annotations/*.xml` or `<annotation>` XML files mean Pascal VOC; `images/` +
+/// `labels/` folders without a YAML mean YOLO as well.
 pub fn open_with(path: impl AsRef<Path>, opts: &OpenOptions) -> Result<LoadedDataset> {
     open_splits(path, opts, &Split::ALL)
 }
@@ -462,6 +463,9 @@ pub(crate) fn detect(path: &Path, format: Format) -> Result<Source> {
         }
         Source::Voc { root, single_xml } => {
             crate::unfinished::check(root)?;
+            if root.file_name().is_some_and(|n| n.eq_ignore_ascii_case("annotations")) {
+                crate::unfinished::check(&root.join(".."))?;
+            }
             if let Some(xml) = single_xml {
                 let dir = crate::paths::parent_dir(xml);
                 crate::unfinished::check(dir)?;
@@ -703,6 +707,10 @@ fn check_candidate(
     let mut issues = Vec::new();
     let mut fresh = Vec::new();
     let issue = |kind, path: &Path, message: String| Issue { kind, path: path.to_path_buf(), message };
+    if let Err(e) = crate::guard::check(&c.image) {
+        issues.push(issue(IssueKind::CorruptImage, &c.image, DataError::io(&c.image, e).to_string()));
+        return (None, issues, fresh);
+    }
     let Some(image) = probes.stat(&c.image).filter(|e| e.is_file) else {
         issues.push(issue(IssueKind::MissingImage, &c.image, "image file not found".into()));
         return (None, issues, fresh);

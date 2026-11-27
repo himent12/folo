@@ -115,7 +115,9 @@ pub fn stratified_indices(sample_classes: &[Vec<u32>], config: &SplitConfig) -> 
         return Err(DataError::Config("cannot split an empty dataset (0 samples)".into()));
     }
 
-    let ratios = config.ratios();
+    let raw = config.ratios();
+    let sum: f64 = raw.iter().sum();
+    let ratios = [raw[0] / sum, raw[1] / sum, raw[2] / sum];
     let active: Vec<usize> = (0..3).filter(|&s| ratios[s] > 0.0).collect();
     let mut cap = target_capacities(n, &ratios, &active);
 
@@ -180,7 +182,7 @@ pub fn stratified_indices(sample_classes: &[Vec<u32>], config: &SplitConfig) -> 
             if assigned[idx] {
                 continue;
             }
-            let chosen = pick_split(rarest, &desired, &ratios, &cap, &active, &mut rng);
+            let chosen = pick_split(rarest, &sample_labels[idx], &desired, &ratios, &cap, &active, &mut rng);
             assigned[idx] = true;
             remaining_total -= 1;
             cap[chosen] -= 1;
@@ -212,16 +214,26 @@ fn target_capacities(n: usize, ratios: &[f64; 3], active: &[usize]) -> [usize; 3
         used += floor;
         frac[s] = (s, exact - floor as f64);
     }
-    let mut rem = n.saturating_sub(used);
     let mut order: Vec<usize> = active.to_vec();
     order.sort_by(|&a, &b| {
         frac[b].1.total_cmp(&frac[a].1).then_with(|| ratios[b].total_cmp(&ratios[a])).then_with(|| a.cmp(&b))
     });
-    for &s in order.iter().take(rem) {
+    while used > n {
+        if let Some(&donor) = active.iter().filter(|&&d| cap[d] > 0).max_by_key(|&&d| cap[d]) {
+            cap[donor] -= 1;
+            used -= 1;
+        } else {
+            break;
+        }
+    }
+    let mut rem = n.saturating_sub(used);
+    let mut cursor = 0usize;
+    while rem > 0 {
+        let s = order[cursor % order.len()];
         cap[s] += 1;
         rem -= 1;
+        cursor += 1;
     }
-    debug_assert_eq!(rem, 0);
 
     // If there are enough samples for every active split to receive at least one, ensure none is starved to 0.
     if n >= active.len() {
@@ -238,13 +250,16 @@ fn target_capacities(n: usize, ratios: &[f64; 3], active: &[usize]) -> [usize; 3
     cap
 }
 
-/// Chooses the best split with remaining capacity for a sample carrying `label`.
+/// Chooses the best split with remaining capacity for a sample carrying `label` and `sample_labels`.
 ///
 /// Maximises relative deficit `desired[label][s] / ratio[s]`, which gives every active split a representative of a
 /// rare class (with >= 2 samples) before another split takes a second, while converging to exact target ratios for
-/// larger counts. Ties break by largest remaining split capacity, then deterministically via `rng`.
+/// larger counts. Ties break by the sample's combined relative deficit across all its other labels (preserving
+/// co-occurring class balance when singletons appear), then by largest remaining split capacity, then deterministically
+/// via `rng`.
 fn pick_split(
     label: usize,
+    sample_labels: &[usize],
     desired: &[[f64; 3]],
     ratios: &[f64; 3],
     cap: &[usize; 3],
@@ -261,7 +276,7 @@ fn pick_split(
             continue;
         }
         let score = desired[label][s] / ratios[s];
-        if score > best_score + EPS {
+        if best_len == 0 || score > best_score + EPS {
             best_score = score;
             best_splits[0] = s;
             best_len = 1;
@@ -274,11 +289,32 @@ fn pick_split(
     if best_len == 1 {
         return best_splits[0];
     }
-    // Tie-breaker 1: largest remaining capacity (sends singletons to train rather than val/test).
-    let max_cap = best_splits[..best_len].iter().map(|&s| cap[s]).max().unwrap_or(0);
+
+    // Tie-breaker 1: combined relative deficit across the sample's other labels (handles multi-label co-occurrence).
+    let mut co_best = f64::NEG_INFINITY;
+    let mut co_splits = [0usize; 3];
+    let mut co_len = 0usize;
+    for &s in &best_splits[..best_len] {
+        let co_score: f64 =
+            sample_labels.iter().filter(|&&l| l != label).map(|&l| desired[l][s] / ratios[s]).sum();
+        if co_len == 0 || co_score > co_best + EPS {
+            co_best = co_score;
+            co_splits[0] = s;
+            co_len = 1;
+        } else if (co_score - co_best).abs() <= EPS {
+            co_splits[co_len] = s;
+            co_len += 1;
+        }
+    }
+    if co_len == 1 {
+        return co_splits[0];
+    }
+
+    // Tie-breaker 2: largest remaining capacity (sends true singletons to train rather than val/test).
+    let max_cap = co_splits[..co_len].iter().map(|&s| cap[s]).max().unwrap_or(0);
     let mut tied = [0usize; 3];
     let mut tied_len = 0usize;
-    for &s in &best_splits[..best_len] {
+    for &s in &co_splits[..co_len] {
         if cap[s] == max_cap {
             tied[tied_len] = s;
             tied_len += 1;
@@ -405,5 +441,32 @@ mod tests {
         // Two samples with 80/20 still give val 1 image instead of starving it.
         let two = stratified_indices(&[vec![0], vec![0]], &SplitConfig::train_val(0.8, 0.2, 1)).unwrap();
         assert_eq!(two.counts(), [1, 1, 0]);
+    }
+
+    #[test]
+    fn handles_tolerance_boundary_ratios_and_cooccurring_singletons() {
+        // Ratios within 1e-6 of 1.0 must normalize cleanly and never panic or underflow at large n.
+        for (cfg, n) in [
+            (SplitConfig::train_val(0.999_999_1, 0.0, 0), 2_500_000usize),
+            (SplitConfig::train_val(0.8, 0.199_999_1, 0), 2_222_223usize),
+            (SplitConfig::train_val(0.500_000_4, 0.500_000_4, 0), 2_500_000usize),
+        ] {
+            cfg.validate().unwrap();
+            let raw = cfg.ratios();
+            let sum: f64 = raw.iter().sum();
+            let norm = [raw[0] / sum, raw[1] / sum, raw[2] / sum];
+            let active: Vec<usize> = (0..3).filter(|&s| norm[s] > 0.0).collect();
+            let cap = target_capacities(n, &norm, &active);
+            assert_eq!(cap.iter().sum::<usize>(), n, "cfg={cfg:?}");
+        }
+
+        // Co-occurrence: 8 backgrounds + {A, B} + {A, C} at 80/20 must spread A across both train and val.
+        let mut labels = vec![vec![0, 1], vec![0, 2]];
+        labels.extend((0..8).map(|_| vec![]));
+        let split = stratified_indices(&labels, &SplitConfig::train_val(0.8, 0.2, 11)).unwrap();
+        assert_eq!(split.counts(), [8, 2, 0]);
+        let a_train = split.train.iter().filter(|&&i| labels[i].contains(&0)).count();
+        let a_val = split.val.iter().filter(|&&i| labels[i].contains(&0)).count();
+        assert_eq!((a_train, a_val), (1, 1), "class A must appear in both train and val");
     }
 }

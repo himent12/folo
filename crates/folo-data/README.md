@@ -14,7 +14,7 @@ the determinism rules.
 | Path | What it holds |
 |---|---|
 | `src/lib.rs` | Crate docs with an example, and the re-exports |
-| `src/dataset/` | `mod.rs` (the `Dataset` trait, `Split`, `Format`, `open` / `open_with`, format detection, `LoadReport`), `yolo.rs` and `labels.rs` (YOLO), `coco/` (`mod.rs`, `parse.rs`, `fields.rs`: single-pass streaming COCO instances JSON reader), `voc/` (`mod.rs`, `xml.rs`: zero-dependency Pascal VOC XML reader), `cache/` (the on-disk scan cache: `mod.rs`, `probe.rs`, `coco.rs`, `listing.rs`, `tests.rs`) |
+| `src/dataset/` | `mod.rs` (the `Dataset` trait, `Split`, `Format`, `open` / `open_with`, format detection, `LoadReport`), `yolo.rs` and `labels.rs` (YOLO), `coco/` (`mod.rs`, `parse.rs`, `fields.rs`: single-pass streaming COCO instances JSON reader), `voc/` (`mod.rs`, `resolve.rs`, `xml.rs`: zero-dependency Pascal VOC XML reader), `cache/` (the on-disk scan cache: `mod.rs`, `probe.rs`, `coco.rs`, `listing.rs`, `tests.rs`) |
 | `src/image.rs` | `Image`, decoding with EXIF orientation, encoding, `Sample` |
 | `src/bbox.rs` | `BBox`, normalised centre format |
 | `src/letterbox.rs` | Letterbox resize with exact box mapping both ways |
@@ -26,7 +26,7 @@ the determinism rules.
 | `src/synthetic/` | `mod.rs` (the shapes generator, `write_yolo`, `SyntheticDataset`), `raster.rs` (rasteriser, backgrounds), `math.rs` (sine, cosine and powers of two from basic operations), `tests.rs` (golden digests) |
 | `src/audit.rs` | `LoadedDataset::audit()` / `audit_dataset`: streaming 128-bit content-hash duplicate and cross-split (`train`↔`val`/`test`) leakage audit |
 | `src/check.rs` | `folo dataset check`: one `CheckIssue` per problem (including cross-split leakage and VOC diagnostics) |
-| `src/convert.rs` | `folo dataset convert`: writes an opened dataset as YOLO, COCO, or Pascal VOC |
+| `src/convert.rs` | `convert::convert`: writes an opened dataset as YOLO, COCO, or Pascal VOC (CLI `folo dataset convert` targets YOLO / COCO) |
 | `src/split.rs` | `split_dataset`, `split_indices`, `write_split`: seeded multi-label stratified `train`/`val`/`test` splitting |
 | `src/unfinished.rs` | The `.folo-unfinished` marker: `claim`, every writer's first step, makes it in an empty folder; readers refuse it |
 | `src/pack.rs` | A dataset as one tar stream in the canonical YOLO layout, for another FOLO server |
