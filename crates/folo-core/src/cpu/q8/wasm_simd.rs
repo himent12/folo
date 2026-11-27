@@ -835,16 +835,18 @@ mod tests {
                 init_tile[r][j] = rng.uniform(-3.0, 3.0);
             }
         }
+        let corr = [17i32, -31, 0, 128];
         // Extreme values and exact half-integer tie-to-even values (`inv[1] = 8.0`, `bias[1] = 0.0`, `zero[1] = 120`).
+        // Pin `acc[1][0..6] = corr[1]` so `accumulate_part_f32_wasm` adds `0.0` and preserves the `.5` lanes.
         init_tile[0][0] = f32::NAN;
         init_tile[0][1] = f32::INFINITY;
         init_tile[0][2] = f32::NEG_INFINITY;
         init_tile[0][3] = 1.0e6;
         init_tile[0][4] = -1.0e6;
         for (j, target) in [0.5f32, 1.5, 2.5, 120.5, 121.5, 254.5].into_iter().enumerate() {
+            acc[1][j] = corr[1];
             init_tile[1][j] = (target - 120.0) / 8.0;
         }
-        let corr = [17i32, -31, 0, 128];
         let scale = [0.004f32, 0.012, 0.007, 0.019];
         let bias = [-0.25f32, 0.0, 0.75, -1.1];
         let rs = [0.02f32, 0.03, 0.015, 0.025];
@@ -908,6 +910,12 @@ mod tests {
                         // SAFETY: `qfd` holds `NR` words and `res_ptr` is valid when `has_res` is true.
                         unsafe { epi.apply_f32_full_u8_direct(&dst_w, res_ptr, qfd.as_mut_ptr()) };
                         assert_eq!(qfd, qfs, "apply_f32_full_u8_direct mismatch silu={silu} res={has_res}");
+                        if !silu && !has_res {
+                            let got_extremes: Vec<u8> = (0..5).map(|j| qfd[j].to_le_bytes()[0]).collect();
+                            assert_eq!(got_extremes, [0, 255, 0, 255, 0], "extreme lanes mismatch");
+                            let got_ties: Vec<u8> = (0..6).map(|j| qfd[j].to_le_bytes()[1]).collect();
+                            assert_eq!(got_ties, [0, 2, 2, 120, 122, 254], "tie-to-even lanes mismatch");
+                        }
                     } else {
                         for r in 0..MR {
                             for j in 0..NR {

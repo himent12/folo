@@ -12,8 +12,9 @@
 //!    exact `r(1.0) == 1.0` and `r(2.0) == 0.5`, 33% lower latency than 3 Newton-Raphson steps), achieving
 //!    `< 2.5e-7` hybrid error (`|err| / max(1, |ref|)`) with ZERO `vdivps` and ZERO platform-divergent `rcpps`.
 //!
-//! Scalar and AVX2 paths execute the exact same IEEE-754 FMA/mul/add/sub/integer operations in the same order,
-//! producing bit-identical results on all non-NaN inputs across CPUs (and preserving NaN classification on NaN inputs).
+//! On each target, the scalar and SIMD paths (`AVX2`/`AVX-512` FMA on `x86_64`, non-FMA `wasm32` SIMD128 on Wasm)
+//! execute the exact same IEEE-754 operations in the same order, producing bit-identical results on all non-NaN inputs
+//! within that target (and preserving NaN classification on NaN inputs).
 
 /// `max(a, b)` as `vmaxps` computes it (`b` when either is NaN).
 #[inline(always)]
