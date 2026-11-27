@@ -7,6 +7,7 @@ import { bindable, css } from 'fw';
 import type { Prediction } from '$lib/api/types';
 import Panel from '$lib/ui/Panel';
 import Slider from '$lib/ui/Slider';
+import { formatConfThreshold } from './perClassConf';
 import type { Source } from './source';
 
 export interface SidePanelsProps {
@@ -34,7 +35,7 @@ export default function SidePanels(props: SidePanelsProps) {
       <div class="thresholds">
         <Panel title="Thresholds" divided actions={props.resetButton}>
           <div class="sliders">
-            <Slider label="Confidence" bind:value={conf} min={0} max={1} step={0.01} hint="Hide boxes scored below this." />
+            <Slider label="Confidence" bind:value={conf} min={0} max={1} step={0.01} format={formatConfThreshold} hint="Hide boxes scored below this." />
             {props.secondarySliders(false)}
           </div>
           {props.perClassThresholds ? props.perClassThresholds() : null}

@@ -339,7 +339,7 @@ export function compareMarkdown(
       const cells: string[] = [escMd(cond.name)];
       for (let i = 0; i < shown.length; i++) {
         const v = cond.values[i] ?? null;
-        cells.push(v === null ? '—' : escMd(keptText(v)));
+        cells.push(v === null || !Number.isFinite(v) ? '—' : escMd(keptText(v)));
         if (i > 0) {
           const { printed } = conditionDelta(v, baseVal, !old[i] && !old[0]);
           cells.push(printed ? escMd(printed) : '—');

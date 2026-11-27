@@ -100,7 +100,7 @@ export default function SideBySide(props: SideBySideProps) {
       pad="none"
       actions={
         showExport.get() ? (
-          <>
+          <span class="sbs-export-actions" data-compare-export-actions>
             {props.onCopyMarkdown ? (
               <Button size="sm" variant="ghost" icon={props.copiedMd ? Check : Copy} data-compare-copy-md onclick={props.onCopyMarkdown}>
                 {props.copiedMd ? 'Copied' : 'Copy Markdown'}
@@ -111,7 +111,7 @@ export default function SideBySide(props: SideBySideProps) {
                 Download CSV
               </Button>
             ) : null}
-          </>
+          </span>
         ) : undefined
       }
     >
@@ -269,6 +269,12 @@ css`
     color: var(--text-tertiary);
     text-align: right;
   }
+  .sbs-export-actions {
+    display: inline-flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2);
+  }
   .sbs,
   .sbs-base {
     display: none;
@@ -282,6 +288,10 @@ css`
     }
   }
   @media (max-width: 767px) {
+    .sbs-export-actions :global(.btn) {
+      --h: 44px;
+      padding: 0 var(--space-3);
+    }
     .scroll:has(.cmp) {
       display: none;
     }

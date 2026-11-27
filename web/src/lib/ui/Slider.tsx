@@ -41,6 +41,7 @@ export default function Slider(props: SliderProps) {
         bind:value={value}
         oninput={() => p.oninput?.(value.get())}
         style={{ '--pct': `${pct.get()}%` }}
+        aria-valuetext={p.format(value.get())}
         aria-describedby={describedBy(p.hint && `${p.id}-hint`, field?.describedby)}
       />
       {p.hint ? (
@@ -67,7 +68,7 @@ css`
   }
   .inline .val {
     order: 2;
-    min-width: 4ch;
+    min-width: 5ch;
     text-align: right;
   }
   .inline .hint {

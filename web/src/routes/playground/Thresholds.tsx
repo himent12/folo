@@ -6,6 +6,7 @@
 import { bindable, css } from 'fw';
 import Slider from '$lib/ui/Slider';
 import { tooltip } from '$lib/ui/tooltip';
+import { formatConfThreshold } from './perClassConf';
 import { DEFAULTS } from './predict';
 
 const NMS_TIP = 'Non-max suppression: a lower-scoring box of the same class is dropped when it overlaps a kept one by more than this.';
@@ -53,7 +54,7 @@ export function RailThresholds(props: SliderValues & { o2o: boolean; perClassThr
     <>
       <div class="r-sliders">
         <span use:tooltip={CONF_HINT}>
-          <Slider label="Confidence" bind:value={conf} min={0} max={1} step={0.01} />
+          <Slider label="Confidence" bind:value={conf} min={0} max={1} step={0.01} format={formatConfThreshold} />
         </span>
         {props.o2o ? (
           <p class="no-nms">
@@ -102,7 +103,7 @@ export function MoreBody(
           </>
         ) : (
           <>
-            <Slider inline label="Confidence" bind:value={conf} min={0} max={1} step={0.01} />
+            <Slider inline label="Confidence" bind:value={conf} min={0} max={1} step={0.01} format={formatConfThreshold} />
             <SecondarySliders inline o2o={props.o2o} bind:iou={iou} bind:maxDet={maxDet} />
           </>
         )}
@@ -147,7 +148,7 @@ css`
   /* One label column and one value column: every track (the pinned Confidence, the sheet's three) starts and ends at
      the same x. */
   .more-sliders :global(.slider.inline) {
-    grid-template-columns: 112px minmax(0, 1fr) 40px;
+    grid-template-columns: 112px minmax(0, 1fr) 48px;
     min-height: 44px;
   }
   .more-toggles {

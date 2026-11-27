@@ -28,6 +28,7 @@ import Segmented from '$lib/ui/Segmented';
 import Slider from '$lib/ui/Slider';
 import DropZone from './DropZone';
 import NoticeStrip from './NoticeStrip';
+import { formatConfThreshold } from './perClassConf';
 import { BACKEND_NAME, DEFAULTS, px, score } from './predict';
 import { sourceImageKey, type Source } from './source';
 import Swatch from './Swatch';
@@ -369,7 +370,7 @@ export default function ImagePanel(props: ImagePanelProps) {
             Confidence and Overlap side by side (Confidence alone for end-to-end o2o models), the less-used settings one tap away. */}
         {props.source ? (
           <div class="qconf" class:covered={props.sheetShown && !props.tablet} class:single={props.tablet && !!props.o2o}>
-            <Slider inline label="Confidence" bind:value={conf} min={0} max={1} step={0.01} />
+            <Slider inline label="Confidence" bind:value={conf} min={0} max={1} step={0.01} format={formatConfThreshold} />
             {props.tablet && !props.o2o ? (
               <div class="qiou" title="Non-max suppression: a lower-scoring box of the same class is dropped when it overlaps a kept one by more than this.">
                 <Slider inline label="Overlap (IoU)" bind:value={iou} min={0.05} max={0.95} step={0.05} />
@@ -755,7 +756,7 @@ css`
   /* One label column and one value column: every track (the pinned Confidence, the sheet's three) starts and ends at
      the same x. */
   .qconf :global(.slider.inline) {
-    grid-template-columns: 112px minmax(0, 1fr) 40px;
+    grid-template-columns: 112px minmax(0, 1fr) 48px;
   }
   .more-btn {
     display: none;
@@ -801,7 +802,7 @@ css`
       grid-template-columns: minmax(0, 1fr);
     }
     .qconf :global(.slider.inline) {
-      grid-template-columns: auto minmax(0, 1fr) 40px;
+      grid-template-columns: auto minmax(0, 1fr) 48px;
     }
     .qconf :global(output.val) {
       font-family: var(--font-sans);
