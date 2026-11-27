@@ -162,7 +162,7 @@ fn dataset_balance_strip_jumps_to_rarest_class_and_empty_images() {
         app.run_until_idle();
     }
 
-    // Install skewed stats (class 2 = rarest with 15 boxes, 6 empty images).
+    // Install skewed stats (class 2 = rarest with 15 boxes, 6 empty images) AND stale split/query.
     drive(&mut app, window, |this, _, cx| {
         let mut ds = this.store.dataset.get(&ds_id).unwrap().ready().unwrap().clone();
         ds.classes = vec!["circle".into(), "square".into(), "triangle".into()];
@@ -171,12 +171,16 @@ fn dataset_balance_strip_jumps_to_rarest_class_and_empty_images() {
         stats.boxes = 665;
         stats.empty_images = 6;
         this.store.dataset.insert(ds_id.clone(), Load::Ready(ds));
+        this.ds_split = Some(crate::api::Split::Val);
+        this.ds_img_dataset = Some(ds_id.clone());
+        this.ds_img_query = "nonexistent-file".into();
+        this.ds_img_search.update(cx, |i, cx| i.set_text("nonexistent-file", cx));
         this.ds_tab = DsTab::Statistics;
         cx.notify();
     });
     app.frame(window.into());
 
-    // 1. Activate "Inspect rarest" in Statistics strip -> switches to Images filtered to class 2.
+    // 1. Activate "Inspect rarest" in Statistics strip -> clears hidden split/query and filters class 2.
     drive(&mut app, window, |this, w, cx| this.focus_key("ds-balance-rarest", w, cx));
     app.frame(window.into());
     send_key(&mut app, window, "enter");
@@ -184,9 +188,18 @@ fn dataset_balance_strip_jumps_to_rarest_class_and_empty_images() {
         assert_eq!(this.ds_tab, DsTab::Images);
         assert_eq!(this.class_filter(&ds_id), Some(2));
         assert!(!this.empty_only(&ds_id));
+        assert_eq!(this.ds_split, None, "dataset-wide jump clears split filter");
+        assert!(this.img_query(&ds_id).is_empty(), "dataset-wide jump clears filename query");
     });
 
-    // 2. Activate "Empty" quick pill on the tab row -> switches to empty-only filter and clears class.
+    // 2. Activate "Empty" quick pill on the tab row -> clears hidden split/query and shows empty images.
+    drive(&mut app, window, |this, _, cx| {
+        this.ds_split = Some(crate::api::Split::Train);
+        this.ds_img_query = "only-train".into();
+        this.ds_img_search.update(cx, |i, cx| i.set_text("only-train", cx));
+        cx.notify();
+    });
+    app.frame(window.into());
     drive(&mut app, window, |this, w, cx| this.focus_key("ds-balance-empty-pill", w, cx));
     app.frame(window.into());
     send_key(&mut app, window, "enter");
@@ -194,6 +207,8 @@ fn dataset_balance_strip_jumps_to_rarest_class_and_empty_images() {
         assert_eq!(this.ds_tab, DsTab::Images);
         assert!(this.empty_only(&ds_id));
         assert_eq!(this.class_filter(&ds_id), None);
+        assert_eq!(this.ds_split, None, "empty jump clears split filter");
+        assert!(this.img_query(&ds_id).is_empty(), "empty jump clears filename query");
     });
 
     // 3. Switch back to Statistics and activate "Inspect empty" button inside the balance strip.
@@ -283,7 +298,8 @@ fn run_samples_error_explorer_filters_sorts_and_resets_on_navigation() {
         assert_eq!(this.sample_error_filter, SampleErrorFilter::Fp);
     });
 
-    // 2. Raising confidence above all FP predictions yields empty-filter state with Reset button.
+    // 2. Raising confidence above all FP predictions yields empty-filter state; Reset transfers
+    // focus onto `smp-filter-all` so keyboard Tab never strands on an unmounted handle.
     drive(&mut app, window, |this, _, cx| {
         this.sample_conf = 0.95;
         cx.notify();
@@ -292,15 +308,69 @@ fn run_samples_error_explorer_filters_sorts_and_resets_on_navigation() {
     drive(&mut app, window, |this, w, cx| this.focus_key("smp-filter-reset", w, cx));
     app.frame(window.into());
     send_key(&mut app, window, "enter");
-    drive(&mut app, window, |this, _, cx| {
+    drive(&mut app, window, |this, w, cx| {
         assert_eq!(this.sample_error_filter, SampleErrorFilter::All);
+        assert!(this.fh("smp-filter-all", cx).is_focused(w), "reset transfers focus to smp-filter-all");
         this.sample_conf = 0.25;
         this.sample_sort = SampleSort::WorstErrors;
         cx.notify();
     });
     app.frame(window.into());
 
-    // 3. Navigating away resets error filter and sort to defaults.
+    // 3. Opening a sample under FP + MostFp freezes the filtered/sorted snapshot and epoch so
+    // `step_inspector` walks ONLY matching samples in gallery order even after a live epoch update.
+    let fp_two = vec![
+        Sample {
+            image_id: "img_clean".into(),
+            dataset_id: "ds_3b91".into(),
+            width: 640,
+            height: 480,
+            truth: vec![mk_gt(0, 10., 10., 110., 110.)],
+            pred: vec![mk_pred(0, 0.90, 10., 10., 110., 110.)],
+        },
+        Sample {
+            image_id: "img_fp_one".into(),
+            dataset_id: "ds_3b91".into(),
+            width: 640,
+            height: 480,
+            truth: vec![],
+            pred: vec![mk_pred(0, 0.80, 10., 10., 60., 60.)],
+        },
+        Sample {
+            image_id: "img_fp_three".into(),
+            dataset_id: "ds_3b91".into(),
+            width: 640,
+            height: 480,
+            truth: vec![],
+            pred: vec![
+                mk_pred(0, 0.85, 10., 10., 60., 60.),
+                mk_pred(0, 0.75, 80., 10., 130., 60.),
+                mk_pred(0, 0.65, 150., 10., 200., 60.),
+            ],
+        },
+    ];
+    drive(&mut app, window, |this, w, cx| {
+        this.store.samples.insert(run_id.clone(), Load::Ready(RunSamples { epoch: 5, samples: fp_two }));
+        this.sample_error_filter = SampleErrorFilter::Fp;
+        this.sample_sort = SampleSort::MostFp;
+        this.open_sample("ds_3b91".into(), "img_fp_three".into(), run_id.clone(), w, cx);
+        // Simulate a live epoch refresh while inspector is open: snapshot must remain frozen at epoch 5.
+        this.store.samples.insert(run_id.clone(), Load::Ready(RunSamples { epoch: 6, samples: Vec::new() }));
+        let snap = this.inspector.as_ref().unwrap().sample_snapshot.as_ref().unwrap();
+        assert_eq!(snap.epoch, 5);
+        assert_eq!(
+            snap.samples.iter().map(|s| s.image_id.as_str()).collect::<Vec<_>>(),
+            vec!["img_fp_three", "img_fp_one"],
+            "snapshot preserves FP filter and MostFp sort order (excluding img_clean)"
+        );
+        this.step_inspector(1, cx);
+        assert_eq!(this.inspector.as_ref().unwrap().want.as_deref(), Some("img_fp_one"));
+        this.step_inspector(1, cx);
+        assert_eq!(this.inspector.as_ref().unwrap().want.as_deref(), Some("img_fp_three"));
+        this.close_inspector(w, cx);
+    });
+
+    // 4. Navigating away resets error filter and sort to defaults.
     drive(&mut app, window, |this, w, cx| {
         this.sample_error_filter = SampleErrorFilter::Fn;
         this.sample_sort = SampleSort::MostFn;

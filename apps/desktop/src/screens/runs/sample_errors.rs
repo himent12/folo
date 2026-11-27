@@ -208,6 +208,19 @@ pub fn filter_and_sort_samples(
     out
 }
 
+/// Returns the filtered and sorted clone of `samples` at `min_conf` (shared by the samples grid
+/// and the image inspector's frozen sample snapshot).
+pub fn ordered_filtered_samples(
+    samples: &[Sample],
+    min_conf: f32,
+    filter: SampleErrorFilter,
+    sort: SampleSort,
+) -> Vec<Sample> {
+    let analyzed: Vec<(usize, &Sample, SampleErrorStats)> =
+        samples.iter().enumerate().map(|(i, s)| (i, s, analyze_sample(s, min_conf))).collect();
+    filter_and_sort_samples(analyzed, filter, sort).into_iter().map(|(_, s, _)| s.clone()).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

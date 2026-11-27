@@ -503,7 +503,14 @@ impl FoloApp {
             .pb(px(if self.kb { 48. } else { 16. }))
             .child(header)
             .child(
-                div().flex().items_center().justify_between().gap(px(12.)).child(tabs).children(quick_pills),
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(12.))
+                    .child(tabs)
+                    .children(quick_pills),
             )
             .child(div().flex_1().min_h_0().flex().flex_col().child(content))
             .into_any_element()

@@ -305,8 +305,11 @@ impl FoloApp {
                         None,
                         window,
                         cx,
-                        act(|this, _, cx| {
+                        act(|this, w, cx| {
                             this.sample_error_filter = SampleErrorFilter::All;
+                            // Move focus off the disappearing reset button onto the persistent All chip.
+                            let fh = this.fh("smp-filter-all", cx);
+                            w.focus(&fh);
                             cx.notify();
                         }),
                     );
@@ -492,8 +495,11 @@ impl FoloApp {
     }
 }
 
-/// Compact per-sample TP / FP / FN badge strip beneath each validation thumbnail.
+/// Compact per-sample TP / FP / FN badge strip overlaid inside each validation thumbnail.
 fn sample_error_badges(t: &Theme, st: &SampleErrorStats) -> AnyElement {
+    if !st.has_errors() && st.tp == 0 {
+        return div().flex().items_center().child(badge(t, "Clean", Tone::Neutral)).into_any_element();
+    }
     div()
         .flex()
         .flex_wrap()
@@ -502,7 +508,6 @@ fn sample_error_badges(t: &Theme, st: &SampleErrorStats) -> AnyElement {
         .child(badge(t, format!("TP {}", st.tp), if st.tp > 0 { Tone::Success } else { Tone::Neutral }))
         .when(st.fp > 0, |d| d.child(badge(t, format!("FP {}", st.fp), Tone::Danger)))
         .when(st.fn_count > 0, |d| d.child(badge(t, format!("FN {}", st.fn_count), Tone::Warning)))
-        .when(!st.has_errors() && st.tp == 0, |d| d.child(badge(t, "Clean", Tone::Neutral)))
         .into_any_element()
 }
 

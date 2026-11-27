@@ -215,6 +215,16 @@ pub struct Toast {
     pub action: Option<(SharedString, Action)>,
 }
 
+/// Frozen filtered/sorted run-sample list and epoch captured when the inspector opens from a
+/// run's Validation samples panel so stepping, counter, and overlays stay aligned with the gallery
+/// even across live refreshes.
+#[derive(Clone, Debug)]
+pub struct SampleSnapshot {
+    pub epoch: u32,
+    pub conf: f32,
+    pub samples: Vec<Sample>,
+}
+
 /// The image inspector over a dataset grid.
 pub struct Inspector {
     pub dataset: String,
@@ -241,6 +251,8 @@ pub struct Inspector {
     /// Opened from a run's samples: that run and the view it was in. Images that are among its
     /// samples show the epoch's predictions over the (dashed) labels, as the run page draws them.
     pub sample: Option<(String, SampleView)>,
+    /// Frozen filtered & sorted sample snapshot captured when opened from the samples panel.
+    pub sample_snapshot: Option<SampleSnapshot>,
 }
 
 pub struct PlayImage {

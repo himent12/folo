@@ -77,6 +77,8 @@ impl Backend for MockBackend {
         let mut features = vec![
             "queue_control".into(),
             "weights_onnx".into(),
+            folo_api::FEATURE_EXPORT_ONNX_SWITCHES.into(),
+            "export_dynamic_axes".into(),
             "run_estimate".into(),
             "run_cli".into(),
             "throughput".into(),

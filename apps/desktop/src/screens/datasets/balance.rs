@@ -4,8 +4,8 @@
 
 use folo_ui::prelude::FluentBuilder;
 use folo_ui::{
-    AnyElement, Context, FontWeight, IntoElement, ParentElement, StatefulInteractiveElement, Styled, Window,
-    div, px,
+    AnyElement, Context, FontWeight, InteractiveElement, IntoElement, ParentElement,
+    StatefulInteractiveElement, Styled, Window, div, px,
 };
 
 use crate::api::{Dataset, DatasetStats, SplitsExt};
@@ -133,34 +133,27 @@ impl ClassBalanceSummary {
         }
     }
 
-    /// Short badge label and tone for the imbalance ratio.
+    /// Short badge label and tone strictly reflecting the numeric max/min imbalance ratio
+    /// (zero-box classes are surfaced in their own Danger badge so a 1.0× ratio among present
+    /// classes never reads as "1.0× severe skew").
     pub fn ratio_badge(&self) -> Option<(String, Tone)> {
-        if let Some(r) = self.imbalance_ratio {
-            let tone = match self.severity {
-                BalanceSeverity::Severe => Tone::Danger,
-                BalanceSeverity::Skewed => Tone::Warning,
-                BalanceSeverity::Balanced => Tone::Success,
-                BalanceSeverity::SingleOrEmpty => Tone::Neutral,
-            };
-            let suffix = match self.severity {
-                BalanceSeverity::Severe => "severe skew",
-                BalanceSeverity::Skewed => "skew",
-                BalanceSeverity::Balanced => "balanced",
-                BalanceSeverity::SingleOrEmpty => "ratio",
-            };
-            Some((format!("{r:.1}× {suffix}"), tone))
-        } else if !self.zero_classes.is_empty() && self.dominant.is_some() {
-            Some((
-                format!(
-                    "{} unlabeled {}",
-                    self.zero_classes.len(),
-                    if self.zero_classes.len() == 1 { "class" } else { "classes" }
-                ),
-                Tone::Danger,
-            ))
+        let r = self.imbalance_ratio?;
+        if r >= SKEW_SEVERE {
+            Some((format!("{r:.1}× severe skew"), Tone::Danger))
+        } else if r > SKEW_WARN {
+            Some((format!("{r:.1}× skew"), Tone::Warning))
         } else {
-            None
+            Some((format!("{r:.1}× balanced"), Tone::Success))
         }
+    }
+
+    /// Separate Danger badge when one or more declared classes have zero boxes.
+    pub fn unlabeled_classes_badge(&self) -> Option<(String, Tone)> {
+        if self.zero_classes.is_empty() || self.dominant.is_none() {
+            return None;
+        }
+        let n = self.zero_classes.len();
+        Some((format!("{n} unlabeled {}", if n == 1 { "class" } else { "classes" }), Tone::Danger))
     }
 }
 
@@ -169,7 +162,25 @@ fn fmt_share(frac: f64) -> String {
     if pct < 10.0 { format!("{pct:.1}%") } else { format!("{pct:.0}%") }
 }
 
+/// Truncates a class name for compact inline pills/badges (full name stays in the tooltip).
+fn trunc_name(s: &str, max_chars: usize) -> String {
+    let mut chars = s.chars();
+    let head: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() { format!("{head}…") } else { head }
+}
+
 impl FoloApp {
+    /// Clears split and filename search restrictions for dataset `ds_id` when jumping from a
+    /// dataset-wide statistic (rarest class / empty images) so the gallery always shows the
+    /// advertised dataset-wide items rather than an empty intersection with stale filters.
+    fn clear_hidden_gallery_filters(&mut self, ds_id: &str, cx: &mut Context<Self>) {
+        self.ds_split = None;
+        if self.ds_img_dataset.as_deref() == Some(ds_id) && !self.ds_img_query.is_empty() {
+            self.ds_img_query.clear();
+            self.ds_img_search.update(cx, |i, cx| i.set_text("", cx));
+        }
+    }
+
     /// Jumps straight to the Images tab filtered to `class_idx` on dataset `ds_id`.
     pub fn jump_dataset_class(
         &mut self,
@@ -178,6 +189,7 @@ impl FoloApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.clear_hidden_gallery_filters(&ds_id, cx);
         self.ds_class = Some((ds_id.clone(), class_idx));
         if self.empty_only(&ds_id) {
             self.ds_empty_of = None;
@@ -193,6 +205,7 @@ impl FoloApp {
 
     /// Jumps straight to the Images tab filtered to empty (unlabeled) images on dataset `ds_id`.
     pub fn jump_dataset_empty(&mut self, ds_id: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.clear_hidden_gallery_filters(&ds_id, cx);
         self.ds_empty_of = Some(ds_id.clone());
         if self.ds_class.as_ref().is_some_and(|(of, _)| *of == ds_id) {
             self.ds_class = None;
@@ -215,46 +228,50 @@ impl FoloApp {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let s = ds.stats.as_ref()?;
-        // Hide on very narrow viewports so the Images / Statistics tabs keep full breathing room.
-        if self.content_width(window) < 820. {
+        // Hide on narrower viewports so the Images / Statistics tabs keep full breathing room.
+        if self.content_width(window) < 880. {
             return None;
         }
         let summary = ClassBalanceSummary::compute(ds, s);
         let t = theme(cx);
         let ratio = summary.ratio_badge();
-        let rarest_pill = summary.rarest_present.as_ref().map(|r| {
-            let did = ds.id.clone();
-            let idx = r.index;
-            let active = self.ds_tab == DsTab::Images && self.class_filter(&ds.id) == Some(idx);
-            self.chip(
-                "ds-balance-rarest-pill",
-                format!("Rarest: {}", r.name),
-                active,
-                Some(idx),
-                Some(r.count),
-                window,
-                cx,
-                act(move |this, w, cx| {
-                    if this.ds_tab == DsTab::Images && this.class_filter(&did) == Some(idx) {
-                        this.ds_class = None;
-                        this.ds_hover_tile = None;
-                        this.ds_scroll_anchor = None;
-                        this.grid_scroll.scroll_to_item(0, folo_ui::ScrollStrategy::Top);
-                        cx.notify();
-                    } else {
-                        this.jump_dataset_class(did.clone(), idx, w, cx);
-                    }
-                }),
-            )
-            .tooltip(crate::controls::tip(
-                format!(
-                    "Least-represented class ({}, {} of boxes) · click to filter gallery",
-                    counted(r.count, "box", "boxes"),
-                    fmt_share(r.share),
-                ),
-                None,
-            ))
-        });
+        let unlabeled = summary.unlabeled_classes_badge();
+        let rarest_pill =
+            (ds.classes.len() >= 2).then_some(summary.rarest_present.as_ref()).flatten().map(|r| {
+                let did = ds.id.clone();
+                let idx = r.index;
+                let active = self.ds_tab == DsTab::Images && self.class_filter(&ds.id) == Some(idx);
+                let short_name = trunc_name(&r.name, 16);
+                self.chip(
+                    "ds-balance-rarest-pill",
+                    format!("Rarest: {short_name}"),
+                    active,
+                    Some(idx),
+                    Some(r.count),
+                    window,
+                    cx,
+                    act(move |this, w, cx| {
+                        if this.ds_tab == DsTab::Images && this.class_filter(&did) == Some(idx) {
+                            this.ds_class = None;
+                            this.ds_hover_tile = None;
+                            this.ds_scroll_anchor = None;
+                            this.grid_scroll.scroll_to_item(0, folo_ui::ScrollStrategy::Top);
+                            cx.notify();
+                        } else {
+                            this.jump_dataset_class(did.clone(), idx, w, cx);
+                        }
+                    }),
+                )
+                .tooltip(crate::controls::tip(
+                    format!(
+                        "Rarest class: {} ({}, {} of boxes) · click to filter all splits",
+                        r.name,
+                        counted(r.count, "box", "boxes"),
+                        fmt_share(r.share),
+                    ),
+                    None,
+                ))
+            });
         let empty_pill = (summary.empty_images > 0).then(|| {
             let did = ds.id.clone();
             let active = self.ds_tab == DsTab::Images && self.empty_only(&ds.id);
@@ -280,22 +297,26 @@ impl FoloApp {
             )
             .tooltip(crate::controls::tip(
                 format!(
-                    "{} ({}) without boxes · click to inspect in gallery",
+                    "{} ({}) without boxes · click to inspect across all splits",
                     counted(summary.empty_images, "empty image", "empty images"),
                     fmt_share(summary.empty_share),
                 ),
                 None,
             ))
         });
-        if ratio.is_none() && rarest_pill.is_none() && empty_pill.is_none() {
+        if ratio.is_none() && unlabeled.is_none() && rarest_pill.is_none() && empty_pill.is_none() {
             return None;
         }
         Some(
             div()
+                .min_w_0()
                 .flex()
+                .flex_wrap()
                 .items_center()
+                .justify_end()
                 .gap(px(8.))
                 .when_some(ratio, |d, (label, tone)| d.child(badge(&t, label, tone)))
+                .when_some(unlabeled, |d, (label, tone)| d.child(badge(&t, label, tone)))
                 .children(rarest_pill)
                 .children(empty_pill)
                 .into_any_element(),
@@ -317,54 +338,77 @@ impl FoloApp {
         let ratio_el = match summary.ratio_badge() {
             Some((label, tone)) => {
                 let detail = match (&summary.dominant, &summary.rarest_present) {
-                    (Some(hi), Some(lo)) if hi.index != lo.index => {
-                        format!("{} ({}) vs {} ({})", hi.name, int(hi.count), lo.name, int(lo.count))
-                    }
+                    (Some(hi), Some(lo)) if hi.index != lo.index => format!(
+                        "{} ({}) vs {} ({})",
+                        trunc_name(&hi.name, 18),
+                        int(hi.count),
+                        trunc_name(&lo.name, 18),
+                        int(lo.count)
+                    ),
                     _ => "max : min class boxes".to_string(),
                 };
                 div()
+                    .min_w_0()
                     .flex()
+                    .flex_wrap()
                     .items_center()
                     .gap(px(8.))
                     .child(badge(t, label, tone))
-                    .child(text(ty::SM, t.text_tertiary).tnum().child(detail))
+                    .child(text(ty::SM, t.text_tertiary).min_w_0().tnum().child(detail))
             }
             None => div().child(text(ty::SM, t.text_tertiary).child("Single-class or unannotated dataset")),
         };
 
-        let rarest_el = summary.rarest_present.as_ref().map(|r| {
-            let did = ds.id.clone();
-            let idx = r.index;
-            let btn = self.button(
-                "ds-balance-rarest",
-                "Inspect rarest",
-                Btn::Secondary,
-                Some("icons/list-filter.svg"),
-                window,
-                cx,
-                act(move |this, w, cx| this.jump_dataset_class(did.clone(), idx, w, cx)),
-            );
-            div()
-                .flex()
-                .items_center()
-                .gap(px(8.))
-                .child(text(ty::SM, t.text_tertiary).child("Rarest"))
-                .child(class_swatch(t, r.index, 8.))
-                .child(text(ty::SM, t.text_primary).font_weight(FontWeight::MEDIUM).child(r.name.clone()))
-                .child(text(ty::SM, t.text_tertiary).tnum().child(format!(
-                    "{} ({})",
-                    counted(r.count, "box", "boxes"),
-                    fmt_share(r.share)
-                )))
-                .child(btn)
-        });
+        let rarest_el =
+            (ds.classes.len() >= 2).then_some(summary.rarest_present.as_ref()).flatten().map(|r| {
+                let did = ds.id.clone();
+                let idx = r.index;
+                let btn = self.button(
+                    "ds-balance-rarest",
+                    "Inspect rarest",
+                    Btn::Secondary,
+                    Some("icons/list-filter.svg"),
+                    window,
+                    cx,
+                    act(move |this, w, cx| this.jump_dataset_class(did.clone(), idx, w, cx)),
+                );
+                div()
+                    .min_w_0()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(text(ty::SM, t.text_tertiary).child("Rarest"))
+                    .child(class_swatch(t, r.index, 8.))
+                    .child(
+                        text(ty::SM, t.text_primary)
+                            .font_weight(FontWeight::MEDIUM)
+                            .max_w(px(180.))
+                            .ellipsis()
+                            .child(trunc_name(&r.name, 22)),
+                    )
+                    .child(text(ty::SM, t.text_tertiary).tnum().child(format!(
+                        "{} ({})",
+                        counted(r.count, "box", "boxes"),
+                        fmt_share(r.share)
+                    )))
+                    .child(btn)
+            });
 
-        let empty_tone = if summary.empty_share > 0.10 {
-            Tone::Warning
+        let (empty_label, empty_tone) = if summary.total_images == 0 {
+            ("no images".to_string(), Tone::Neutral)
         } else if summary.empty_images > 0 {
-            Tone::Neutral
+            let tone = if summary.empty_share > 0.10 { Tone::Warning } else { Tone::Neutral };
+            (
+                format!(
+                    "{} ({})",
+                    counted(summary.empty_images, "empty image", "empty images"),
+                    fmt_share(summary.empty_share)
+                ),
+                tone,
+            )
         } else {
-            Tone::Success
+            ("0 empty images".to_string(), Tone::Success)
         };
         let empty_btn = (summary.empty_images > 0).then(|| {
             let did = ds.id.clone();
@@ -380,28 +424,23 @@ impl FoloApp {
         });
         let empty_el = div()
             .flex()
+            .flex_wrap()
             .items_center()
             .gap(px(8.))
-            .child(badge(
-                t,
-                if summary.empty_images > 0 {
-                    format!(
-                        "{} ({})",
-                        counted(summary.empty_images, "empty image", "empty images"),
-                        fmt_share(summary.empty_share)
-                    )
-                } else {
-                    "0 empty images".to_string()
-                },
-                empty_tone,
-            ))
+            .child(badge(t, empty_label, empty_tone))
             .children(empty_btn);
 
         let zero_note = (!summary.zero_classes.is_empty()).then(|| {
-            let names: Vec<&str> = summary.zero_classes.iter().take(3).map(|(_, n)| n.as_str()).collect();
-            let extra = summary.zero_classes.len().saturating_sub(3);
+            let names: Vec<String> =
+                summary.zero_classes.iter().take(2).map(|(_, n)| trunc_name(n, 16)).collect();
+            let extra = summary.zero_classes.len().saturating_sub(2);
             let suffix = if extra > 0 { format!(" +{extra} more") } else { String::new() };
-            badge(t, format!("0 boxes: {}{suffix}", names.join(", ")), Tone::Danger)
+            let full_tip =
+                summary.zero_classes.iter().map(|(_, n)| n.as_str()).collect::<Vec<_>>().join(", ");
+            div()
+                .id("ds-balance-zero-note")
+                .tooltip(crate::controls::tip(format!("Classes with 0 boxes: {full_tip}"), None))
+                .child(badge(t, format!("0 boxes: {}{suffix}", names.join(", ")), Tone::Danger))
         });
 
         let few_note = (summary.underrepresented_count > 0).then(|| {
@@ -428,15 +467,25 @@ impl FoloApp {
             .gap(px(12.))
             .child(
                 div()
+                    .min_w_0()
                     .flex()
                     .flex_wrap()
                     .items_center()
-                    .gap(px(12.))
+                    .gap(px(10.))
                     .child(ratio_el)
                     .children(zero_note)
                     .children(few_note),
             )
-            .child(div().flex().flex_wrap().items_center().gap(px(12.)).children(rarest_el).child(empty_el))
+            .child(
+                div()
+                    .min_w_0()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(12.))
+                    .children(rarest_el)
+                    .child(empty_el),
+            )
             .into_any_element()
     }
 }
@@ -469,6 +518,7 @@ mod tests {
         assert!((b.empty_share - 0.05).abs() < 1e-6);
         assert_eq!(b.underrepresented_count, 0);
         assert_eq!(b.ratio_badge(), Some(("2.0× balanced".into(), Tone::Success)));
+        assert_eq!(b.unlabeled_classes_badge(), None);
 
         // Skewed dataset (ratio 10.0x -> Warning).
         s.class_counts = vec![500, 250, 50];
@@ -485,12 +535,15 @@ mod tests {
         assert_eq!(sev.severity, BalanceSeverity::Severe);
         assert_eq!(sev.ratio_badge(), Some(("25.0× severe skew".into(), Tone::Danger)));
 
-        // Missing class (0 boxes) marks Severe even if present classes are equal.
+        // Missing class (0 boxes) marks overall severity Severe, but ratio badge stays honest
+        // ("1.0× balanced") while unlabeled_classes_badge surfaces the missing class in Danger.
         s.class_counts = vec![300, 300, 0];
         let zero = ClassBalanceSummary::compute(&ds, &s);
         assert_eq!(zero.zero_classes, vec![(2, "triangle".into())]);
         assert_eq!(zero.severity, BalanceSeverity::Severe);
         assert_eq!(zero.rarest_present.as_ref().unwrap().index, 0);
+        assert_eq!(zero.ratio_badge(), Some(("1.0× balanced".into(), Tone::Success)));
+        assert_eq!(zero.unlabeled_classes_badge(), Some(("1 unlabeled class".into(), Tone::Danger)));
     }
 
     #[test]
@@ -510,5 +563,12 @@ mod tests {
         assert!(b.rarest_present.is_none());
         assert_eq!(b.empty_share, 0.0);
         assert_eq!(b.ratio_badge(), None);
+        assert_eq!(b.unlabeled_classes_badge(), None);
+    }
+
+    #[test]
+    fn trunc_name_bounds_long_class_names_cleanly() {
+        assert_eq!(trunc_name("short", 16), "short");
+        assert_eq!(trunc_name("a-very-long-class-name-for-testing", 10), "a-very-lon…");
     }
 }
