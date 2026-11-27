@@ -18,8 +18,9 @@ loss/              the detection loss: assignment.rs (host assigner), terms/ (BC
 assign.rs          the task-aligned assigner (including eps-free TAL & NWD-IoU) and DFL target encoding
 boxes.rs, decode.rs, nms/{mod.rs, kernel.rs, topk.rs}, fusion/{mod.rs, tests.rs}   boxes and IoU, anchors and DFL decode, NMS (standard/AVX2, DIoU-NMS, Soft-NMS) / o2o top-k, cluster fusion (vote/DFL/SEBF) & ELC/DFL-consensus/DFL-repulse/DFL-CGR
 metrics.rs, eval/, cocoeval.rs           Evaluator (mAP, PR curves, confusion matrix, opt-in per-image ImageDiagnostics), the full COCOeval
-train/             Trainer: config/, setup (new / resume), run (epochs), epoch, feed (GPU staging), device,
-                   teacher (distillation), gauge (Floor Conv+BN Gauge Normalization), checkpoint, events, writer/
+train/             Trainer: config/, setup (new / resume), auto_batch (GPU VRAM-budget prober), run (epochs), epoch,
+                   feed (GPU staging), device, teacher (distillation), gauge (Floor Conv+BN Gauge Normalization),
+                   checkpoint, events, writer/
 val.rs             validate: a model on a dataset split
 predict.rs         Predictor
 tile.rs            SAHI tiled inference (TileConfig, compute_tiles, crop_tile, merge_tiled_detections)
@@ -215,6 +216,19 @@ Opt-in post-processing on `o2m` NMS clusters (MODEL.md §9.4, configured via `Nm
 - **Devices:** the device is a parameter. On a GPU (`place_model` moves the model; optimizer, EMA and gradient
   buffers follow) a feeder thread stages each `u8` batch for upload while the previous step runs, accumulation and
   clipping stay on the device, and the step waits only for the loss items and one BatchNorm finiteness check.
+- **GPU Auto-Batch Prober (`train/auto_batch/`):** opt-in (`TrainConfig.auto_batch = true`,
+  `auto_batch_target = 0.80` in `0.25..=0.95`), wired into `Trainer::new` before `place_model` (skipped on CPU and on
+  checkpoint resume so resumed schedules stay bit-exact). Queries `folo-gpu`'s `MemoryBudget` (`memory_budget()`,
+  `memory_usage()`, `estimate_max_batch`, `estimate_headroom`, `needs_reclaim`) against an analytic per-stage
+  `FoloModel` memory footprint covering `f32`, `amp` (including `F32` autocast attention softmax), `o2o`, EMA,
+  optimizer state (`SGD`, `MuSGD` momentum + Muon conv buffers, `AdamW`), frozen distillation teachers (resident
+  single/dual-head weights, retained outputs, and forward-plan intermediates), and conv backward split-K scratch;
+  respects BOTH usable VRAM and per-buffer `max_buffer_size` / `max_storage_buffer_binding_size` limits, reclaims
+  cached pool buffers (`release_memory()`) when needed, selects a divisor-compatible physical micro-batch paired with
+  gradient accumulation (`accumulate`, preserving `nbs = max(nbs, requested_batch)` and effective `wd_eff`) so
+  effective batch size and LR schedule stay invariant, and caps `val_batch` (`chosen_val_batch`) against `F32` eval
+  limits. Standalone `probe_batch_size` / `auto_batch_plan` return a serializable `AutoBatchPlan` diagnostic (also
+  exposed via `Trainer::auto_batch_plan()` and `config.json`'s `auto_batch`).
 - **Mixed precision** (`amp`, MODEL.md §8.8; GPU tensor cores only, else `not_supported`): the forward under
   `autocast` (f16 convs and products on tensor cores), the loss in f32 on f32 copies of the head, backward of the loss
   times folo-nn's `GradScaler` scale, and at the end of a window the unscale, clip and overflow check with one flag
@@ -328,5 +342,5 @@ and `HeadOutput::detections`, which reads the head outputs in place and extracts
 The integration tests in `crates/folo-vision/tests/` are named for what they protect: `model.rs`, `model_v2.rs`,
 `onnx_export.rs`, `loss_cases.rs`, `assign_cases.rs`, `distill.rs`, `wave7_train_algos.rs`, `nms_reference.rs`,
 `fusion_reference.rs`, `elc_postproc.rs`, `metrics_known.rs`, `coco_parity.rs`, `coco_full.rs`, `train/` (`main.rs`,
-`ema.rs`), `o2o.rs`, `lazy_head.rs`, `int8.rs`, `harden_pipelines.rs`, `tiled_predict.rs`, `tta_predict.rs`,
+`ema.rs`), `auto_batch.rs`, `o2o.rs`, `lazy_head.rs`, `int8.rs`, `harden_pipelines.rs`, `tiled_predict.rs`, `tta_predict.rs`,
 `track_and_eval.rs`, and the GPU ones (`gpu*.rs`).
