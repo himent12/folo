@@ -3,7 +3,6 @@
 //! methods as in embedded mode; only the transport differs: [`folo_client::Client`] (blocking, `http://` or
 //! `https://`, the server's `--token` when it has one). The MCP layer runs the calls on tokio's blocking pool.
 
-use std::path::Path;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -87,20 +86,18 @@ impl HttpStore {
         HttpStore { client, deadline: None, probe: Arc::new(SharedProbe::default()) }
     }
 
-    /// [`HttpStore::new`] optionally trusting the PEM CA bundle at `tls_ca` (for self-signed or private-CA
+    /// [`HttpStore::new`] optionally trusting the validated CA bundle `tls_ca` (for self-signed or private-CA
     /// `https://` servers).
-    pub fn with_tls_ca(base: &str, token: Option<&str>, tls_ca: Option<&Path>) -> Result<HttpStore, String> {
+    pub fn with_tls_ca(base: &str, token: Option<&str>, tls_ca: Option<&folo_client::TlsCa>) -> HttpStore {
         let client = match tls_ca {
-            Some(path) => {
-                Client::with_tls_ca_file(base, Duration::from_secs(5), Duration::from_secs(600), path)?
-            }
+            Some(ca) => Client::with_tls_ca(base, Duration::from_secs(5), Duration::from_secs(600), ca),
             None => Client::new(base),
         };
-        Ok(HttpStore {
+        HttpStore {
             client: client.token(token.unwrap_or_default()),
             deadline: None,
             probe: Arc::new(SharedProbe::default()),
-        })
+        }
     }
 
     /// The server's base URL.

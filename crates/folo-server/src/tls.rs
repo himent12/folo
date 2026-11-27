@@ -171,13 +171,29 @@ fn read_error(e: std::io::Error, label: &str, is_cert: bool) -> TlsError {
     }
 }
 
+fn describe_pem_error(e: &rustls_pki_types::pem::Error) -> &'static str {
+    use rustls_pki_types::pem::Error;
+    // Never format raw PEM lines or section markers (`IllegalSectionStart` / `MissingSectionEnd`) into error
+    // messages: a mangled or single-line private key file could otherwise leak key bytes into logs or CLI output.
+    match e {
+        Error::MissingSectionEnd { .. } => "missing PEM section end marker",
+        Error::IllegalSectionStart { .. } => "malformed PEM section header",
+        Error::Base64Decode(_) => "invalid base64 encoding",
+        Error::Io(_) => "I/O error while reading PEM",
+        Error::NoItemsFound => "no PEM blocks found",
+        Error::SectionTooLarge => "PEM section exceeds maximum size",
+        _ => "malformed PEM encoding",
+    }
+}
+
 fn parse_certs(pem: &[u8], label: &str) -> Result<Vec<CertificateDer<'static>>, TlsError> {
     let mut certs = Vec::new();
     for item in CertificateDer::pem_slice_iter(pem) {
         let cert = item.map_err(|e| {
+            let reason = describe_pem_error(&e);
             TlsError::new(
                 TlsErrorKind::InvalidCert,
-                format!("invalid PEM certificate in '{label}': {e}"),
+                format!("invalid PEM certificate in '{label}': {reason}"),
                 "provide a valid PEM-encoded X.509 certificate chain (-----BEGIN CERTIFICATE-----) to --tls-cert",
             )
         })?;
@@ -190,6 +206,19 @@ fn parse_certs(pem: &[u8], label: &str) -> Result<Vec<CertificateDer<'static>>, 
             "provide a PEM-encoded X.509 certificate chain (-----BEGIN CERTIFICATE-----) to --tls-cert",
         ));
     }
+    // Validate X.509 DER syntax for every certificate in the chain upfront (`ServerConfig::with_single_cert` only
+    // inspects the leaf cert against the key, so a corrupt intermediate would otherwise pass startup and break
+    // handshakes later).
+    let mut store = rustls::RootCertStore::empty();
+    for (idx, cert) in certs.iter().enumerate() {
+        if let Err(e) = store.add(cert.clone()) {
+            return Err(TlsError::new(
+                TlsErrorKind::InvalidCert,
+                format!("certificate #{} in '{label}' is not valid X.509 DER: {e}", idx + 1),
+                "provide a valid PEM-encoded X.509 certificate chain to --tls-cert",
+            ));
+        }
+    }
     Ok(certs)
 }
 
@@ -197,9 +226,10 @@ fn parse_key(pem: &[u8], label: &str) -> Result<PrivateKeyDer<'static>, TlsError
     let mut keys = Vec::new();
     for item in PrivateKeyDer::pem_slice_iter(pem) {
         let key = item.map_err(|e| {
+            let reason = describe_pem_error(&e);
             TlsError::new(
                 TlsErrorKind::InvalidKey,
-                format!("invalid PEM private key in '{label}': {e}"),
+                format!("invalid PEM private key in '{label}': {reason}"),
                 "provide a valid unencrypted PKCS#8, PKCS#1, or SEC1 PEM private key to --tls-key",
             )
         })?;
@@ -330,6 +360,8 @@ pub(crate) async fn serve_tls(
         });
     }
 
+    // Stop listening for new TCP connections immediately while in-flight requests drain.
+    drop(listener);
     graceful.shutdown().await;
     Ok(())
 }
@@ -420,5 +452,62 @@ mod tests {
 
         // Valid cert_b + key_b still works.
         TlsConfig::from_pem(cert_b.as_bytes(), key_b.as_bytes()).unwrap();
+    }
+
+    #[test]
+    fn malformed_pem_never_leaks_private_key_bytes() {
+        let (cert_a, _key_a) = generate_self_signed("localhost");
+        let sentinel = "SUPERSECRETKEYPAYLOAD9876543210";
+        let single_line_key = format!("-----BEGIN PRIVATE KEY-----{sentinel}-----END PRIVATE KEY-----");
+        let joined_header_key = format!("-----BEGIN PRIVATE KEY-----{sentinel}\n-----END PRIVATE KEY-----\n");
+
+        for bad in [&single_line_key, &joined_header_key] {
+            let err = TlsConfig::from_pem(cert_a.as_bytes(), bad.as_bytes()).unwrap_err();
+            assert_eq!(err.kind(), TlsErrorKind::InvalidKey);
+            let msg = format!("{err} {err:?}");
+            assert!(!msg.contains(sentinel), "raw secret leaked: {msg}");
+            // Also ensure ASCII byte-array dumps of the secret cannot appear.
+            assert!(!msg.contains("83, 85, 80, 69, 82"), "byte array secret leaked: {msg}");
+
+            // Combined file passed to `--tls-cert` must also never leak the key block.
+            let combined = format!("{cert_a}\n{bad}");
+            let err = TlsConfig::from_pem(combined.as_bytes(), bad.as_bytes()).unwrap_err();
+            assert_eq!(err.kind(), TlsErrorKind::InvalidCert);
+            let msg = format!("{err} {err:?}");
+            assert!(!msg.contains(sentinel) && !msg.contains("83, 85, 80, 69, 82"), "leaked: {msg}");
+        }
+    }
+
+    #[test]
+    fn validates_full_certificate_chain_and_trailing_pem_blocks() {
+        // Multi-cert chain (leaf signed by intermediate CA) succeeds.
+        let ca_key = rcgen::KeyPair::generate().unwrap();
+        let mut ca_params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+        ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        let ca_cert = ca_params.self_signed(&ca_key).unwrap();
+        let ca_issuer = rcgen::Issuer::new(ca_params, ca_key);
+
+        let leaf_key = rcgen::KeyPair::generate().unwrap();
+        let leaf_params = rcgen::CertificateParams::new(vec!["localhost".to_string()]).unwrap();
+        let leaf_cert = leaf_params.signed_by(&leaf_key, &ca_issuer).unwrap();
+
+        let full_chain = format!("{}\n{}", leaf_cert.pem(), ca_cert.pem());
+        let leaf_key_pem = leaf_key.serialize_pem();
+        TlsConfig::from_pem(full_chain.as_bytes(), leaf_key_pem.as_bytes()).unwrap();
+
+        // Corrupt intermediate certificate (`AA==`) appended after a valid leaf is rejected upfront.
+        let bad_chain =
+            format!("{}\n-----BEGIN CERTIFICATE-----\nAA==\n-----END CERTIFICATE-----\n", leaf_cert.pem());
+        let err = TlsConfig::from_pem(bad_chain.as_bytes(), leaf_key_pem.as_bytes()).unwrap_err();
+        assert_eq!(err.kind(), TlsErrorKind::InvalidCert);
+        assert!(err.to_string().contains("#2"), "{err}");
+
+        // Valid cert/key followed by a trailing malformed PEM block is rejected upfront.
+        let trailing_bad = format!(
+            "{}\n-----BEGIN CERTIFICATE-----\n!!!bad!!!\n-----END CERTIFICATE-----\n",
+            leaf_cert.pem()
+        );
+        let err = TlsConfig::from_pem(trailing_bad.as_bytes(), leaf_key_pem.as_bytes()).unwrap_err();
+        assert_eq!(err.kind(), TlsErrorKind::InvalidCert);
     }
 }

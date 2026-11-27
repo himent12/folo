@@ -76,8 +76,8 @@ pub enum Backend {
         url: String,
         /// The token it was started with (`--token`), if any.
         token: Option<String>,
-        /// Optional PEM CA certificate file to trust for `https://` servers (`--tls-ca`).
-        tls_ca: Option<PathBuf>,
+        /// Optional validated custom CA bundle for `https://` servers (`--tls-ca`).
+        tls_ca: Option<folo_client::TlsCa>,
     },
 }
 
@@ -139,7 +139,7 @@ pub fn build(backend: Backend, opts: Options) -> Result<FoloMcp, String> {
                     "--server (or FOLO_SERVER) must be a valid http:// or https:// URL of a `folo serve` ({why})"
                 ));
             }
-            let http = Arc::new(proxy::HttpStore::with_tls_ca(&url, token.as_deref(), tls_ca.as_deref())?);
+            let http = Arc::new(proxy::HttpStore::with_tls_ca(&url, token.as_deref(), tls_ca.as_ref()));
             let store: Arc<dyn Store> = http.clone();
             FoloMcp::new(store, Some(http), opts)
         }

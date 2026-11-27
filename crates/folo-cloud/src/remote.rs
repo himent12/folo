@@ -51,8 +51,8 @@ impl Provider for Remote {
                     required: true,
                     placeholder: Some("https://gpu-box.example.com:7878".into()),
                     help: Some(
-                        "The address of its `folo serve`; use https:// (`--tls-cert` / `--tls-key`, a TLS proxy, or \
-                         a tunnel) across networks you do not control."
+                        "The address of its `folo serve`; use https:// (a TLS proxy or a tunnel) across networks you \
+                         do not control."
                             .into(),
                     ),
                 },

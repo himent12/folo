@@ -263,4 +263,161 @@ fn serve_tls_rejects_unpaired_missing_malformed_and_mismatched_files_upfront() {
         (key_arg["long"].as_str(), key_arg["env"].as_str(), key_arg["type"].as_str()),
         (Some("--tls-key"), Some("FOLO_TLS_KEY"), Some("path"))
     );
+
+    // 7. Single-line / mangled private key PEM never leaks key bytes into JSON or stderr.
+    let sentinel = "CLISECRETKEYBYTES987654321";
+    let mangled_key_path = dir.join("mangled-key.pem");
+    std::fs::write(
+        &mangled_key_path,
+        format!("-----BEGIN PRIVATE KEY-----{sentinel}-----END PRIVATE KEY-----"),
+    )
+    .unwrap();
+    let out = folo_cmd()
+        .args([
+            "serve",
+            "--mock",
+            "--json",
+            "--port",
+            "0",
+            "--tls-cert",
+            cert_s,
+            "--tls-key",
+            mangled_key_path.to_str().unwrap(),
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let stdout_s = String::from_utf8_lossy(&out.stdout);
+    let stderr_s = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "stdout={stdout_s} stderr={stderr_s}");
+    assert!(!stdout_s.contains(sentinel) && !stderr_s.contains(sentinel), "secret leaked!");
+    assert!(
+        !stdout_s.contains("67, 76, 73, 83") && !stderr_s.contains("67, 76, 73, 83"),
+        "secret bytes leaked!"
+    );
+
+    // 8. Corrupt second certificate (`AA==`) in the chain is rejected upfront before binding.
+    let bad_chain_path = dir.join("bad-chain.pem");
+    std::fs::write(
+        &bad_chain_path,
+        format!("{cert_a}\n-----BEGIN CERTIFICATE-----\nAA==\n-----END CERTIFICATE-----\n"),
+    )
+    .unwrap();
+    let (code, v) = run(
+        &[
+            "serve",
+            "--mock",
+            "--json",
+            "--port",
+            "0",
+            "--tls-cert",
+            bad_chain_path.to_str().unwrap(),
+            "--tls-key",
+            key_a_s,
+        ],
+        &[],
+    );
+    assert_eq!((code, v["error"]["code"].as_str()), (1, Some("serve_failed")), "{v}");
+
+    // 9. `folo mcp --tls-ca` rejects invalid X.509 DER (`AA==`) and non-PEM BEFORE touching `--data-dir` / `serve.lock`.
+    let bad_ca_der = dir.join("bad-ca-der.pem");
+    std::fs::write(&bad_ca_der, "-----BEGIN CERTIFICATE-----\nAA==\n-----END CERTIFICATE-----\n").unwrap();
+    let fresh_data = dir.join("fresh-mcp-data");
+    for bad_ca in [bad_s, bad_ca_der.to_str().unwrap()] {
+        let out = folo_cmd()
+            .args(["mcp", "--data-dir", fresh_data.to_str().unwrap(), "--tls-ca", bad_ca])
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(2), "stderr={}", String::from_utf8_lossy(&out.stderr));
+        assert!(out.stdout.is_empty());
+        assert!(!fresh_data.join("serve.lock").exists(), "bad --tls-ca must not acquire serve.lock");
+    }
+}
+
+#[test]
+fn serve_tls_preserves_dns_host_for_dns_only_cert_and_mcp_auto_proxy() {
+    let dir = TestDir::new("cli-serve-tls-dns");
+    let data = dir.join("data");
+    // DNS-only certificate (`DNS:localhost`, no IP SAN): requires `https://localhost:<port>` to verify.
+    let (cert_pem, key_pem) = make_cert(&["localhost"]);
+    let cert_path = dir.join("cert.pem");
+    let key_path = dir.join("key.pem");
+    std::fs::write(&cert_path, &cert_pem).unwrap();
+    std::fs::write(&key_path, &key_pem).unwrap();
+
+    let mut server: ChildGuard = folo_cmd()
+        .args([
+            "serve",
+            "--host",
+            "localhost",
+            "--port",
+            "0",
+            "--json",
+            "--data-dir",
+            data.to_str().unwrap(),
+            "--tls-cert",
+            cert_path.to_str().unwrap(),
+            "--tls-key",
+            key_path.to_str().unwrap(),
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap()
+        .into();
+
+    let line = read_line_within(server.stdout.take().unwrap(), Duration::from_secs(30));
+    let listening: Value = serde_json::from_str(&line).unwrap_or_else(|e| panic!("{e}: {line:?}"));
+    assert_eq!(listening["event"], "listening", "{listening}");
+    let url = listening["url"].as_str().unwrap().to_string();
+    assert!(url.starts_with("https://localhost:"), "expected DNS hostname in URL: {listening}");
+
+    // `serve.json` records `https://localhost:<port>` and a verified client succeeds against it.
+    let serve_json: Value = serde_json::from_slice(&std::fs::read(data.join("serve.json")).unwrap()).unwrap();
+    assert_eq!(serve_json["url"], url, "{serve_json}");
+    let client = folo_client::Client::with_tls_ca_file(
+        &url,
+        Duration::from_secs(5),
+        Duration::from_secs(30),
+        &cert_path,
+    )
+    .unwrap();
+    let sys: Value = client.get("/system").unwrap();
+    assert!(sys["data_dir"].is_string(), "{sys}");
+
+    // `folo mcp --data-dir <data> --tls-ca <cert>` auto-discovers via `serve.json` and proxies cleanly over HTTPS.
+    let mut mcp: ChildGuard = folo_cmd()
+        .args(["mcp", "--data-dir", data.to_str().unwrap(), "--tls-ca", cert_path.to_str().unwrap()])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap()
+        .into();
+    let mut stdin = mcp.stdin.take().unwrap();
+    for msg in [
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}"#,
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"folo_info","arguments":{}}}"#,
+    ] {
+        writeln!(stdin, "{msg}").unwrap();
+    }
+    let info =
+        find_line_within(mcp.stdout.take().unwrap(), Duration::from_secs(30), |l| l.contains(r#""id":2"#));
+    drop(stdin);
+    assert!(info.contains(r#"\"mode\":\"proxy\""#) || info.contains(r#""mode":"proxy""#), "{info}");
+    assert!(info.contains("https://localhost:"), "{info}");
+
+    // An invalid `--tls-ca` against the running TLS server reports a usage error (exit 2), NOT `data_dir_in_use`.
+    let bad_ca = dir.join("not-a-ca.pem");
+    std::fs::write(&bad_ca, "not pem").unwrap();
+    let bad_mcp = folo_cmd()
+        .args(["mcp", "--data-dir", data.to_str().unwrap(), "--tls-ca", bad_ca.to_str().unwrap()])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(bad_mcp.status.code(), Some(2), "stderr={}", String::from_utf8_lossy(&bad_mcp.stderr));
+    assert!(bad_mcp.stdout.is_empty());
 }

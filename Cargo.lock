@@ -783,6 +783,8 @@ dependencies = [
  "folo-api",
  "folo-test-support",
  "http",
+ "rustls",
+ "rustls-pki-types",
  "serde",
  "serde_json",
  "ureq",

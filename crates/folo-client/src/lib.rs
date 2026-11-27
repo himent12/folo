@@ -15,6 +15,7 @@ pub mod transfer;
 
 use std::ops::Range;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use folo_api::{ApiError, ErrorBody};
@@ -22,6 +23,8 @@ use http::header::{
     AUTHORIZATION, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, ETAG, IF_MATCH, RANGE,
 };
 use http::{HeaderMap, StatusCode};
+use rustls_pki_types::CertificateDer;
+use rustls_pki_types::pem::PemObject;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
@@ -114,6 +117,66 @@ pub enum StreamError {
     Http(Error),
     /// Writing to the destination sink failed.
     Io(std::io::Error),
+}
+
+/// Error returned when loading or validating a custom TLS CA bundle ([`TlsCa`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TlsCaError {
+    not_found: bool,
+    message: String,
+}
+
+impl TlsCaError {
+    /// True when the CA file does not exist.
+    pub fn is_not_found(&self) -> bool {
+        self.not_found
+    }
+}
+
+impl std::fmt::Display for TlsCaError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for TlsCaError {}
+
+/// A validated custom PEM CA bundle for [`Client::with_tls_ca`] (self-signed or private-CA `https://` workers).
+#[derive(Clone)]
+pub struct TlsCa {
+    certs: Arc<Vec<ureq::tls::Certificate<'static>>>,
+}
+
+impl std::fmt::Debug for TlsCa {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TlsCa").field("certs", &self.certs.len()).finish()
+    }
+}
+
+impl TlsCa {
+    /// Parses and validates PEM X.509 root certificate(s) from memory.
+    pub fn from_pem(pem: &[u8]) -> std::result::Result<Self, String> {
+        let certs = parse_ca_pem(pem)?;
+        Ok(Self { certs: Arc::new(certs) })
+    }
+
+    /// Reads and validates PEM X.509 root certificate(s) from `path`.
+    pub fn from_file(path: &Path) -> std::result::Result<Self, TlsCaError> {
+        let label = folo_api::json::path(path);
+        let pem = std::fs::read(path).map_err(|e| TlsCaError {
+            not_found: e.kind() == std::io::ErrorKind::NotFound,
+            message: if e.kind() == std::io::ErrorKind::NotFound {
+                format!("TLS CA file '{label}' does not exist")
+            } else {
+                format!("could not read TLS CA file '{label}': {e}")
+            },
+        })?;
+        let certs = parse_ca_pem(&pem).map_err(|why| TlsCaError {
+            not_found: false,
+            message: format!("invalid TLS CA file '{label}': {why}"),
+        })?;
+        Ok(Self { certs: Arc::new(certs) })
+    }
 }
 
 /// A client of one FOLO server. Cheap to clone (the connection pool is shared).
@@ -213,6 +276,11 @@ impl Client {
         Self::build(base, connect, request, None)
     }
 
+    /// [`Client::with_timeouts`] trusting the validated custom CA bundle `ca` instead of the bundled web PKI roots.
+    pub fn with_tls_ca(base: &str, connect: Duration, request: Duration, ca: &TlsCa) -> Client {
+        Self::build(base, connect, request, Some(ca))
+    }
+
     /// [`Client::with_timeouts`] trusting the PEM root certificate(s) in `ca_pem` instead of the bundled web PKI
     /// roots (for self-signed or private-CA `folo serve --tls-cert` workers).
     pub fn with_tls_ca_pem(
@@ -221,8 +289,8 @@ impl Client {
         request: Duration,
         ca_pem: &[u8],
     ) -> std::result::Result<Client, String> {
-        let certs = parse_ca_pem(ca_pem)?;
-        Ok(Self::build(base, connect, request, Some(certs)))
+        let ca = TlsCa::from_pem(ca_pem)?;
+        Ok(Self::build(base, connect, request, Some(&ca)))
     }
 
     /// [`Client::with_tls_ca_pem`] reading the PEM CA bundle from `ca_path`.
@@ -232,18 +300,11 @@ impl Client {
         request: Duration,
         ca_path: &Path,
     ) -> std::result::Result<Client, String> {
-        let label = folo_api::json::path(ca_path);
-        let pem = std::fs::read(ca_path).map_err(|e| format!("could not read TLS CA file '{label}': {e}"))?;
-        let certs = parse_ca_pem(&pem).map_err(|why| format!("invalid TLS CA file '{label}': {why}"))?;
-        Ok(Self::build(base, connect, request, Some(certs)))
+        let ca = TlsCa::from_file(ca_path).map_err(|e| e.to_string())?;
+        Ok(Self::build(base, connect, request, Some(&ca)))
     }
 
-    fn build(
-        base: &str,
-        connect: Duration,
-        request: Duration,
-        ca_certs: Option<Vec<ureq::tls::Certificate<'static>>>,
-    ) -> Client {
+    fn build(base: &str, connect: Duration, request: Duration, ca: Option<&TlsCa>) -> Client {
         // Never follow HTTP redirects: FOLO endpoints do not redirect, and following one would risk treating a
         // proxy or captive portal's answer as the server's (or sending requests to an unexpected host).
         let mut builder = ureq::Agent::config_builder()
@@ -252,9 +313,9 @@ impl Client {
             .max_redirects_will_error(false)
             .timeout_connect(Some(connect))
             .timeout_global(Some(request));
-        if let Some(certs) = ca_certs {
+        if let Some(ca) = ca {
             let tls = ureq::tls::TlsConfig::builder()
-                .root_certs(ureq::tls::RootCerts::new_with_certs(&certs))
+                .root_certs(ureq::tls::RootCerts::new_with_certs(&ca.certs))
                 .build();
             builder = builder.tls_config(tls);
         }
@@ -646,14 +707,29 @@ impl Client {
     }
 }
 
+fn describe_pem_error(e: &rustls_pki_types::pem::Error) -> &'static str {
+    use rustls_pki_types::pem::Error;
+    match e {
+        Error::MissingSectionEnd { .. } => "missing PEM section end marker",
+        Error::IllegalSectionStart { .. } => "malformed PEM section header",
+        Error::Base64Decode(_) => "invalid base64 encoding",
+        Error::Io(_) => "I/O error while reading PEM",
+        Error::NoItemsFound => "no PEM blocks found",
+        Error::SectionTooLarge => "PEM section exceeds maximum size",
+        _ => "malformed PEM encoding",
+    }
+}
+
 fn parse_ca_pem(pem: &[u8]) -> std::result::Result<Vec<ureq::tls::Certificate<'static>>, String> {
     let mut certs = Vec::new();
-    for item in ureq::tls::parse_pem(pem) {
-        match item {
-            Ok(ureq::tls::PemItem::Certificate(cert)) => certs.push(cert),
-            Ok(_) => {}
-            Err(e) => return Err(format!("invalid PEM certificate: {e}")),
-        }
+    let mut store = rustls::RootCertStore::empty();
+    for item in CertificateDer::pem_slice_iter(pem) {
+        let der = item.map_err(|e| format!("invalid PEM certificate: {}", describe_pem_error(&e)))?;
+        let idx = certs.len() + 1;
+        store
+            .add(der.clone())
+            .map_err(|e| format!("certificate #{idx} is not a valid X.509 trust anchor: {e}"))?;
+        certs.push(ureq::tls::Certificate::from_der(der.as_ref()).to_owned());
     }
     if certs.is_empty() {
         return Err("no PEM certificates found".into());

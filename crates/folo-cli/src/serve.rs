@@ -95,7 +95,7 @@ pub(crate) fn serve(args: ServeArgs, out: Out) -> Result<(), CliError> {
         let addr = listener
             .local_addr()
             .map_err(|e| CliError::new(ExitCode::Runtime, "bind_failed", e.to_string()))?;
-        let listen = ListenUrls::from_addr(addr, tls_enabled);
+        let listen = ListenUrls::from_bind(&args.host, addr, tls_enabled);
         // Before the store opens (it can take a while): a second start can say where this one is.
         if let Some(lock) = &serve_lock
             && let Err(e) = lock.publish(&listen.url)
@@ -205,23 +205,36 @@ fn load_tls(args: &ServeArgs) -> Result<Option<folo_server::TlsConfig>, CliError
 struct ListenUrls {
     url: String,
     bind: String,
-    wildcard: bool,
+    show_bind: bool,
     tls: bool,
 }
 
 impl ListenUrls {
+    fn from_bind(host: &str, addr: std::net::SocketAddr, tls: bool) -> Self {
+        let host = host.trim();
+        let is_dns_name = !host.is_empty()
+            && !host.starts_with('[')
+            && !host.contains('%')
+            && host.parse::<std::net::IpAddr>().is_err();
+        // When TLS is active and `--host` was given as a DNS name (e.g. `localhost` or `gpu.example.com`), keep
+        // that hostname in the advertised `https://` URL (and `serve.json`) so DNS-only certificate SANs verify
+        // cleanly instead of failing against the resolved IP literal, while `bind` preserves the socket address.
+        let (url, show_bind) = if tls && is_dns_name {
+            (format!("https://{host}:{}", addr.port()), true)
+        } else {
+            (serve_lock::local_url(addr, tls), addr.ip().is_unspecified())
+        };
+        Self { url, bind: addr.to_string(), show_bind, tls }
+    }
+
+    #[cfg(test)]
     fn from_addr(addr: std::net::SocketAddr, tls: bool) -> Self {
-        Self {
-            url: serve_lock::local_url(addr, tls),
-            bind: addr.to_string(),
-            wildcard: addr.ip().is_unspecified(),
-            tls,
-        }
+        Self::from_bind(&addr.ip().to_string(), addr, tls)
     }
 
     fn banner_line(&self, mock: bool) -> String {
         let mode = if mock { "mock data" } else { "the real store" };
-        if self.wildcard {
+        if self.show_bind {
             format!("FOLO {VERSION} serving {mode} on {} (bound to {})", self.url, self.bind)
         } else {
             format!("FOLO {VERSION} serving {mode} on {}", self.url)
@@ -338,7 +351,7 @@ mod tests {
 
         // IPv4 wildcard -> clickable IPv4 loopback URL + explicit bind address.
         let v4_wild = ListenUrls::from_addr("0.0.0.0:7878".parse().unwrap(), false);
-        assert!(v4_wild.wildcard);
+        assert!(v4_wild.show_bind);
         assert_eq!(v4_wild.url, "http://127.0.0.1:7878");
         assert_eq!(v4_wild.bind, "0.0.0.0:7878");
         assert_eq!(
@@ -353,7 +366,7 @@ mod tests {
 
         // IPv6 wildcard -> clickable IPv6 loopback URL + explicit bind address.
         let v6_wild = ListenUrls::from_addr("[::]:7878".parse().unwrap(), false);
-        assert!(v6_wild.wildcard);
+        assert!(v6_wild.show_bind);
         assert_eq!(v6_wild.url, "http://[::1]:7878");
         assert_eq!(v6_wild.bind, "[::]:7878");
         assert_eq!(
@@ -380,6 +393,16 @@ mod tests {
         assert_eq!(rec["api"], "https://127.0.0.1:7878/api");
         assert_eq!(rec["tls"], true);
 
+        // TLS with a DNS `--host` preserves the DNS hostname in `url` while keeping the resolved IP in `bind`.
+        let dns_tls = ListenUrls::from_bind("localhost", "[::1]:7878".parse().unwrap(), true);
+        assert!(dns_tls.show_bind);
+        assert_eq!(dns_tls.url, "https://localhost:7878");
+        assert_eq!(dns_tls.bind, "[::1]:7878");
+        assert_eq!(
+            dns_tls.banner_line(false),
+            format!("FOLO {VERSION} serving the real store on https://localhost:7878 (bound to [::1]:7878)")
+        );
+
         // Explicit loopback and LAN hosts stay as bound without a redundant "(bound to ...)" suffix.
         for (raw, want_url, want_bind) in [
             ("127.0.0.1:7878", "http://127.0.0.1:7878", "127.0.0.1:7878"),
@@ -387,7 +410,7 @@ mod tests {
             ("192.168.1.5:7878", "http://192.168.1.5:7878", "192.168.1.5:7878"),
         ] {
             let l = ListenUrls::from_addr(raw.parse().unwrap(), false);
-            assert!(!l.wildcard, "{raw}");
+            assert!(!l.show_bind, "{raw}");
             assert_eq!(l.url, want_url, "{raw}");
             assert_eq!(l.bind, want_bind, "{raw}");
             assert_eq!(l.banner_line(false), format!("FOLO {VERSION} serving the real store on {want_url}"));
@@ -401,7 +424,7 @@ mod tests {
         let scoped =
             std::net::SocketAddr::V6(std::net::SocketAddrV6::new("fe80::1234".parse().unwrap(), 7878, 0, 7));
         let l = ListenUrls::from_addr(scoped, false);
-        assert!(!l.wildcard);
+        assert!(!l.show_bind);
         assert_eq!(l.url, "http://[fe80::1234%7]:7878");
         assert_eq!(l.bind, "[fe80::1234%7]:7878");
         assert!(!l.banner_line(false).contains("bound to"));

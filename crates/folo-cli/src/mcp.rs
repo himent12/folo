@@ -10,20 +10,24 @@ use crate::{data_dir, default_data_dir, serve_lock};
 /// `--json`); logs go to stderr.
 pub(crate) fn mcp(args: McpArgs) -> Result<(), CliError> {
     init_tracing();
-    if let Some(ca) = &args.tls_ca {
-        if ca.as_os_str().is_empty() {
+    // Validate `--tls-ca` upfront (before touching the data dir or acquiring `serve.lock`) so an unreadable or
+    // unusable CA bundle fails immediately instead of falling through to `data_dir_in_use` or embedded mode.
+    let tls_ca = match &args.tls_ca {
+        Some(ca) if ca.as_os_str().is_empty() => {
             return Err(CliError::new(ExitCode::Usage, "usage", "--tls-ca must not be empty")
                 .hint("pass the path to a PEM CA certificate file to --tls-ca (or FOLO_TLS_CA)"));
         }
-        if !ca.exists() {
-            return Err(CliError::new(
-                ExitCode::NotFound,
-                "path_not_found",
-                format!("TLS CA file '{}' does not exist", folo_api::json::path(ca)),
-            )
-            .hint("pass an existing PEM CA certificate file to --tls-ca (or FOLO_TLS_CA)"));
-        }
-    }
+        Some(ca) => Some(folo_client::TlsCa::from_file(ca).map_err(|e| {
+            let (exit, code) = if e.is_not_found() {
+                (ExitCode::NotFound, "path_not_found")
+            } else {
+                (ExitCode::Usage, "usage")
+            };
+            CliError::new(exit, code, e.to_string())
+                .hint("pass a readable PEM X.509 CA certificate file to --tls-ca (or FOLO_TLS_CA)")
+        })?),
+        None => None,
+    };
     if args.tensor_cores && args.server.is_none() {
         // As `folo serve --tensor-cores`: before anything creates the GPU context.
         folo_gpu::context::request_tensor_cores();
@@ -35,11 +39,9 @@ pub(crate) fn mcp(args: McpArgs) -> Result<(), CliError> {
         args.data_dir.clone().unwrap_or_else(default_data_dir)
     };
     let mut backend = match (&args.server, args.mock) {
-        (Some(url), _) => folo_mcp::Backend::Proxy {
-            url: url.clone(),
-            token: args.token.clone(),
-            tls_ca: args.tls_ca.clone(),
-        },
+        (Some(url), _) => {
+            folo_mcp::Backend::Proxy { url: url.clone(), token: args.token.clone(), tls_ca: tls_ca.clone() }
+        }
         (None, true) => folo_mcp::Backend::Mock,
         (None, false) => folo_mcp::Backend::Real,
     };
@@ -50,11 +52,10 @@ pub(crate) fn mcp(args: McpArgs) -> Result<(), CliError> {
             Ok(serve_lock::Acquire::Held(lock)) => Some(lock),
             Ok(serve_lock::Acquire::InUse { url: Some(url) })
                 if !args.confine
-                    && serve_lock::serves(&url, &data_dir, args.token.as_deref(), args.tls_ca.as_deref()) =>
+                    && serve_lock::serves(&url, &data_dir, args.token.as_deref(), tls_ca.as_ref()) =>
             {
                 tracing::info!(%url, "a folo serve owns the data dir: using it (as --server)");
-                backend =
-                    folo_mcp::Backend::Proxy { url, token: args.token.clone(), tls_ca: args.tls_ca.clone() };
+                backend = folo_mcp::Backend::Proxy { url, token: args.token.clone(), tls_ca: tls_ca.clone() };
                 None
             }
             Ok(serve_lock::Acquire::InUse { url }) => return Err(data_dir_in_use(&data_dir, url.as_deref())),

@@ -92,7 +92,7 @@ const SERVES_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// Whether the `folo serve` at `url` serves `dir` (its `/api/system` `data_dir`): `serve.json` can be stale, and a
 /// new process may listen on a dead server's port. Connecting is quick or nothing listens there.
-pub fn serves(url: &str, dir: &Path, token: Option<&str>, tls_ca: Option<&Path>) -> bool {
+pub fn serves(url: &str, dir: &Path, token: Option<&str>, tls_ca: Option<&folo_client::TlsCa>) -> bool {
     serves_within(url, dir, token, tls_ca, SERVES_TIMEOUT)
 }
 
@@ -101,15 +101,12 @@ fn serves_within(
     url: &str,
     dir: &Path,
     token: Option<&str>,
-    tls_ca: Option<&Path>,
+    tls_ca: Option<&folo_client::TlsCa>,
     timeout: std::time::Duration,
 ) -> bool {
     let connect = std::time::Duration::from_secs(3);
     let mut client = match tls_ca {
-        Some(ca) => match folo_client::Client::with_tls_ca_file(url, connect, timeout, ca) {
-            Ok(c) => c,
-            Err(_) => return false,
-        },
+        Some(ca) => folo_client::Client::with_tls_ca(url, connect, timeout, ca),
         None => folo_client::Client::with_timeouts(url, connect, timeout),
     };
     if let Some(token) = token {
