@@ -122,6 +122,11 @@ impl FoloApp {
             }
         };
         let no_models = models.is_empty() && self.store.models.ready().is_some();
+        let compare_on = self.play_compare.enabled && !no_models;
+        let model_b_block = compare_on.then(|| self.play_model_b_controls(&t, &models, window, cx));
+        // In Compare mode, hide the NMS IoU slider only when BOTH Model A and Model B are end-to-end.
+        let e2e_b = self.play_shown_model_b().is_some_and(|m| self.model_e2e(m));
+        let e2e_controls = if compare_on { e2e && e2e_b } else { e2e };
         let run_on = self.run_on(window, cx);
         let controls = div()
             .flex()
@@ -135,7 +140,18 @@ impl FoloApp {
                     .flex()
                     .flex_col()
                     .gap(px(8.))
-                    .child(text(ty::SM, t.text_secondary).font_weight(FontWeight::MEDIUM).child("Model"))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .when(compare_on, |d| d.child(badge(&t, "A", Tone::Accent)))
+                            .child(
+                                text(ty::SM, t.text_secondary)
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .child(if compare_on { "Model A" } else { "Model" }),
+                            ),
+                    )
                     .map(|d| {
                         if no_models {
                             // Nothing to choose: a quiet, inert field instead of a dropdown.
@@ -172,6 +188,7 @@ impl FoloApp {
                         )
                     }),
             )
+            .children(model_b_block)
             .when(!no_models, |d| {
                 d.child(run_on)
                     .child(field("Confidence", fmt_conf(self.play_conf), conf.into_any_element(), conf_help))
@@ -218,7 +235,7 @@ impl FoloApp {
                     // "NMS IoU": the suppression overlap, not the evaluation's IoU 0.50. An end-to-end
                     // model has no suppression step: the row says so instead of offering an inert slider.
                     .map(|d| {
-                        if e2e {
+                        if e2e_controls {
                             d.child(
                                 div()
                                     .h(px(20.))
@@ -248,142 +265,75 @@ impl FoloApp {
 
         let active = self.play_active(window, cx);
         let mut timing: Option<AnyElement> = None;
-        let detections = match &self.play_pred {
-            Load::Ready(p) => {
-                let above_conf: Vec<crate::api::ScoredBox> =
-                    p.boxes.iter().filter(|b| b.score >= self.play_conf).cloned().collect();
-                let below_conf = p.boxes.len() - above_conf.len();
-                let vis: Vec<crate::api::ScoredBox> =
-                    super::page::filter_detections(&p.boxes, self.play_conf, self.play_class)
-                        .into_iter()
-                        .cloned()
-                        .collect();
-                let mut class_counts: std::collections::BTreeMap<u32, (String, u64)> =
-                    std::collections::BTreeMap::new();
-                for b in &above_conf {
-                    class_counts
-                        .entry(b.class)
-                        .and_modify(|(_, c)| *c += 1)
-                        .or_insert_with(|| (b.name.clone(), 1));
-                }
-                let distinct_above = class_counts.len();
-                if let Some(cid) = self.play_class
-                    && !class_counts.contains_key(&cid)
-                {
-                    let name = self
-                        .play_shown_model()
-                        .and_then(|m| m.classes.get(cid as usize).cloned())
-                        .or_else(|| p.boxes.iter().find(|b| b.class == cid).map(|b| b.name.clone()))
-                        .unwrap_or_else(|| format!("class {cid}"));
-                    class_counts.insert(cid, (name, 0));
-                }
-                let show_class_chips = distinct_above >= 2 || self.play_class.is_some();
-                let boxes_chip = self.chip(
-                    "play-boxes",
-                    "Boxes",
-                    self.play_boxes,
-                    None,
-                    None,
-                    window,
-                    cx,
-                    act(|this, _, cx| {
-                        this.play_boxes = !this.play_boxes;
-                        if !this.play_boxes {
-                            this.clear_play_hover();
-                        }
-                        cx.notify();
-                    }),
-                );
-                let labels_chip = self.chip(
-                    "play-labels",
-                    "Labels",
-                    self.play_boxes && self.play_labels,
-                    None,
-                    None,
-                    window,
-                    cx,
-                    act(|this, _, cx| {
-                        if !this.play_boxes {
-                            this.play_boxes = true;
-                            this.play_labels = true;
-                        } else {
-                            this.play_labels = !this.play_labels;
-                        }
-                        cx.notify();
-                    }),
-                );
-                let copy_json = self
-                    .button(
-                        "play-copy-json",
-                        "Copy JSON",
-                        Btn::Secondary,
-                        Some("icons/copy.svg"),
+        let detections = if compare_on {
+            self.play_compare_results(&t, window, cx)
+        } else {
+            match &self.play_pred {
+                Load::Ready(p) => {
+                    let above_conf: Vec<crate::api::ScoredBox> =
+                        p.boxes.iter().filter(|b| b.score >= self.play_conf).cloned().collect();
+                    let below_conf = p.boxes.len() - above_conf.len();
+                    let vis: Vec<crate::api::ScoredBox> =
+                        super::page::filter_detections(&p.boxes, self.play_conf, self.play_class)
+                            .into_iter()
+                            .cloned()
+                            .collect();
+                    let mut class_counts: std::collections::BTreeMap<u32, (String, u64)> =
+                        std::collections::BTreeMap::new();
+                    for b in &above_conf {
+                        class_counts
+                            .entry(b.class)
+                            .and_modify(|(_, c)| *c += 1)
+                            .or_insert_with(|| (b.name.clone(), 1));
+                    }
+                    let distinct_above = class_counts.len();
+                    if let Some(cid) = self.play_class
+                        && !class_counts.contains_key(&cid)
+                    {
+                        let name = self
+                            .play_shown_model()
+                            .and_then(|m| m.classes.get(cid as usize).cloned())
+                            .or_else(|| p.boxes.iter().find(|b| b.class == cid).map(|b| b.name.clone()))
+                            .unwrap_or_else(|| format!("class {cid}"));
+                        class_counts.insert(cid, (name, 0));
+                    }
+                    let show_class_chips = distinct_above >= 2 || self.play_class.is_some();
+                    let boxes_chip = self.chip(
+                        "play-boxes",
+                        "Boxes",
+                        self.play_boxes,
+                        None,
+                        None,
                         window,
                         cx,
-                        act(|this, _, cx| this.copy_play_json(cx)),
-                    )
-                    .tooltip(crate::controls::tip("Copy visible detections as JSON", None));
-                let toolbar = div()
-                    .px(px(12.))
-                    .py(px(6.))
-                    .border_b_1()
-                    .border_color(t.line_subtle)
-                    .flex()
-                    .flex_wrap()
-                    .items_center()
-                    .justify_between()
-                    .gap(px(6.))
-                    .child(div().flex().items_center().gap(px(6.)).child(boxes_chip).child(labels_chip))
-                    .child(copy_json);
-                let class_bar = show_class_chips.then(|| {
-                    let mut chips: Vec<AnyElement> = Vec::with_capacity(class_counts.len() + 1);
-                    chips.push(
-                        self.chip(
-                            "play-class-all",
-                            "All",
-                            self.play_class.is_none(),
-                            None,
-                            Some(above_conf.len() as u64),
-                            window,
-                            cx,
-                            act(move |this, w, cx| {
-                                this.play_class = None;
+                        act(|this, _, cx| {
+                            this.play_boxes = !this.play_boxes;
+                            if !this.play_boxes {
                                 this.clear_play_hover();
-                                if distinct_above < 2 {
-                                    this.focus_key("play-boxes", w, cx);
-                                }
-                                cx.notify();
-                            }),
-                        )
-                        .into_any_element(),
+                            }
+                            cx.notify();
+                        }),
                     );
-                    for (cid, (cname, cnt)) in class_counts {
-                        let on = self.play_class == Some(cid);
-                        chips.push(
-                            self.chip(
-                                &format!("play-class-{cid}"),
-                                cname,
-                                on,
-                                Some(cid),
-                                Some(cnt),
-                                window,
-                                cx,
-                                act(move |this, w, cx| {
-                                    let clearing = this.play_class == Some(cid);
-                                    this.play_class = if clearing { None } else { Some(cid) };
-                                    this.clear_play_hover();
-                                    if clearing && distinct_above < 2 {
-                                        this.focus_key("play-boxes", w, cx);
-                                    } else if clearing && cnt == 0 {
-                                        this.focus_key("play-class-all", w, cx);
-                                    }
-                                    cx.notify();
-                                }),
-                            )
-                            .into_any_element(),
-                        );
-                    }
-                    div()
+                    let labels_chip = self.chip(
+                        "play-labels",
+                        "Labels",
+                        self.play_boxes && self.play_labels,
+                        None,
+                        None,
+                        window,
+                        cx,
+                        act(|this, _, cx| {
+                            if !this.play_boxes {
+                                this.play_boxes = true;
+                                this.play_labels = true;
+                            } else {
+                                this.play_labels = !this.play_labels;
+                            }
+                            cx.notify();
+                        }),
+                    );
+                    let export_bar = self.play_export_bar(&t, window, cx);
+                    let toolbar = div()
                         .px(px(12.))
                         .py(px(6.))
                         .border_b_1()
@@ -392,242 +342,312 @@ impl FoloApp {
                         .flex_wrap()
                         .items_center()
                         .gap(px(6.))
-                        .children(chips)
-                });
-                let clear_class = (self.play_class.is_some() && vis.is_empty()).then(|| {
-                    self.button(
-                        "play-class-clear",
-                        "Show all classes",
-                        Btn::Secondary,
-                        None,
-                        window,
-                        cx,
-                        act(move |this, w, cx| {
-                            this.play_class = None;
-                            this.clear_play_hover();
-                            let target = if distinct_above >= 2 { "play-class-all" } else { "play-boxes" };
-                            this.focus_key(target, w, cx);
-                            cx.notify();
-                        }),
-                    )
-                });
-                let n_vis = vis.len();
-                let rows: Vec<AnyElement> = vis
-                    .iter()
-                    .enumerate()
-                    .map(|(i, b)| {
-                        let hot = active == Some(i);
-                        let key = format!("det-{i}");
-                        // A cut class name shows in full on hover and on keyboard focus.
-                        let long = may_overflow(&b.name, ty::SM.size, 68.);
-                        let score = if b.score.is_finite() { b.score.clamp(0.0, 1.0) } else { 0.0 };
-                        let row = self
-                            .disclose(
-                                div().id(SharedString::from(key.clone())),
-                                &key,
-                                b.name.clone(),
-                                long,
-                                28.,
-                                false,
+                        .child(boxes_chip)
+                        .child(labels_chip);
+                    let class_bar = show_class_chips.then(|| {
+                        let mut chips: Vec<AnyElement> = Vec::with_capacity(class_counts.len() + 1);
+                        chips.push(
+                            self.chip(
+                                "play-class-all",
+                                "All",
+                                self.play_class.is_none(),
+                                None,
+                                Some(above_conf.len() as u64),
                                 window,
                                 cx,
-                            )
-                            .flex_none()
-                            .h(px(28.))
-                            .px(px(8.))
-                            .flex()
-                            .items_center()
-                            .gap(px(8.))
-                            .rounded(px(radius::SM))
-                            .when(hot, |d| d.bg(t.bg_active).child(crate::ui::select_bar(&t)))
-                            .hover(|s| s.bg(t.bg_hover))
-                            .active(|s| s.bg(t.bg_active))
-                            .on_key_down(cx.listener(move |this, ev: &folo_ui::KeyDownEvent, w, cx| {
-                                let next = match ev.keystroke.key.as_str() {
-                                    "down" => (i + 1 < n_vis).then_some(i + 1),
-                                    "up" => i.checked_sub(1),
-                                    "home" => (i > 0).then_some(0),
-                                    "end" => (i + 1 < n_vis).then_some(n_vis - 1),
-                                    _ => return,
-                                };
-                                if let Some(next) = next {
-                                    this.focus_key_and_reveal(&format!("det-{next}"), w, cx);
-                                }
-                                cx.stop_propagation();
-                            }))
-                            .on_hover(cx.listener(move |this, h: &bool, _, cx| {
-                                if *h {
-                                    this.play_hover_from_stage = false;
-                                    if this.play_hover != Some(i) {
-                                        this.play_hover = Some(i);
-                                        cx.notify();
-                                    }
-                                } else if !this.play_hover_from_stage && this.play_hover == Some(i) {
+                                act(move |this, w, cx| {
+                                    this.play_class = None;
                                     this.clear_play_hover();
+                                    if distinct_above < 2 {
+                                        this.focus_key("play-boxes", w, cx);
+                                    }
                                     cx.notify();
-                                }
-                            }))
-                            .child(crate::ui::class_swatch(&t, b.class, 8.))
-                            .child(text(ty::SM, t.text_primary).w(px(68.)).ellipsis().child(b.name.clone()))
-                            // Size tells apart two boxes of the same class.
-                            .child(
-                                // On the active row's fill, tertiary falls under AA: secondary there.
-                                text(ty::SM, if hot { t.text_secondary } else { t.text_tertiary })
-                                    .tnum()
-                                    .w(px(68.))
-                                    .flex_none()
-                                    .child(format!(
-                                        "{:.0}×{:.0}",
-                                        (b.x2 - b.x1).max(0.0),
-                                        (b.y2 - b.y1).max(0.0)
-                                    )),
+                                }),
                             )
-                            .child(
-                                div().flex_1().h(px(4.)).rounded_full().bg(t.bg_inset).child(
-                                    // The class's surface-safe stroke (the photo palette washes out on a light panel).
-                                    div()
-                                        .h_full()
-                                        .w(relative(score))
-                                        .rounded_full()
-                                        .bg(t.class_on(b.class, crate::theme::Surface::Panel)),
-                                ),
-                            )
-                            .child(
-                                text(ty::SM, t.text_primary)
-                                    .tnum()
-                                    .w(px(36.))
-                                    .text_right()
-                                    .child(format!("{score:.2}")),
+                            .into_any_element(),
+                        );
+                        for (cid, (cname, cnt)) in class_counts {
+                            let on = self.play_class == Some(cid);
+                            chips.push(
+                                self.chip(
+                                    &format!("play-class-{cid}"),
+                                    cname,
+                                    on,
+                                    Some(cid),
+                                    Some(cnt),
+                                    window,
+                                    cx,
+                                    act(move |this, w, cx| {
+                                        let clearing = this.play_class == Some(cid);
+                                        this.play_class = if clearing { None } else { Some(cid) };
+                                        this.clear_play_hover();
+                                        if clearing && distinct_above < 2 {
+                                            this.focus_key("play-boxes", w, cx);
+                                        } else if clearing && cnt == 0 {
+                                            this.focus_key("play-class-all", w, cx);
+                                        }
+                                        cx.notify();
+                                    }),
+                                )
+                                .into_any_element(),
                             );
-                        // Focusable so the keyboard can inspect boxes too (focus = highlight).
-                        self.bind(
-                            row,
-                            &key,
-                            radius::SM,
+                        }
+                        div()
+                            .px(px(12.))
+                            .py(px(6.))
+                            .border_b_1()
+                            .border_color(t.line_subtle)
+                            .flex()
+                            .flex_wrap()
+                            .items_center()
+                            .gap(px(6.))
+                            .children(chips)
+                    });
+                    let clear_class = (self.play_class.is_some() && vis.is_empty()).then(|| {
+                        self.button(
+                            "play-class-clear",
+                            "Show all classes",
+                            Btn::Secondary,
+                            None,
                             window,
                             cx,
-                            act(move |this, _, cx| {
-                                this.play_hover_from_stage = false;
-                                this.play_hover = if this.play_hover == Some(i) { None } else { Some(i) };
+                            act(move |this, w, cx| {
+                                this.play_class = None;
+                                this.clear_play_hover();
+                                let target =
+                                    if distinct_above >= 2 { "play-class-all" } else { "play-boxes" };
+                                this.focus_key(target, w, cx);
                                 cx.notify();
                             }),
                         )
-                        .into_any_element()
-                    })
-                    .collect();
-                let total = p.timing.total_ms.max(0.001);
-                let seg = |v: f64, c| {
-                    let frac = if v.is_finite() { (v / total).clamp(0.0, 1.0) as f32 } else { 0.0 };
-                    div().h_full().w(relative(frac)).bg(c)
-                };
-                // One neutral ramp: Inference (the bulk) in secondary ink, Preprocess tertiary a step
-                // below it (70 % dark, 80 % light: each 3:1 on its panel), and Postprocess an outline
-                // (a faint fill in a tertiary edge), in the bar and its key alike.
-                let (c_pre, c_model, c_nms) = (
-                    crate::theme::alpha(t.text_tertiary, if t.is_dark() { 0.7 } else { 0.8 }),
-                    t.text_secondary,
-                    crate::theme::alpha(t.text_tertiary, 0.3),
-                );
-                let timing_el = div()
-                    .w_full()
-                    .flex()
-                    .flex_col()
-                    .gap(px(8.))
-                    .px(px(16.))
-                    .py(px(12.))
-                    .border_t_1()
-                    .border_color(t.line_subtle)
-                    .child(
-                        div()
-                            .flex()
-                            .justify_between()
-                            .items_start()
-                            .gap(px(8.))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .flex()
-                                    .flex_col()
-                                    .gap(px(2.))
-                                    // Where the number comes from: the built-in demo simulates it; a
-                                    // server or this app times one image (not sustained throughput).
-                                    .child(
-                                        text(ty::SM, t.text_secondary)
-                                            .font_weight(FontWeight::MEDIUM)
-                                            .child(if simulated { "Simulated latency" } else { "Latency" }),
-                                    )
-                                    // Under the label, whole: beside it a local GPU's name left no room
-                                    // ("RTX 4080 SUPER in this app · o…").
-                                    .child(text(ty::SM, t.text_tertiary).tnum().whitespace_normal().child(
-                                        // The demo has no device of its own to name.
-                                        if simulated {
-                                            "one image".to_string()
-                                        } else {
-                                            format!(
-                                                "{} · one image",
-                                                device_name(&p.device, self.store.system.ready()),
-                                            )
-                                        },
-                                    )),
+                    });
+                    let n_vis = vis.len();
+                    let rows: Vec<AnyElement> = vis
+                        .iter()
+                        .enumerate()
+                        .map(|(i, b)| {
+                            let hot = active == Some(i);
+                            let key = format!("det-{i}");
+                            // A cut class name shows in full on hover and on keyboard focus.
+                            let long = may_overflow(&b.name, ty::SM.size, 68.);
+                            let score = if b.score.is_finite() { b.score.clamp(0.0, 1.0) } else { 0.0 };
+                            let row = self
+                                .disclose(
+                                    div().id(SharedString::from(key.clone())),
+                                    &key,
+                                    b.name.clone(),
+                                    long,
+                                    28.,
+                                    false,
+                                    window,
+                                    cx,
+                                )
+                                .flex_none()
+                                .h(px(28.))
+                                .px(px(8.))
+                                .flex()
+                                .items_center()
+                                .gap(px(8.))
+                                .rounded(px(radius::SM))
+                                .when(hot, |d| d.bg(t.bg_active).child(crate::ui::select_bar(&t)))
+                                .hover(|s| s.bg(t.bg_hover))
+                                .active(|s| s.bg(t.bg_active))
+                                .on_key_down(cx.listener(move |this, ev: &folo_ui::KeyDownEvent, w, cx| {
+                                    let next = match ev.keystroke.key.as_str() {
+                                        "down" => (i + 1 < n_vis).then_some(i + 1),
+                                        "up" => i.checked_sub(1),
+                                        "home" => (i > 0).then_some(0),
+                                        "end" => (i + 1 < n_vis).then_some(n_vis - 1),
+                                        _ => return,
+                                    };
+                                    if let Some(next) = next {
+                                        this.focus_key_and_reveal(&format!("det-{next}"), w, cx);
+                                    }
+                                    cx.stop_propagation();
+                                }))
+                                .on_hover(cx.listener(move |this, h: &bool, _, cx| {
+                                    if *h {
+                                        this.play_hover_from_stage = false;
+                                        if this.play_hover != Some(i) {
+                                            this.play_hover = Some(i);
+                                            cx.notify();
+                                        }
+                                    } else if !this.play_hover_from_stage && this.play_hover == Some(i) {
+                                        this.clear_play_hover();
+                                        cx.notify();
+                                    }
+                                }))
+                                .child(crate::ui::class_swatch(&t, b.class, 8.))
+                                .child(
+                                    text(ty::SM, t.text_primary).w(px(68.)).ellipsis().child(b.name.clone()),
+                                )
+                                // Size tells apart two boxes of the same class.
+                                .child(
+                                    // On the active row's fill, tertiary falls under AA: secondary there.
+                                    text(ty::SM, if hot { t.text_secondary } else { t.text_tertiary })
+                                        .tnum()
+                                        .w(px(68.))
+                                        .flex_none()
+                                        .child(format!(
+                                            "{:.0}×{:.0}",
+                                            (b.x2 - b.x1).max(0.0),
+                                            (b.y2 - b.y1).max(0.0)
+                                        )),
+                                )
+                                .child(
+                                    div().flex_1().h(px(4.)).rounded_full().bg(t.bg_inset).child(
+                                        // The class's surface-safe stroke (the photo palette washes out on a light panel).
+                                        div()
+                                            .h_full()
+                                            .w(relative(score))
+                                            .rounded_full()
+                                            .bg(t.class_on(b.class, crate::theme::Surface::Panel)),
+                                    ),
+                                )
+                                .child(
+                                    text(ty::SM, t.text_primary)
+                                        .tnum()
+                                        .w(px(36.))
+                                        .text_right()
+                                        .child(format!("{score:.2}")),
+                                );
+                            // Focusable so the keyboard can inspect boxes too (focus = highlight).
+                            self.bind(
+                                row,
+                                &key,
+                                radius::SM,
+                                window,
+                                cx,
+                                act(move |this, _, cx| {
+                                    this.play_hover_from_stage = false;
+                                    this.play_hover = if this.play_hover == Some(i) { None } else { Some(i) };
+                                    cx.notify();
+                                }),
                             )
-                            .child(metric(&t, format!("{:.1}", p.timing.total_ms), "ms", ty::LG, ty::SM)),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .h(px(6.))
-                            .gap(px(2.))
-                            .rounded_full()
-                            .overflow_hidden()
-                            .child(seg(p.timing.preprocess_ms, c_pre))
-                            .child(seg(p.timing.inference_ms, c_model))
-                            .child(
-                                seg(p.timing.postprocess_ms, c_nms).border_1().border_color(t.text_tertiary),
-                            ),
-                    )
-                    .child(
-                        // One line in the 280 px rail: short stage names, the full name on hover. Whole
-                        // entries still wrap if the numbers get wide (100 ms inference on a narrow rail).
-                        div().flex().flex_wrap().gap_x(px(12.)).gap_y(px(4.)).children(
-                            [
-                                ("Pre", "Preprocess", p.timing.preprocess_ms, c_pre),
-                                ("Infer", "Inference", p.timing.inference_ms, c_model),
-                                // The engine's postprocess: box decoding, and NMS unless the model
-                                // is end-to-end (named as Studio names it).
-                                (
-                                    "Post",
-                                    if e2e {
-                                        "Postprocess · box decoding"
-                                    } else {
-                                        "Postprocess · box decoding and NMS"
-                                    },
-                                    p.timing.postprocess_ms,
-                                    c_nms,
-                                ),
-                            ]
-                            .into_iter()
-                            .map(|(n, full, v, c)| {
-                                div()
-                                    .id(SharedString::from(format!("lat-{n}")))
-                                    .tooltip(crate::controls::tip(full, None))
-                                    .flex()
-                                    .flex_none()
-                                    .items_center()
-                                    .gap(px(5.))
-                                    .whitespace_nowrap()
-                                    .child(
-                                        swatch(c, 8.).when(n == "Post", |d| {
-                                            d.border_1().border_color(t.text_tertiary)
-                                        }),
-                                    )
-                                    .child(text(ty::SM, t.text_tertiary).child(n))
-                                    .child(text(ty::SM, t.text_secondary).tnum().child(format!("{v:.1} ms")))
-                            }),
-                        ),
+                            .into_any_element()
+                        })
+                        .collect();
+                    let total = p.timing.total_ms.max(0.001);
+                    let seg = |v: f64, c| {
+                        let frac = if v.is_finite() { (v / total).clamp(0.0, 1.0) as f32 } else { 0.0 };
+                        div().h_full().w(relative(frac)).bg(c)
+                    };
+                    // One neutral ramp: Inference (the bulk) in secondary ink, Preprocess tertiary a step
+                    // below it (70 % dark, 80 % light: each 3:1 on its panel), and Postprocess an outline
+                    // (a faint fill in a tertiary edge), in the bar and its key alike.
+                    let (c_pre, c_model, c_nms) = (
+                        crate::theme::alpha(t.text_tertiary, if t.is_dark() { 0.7 } else { 0.8 }),
+                        t.text_secondary,
+                        crate::theme::alpha(t.text_tertiary, 0.3),
                     );
-                timing = Some(timing_el.into_any_element());
-                div()
+                    let timing_el = div()
+                        .w_full()
+                        .flex()
+                        .flex_col()
+                        .gap(px(8.))
+                        .px(px(16.))
+                        .py(px(12.))
+                        .border_t_1()
+                        .border_color(t.line_subtle)
+                        .child(
+                            div()
+                                .flex()
+                                .justify_between()
+                                .items_start()
+                                .gap(px(8.))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .flex()
+                                        .flex_col()
+                                        .gap(px(2.))
+                                        // Where the number comes from: the built-in demo simulates it; a
+                                        // server or this app times one image (not sustained throughput).
+                                        .child(
+                                            text(ty::SM, t.text_secondary)
+                                                .font_weight(FontWeight::MEDIUM)
+                                                .child(if simulated {
+                                                    "Simulated latency"
+                                                } else {
+                                                    "Latency"
+                                                }),
+                                        )
+                                        // Under the label, whole: beside it a local GPU's name left no room
+                                        // ("RTX 4080 SUPER in this app · o…").
+                                        .child(
+                                            text(ty::SM, t.text_tertiary).tnum().whitespace_normal().child(
+                                                // The demo has no device of its own to name.
+                                                if simulated {
+                                                    "one image".to_string()
+                                                } else {
+                                                    format!(
+                                                        "{} · one image",
+                                                        device_name(&p.device, self.store.system.ready()),
+                                                    )
+                                                },
+                                            ),
+                                        ),
+                                )
+                                .child(metric(&t, format!("{:.1}", p.timing.total_ms), "ms", ty::LG, ty::SM)),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .h(px(6.))
+                                .gap(px(2.))
+                                .rounded_full()
+                                .overflow_hidden()
+                                .child(seg(p.timing.preprocess_ms, c_pre))
+                                .child(seg(p.timing.inference_ms, c_model))
+                                .child(
+                                    seg(p.timing.postprocess_ms, c_nms)
+                                        .border_1()
+                                        .border_color(t.text_tertiary),
+                                ),
+                        )
+                        .child(
+                            // One line in the 280 px rail: short stage names, the full name on hover. Whole
+                            // entries still wrap if the numbers get wide (100 ms inference on a narrow rail).
+                            div().flex().flex_wrap().gap_x(px(12.)).gap_y(px(4.)).children(
+                                [
+                                    ("Pre", "Preprocess", p.timing.preprocess_ms, c_pre),
+                                    ("Infer", "Inference", p.timing.inference_ms, c_model),
+                                    // The engine's postprocess: box decoding, and NMS unless the model
+                                    // is end-to-end (named as Studio names it).
+                                    (
+                                        "Post",
+                                        if e2e {
+                                            "Postprocess · box decoding"
+                                        } else {
+                                            "Postprocess · box decoding and NMS"
+                                        },
+                                        p.timing.postprocess_ms,
+                                        c_nms,
+                                    ),
+                                ]
+                                .into_iter()
+                                .map(|(n, full, v, c)| {
+                                    div()
+                                        .id(SharedString::from(format!("lat-{n}")))
+                                        .tooltip(crate::controls::tip(full, None))
+                                        .flex()
+                                        .flex_none()
+                                        .items_center()
+                                        .gap(px(5.))
+                                        .whitespace_nowrap()
+                                        .child(swatch(c, 8.).when(n == "Post", |d| {
+                                            d.border_1().border_color(t.text_tertiary)
+                                        }))
+                                        .child(text(ty::SM, t.text_tertiary).child(n))
+                                        .child(
+                                            text(ty::SM, t.text_secondary).tnum().child(format!("{v:.1} ms")),
+                                        )
+                                }),
+                            ),
+                        );
+                    timing = Some(timing_el.into_any_element());
+                    div()
                     .flex()
                     .flex_col()
                     .flex_none()
@@ -649,6 +669,7 @@ impl FoloApp {
                         }),
                     ))
                     .child(toolbar)
+                    .child(export_bar)
                     .children(class_bar)
                     .child(
                         div()
@@ -693,57 +714,58 @@ impl FoloApp {
                             }),
                     )
                     .into_any_element()
-            }
-            Load::Failed(e) => {
-                let retry = self.button(
-                    "play-retry",
-                    "Retry",
-                    Btn::Secondary,
-                    Some("icons/refresh-cw.svg"),
-                    window,
-                    cx,
-                    // Show "Detecting…" again (the failure would otherwise stay up, and its
-                    // button live, while the retry runs).
-                    act(|this, _, cx| this.rerun_predict(cx)),
-                );
-                // Out of GPU memory locally: the CPU is one click away.
-                let to_cpu = (e.code == "gpu_out_of_memory"
-                    && self.play_target == Some(crate::local::Target::Gpu))
-                .then(|| {
-                    self.button(
-                        "play-to-cpu",
-                        "Run on Local CPU",
+                }
+                Load::Failed(e) => {
+                    let retry = self.button(
+                        "play-retry",
+                        "Retry",
                         Btn::Secondary,
-                        None,
+                        Some("icons/refresh-cw.svg"),
                         window,
                         cx,
-                        act(|this, _, cx| this.set_play_target(Some(crate::local::Target::Cpu), cx)),
+                        // Show "Detecting…" again (the failure would otherwise stay up, and its
+                        // button live, while the retry runs).
+                        act(|this, _, cx| this.rerun_predict(cx)),
+                    );
+                    // Out of GPU memory locally: the CPU is one click away.
+                    let to_cpu = (e.code == "gpu_out_of_memory"
+                        && self.play_target == Some(crate::local::Target::Gpu))
+                    .then(|| {
+                        self.button(
+                            "play-to-cpu",
+                            "Run on Local CPU",
+                            Btn::Secondary,
+                            None,
+                            window,
+                            cx,
+                            act(|this, _, cx| this.set_play_target(Some(crate::local::Target::Cpu), cx)),
+                        )
+                    });
+                    div()
+                        .p(px(16.))
+                        .flex()
+                        .flex_col()
+                        .items_start()
+                        .gap(px(6.))
+                        .child(text(ty::SM, t.danger_text).whitespace_normal().child(e.message.clone()))
+                        .when_some(e.hint.clone(), |d, h| {
+                            d.child(text(ty::SM, t.text_tertiary).whitespace_normal().child(h))
+                        })
+                        // Retry (same image, model and thresholds), with the CPU beside it after an OOM.
+                        .child(div().pt(px(4.)).flex().gap(px(8.)).child(retry).children(to_cpu))
+                        .into_any_element()
+                }
+                Load::Loading => div()
+                    .flex_none()
+                    .child(
+                        panel_header(&t, "Detections")
+                            .h(px(32.))
+                            .child(text(ty::SM, t.text_tertiary).child("Detecting…")),
                     )
-                });
-                div()
-                    .p(px(16.))
-                    .flex()
-                    .flex_col()
-                    .items_start()
-                    .gap(px(6.))
-                    .child(text(ty::SM, t.danger_text).whitespace_normal().child(e.message.clone()))
-                    .when_some(e.hint.clone(), |d, h| {
-                        d.child(text(ty::SM, t.text_tertiary).whitespace_normal().child(h))
-                    })
-                    // Retry (same image, model and thresholds), with the CPU beside it after an OOM.
-                    .child(div().pt(px(4.)).flex().gap(px(8.)).child(retry).children(to_cpu))
-                    .into_any_element()
+                    .child(loading_rows(&t, "det", 4))
+                    .into_any_element(),
+                Load::Idle => div().into_any_element(),
             }
-            Load::Loading => div()
-                .flex_none()
-                .child(
-                    panel_header(&t, "Detections")
-                        .h(px(32.))
-                        .child(text(ty::SM, t.text_tertiary).child("Detecting…")),
-                )
-                .child(loading_rows(&t, "det", 4))
-                .into_any_element(),
-            Load::Idle => div().into_any_element(),
         };
         // Sample picker: validation images of the model's dataset.
         let ds_id = self.play_sample_dataset();

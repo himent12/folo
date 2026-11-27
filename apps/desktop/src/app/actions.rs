@@ -380,6 +380,10 @@ impl FoloApp {
             let name = self.play_model.as_ref().and_then(|m| self.deleted.get(m)).cloned();
             self.drop_play_model(name);
         }
+        if self.play_model_b_made_by(id, &made) {
+            let name = self.play_compare.model_b.as_ref().and_then(|m| self.deleted.get(m)).cloned();
+            self.drop_play_model_b(name);
+        }
         // Gone from the list now, which is fetched again (an answer asked for before the delete still
         // lists them, and is dropped). Playground takes the best model left at once.
         if let Some(models) = self.store.models.ready_mut() {

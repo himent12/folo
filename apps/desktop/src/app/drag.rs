@@ -77,6 +77,9 @@ impl FoloApp {
             if let Some(d) = self.drag.take() {
                 if d.id == "play-iou" {
                     self.run_predict(cx);
+                    if self.play_compare.enabled {
+                        self.run_predict_b(cx);
+                    }
                 }
                 cx.notify();
             }
@@ -111,6 +114,9 @@ impl FoloApp {
         if let Some(d) = self.drag.take() {
             if d.id == "play-iou" {
                 self.run_predict(cx);
+                if self.play_compare.enabled {
+                    self.run_predict_b(cx);
+                }
             }
             cx.notify();
         }

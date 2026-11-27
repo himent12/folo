@@ -137,10 +137,14 @@ impl FoloApp {
         self.play_pred_dim = false;
         self.play_pred_for = None;
         self.clear_play_hover();
+        self.clear_play_pred_b();
         self.play_zoom = 1.0;
         self.play_pan = (0., 0.);
         self.play_drag = None;
         self.run_predict(cx);
+        if self.play_compare.enabled {
+            self.run_predict_b(cx);
+        }
     }
 
     /// Dataset `dataset`'s files changed ([`FoloApp::forget_dataset_contents`]): its image ids are
@@ -166,6 +170,7 @@ impl FoloApp {
             self.play_pred_dim = false;
             self.play_pred_for = None;
             self.clear_play_hover();
+            self.clear_play_pred_b();
             self.play_drag = None;
             self.play_image.take().map(|p| p.image)
         } else {
@@ -194,6 +199,14 @@ impl FoloApp {
             } else {
                 // An error (an OOM and its Retry) isn't left live during the fallback.
                 self.rerun_predict(cx);
+            }
+            if self.play_compare.enabled {
+                if matches!(self.play_compare.pred_b, Load::Ready(_)) {
+                    self.play_compare.pred_b_dim = true;
+                    self.run_predict_b(cx);
+                } else {
+                    self.rerun_predict_b(cx);
+                }
             }
         }
     }
@@ -272,6 +285,7 @@ impl FoloApp {
             self.drop_play_model(Some(name));
         }
         if self.play_model.is_some() {
+            self.reconcile_play_model_b(cx);
             return;
         }
         // The best model (not the newest checkpoint, which may have learned nothing yet).
@@ -289,6 +303,7 @@ impl FoloApp {
             self.play_model_run = run;
             self.run_predict(cx);
         }
+        self.reconcile_play_model_b(cx);
     }
 
     /// The Playground's model is gone (its run was deleted, here or elsewhere; `name` says which):
@@ -326,8 +341,12 @@ impl FoloApp {
     pub fn set_play_conf(&mut self, conf: f32, cx: &mut Context<Self>) {
         self.play_conf = conf;
         self.clear_play_hover();
+        self.play_compare.clear_hover();
         if conf < self.play_fetched_floor - 1e-6 {
             self.run_predict(cx);
+        }
+        if self.play_compare.enabled && conf < self.play_compare.fetched_floor_b - 1e-6 {
+            self.run_predict_b(cx);
         }
     }
 

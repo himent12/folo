@@ -9,7 +9,7 @@ use crate::app::{FoloApp, act};
 use crate::controls::Btn;
 use crate::screens::page_header;
 use crate::theme::theme;
-use crate::ui::{Tone, plural};
+use crate::ui::Tone;
 use crate::viz::DrawBox;
 
 /// Filters `boxes` by confidence threshold and optional class index.
@@ -57,24 +57,43 @@ impl FoloApp {
             .collect()
     }
 
-    /// Copies the currently filtered Playground detections as formatted JSON and shows a toast.
+    /// Boxes of Model B's prediction that pass the confidence threshold and active class filter.
+    pub(crate) fn visible_boxes_b(&self, p: &PredictResponse, active: Option<usize>) -> Vec<DrawBox> {
+        self.filter_detections_b(&p.boxes)
+            .into_iter()
+            .enumerate()
+            .map(|(i, b)| DrawBox {
+                label: Some(b.name.clone().into()),
+                score: Some(b.score),
+                highlight: active == Some(i),
+                dim: active.is_some_and(|h| h != i),
+                ..DrawBox::new(b.class, b.x1, b.y1, b.x2, b.y2)
+            })
+            .collect()
+    }
+
+    /// Copies the currently filtered Playground detections (Single or Compare A/B) as formatted JSON.
     pub(crate) fn copy_play_json(&mut self, cx: &mut Context<Self>) {
-        let Some(p) = self.play_pred.ready() else { return };
-        let vis = filter_detections(&p.boxes, self.play_conf, self.play_class);
-        let shown = self.play_shown_model();
-        let e2e = shown.is_some_and(|m| m.head == crate::api::Head::O2o);
-        let model = shown.map(|m| m.name.as_str()).or(self.play_model.as_deref()).unwrap_or("");
-        let image = self.play_image.as_ref().map(|i| i.name.as_ref()).unwrap_or("");
-        let iou = (!e2e).then_some(self.play_iou);
-        let json = detections_json(model, image, self.play_conf, iou, self.play_class, &vis);
-        let body = plural(vis.len(), "detection");
+        let Some((json, _, summary)) = self.build_play_export_json() else { return };
         cx.write_to_clipboard(folo_ui::ClipboardItem::new_string(json));
-        self.toast(Tone::Success, "Copied detection JSON", Some(body.into()), cx);
+        self.toast(Tone::Success, "Copied detection JSON", Some(summary.into()), cx);
     }
 
     pub fn playground(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
         let no_models_hdr = self.store.models.ready().is_some_and(|m| m.is_empty());
+        let compare_toggle = self
+            .segmented(
+                "play-mode",
+                &["Single", "Compare A/B"],
+                usize::from(self.play_compare.enabled),
+                window,
+                cx,
+                std::rc::Rc::new(|this, i, _, cx| {
+                    this.set_play_compare(i == 1, cx);
+                }),
+            )
+            .into_any_element();
         let open = if let Some(why) = self.open_image_blocked() {
             self.button_disabled(
                 "play-open",
@@ -104,11 +123,13 @@ impl FoloApp {
             "Playground",
             if no_models_hdr {
                 "Run a model on any image."
+            } else if self.play_compare.enabled {
+                "Compare two models side-by-side on any image. Drop a file anywhere in the window."
             } else {
                 "Run a model on any image. Drop a file anywhere in the window."
             },
             // No models: the body's call to action is the only one (no inert button beside it).
-            if no_models_hdr { Vec::new() } else { vec![open] },
+            if no_models_hdr { Vec::new() } else { vec![compare_toggle, open] },
         );
         let stage = self.stage(window, cx);
         self.probe_local_gpu(cx);
@@ -138,6 +159,14 @@ impl FoloApp {
             .map_or(0, |p| filter_detections(&p.boxes, self.play_conf, self.play_class).len());
         let focused = (0..n).find(|i| self.fh(format!("det-{i}"), cx).is_focused(window));
         let hover = self.play_hover.filter(|&i| i < n);
+        if self.kb { focused.or(hover) } else { hover.or(focused) }
+    }
+
+    /// The Model B detection being inspected in Compare mode.
+    pub fn play_active_b(&self, window: &Window, cx: &mut Context<Self>) -> Option<usize> {
+        let n = self.play_compare.pred_b.ready().map_or(0, |p| self.filter_detections_b(&p.boxes).len());
+        let focused = (0..n).find(|i| self.fh(format!("det-b-{i}"), cx).is_focused(window));
+        let hover = self.play_compare.hover_b.filter(|&i| i < n);
         if self.kb { focused.or(hover) } else { hover.or(focused) }
     }
 }

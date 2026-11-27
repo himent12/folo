@@ -45,6 +45,16 @@ impl App {
         self.platform.prompt_for_paths(options)
     }
 
+    /// Opens the system's save-file dialog in `directory` with an optional `suggested_name`.
+    /// The receiver resolves to the chosen path (`None` when cancelled).
+    pub fn prompt_for_new_path(
+        &self,
+        directory: &Path,
+        suggested_name: Option<&str>,
+    ) -> crate::oneshot::Receiver<anyhow::Result<Option<PathBuf>>> {
+        self.platform.prompt_for_new_path(directory, suggested_name)
+    }
+
     /// Opens a URL in the default browser.
     pub fn open_url(&self, url: &str) {
         self.platform.open_url(url)

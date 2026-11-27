@@ -87,6 +87,9 @@ impl FoloApp {
                     this.set_slider(key, n.clamp(0.0, 1.0), cx);
                     if key == "play-iou" && (this.play_iou - prev_iou).abs() > f32::EPSILON {
                         this.run_predict(cx);
+                        if this.play_compare.enabled {
+                            this.run_predict_b(cx);
+                        }
                     }
                     cx.stop_propagation();
                 }
