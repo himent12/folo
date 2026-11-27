@@ -1,5 +1,7 @@
 // The Benchmarks list (`#/benchmarks`): the server's vision benchmarks, filtered by source or by what is running, and
 // the New benchmark dialog (`?new=1`). The parts are in ./bench/.
+import ChevronDown from '$icons/chevron-down';
+import ChevronUp from '$icons/chevron-up';
 import Download from '$icons/download';
 import Plus from '$icons/plus';
 import Search from '$icons/search';
@@ -28,6 +30,7 @@ import { isDisconnected, OFFLINE_REASON } from '$lib/ui/offline';
 import Panel from '$lib/ui/Panel';
 import { rowNav } from '$lib/ui/rowNav';
 import Segmented from '$lib/ui/Segmented';
+import Select from '$lib/ui/Select';
 import Skeleton from '$lib/ui/Skeleton';
 import SortHeader from '$lib/ui/SortHeader';
 import StatusBadge from '$lib/ui/StatusBadge';
@@ -54,14 +57,15 @@ interface Col {
 const finite = (v: number | null | undefined): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 const cols: Col[] = [
   { key: 'name', label: 'Benchmark', get: (b) => b.name.toLowerCase() },
-  { key: 'source', label: 'Images from', get: (b) => b.source_name.toLowerCase(), hide: 'md', w: '208px' },
-  { key: 'images', label: 'Images', num: true, get: (b) => b.images, w: '88px' },
-  { key: 'classes', label: 'Classes', num: true, get: (b) => b.classes.length, hide: 'lg', w: '88px' },
-  { key: 'conditions', label: 'Conditions', num: true, get: (b) => b.plan.conditions.length, hide: 'lg', w: '104px' },
-  { key: 'entries', label: 'Entries', num: true, get: (b) => b.entries, w: '88px' },
-  { key: 'leader', label: 'Leader', get: (b) => finite(b.best?.score), w: '256px' },
-  { key: 'created', label: 'Created', num: true, get: (b) => finite(Date.parse(b.created)), hide: 'md', w: '104px' },
+  { key: 'source', label: 'Images from', get: (b) => b.source_name.toLowerCase(), hide: 'md', w: '176px' },
+  { key: 'images', label: 'Images', num: true, get: (b) => b.images, w: '72px' },
+  { key: 'classes', label: 'Classes', num: true, get: (b) => b.classes.length, hide: 'lg', w: '72px' },
+  { key: 'conditions', label: 'Conditions', num: true, get: (b) => b.plan.conditions.length, hide: 'lg', w: '88px' },
+  { key: 'entries', label: 'Entries', num: true, get: (b) => b.entries, w: '72px' },
+  { key: 'leader', label: 'Leader', get: (b) => finite(b.best?.score), w: '192px' },
+  { key: 'created', label: 'Created', num: true, get: (b) => finite(Date.parse(b.created)), hide: 'md', w: '88px' },
 ];
+const SORT_OPTIONS = cols.map((c) => ({ value: c.key, label: c.label }));
 const COLS = cols.length;
 const hideCls = (c: Col) => (c.hide ? `hide-${c.hide}` : '');
 
@@ -122,6 +126,12 @@ export default function Benchmarks() {
       sortKey.set(c.key);
       sortDir.set(c.num || c.key === 'leader' ? 'desc' : 'asc');
     }
+  }
+  function pickSortKey(key: Key) {
+    const c = cols.find((x) => x.key === key);
+    if (!c || sortKey.peek() === key) return;
+    sortKey.set(key);
+    sortDir.set(c.num || c.key === 'leader' ? 'desc' : 'asc');
   }
 
   const query = signal(start.q);
@@ -331,6 +341,27 @@ export default function Benchmarks() {
                   ]}
                 />
               </div>{' '}
+              {phone.current ? (
+                <div class="lt-sort">
+                  <label for="benches-sort">Sort</label>
+                  <Select
+                    id="benches-sort"
+                    label="Sort benchmarks"
+                    value={sortKey.get()}
+                    onchange={pickSortKey}
+                    disabled={!hasData.get()}
+                    options={SORT_OPTIONS}
+                  />
+                  <Button
+                    variant="secondary"
+                    icon={sortDir.get() === 'asc' ? ChevronUp : ChevronDown}
+                    aria-label={sortDir.get() === 'asc' ? 'Sort ascending; click for descending' : 'Sort descending; click for ascending'}
+                    aria-pressed={sortDir.get() === 'asc'}
+                    disabled={!hasData.get()}
+                    onclick={() => sortDir.set((d) => (d === 'asc' ? 'desc' : 'asc'))}
+                  />
+                </div>
+              ) : null}{' '}
               <div class="lt-search">
                 <Input
                   bind:el={searchEl}
@@ -485,10 +516,11 @@ export default function Benchmarks() {
                               </span>
                             </td>
                             <td class="hide-md src">
-                              <Meta line>
-                                <span>{b().source_name}</span>
-                                <span>{sourceKind(b().source)}</span>
-                              </Meta>
+                              <span class="src-row" title={`${b().source_name} · ${sourceKind(b().source)}`}>
+                                <span class="src-name truncate">{b().source_name}</span>
+                                <span class="src-sep" aria-hidden="true">·</span>
+                                <span class="src-kind">{sourceKind(b().source)}</span>
+                              </span>
                             </td>
                             <td class="r num muted">{num(b().images)}</td>
                             <td class="r num muted hide-lg">{b().classes.length}</td>
@@ -553,12 +585,43 @@ css`
   }
   .name-cell {
     max-width: 0;
+    min-width: 160px;
   }
   .name {
     display: block;
   }
   .src {
+    max-width: 0;
     color: var(--text-secondary);
+  }
+  .src-row {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-1);
+    min-width: 0;
+  }
+  .src-name {
+    min-width: 0;
+  }
+  .src-sep,
+  .src-kind {
+    flex-shrink: 0;
+    color: var(--text-tertiary);
+  }
+  .lt-sort {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex-basis: 100%;
+  }
+  .lt-sort label {
+    flex-shrink: 0;
+    font-size: var(--type-sm-size);
+    color: var(--text-tertiary);
+  }
+  .lt-sort :global(.select) {
+    flex: 1;
+    width: auto;
   }
   /* The leader: its score, then its name (cut when long; its own page has it whole). */
   .leader {

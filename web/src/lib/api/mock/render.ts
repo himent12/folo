@@ -33,7 +33,7 @@ export async function renderImage(spec: MockDatasetSpec, img: DatasetImage, inde
     const cls = spec.classes[b.class] ?? '';
     if (spec.style === 'fasteners') drawFastener(ctx, cls, b, r);
     else if (spec.style === 'pond') drawCreature(ctx, cls, b, r);
-    else drawShape(ctx, cls, b, r);
+    else drawShape(ctx, spec.renderShapes?.[b.class] ?? cls.toLowerCase(), b, r);
   }
   if (spec.style === 'fasteners') vignette(ctx, img.width, img.height, 0.55);
   if (spec.style === 'pond') {
@@ -116,6 +116,22 @@ function shapePath(ctx: Ctx, cls: string, b: Box) {
       }
       ctx.closePath();
       break;
+    case 'ring': {
+      const rx = w / 2;
+      const ry = h / 2;
+      ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
+      ctx.moveTo(cx + rx * 0.52, cy);
+      ctx.ellipse(cx, cy, rx * 0.52, ry * 0.52, 0, 0, Math.PI * 2, true);
+      break;
+    }
+    case 'heart': {
+      const topY = b.y1 + h * 0.3;
+      ctx.moveTo(cx, b.y2);
+      ctx.bezierCurveTo(b.x1 - w * 0.05, b.y1 + h * 0.62, b.x1, b.y1 + h * 0.06, cx, topY);
+      ctx.bezierCurveTo(b.x2, b.y1 + h * 0.06, b.x2 + w * 0.05, b.y1 + h * 0.62, cx, b.y2);
+      ctx.closePath();
+      break;
+    }
     case 'hexagon':
       for (let i = 0; i < 6; i++) {
         const a = (i * Math.PI) / 3;
@@ -136,6 +152,7 @@ function shapePath(ctx: Ctx, cls: string, b: Box) {
 }
 
 function drawShape(ctx: Ctx, cls: string, b: Box, r: () => number) {
+  const fillRule: CanvasFillRule = cls === 'ring' ? 'evenodd' : 'nonzero';
   const hue = range(r, 0, 360);
   const g = ctx.createLinearGradient(b.x1, b.y1, b.x2, b.y2);
   g.addColorStop(0, `hsl(${hue} ${range(r, 55, 85)}% ${range(r, 55, 66)}%)`);
@@ -146,11 +163,11 @@ function drawShape(ctx: Ctx, cls: string, b: Box, r: () => number) {
   ctx.shadowOffsetY = Math.min(b.y2 - b.y1, 40) * 0.08;
   ctx.fillStyle = g;
   shapePath(ctx, cls, b);
-  ctx.fill('nonzero');
+  ctx.fill(fillRule);
   ctx.restore();
   ctx.save();
   shapePath(ctx, cls, b);
-  ctx.clip();
+  ctx.clip(fillRule);
   const hl = ctx.createRadialGradient(b.x1 + (b.x2 - b.x1) * 0.3, b.y1 + (b.y2 - b.y1) * 0.25, 0, b.x1, b.y1, (b.x2 - b.x1) * 0.9);
   hl.addColorStop(0, 'rgba(255,255,255,0.35)');
   hl.addColorStop(1, 'rgba(255,255,255,0)');

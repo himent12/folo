@@ -33,6 +33,8 @@ export interface ResultsPanelProps {
   onShowAll?: () => void;
   rows: { b: Det; i: number }[];
   predicting: boolean;
+  /** True when a local video has been manually scrubbed ahead of the last detected frame. */
+  unsyncedPreview?: boolean;
   notice: 'file' | 'error' | null;
   json: unknown;
   pred: Prediction | null;
@@ -183,9 +185,15 @@ export default function ResultsPanel(props: ResultsPanelProps) {
             <p class="placeholder">
               {props.predicting
                 ? 'Running inference…'
-                : props.notice === 'error'
-                  ? 'No detections: the last prediction failed.'
-                  : 'Detections appear here once you run the model on an image.'}
+                : props.unsyncedPreview
+                  ? 'Preview frame not yet detected — click Detect frame.'
+                  : props.notice === 'error'
+                    ? 'No detections: the last prediction failed.'
+                    : 'Detections appear here once you run the model on an image.'}
+            </p>
+          ) : view() === 'json' ? (
+            <p class="placeholder">
+              {props.predicting ? 'Running inference…' : 'JSON output appears here once the current frame is detected.'}
             </p>
           ) : view() === 'classes' ? (
             <div class="classes-tab">

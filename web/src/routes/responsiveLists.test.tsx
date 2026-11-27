@@ -162,4 +162,35 @@ describe('single-DOM responsive lists', () => {
       vi.stubGlobal('IntersectionObserver', realIO);
     }
   });
+
+  it('Benchmarks: exposes a phone-only sort control with direction toggle that reorders rows and syncs URL', async () => {
+    mediaCtl = installMediaControl(false);
+    mountScreen(Benchmarks, '/benchmarks');
+    await until(() => target.querySelector('table.benches tbody tr[data-row]'), 'benchmarks desktop');
+    expect(target.querySelector('#benches-sort')).toBeNull();
+
+    mediaCtl.setPhone(true);
+    const select = await until(() => target.querySelector<HTMLSelectElement>('#benches-sort'), 'benchmarks phone sort select');
+    const dirBtn = target.querySelector<HTMLButtonElement>('.lt-sort button')!;
+    expect(dirBtn).not.toBeNull();
+
+    const rowNames = () => [...target.querySelectorAll('ul.rows li .name')].map((el) => el.textContent?.trim());
+
+    // Switch sort key to Images -> defaults to descending (most images first) and updates URL.
+    select.value = 'images';
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+    flushSync();
+    expect(router.route.query.get('sort')).toBe('images');
+    expect(router.route.query.get('dir')).toBe('desc');
+    const descOrder = rowNames();
+    expect(descOrder.length).toBeGreaterThan(1);
+
+    // Toggle direction button -> flips to ascending (fewest images first) and moves the largest benchmark to the end.
+    dirBtn.click();
+    flushSync();
+    expect(router.route.query.get('dir')).toBe('asc');
+    const ascOrder = rowNames();
+    expect(ascOrder).not.toEqual(descOrder);
+    expect(ascOrder[ascOrder.length - 1]).toBe(descOrder[0]);
+  });
 });

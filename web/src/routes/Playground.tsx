@@ -452,6 +452,7 @@ export default function Playground() {
   });
 
   const singleJson = computed(() => {
+    if (isUnsyncedVideoFn()) return null;
     const h = hidden.get();
     const cls = classes.get();
     const hiddenClasses = h.size ? [...h].sort((a, b) => a - b).map((c) => cls[c] ?? `class ${c}`) : undefined;
@@ -699,34 +700,38 @@ export default function Playground() {
   );
 
   // The detections: a panel under the image below 1024 px, the rail's Detections section (with a Classes tab) above.
-  const results = (rail: boolean) => (
-    <ResultsPanel
-      rail={rail}
-      classCount={showingB.get() ? cmp.countsB.get().length : counts.get().length}
-      classList={classList}
-      showAllButton={showAllButton}
-      onShowAll={clearAllHidden}
-      result={tableResult.get()}
-      bind:tab={tab}
-      rows={tableRows.get()}
-      predicting={showingB.get() ? cmp.predictingB.get() : predicting.get()}
-      notice={showingB.get() ? (cmp.weightsMissingB.get() ? 'file' : cmp.errorB.get() && !cmp.predB.get() ? 'error' : null) : notice.get()}
-      json={activeJson.get()}
-      pred={showingB.get() ? cmp.predB.get() : pred.get()}
-      bind:conf={conf}
-      maxDet={maxDet.get()}
-      hidden={showingB.get() ? cmp.hiddenB.get() : hidden.get()}
-      bind:tbody={tbody}
-      tabRow={tabRow.get()}
-      activeIdx={tableActiveIdx.get()}
-      selectedIdx={tableSelectedIdx.get()}
-      hover={showingB.get() ? cmp.hoverB.get() : hover.get()}
-      picked={showingB.get() ? cmp.pickedB.get() : picked.get()}
-      onHover={(b) => (showingB.peek() ? cmp.hoverB.set(b) : hover.set(b))}
-      onPick={(b) => (showingB.peek() ? cmp.pickedB.set(b) : picked.set(b))}
-      onrowkey={onrowkey}
-    />
-  );
+  const results = (rail: boolean) => {
+    const unsynced = isUnsyncedVideoFn();
+    return (
+      <ResultsPanel
+        rail={rail}
+        unsyncedPreview={unsynced}
+        classCount={unsynced ? 0 : showingB.get() ? cmp.countsB.get().length : counts.get().length}
+        classList={classList}
+        showAllButton={showAllButton}
+        onShowAll={clearAllHidden}
+        result={unsynced ? null : tableResult.get()}
+        bind:tab={tab}
+        rows={unsynced ? [] : tableRows.get()}
+        predicting={showingB.get() ? cmp.predictingB.get() : predicting.get()}
+        notice={showingB.get() ? (cmp.weightsMissingB.get() ? 'file' : cmp.errorB.get() && !cmp.predB.get() ? 'error' : null) : notice.get()}
+        json={activeJson.get()}
+        pred={unsynced ? null : showingB.get() ? cmp.predB.get() : pred.get()}
+        bind:conf={conf}
+        maxDet={maxDet.get()}
+        hidden={showingB.get() ? cmp.hiddenB.get() : hidden.get()}
+        bind:tbody={tbody}
+        tabRow={tabRow.get()}
+        activeIdx={tableActiveIdx.get()}
+        selectedIdx={tableSelectedIdx.get()}
+        hover={showingB.get() ? cmp.hoverB.get() : hover.get()}
+        picked={showingB.get() ? cmp.pickedB.get() : picked.get()}
+        onHover={(b) => (showingB.peek() ? cmp.hoverB.set(b) : hover.set(b))}
+        onPick={(b) => (showingB.peek() ? cmp.pickedB.set(b) : picked.set(b))}
+        onrowkey={onrowkey}
+      />
+    );
+  };
 
   return (
     <>

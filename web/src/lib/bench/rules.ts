@@ -18,6 +18,7 @@ export const GENERATED_CLASSES_MAX = 8;
 export const GENERATED_CLASSES_DEFAULT = ['circle', 'square', 'triangle'] as const;
 /** Built-in shape names in `folo-data::synthetic::SHAPES`; colliding case variants (e.g. `Circle` & `circle`) are rejected. */
 export const GENERATED_SHAPES = ['circle', 'square', 'triangle', 'star', 'ring', 'cross', 'hexagon', 'heart'] as const;
+export type GeneratedShape = (typeof GENERATED_SHAPES)[number];
 
 /** Returns the first duplicate built-in shape name if two classes claim the same shape (case-insensitive), else null. */
 export function generatedShapeCollision(classes: readonly string[]): string | null {
@@ -29,6 +30,28 @@ export function generatedShapeCollision(classes: readonly string[]): string | nu
     seen.add(lower);
   }
   return null;
+}
+
+/**
+ * Resolves each class name to its deterministic rendered shape matching `folo_data::synthetic::shapes_for`:
+ * built-in shape names claim that shape (case-insensitive), and custom names claim the first unclaimed built-in shape.
+ */
+export function resolveGeneratedShapes(classes: readonly string[]): GeneratedShape[] {
+  const shapeIndex = (raw: string) => (GENERATED_SHAPES as readonly string[]).indexOf(raw.trim().toLowerCase());
+  const taken = new Array<boolean>(GENERATED_SHAPES.length).fill(false);
+  for (const raw of classes) {
+    const k = shapeIndex(raw);
+    if (k >= 0) taken[k] = true;
+  }
+  return classes.map((raw) => {
+    let k = shapeIndex(raw);
+    if (k < 0) {
+      k = taken.findIndex((used) => !used);
+      if (k < 0) k = 0;
+      else taken[k] = true;
+    }
+    return GENERATED_SHAPES[k]!;
+  });
 }
 
 /** True when a persisted `Bench.source` came from deterministic generated scenes rather than a registered dataset. */

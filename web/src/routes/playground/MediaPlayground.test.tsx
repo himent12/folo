@@ -715,9 +715,18 @@ describe('Playground: Local Video Frame Scrubber & Live Webcam', () => {
       flushSync();
 
       expect(predictSpy.mock.calls.length).toBe(callsBefore);
-      // Stale Compare classDiff summary and Detections Compare JSON copy button both clear until Detect frame runs.
+      // Stale Compare classDiff summary, Detections rows, and Compare JSON copy button all clear until Detect frame runs.
       expect(target.querySelector('[data-class-diff]')).toBeNull();
       expect(target.querySelector('.copy-json')).toBeNull();
+      expect(target.querySelectorAll('#pg-panel tbody tr')).toHaveLength(0);
+      expect(target.querySelector('#pg-panel .placeholder')?.textContent).toContain('Detect frame');
+
+      // Switching to the JSON tab while unsynced never falls through to stale detection rows.
+      const jsonTab = [...target.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find((b) => b.textContent?.trim() === 'JSON');
+      jsonTab?.click();
+      flushSync();
+      expect(target.querySelectorAll('#pg-panel tbody tr')).toHaveLength(0);
+      expect(target.querySelector('#pg-panel .placeholder')?.textContent).toContain('Detect frame');
     } finally {
       URL.createObjectURL = origCreateUrl;
       URL.revokeObjectURL = origRevokeUrl;
