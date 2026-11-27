@@ -2,6 +2,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Prediction } from '$lib/api/types';
 import { toCsv } from '$lib/tableExport';
+import { toast } from '$lib/ui/toast';
 import {
   BATCH_CSV_HEADERS,
   batchPredKey,
@@ -44,6 +45,7 @@ function makeItem(over: Partial<BatchItem> = {}): BatchItem {
 const DEFAULT_FILTER: BatchFilter = { conf: 0.25, iou: 0.7, maxDet: 300, o2o: false };
 
 afterEach(() => {
+  toast.items = [];
   vi.restoreAllMocks();
 });
 
@@ -184,7 +186,14 @@ describe('playground batch helpers', () => {
     vi.useFakeTimers();
     try {
       expect(exportBatchJson(doneInput)).toBe(true);
+      expect(toast.items).toHaveLength(1);
+      expect(toast.items[0]?.key).toBe('playground-export');
+      expect(toast.items[0]?.title).toBe('Batch JSON exported');
+      // Repeated Playground exports replace the prior export toast in place instead of stacking over stage controls.
       expect(exportBatchCsv(doneInput)).toBe(true);
+      expect(toast.items).toHaveLength(1);
+      expect(toast.items[0]?.key).toBe('playground-export');
+      expect(toast.items[0]?.title).toBe('Batch CSV exported');
       expect(createUrl).toHaveBeenCalledTimes(2);
       expect(click).toHaveBeenCalledTimes(2);
       vi.advanceTimersByTime(1000);

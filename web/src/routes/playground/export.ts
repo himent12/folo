@@ -70,7 +70,7 @@ export function downloadBlob(blob: Blob, filename: string): boolean {
     return true;
   } catch (err) {
     if (url) URL.revokeObjectURL(url);
-    toast.error(err instanceof Error ? err : new Error('Your browser blocked the file download.'), 'Export failed');
+    toast.error(err instanceof Error ? err : new Error('Your browser blocked the file download.'), 'Export failed', { key: 'playground-export' });
     return false;
   } finally {
     a?.remove();
@@ -84,7 +84,7 @@ export function exportDetectionsJson(filenameBase: string, payload: unknown): bo
   try {
     content = toJson(payload);
   } catch (err) {
-    toast.error(err instanceof Error ? err : new Error('Could not serialize export JSON.'), 'Export failed');
+    toast.error(err instanceof Error ? err : new Error('Could not serialize export JSON.'), 'Export failed', { key: 'playground-export' });
     return false;
   }
   return downloadText(content, exportFilename(filenameBase, 'json'), 'application/json;charset=utf-8');

@@ -220,7 +220,9 @@ export function exportBatchJson(input: BatchExportInput): boolean {
   if (ok) {
     toast.success(
       'Batch JSON exported',
-      `${summary.totalDetections} ${summary.totalDetections === 1 ? 'detection' : 'detections'} across ${summary.done} ${summary.done === 1 ? 'image' : 'images'}${truncated ? ` (${truncated} capped at 1,000 candidates)` : ''}.`,
+      `${summary.totalDetections} ${summary.totalDetections === 1 ? 'detection' : 'detections'} across ${summary.done} ${summary.done === 1 ? 'image' : 'images'}${truncated ? ` (${truncated} capped at the candidate limit)` : ''}.`,
+      undefined,
+      { key: 'playground-export' },
     );
   }
   return ok;
@@ -235,7 +237,9 @@ export function exportBatchCsv(input: BatchExportInput): boolean {
   if (ok) {
     toast.success(
       'Batch CSV exported',
-      `${rows.length} ${rows.length === 1 ? 'detection' : 'detections'} across ${summary.done} ${summary.done === 1 ? 'image' : 'images'}${summary.truncated ? ` (${summary.truncated} capped at 1,000 candidates)` : ''}.`,
+      `${rows.length} ${rows.length === 1 ? 'detection' : 'detections'} across ${summary.done} ${summary.done === 1 ? 'image' : 'images'}${summary.truncated ? ` (${summary.truncated} capped at the candidate limit)` : ''}.`,
+      undefined,
+      { key: 'playground-export' },
     );
   }
   return ok;

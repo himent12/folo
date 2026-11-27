@@ -665,4 +665,21 @@ describe('ExportDialog: dynamic ONNX axes & CLI commands', () => {
     pickPred('ByteTrack');
     expect(predictPre.textContent).toBe('folo predict --model D:/folo/models/shapes-n-best.folo <frames_dir> --track');
   });
+
+  it('describes end-to-end detections without external NMS when decoding an o2o model to ONNX', async () => {
+    const api = new HttpApi('http://folo.test');
+    vi.spyOn(api, 'system').mockResolvedValue({ ...SYS, features: ['export_onnx_switches', 'export_dynamic_axes'] });
+    hub.api = api;
+    c = mount(ExportDialog, {
+      target,
+      props: { model: { ...model, head: 'o2o' }, open: true },
+    });
+    flushSync();
+
+    const switches = await until(() => target.ownerDocument.querySelector('dialog [role="group"][aria-label="ONNX options"]'), 'ONNX options');
+    const text = switches.textContent ?? '';
+    expect(text).toContain('end-to-end detections');
+    expect(text).toContain('no external NMS');
+    expect(text).not.toContain('NMS still runs outside');
+  });
 });

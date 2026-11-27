@@ -66,4 +66,16 @@ describe('PerClass with a tiny AP', () => {
     const cells = [...target.querySelectorAll('td.num')].map((td) => td.textContent?.trim());
     expect(cells).toEqual(['0.00042', '·', '0.001', '0.00020', '0.400']);
   });
+
+  it('keeps a positive upper bound on the bar scale for near-zero AP instead of rounding to 0–0', () => {
+    const e: Epoch = { ...validated, val: { ...validated.val, per_class: [{ class: 0, map50: 0.0001, map50_95: 0.00004, precision: 0.0001, recall: 0.01 }] } };
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    c = render(() => <PerClass classes={['circle']} epochs={[e]} version={0} loading={false} />, target);
+    flushSync();
+    const meta = target.querySelector('#per-class .meta')?.textContent?.trim() ?? target.textContent ?? '';
+    const barHeader = target.querySelector('th.bar-col .sr-only')?.textContent?.trim() ?? '';
+    expect(meta).toBe('epoch 1 · bars 0–0.000042');
+    expect(barHeader).toBe('AP50-95 bar, scaled to 0–0.000042');
+  });
 });

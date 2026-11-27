@@ -105,10 +105,17 @@ export async function runPngExport(input: RunPngExportInput): Promise<boolean> {
           },
           filenameBase,
         });
-    if (ok) toast.success('Annotated PNG exported', input.compare ? 'Saved Model A/B comparison image.' : 'Saved annotated detections image.');
+    if (ok) {
+      toast.success(
+        'Annotated PNG exported',
+        input.compare ? 'Saved Model A/B comparison image.' : 'Saved annotated detections image.',
+        undefined,
+        { key: 'playground-export' },
+      );
+    }
     return ok;
   } catch (err) {
-    toast.error(err instanceof Error ? err : new Error('Could not export annotated PNG.'), 'Export failed');
+    toast.error(err instanceof Error ? err : new Error('Could not export annotated PNG.'), 'Export failed', { key: 'playground-export' });
     return false;
   }
 }
@@ -123,6 +130,13 @@ export function runJsonExport(opts: {
   if (!opts.payload) return false;
   const filenameBase = buildExportBase(opts.shortName, opts.compare, opts.modelAName, opts.modelBName);
   const ok = exportDetectionsJson(filenameBase, opts.payload);
-  if (ok) toast.success('JSON exported', opts.compare ? 'Saved Model A/B comparison JSON.' : 'Saved detections JSON.');
+  if (ok) {
+    toast.success(
+      'JSON exported',
+      opts.compare ? 'Saved Model A/B comparison JSON.' : 'Saved detections JSON.',
+      undefined,
+      { key: 'playground-export' },
+    );
+  }
   return ok;
 }
