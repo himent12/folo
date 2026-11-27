@@ -305,12 +305,14 @@ export default function Playground() {
     if (id !== null) lastModelId = id;
   });
 
+  let cancelSinglePredict: () => void = () => {};
   const batch = useBatchSession({
     engine,
     model: () => model.peek(),
     modelId: () => modelId.get(),
     runOn,
     localWeights,
+    compare: cmp.compare,
     o2o: () => o2o.get(),
     conf,
     iou,
@@ -325,8 +327,10 @@ export default function Playground() {
     weightsMissing,
     hover,
     picked,
+    choose,
+    cancelSinglePredict: () => cancelSinglePredict(),
     onSingleFile: (s) => setSource(s),
-    onActivateFrame: (s, cached) => setBatchFrame(s, cached),
+    onActivateFrame: (s, cached, bump) => setBatchFrame(s, cached, bump),
     onEnterBatch: () => {
       stopMedia();
       hidden.set(new Set());
@@ -361,6 +365,7 @@ export default function Playground() {
     wasBatchStopped: batch.wasStoppedFor,
     onBatchResult: batch.recordSingleResult,
     onBatchBusy: batch.recordSingleBusy,
+    onRegisterAbort: (fn) => (cancelSinglePredict = fn),
   });
 
   // Out of GPU memory on the server (507): this browser has its own device, and a smaller model of the same classes

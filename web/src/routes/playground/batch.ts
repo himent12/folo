@@ -3,6 +3,7 @@ import type { Prediction } from '$lib/api/types';
 import { filterDetections } from '$lib/detect/nms';
 import { exportTableCsv, exportTableJson, type CsvCell } from '$lib/tableExport';
 import { toast } from '$lib/ui/toast';
+import { isPredictionCutAt } from './allCandidates';
 import type { RunOn } from './predict';
 import type { Source } from './source';
 import type { Det } from './viewState';
@@ -136,6 +137,8 @@ export function buildBatchJson(input: BatchExportInput) {
     ? { conf: input.filter.conf, max_det: input.filter.maxDet }
     : { conf: input.filter.conf, iou: input.filter.iou, max_det: input.filter.maxDet };
 
+  const truncatedCount = input.items.filter((it) => it.status === 'done' && isPredictionCutAt(it.pred, input.filter.conf)).length;
+
   return {
     model_id: input.modelId,
     model_name: input.modelName,
@@ -146,14 +149,17 @@ export function buildBatchJson(input: BatchExportInput) {
       completed_images: summary.done,
       failed_images: summary.failed,
       total_detections: summary.totalDetections,
+      ...(truncatedCount > 0 ? { truncated_images: truncatedCount } : {}),
     },
     images: input.items.map((item) => {
       const boxes = item.status === 'done' ? filterBatchBoxes(item.pred, input.filter, input.hidden) : [];
+      const truncated = item.status === 'done' && isPredictionCutAt(item.pred, input.filter.conf);
       return {
         filename: item.name,
         width: item.pred?.image.width ?? item.width,
         height: item.pred?.image.height ?? item.height,
         status: item.status,
+        ...(truncated ? { truncated: true } : {}),
         ...(item.error ? { error: item.error } : {}),
         timing: item.pred?.timing ?? null,
         boxes: boxes.map((b) => ({
@@ -204,11 +210,12 @@ export function exportBatchJson(input: BatchExportInput): boolean {
   const summary = summarizeBatch(input.items, input.filter, input.hidden);
   if (summary.done === 0) return false;
   const payload = buildBatchJson(input);
+  const truncated = payload.summary.truncated_images ?? 0;
   const ok = exportTableJson(batchFilenameBase(input.modelName, input.items.length), payload);
   if (ok) {
     toast.success(
       'Batch JSON exported',
-      `${summary.totalDetections} ${summary.totalDetections === 1 ? 'detection' : 'detections'} across ${summary.done} ${summary.done === 1 ? 'image' : 'images'}.`,
+      `${summary.totalDetections} ${summary.totalDetections === 1 ? 'detection' : 'detections'} across ${summary.done} ${summary.done === 1 ? 'image' : 'images'}${truncated ? ` (${truncated} capped at 1,000 candidates)` : ''}.`,
     );
   }
   return ok;
@@ -218,12 +225,13 @@ export function exportBatchJson(input: BatchExportInput): boolean {
 export function exportBatchCsv(input: BatchExportInput): boolean {
   const summary = summarizeBatch(input.items, input.filter, input.hidden);
   if (summary.done === 0) return false;
+  const truncated = input.items.filter((it) => it.status === 'done' && isPredictionCutAt(it.pred, input.filter.conf)).length;
   const rows = buildBatchCsvRows(input);
   const ok = exportTableCsv(batchFilenameBase(input.modelName, input.items.length), BATCH_CSV_HEADERS, rows);
   if (ok) {
     toast.success(
       'Batch CSV exported',
-      `${rows.length} ${rows.length === 1 ? 'detection' : 'detections'} across ${summary.done} ${summary.done === 1 ? 'image' : 'images'}.`,
+      `${rows.length} ${rows.length === 1 ? 'detection' : 'detections'} across ${summary.done} ${summary.done === 1 ? 'image' : 'images'}${truncated ? ` (${truncated} capped at 1,000 candidates)` : ''}.`,
     );
   }
   return ok;

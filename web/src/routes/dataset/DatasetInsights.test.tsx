@@ -127,4 +127,64 @@ describe('DatasetInsights', () => {
     expect(root.textContent).toContain('Labels clean');
     expect(target.querySelector('[data-empty-indicator]')).toBeNull();
   });
+
+  it('shows unreadable image errors alongside broken labels without double-counting, formats sub-1% empty share, and hides split bar when 0 images', () => {
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    mounted = render(
+      () => (
+        <DatasetInsights
+          dataset={{ ...DATASET, splits: { train: 5000, val: 0, test: 0 } }}
+          stats={{
+            boxes: 10000,
+            empty_images: 1,
+            broken_labels: 3,
+            class_counts: [2500, 2500, 2500, 2500],
+            box_size_hist: { edges: [0, 0.05, 1], counts: [0, 10000] },
+            boxes_per_image_hist: { edges: [0, 1, 2, 4], counts: [1, 0, 4999] },
+          }}
+          counts={{ error: 5, warning: 0, info: 1, by_kind: { broken_label: 3, corrupt_image: 1, missing_image: 1 } }}
+          activeClass={undefined}
+          activeSplit="all"
+          onSelectClass={() => {}}
+          onSelectSplit={() => {}}
+          onOpenStats={() => {}}
+        />
+      ),
+      target,
+    );
+    flushSync();
+
+    const root = target.querySelector('[data-dataset-insights]')!;
+    expect(root.textContent).toContain('3 broken');
+    expect(root.textContent).toContain('2 unreadable');
+    expect(root.textContent).toContain('1 empty (<1%)');
+    expect(root.textContent).toContain('no val');
+
+    // 0-image dataset hides the empty split bar cleanly
+    mounted.unmount();
+    mounted = render(
+      () => (
+        <DatasetInsights
+          dataset={{ ...DATASET, splits: { train: 0, val: 0, test: 0 } }}
+          stats={{
+            boxes: 0,
+            empty_images: 0,
+            broken_labels: 0,
+            class_counts: [0, 0, 0, 0],
+            box_size_hist: { edges: [0, 1], counts: [0] },
+            boxes_per_image_hist: { edges: [0, 1], counts: [0] },
+          }}
+          activeClass={undefined}
+          activeSplit="all"
+          onSelectClass={() => {}}
+          onSelectSplit={() => {}}
+          onOpenStats={() => {}}
+        />
+      ),
+      target,
+    );
+    flushSync();
+    expect(target.querySelector('.split-bar')).toBeNull();
+  });
 });

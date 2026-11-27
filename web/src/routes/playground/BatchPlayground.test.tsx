@@ -245,4 +245,232 @@ describe('Playground multi-image batch filmstrip', () => {
     await until(() => target.querySelector('[data-batch-pos]')?.textContent?.trim() === '2 / 2', 'stepped to image 2');
     expect(target.querySelector('[data-compare-view]')).not.toBeNull();
   });
+
+  it('cancels in-flight single predict synchronously on Run All (no duplicate call) and aborts on Compare toggle or threshold change', async () => {
+    const calls: { signal?: AbortSignal; resolve: (p: Prediction) => void; reject: (e: unknown) => void }[] = [];
+    const predictSpy = vi.fn<Api['predict']>((_input, _opts, signal) => {
+      return new Promise<Prediction>((resolve, reject) => {
+        signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), { once: true });
+        calls.push({ signal, resolve, reject });
+      });
+    });
+
+    setupPlayground(predictSpy);
+    await until(() => target.querySelector('.model-pick'), 'model picker');
+    selectBatchFiles([makeImageFile('p1.png'), makeImageFile('p22.png'), makeImageFile('p333.png')]);
+    await until(() => calls.length === 1, 'initial single predict started');
+
+    // Click Run all while initial single-image request is STILL pending -> single request aborted BEFORE batch request starts
+    const runAllBtn = () => [...target.querySelectorAll<HTMLButtonElement>('[data-batch-bar] button')].find((b) => b.textContent?.includes('Run all'))!;
+    runAllBtn().click();
+    flushSync();
+    expect(calls[0]!.signal?.aborted).toBe(true);
+    await until(() => calls.length === 2, 'batch runAll started for item 0');
+    expect(predictSpy).toHaveBeenCalledTimes(2);
+
+    // Resolve item 0 -> batch advances to item 1
+    calls[1]!.resolve(fakePrediction('m_hard_s', 2));
+    await until(() => calls.length === 3, 'batch runAll started for item 1');
+
+    // Step to completed item 0 while item 1 is running -> stage busy indicator must NOT stick over completed item 0
+    expect(target.querySelector('.stage .busy')).toBeNull();
+    // Step onto running item 1 -> stage busy indicator reflects item 1 is running
+    target.querySelector<HTMLButtonElement>('button[aria-label="Next image"]')!.click();
+    flushSync();
+    expect(target.querySelector('.stage .busy')).not.toBeNull();
+    // Step back to completed item 0 -> busy indicator clears immediately
+    target.querySelector<HTMLButtonElement>('button[aria-label="Previous image"]')!.click();
+    flushSync();
+    expect(target.querySelector('.stage .busy')).toBeNull();
+
+    // Toggling Compare A/B ON aborts the in-flight Run All cleanly
+    const cmpBtn = [...target.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('Compare A/B'))!;
+    cmpBtn.click();
+    flushSync();
+    expect(calls[2]!.signal?.aborted).toBe(true);
+    expect([...target.querySelectorAll<HTMLButtonElement>('[data-batch-bar] button')].some((b) => b.textContent?.includes('Stop'))).toBe(false);
+  });
+
+  it('aborts Run All on threshold change while keeping completed items cached, invalidates on model switch, and falls back to single-image mode when 1 of 2 files fails decode', async () => {
+    const signals: AbortSignal[] = [];
+    const resolvers: ((p: Prediction) => void)[] = [];
+    const predictSpy = vi.fn<Api['predict']>((_input, _opts, signal) => {
+      if (signal) signals.push(signal);
+      return new Promise<Prediction>((resolve, reject) => {
+        signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), { once: true });
+        resolvers.push(resolve);
+      });
+    });
+
+    setupPlayground(predictSpy);
+    await until(() => target.querySelector('.model-pick'), 'model picker');
+    selectBatchFiles([makeImageFile('t1.png'), makeImageFile('t22.png')]);
+    await until(() => resolvers.length === 1, 'item 0 started');
+    resolvers[0]!(fakePrediction('m_hard_s', 2));
+    await until(() => target.querySelector('[data-batch-idx="0"] [data-batch-badge]')?.textContent === '2', 'item 0 cached');
+
+    // Start Run All -> item 1 starts in flight; changing confidence slider aborts item 1 while keeping item 0 cached
+    const runAllBtn = [...target.querySelectorAll<HTMLButtonElement>('[data-batch-bar] button')].find((b) => b.textContent?.includes('Run all'))!;
+    runAllBtn.click();
+    await until(() => resolvers.length === 2, 'item 1 in flight');
+    const confInput = target.querySelector<HTMLInputElement>('input[type="range"]')!;
+    confInput.value = '0.5';
+    confInput.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    expect(signals[1]?.aborted).toBe(true);
+    expect(target.querySelector('[data-batch-idx="0"] [data-batch-badge]')?.textContent).toBe('2');
+
+    // Switching model via URL query invalidates stale badges on batch items
+    router.route = parse('#/playground?model=m_shapes_n');
+    flushSync();
+    await until(() => target.querySelector('[data-batch-idx="0"] [data-batch-badge]')?.textContent !== '2', 'stale badge cleared on model switch');
+
+    // Dropping 2 files where 1 fails decode falls back cleanly to single-image mode (no filmstrip)
+    let decodeIdx = 0;
+    vi.stubGlobal('createImageBitmap', async () => {
+      decodeIdx++;
+      if (decodeIdx === 1) throw new Error('corrupt');
+      return { width: 100, height: 100, close: () => {} };
+    });
+    selectBatchFiles([makeImageFile('bad.png'), makeImageFile('good.png')]);
+    await until(() => target.querySelector('.src-name')?.textContent === 'good.png', 'single valid image loaded');
+    expect(target.querySelector('[data-batch-bar]')).toBeNull();
+  });
+
+  it('preserves error state without firing a duplicate request when Run All fails on the active image', async () => {
+    let failNow = false;
+    const predictSpy = vi.fn<Api['predict']>(async (_input, opts) => {
+      if (failNow) throw new Error('Server 500 boom');
+      return fakePrediction(opts.model_id, 1);
+    });
+    setupPlayground(predictSpy);
+    await until(() => target.querySelector('.model-pick'), 'model picker');
+    selectBatchFiles([makeImageFile('e1.png'), makeImageFile('e22.png')]);
+    await until(() => target.querySelector('[data-batch-idx="0"] [data-batch-badge]')?.textContent === '1', 'img 0 ok');
+
+    // Step to item 1 with failure active -> fails once on single predict
+    failNow = true;
+    target.querySelector<HTMLButtonElement>('button[aria-label="Next image"]')!.click();
+    await until(() => target.querySelector('[data-batch-idx="1"] [data-batch-badge]')?.textContent === '!', 'img 1 failed');
+    const callsBeforeRunAll = predictSpy.mock.calls.length;
+
+    // Click Run all -> retries failed item 1 once, fails, sets error notice, and does NOT trigger a duplicate useSinglePredict call
+    const runAllBtn = [...target.querySelectorAll<HTMLButtonElement>('[data-batch-bar] button')].find((b) => b.textContent?.includes('Run all'))!;
+    runAllBtn.click();
+    await until(() => predictSpy.mock.calls.length === callsBeforeRunAll + 1, 'runAll retried item 1 once');
+    await new Promise((r) => setTimeout(r, 30));
+    flushSync();
+    expect(predictSpy.mock.calls.length).toBe(callsBeforeRunAll + 1);
+    expect(target.querySelector('.notice')).not.toBeNull();
+  });
+
+  it('prevents an older batch decode from superseding a newer single-image pick and revokes superseded batch URLs', async () => {
+    let resolveSlowBatch!: (bmp: { width: number; height: number; close(): void }) => void;
+    let calls = 0;
+    const { revokedUrls } = setupPlayground(async (_input, opts) => fakePrediction(opts.model_id, 1));
+    vi.stubGlobal('createImageBitmap', () => {
+      calls++;
+      if (calls === 1) {
+        return new Promise((r) => {
+          resolveSlowBatch = r;
+        });
+      }
+      return Promise.resolve({ width: 100, height: 100, close: () => {} });
+    });
+
+    await until(() => target.querySelector('.model-pick'), 'model picker');
+    // Start a slow 2-image batch load
+    selectBatchFiles([makeImageFile('slow-a.png'), makeImageFile('slow-b.png')]);
+    // Immediately supersede it with a single image pick
+    selectBatchFiles([makeImageFile('winner.png')]);
+    await until(() => target.querySelector('.src-name')?.textContent === 'winner.png', 'single image won');
+
+    // Now let the older batch decode resolve -> it must NOT replace winner.png or show the filmstrip
+    resolveSlowBatch({ width: 320, height: 240, close: () => {} });
+    await new Promise((r) => setTimeout(r, 20));
+    flushSync();
+    expect(target.querySelector('.src-name')?.textContent).toBe('winner.png');
+    expect(target.querySelector('[data-batch-bar]')).toBeNull();
+    expect(revokedUrls).toEqual([]);
+  });
+
+  it('ignores keyboard stepping when focus is inside an input and preserves Alt+ArrowLeft inside filmstrip', async () => {
+    setupPlayground(async (_input, opts) => fakePrediction(opts.model_id, 1));
+    await until(() => target.querySelector('.model-pick'), 'model picker');
+    selectBatchFiles([makeImageFile('k1.png'), makeImageFile('k22.png')]);
+    await until(() => target.querySelectorAll('[data-batch-filmstrip] [role="option"]').length === 2, '2 thumbs');
+
+    const sliderInput = target.querySelector<HTMLInputElement>('input[type="range"]')!;
+    sliderInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+    flushSync();
+    expect(target.querySelector('[data-batch-pos]')?.textContent?.trim()).toBe('1 / 2');
+
+    // Alt+ArrowRight inside the filmstrip must not be hijacked
+    const strip = target.querySelector<HTMLElement>('[data-batch-filmstrip]')!;
+    const altEv = new KeyboardEvent('keydown', { key: 'ArrowRight', altKey: true, bubbles: true, cancelable: true });
+    strip.dispatchEvent(altEv);
+    flushSync();
+    expect(altEv.defaultPrevented).toBe(false);
+    expect(target.querySelector('[data-batch-pos]')?.textContent?.trim()).toBe('1 / 2');
+  });
+
+  it('routes mixed empty-MIME image files plus a video file into batch mode rather than dropping the images', async () => {
+    setupPlayground(async (_input, opts) => fakePrediction(opts.model_id, 1));
+    await until(() => target.querySelector('.model-pick'), 'model picker');
+
+    const imgA = new File([PNG_HEAD, 'a'], 'no-mime-a.png', { type: '' });
+    const imgB = new File([PNG_HEAD, 'bb'], 'no-mime-b.png', { type: '' });
+    const vid = new File(['ftyp'], 'clip.mp4', { type: 'video/mp4' });
+    selectBatchFiles([imgA, imgB, vid]);
+
+    await until(() => target.querySelectorAll('[data-batch-filmstrip] [role="option"]').length === 2, 'batch loaded 2 empty-MIME images');
+    expect(target.querySelector('[data-media-bar]')).toBeNull();
+  });
+
+  it('syncs full-candidate (ALL) completion into batch cache and exports without truncation', async () => {
+    const dense1000: Prediction['boxes'] = Array.from({ length: 1000 }, (_, i) => ({
+      class: 0,
+      name: 'circle',
+      score: Number((0.99 - i * 0.0005).toFixed(4)),
+      x1: (i % 20) * 15,
+      y1: Math.floor(i / 20) * 10,
+      x2: (i % 20) * 15 + 10,
+      y2: Math.floor(i / 20) * 10 + 8,
+    }));
+    const full1005: Prediction['boxes'] = [
+      ...dense1000,
+      { class: 1, name: 'square', score: 0.4, x1: 5, y1: 5, x2: 15, y2: 15 },
+    ];
+    let sawAllRequest = false;
+    const predictSpy = vi.fn<Api['predict']>(async (_input, opts) => {
+      if (opts.max_det === 30_000) {
+        sawAllRequest = true;
+        return {
+          model_id: opts.model_id,
+          image: { width: 320, height: 240 },
+          boxes: full1005,
+          timing: { preprocess_ms: 1, inference_ms: 5, postprocess_ms: 1, total_ms: 7 },
+          device: 'cpu',
+        };
+      }
+      return {
+        model_id: opts.model_id,
+        image: { width: 320, height: 240 },
+        boxes: dense1000,
+        timing: { preprocess_ms: 1, inference_ms: 5, postprocess_ms: 1, total_ms: 7 },
+        device: 'cpu',
+      };
+    });
+
+    setupPlayground(predictSpy);
+    await until(() => target.querySelector('.model-pick'), 'model picker');
+    selectBatchFiles([makeImageFile('dense1.png'), makeImageFile('dense22.png')]);
+    await until(() => sawAllRequest, 'askAllWhenCut fetched ALL candidates for dense active image');
+
+    // Run all on item 2 (also dense at default conf 0.25 <= floor ~0.49) fetches ALL and completes cleanly
+    const runAllBtn = [...target.querySelectorAll<HTMLButtonElement>('[data-batch-bar] button')].find((b) => b.textContent?.includes('Run all'))!;
+    runAllBtn.click();
+    await until(() => target.querySelector('[data-batch-summary]')?.textContent?.includes('2/2 run'), 'both dense images completed');
+    expect(predictSpy.mock.calls.filter((c) => c[1].max_det === 30_000).length).toBeGreaterThanOrEqual(2);
+  });
 });

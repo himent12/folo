@@ -89,8 +89,8 @@ export function usePlaygroundSource(input: UseSourceInput) {
   }
 
   /** Activates one image from the active multi-image batch without revoking batch-owned URLs or resetting hidden classes. */
-  function setBatchFrame(s: Extract<Source, { kind: 'file' }>, cached: import('$lib/api/types').Prediction | null) {
-    decodeSeq++;
+  function setBatchFrame(s: Extract<Source, { kind: 'file' }>, cached: import('$lib/api/types').Prediction | null, bumpChoice = true) {
+    if (bumpChoice) decodeSeq++;
     toast.clear('image');
     revokeOwned(source.peek());
     source.set(s);
@@ -149,19 +149,23 @@ export function usePlaygroundSource(input: UseSourceInput) {
       void setFile(files[0]!);
       return;
     }
-    const videoFile = files.find((f) => isVideoFile(f));
-    if (videoFile && !files.some((f) => f.type.startsWith('image/'))) {
-      input.onDropVideo(videoFile);
+    const nonVideos = files.filter((f) => !isVideoFile(f));
+    const imageCandidates = nonVideos.filter((f) => !f.type || f.type.startsWith('image/'));
+    if (imageCandidates.length === 0) {
+      const videoFile = files.find((f) => isVideoFile(f));
+      if (videoFile) {
+        input.onDropVideo(videoFile);
+        return;
+      }
+      const [first] = droppedImages(files);
+      if (first) void setFile(first);
       return;
     }
-    const images = droppedImages(files);
-    if (!images.length) return;
-    if (images.length >= 2 && input.onLoadBatch) {
-      decodeSeq++;
-      input.onLoadBatch(images);
+    if (imageCandidates.length >= 2 && input.onLoadBatch) {
+      input.onLoadBatch(imageCandidates);
       return;
     }
-    void setFile(images[0]!);
+    void setFile(imageCandidates[0]!);
   }
 
   function clear() {

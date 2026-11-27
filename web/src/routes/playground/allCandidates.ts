@@ -12,6 +12,18 @@ const KEY = 'all-candidates';
 /** Answers that hold every candidate: module-wide, as the session keeps an answer when the page is left. */
 const complete = new WeakSet<Prediction>();
 
+/** Marks a prediction as holding every candidate (fetched with `ALL`). */
+export function markPredictionComplete(p: Prediction): void {
+  complete.add(p);
+}
+
+/** True when `p` hit `FETCH.max_det` and its candidate floor is at or above `conf`, so lower boxes may be missing. */
+export function isPredictionCutAt(p: Prediction | null, conf: number): boolean {
+  if (!p || complete.has(p)) return false;
+  const f = candidateFloor(p);
+  return f !== null && conf <= f;
+}
+
 /**
  * A busy image's answer stops at FETCH.max_det candidates and is exact only above the lowest score among them. When the
  * confidence goes to or under it, every candidate is asked for once, and they replace the answer (its timing, the
@@ -30,6 +42,8 @@ export function askAllWhenCut(o: {
   engine: BrowserEngine;
   /** In the browser, the server cannot send the model's file (`noServerWeights`) and none was picked. */
   weightsMissing: () => void;
+  /** Optional hook called when full-candidate completion upgrades `pred`, so batch caches stay in sync. */
+  onCompleted?: (source: Source, model: string, runOn: RunOn, next: Prediction) => void;
 }): () => boolean {
   const floor = computed(() => {
     const p = o.pred.get();
@@ -69,6 +83,7 @@ export function askAllWhenCut(o: {
         complete.add(next);
         takeBack();
         o.pred.set(next);
+        o.onCompleted?.(s, id, on, next);
       },
       // The first answer stays: it is still right above its lowest score, and the count still says "1,000+".
       (e: unknown) => {

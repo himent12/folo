@@ -540,7 +540,10 @@ export default function Dataset() {
                       activeSplit={split.get()}
                       onSelectClass={(c) => setFilter({ class: c === undefined ? null : String(c) })}
                       onSelectSplit={(s) => setFilter({ split: s === 'all' ? null : s })}
-                      onOpenStats={() => setQuery({ tab: 'stats', image: null })}
+                      onOpenStats={() => {
+                        setQuery({ tab: 'stats', image: null });
+                        queueMicrotask(() => document.getElementById('ds-tab-stats')?.focus({ preventScroll: true }));
+                      }}
                     />
                   ) : null}
 

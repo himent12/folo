@@ -35,6 +35,7 @@ export default function BatchFilmstrip(props: BatchFilmstripProps) {
   });
 
   function onStripKey(e: KeyboardEvent) {
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
     const total = b.items.peek().length;
     if (total < 2) return;
     let targetIdx: number | null = null;

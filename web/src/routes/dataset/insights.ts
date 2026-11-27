@@ -36,6 +36,8 @@ export interface DatasetInsightsData {
   emptyPct: number;
   emptyWarn: boolean;
   brokenLabels: number;
+  /** Unreadable or missing image errors distinct from broken labels (matching `health.ts`). */
+  imageErrors: number;
   tinyBoxPct: number;
   tinyWarn: boolean;
   checkErrors: number;
@@ -103,6 +105,7 @@ export function computeDatasetInsights(
   const emptyWarn = totalImages > 0 && emptyShare > EMPTY_WARN;
 
   const brokenLabels = Math.max(0, stats.broken_labels);
+  const imageErrors = counts ? Math.max(0, (counts.by_kind.corrupt_image ?? 0) + (counts.by_kind.missing_image ?? 0)) : 0;
   const tinyShare = shareBelow(stats.box_size_hist, TINY_SIZE);
   const tinyBoxPct = tinyShare * 100;
   const tinyWarn = tinyShare > TINY_WARN;
@@ -111,7 +114,7 @@ export function computeDatasetInsights(
   const checkWarnings = Math.max(0, counts?.warning ?? 0);
 
   const qualityTone: InsightTone =
-    brokenLabels > 0 || checkErrors > 0
+    brokenLabels > 0 || imageErrors > 0 || checkErrors > 0
       ? 'danger'
       : emptyWarn || tinyWarn || checkWarnings > 0
         ? 'warning'
@@ -142,6 +145,7 @@ export function computeDatasetInsights(
     emptyPct,
     emptyWarn,
     brokenLabels,
+    imageErrors,
     tinyBoxPct,
     tinyWarn,
     checkErrors,

@@ -125,14 +125,17 @@ export default function DatasetInsights(props: DatasetInsightsProps) {
         </span>
         <span class="facts num">
           {data.get().boxesPerImage !== null ? <span class="fact">{data.get().boxesPerImage!.toFixed(1)} boxes/img</span> : null}
-          {data.get().brokenLabels > 0 ? (
-            <span class="fact danger">{num(data.get().brokenLabels)} broken</span>
-          ) : data.get().checkErrors > 0 ? (
-            <span class="fact danger">{num(data.get().checkErrors)} file {data.get().checkErrors === 1 ? 'error' : 'errors'}</span>
+          {data.get().brokenLabels > 0 ? <span class="fact danger">{num(data.get().brokenLabels)} broken</span> : null}
+          {data.get().brokenLabels > 0 && data.get().imageErrors > 0 ? (
+            <span class="fact danger">{num(data.get().imageErrors)} unreadable</span>
+          ) : data.get().brokenLabels === 0 && data.get().checkErrors > 0 ? (
+            <span class="fact danger">
+              {num(data.get().checkErrors)} file {data.get().checkErrors === 1 ? 'error' : 'errors'}
+            </span>
           ) : null}
           {data.get().emptyImages > 0 ? (
             <span class="fact" class:warn={data.get().emptyWarn} data-empty-indicator>
-              {num(data.get().emptyImages)} empty ({data.get().emptyPct < 1 ? data.get().emptyPct.toFixed(1) : Math.round(data.get().emptyPct)}%)
+              {num(data.get().emptyImages)} empty ({fmtPct(data.get().emptyPct)})
             </span>
           ) : null}
           {data.get().tinyWarn ? <span class="fact warn">{Math.round(data.get().tinyBoxPct)}% tiny</span> : null}
@@ -148,33 +151,35 @@ export default function DatasetInsights(props: DatasetInsightsProps) {
         </button>
       </div>
 
-      <div class="seg splits">
-        <span class="split-bar" aria-hidden="true">
-          <For each={nonZeroSplits.get()} key={(s) => s.split}>
-            {(s) => <span class={`sbar ${s().split}`} style:width={`${Math.max(4, s().pct)}%`}></span>}
-          </For>
-        </span>
-        <span class="split-pills num" role="group" aria-label="Split breakdown">
-          <For each={nonZeroSplits.get()} key={(s) => s.split}>
-            {(s) => {
-              const active = () => props.activeSplit === s().split;
-              return (
-                <button
-                  type="button"
-                  class="spill"
-                  class:active={active()}
-                  aria-pressed={active()}
-                  onclick={() => props.onSelectSplit(active() ? 'all' : s().split)}
-                >
-                  <span class={`sdot ${s().split}`} aria-hidden="true"></span>
-                  {s().split} {fmtPct(s().pct)}
-                </button>
-              );
-            }}
-          </For>
-          {data.get().noVal && data.get().totalImages > 0 ? <span class="no-val">no val</span> : null}
-        </span>
-      </div>
+      {nonZeroSplits.get().length > 0 ? (
+        <div class="seg splits">
+          <span class="split-bar" aria-hidden="true">
+            <For each={nonZeroSplits.get()} key={(s) => s.split}>
+              {(s) => <span class={`sbar ${s().split}`} style:width={`${Math.max(4, s().pct)}%`}></span>}
+            </For>
+          </span>
+          <span class="split-pills num" role="group" aria-label="Split breakdown">
+            <For each={nonZeroSplits.get()} key={(s) => s.split}>
+              {(s) => {
+                const active = () => props.activeSplit === s().split;
+                return (
+                  <button
+                    type="button"
+                    class="spill"
+                    class:active={active()}
+                    aria-pressed={active()}
+                    onclick={() => props.onSelectSplit(active() ? 'all' : s().split)}
+                  >
+                    <span class={`sdot ${s().split}`} aria-hidden="true"></span>
+                    {s().split} {fmtPct(s().pct)}
+                  </button>
+                );
+              }}
+            </For>
+            {data.get().noVal && data.get().totalImages > 0 ? <span class="no-val">no val</span> : null}
+          </span>
+        </div>
+      ) : null}
     </section>
   );
 }

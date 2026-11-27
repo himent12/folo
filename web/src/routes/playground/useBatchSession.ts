@@ -6,6 +6,7 @@ import type { Model, Prediction } from '$lib/api/types';
 import { isDetectorLoadError, type BrowserEngine } from '$lib/inference/browser';
 import { isOom } from '$lib/oom';
 import { toast } from '$lib/ui/toast';
+import { isPredictionCutAt, markPredictionComplete } from './allCandidates';
 import {
   batchItemSource,
   batchPredKey,
@@ -17,7 +18,7 @@ import {
   type BatchItem,
 } from './batch';
 import { takeImage } from './intake';
-import { ask, FETCH, noServerWeights, type RunOn } from './predict';
+import { ALL, ask, FETCH, noServerWeights, type RunOn } from './predict';
 import { sourceImageKey, type Source } from './source';
 
 export interface UseBatchSessionInput {
@@ -26,6 +27,7 @@ export interface UseBatchSessionInput {
   modelId: () => string | null;
   runOn: Signal<RunOn>;
   localWeights: Signal<Map<string, File>>;
+  compare: Signal<boolean>;
   o2o: () => boolean;
   conf: Signal<number>;
   iou: Signal<number>;
@@ -40,10 +42,14 @@ export interface UseBatchSessionInput {
   weightsMissing: Signal<boolean>;
   hover: Signal<Prediction['boxes'][number] | null>;
   picked: Signal<Prediction['boxes'][number] | null>;
+  /** Shared source-choice token factory from `usePlaygroundSource` so batch and still-image decodes race cleanly. */
+  choose: () => () => boolean;
+  /** Synchronously aborts any in-flight single-image prediction before `Run all` dispatches batch work. */
+  cancelSinglePredict: () => void;
   /** Called when a multi-file selection yields only 1 valid image (falls back cleanly to single-image mode). */
   onSingleFile: (source: Extract<Source, { kind: 'file' }>) => void;
   /** Called when activating a batch image on Playground's stage without tearing down the batch. */
-  onActivateFrame: (source: Extract<Source, { kind: 'file' }>, cached: Prediction | null) => void;
+  onActivateFrame: (source: Extract<Source, { kind: 'file' }>, cached: Prediction | null, bumpChoice?: boolean) => void;
   /** Called when entering batch mode to tear down any active video/webcam session. */
   onEnterBatch: () => void;
   /** Drops an unreadable local .folo weights file for Model A. */
@@ -83,11 +89,11 @@ export function useBatchSession(o: UseBatchSessionInput) {
   });
 
   let destroyed = false;
-  let loadSeq = 0;
   let runSeq = 0;
   let runCtrl: AbortController | null = null;
-  /** Source key of the active unrun batch item when the user explicitly stopped Run All (prevents instant auto-restart). */
+  /** Source key of the active batch item after Stop or a Run All halt/error (suppresses immediate auto-restart). */
   let stoppedKey: string | null = null;
+  let exportCtrl: AbortController | null = null;
 
   function revokeAll(list: readonly BatchItem[]) {
     for (const item of list) URL.revokeObjectURL(item.url);
@@ -107,6 +113,8 @@ export function useBatchSession(o: UseBatchSessionInput) {
     runSeq++;
     runCtrl?.abort();
     runCtrl = null;
+    exportCtrl?.abort();
+    exportCtrl = null;
     runningAll.set(false);
     runningIndex.set(null);
     items.set((cur) =>
@@ -122,7 +130,6 @@ export function useBatchSession(o: UseBatchSessionInput) {
   }
 
   function clear() {
-    loadSeq++;
     stoppedKey = null;
     stopRunAll(false);
     const prev = items.peek();
@@ -171,22 +178,22 @@ export function useBatchSession(o: UseBatchSessionInput) {
   }
 
   /**
-   * Decodes 2+ dropped/picked image files into a filmstrip batch.
-   * If decoding yields only 1 valid image, delegates to single-image mode cleanly without leaking object URLs.
+   * Decodes 2+ dropped/picked image files into a filmstrip batch using the shared `choose()` source-choice token.
+   * If a newer single-image/dataset/batch choice supersedes this load, all created object URLs are revoked cleanly.
    */
   async function loadFiles(files: readonly File[]) {
     if (!files.length) return;
-    const seq = ++loadSeq;
+    const isCurrent = o.choose();
     const decoded: BatchItem[] = [];
     const failed: string[] = [];
 
     for (const file of files) {
-      if (destroyed || seq !== loadSeq) {
+      if (destroyed || !isCurrent()) {
         revokeAll(decoded);
         return;
       }
       const res = await takeImage(file, file.name);
-      if (destroyed || seq !== loadSeq) {
+      if (destroyed || !isCurrent()) {
         revokeAll(decoded);
         return;
       }
@@ -208,7 +215,7 @@ export function useBatchSession(o: UseBatchSessionInput) {
       });
     }
 
-    if (destroyed || seq !== loadSeq) {
+    if (destroyed || !isCurrent()) {
       revokeAll(decoded);
       return;
     }
@@ -246,7 +253,7 @@ export function useBatchSession(o: UseBatchSessionInput) {
     items.set(decoded);
     activeIndex.set(0);
     if (prev.length) revokeAll(prev);
-    o.onActivateFrame(batchItemSource(decoded[0]!), null);
+    o.onActivateFrame(batchItemSource(decoded[0]!), null, false);
   }
 
   /** True when the user stopped Run All on this unrun source (suppresses immediate re-fetch until they navigate or re-run). */
@@ -289,6 +296,36 @@ export function useBatchSession(o: UseBatchSessionInput) {
     }
   }
 
+  /** Fetches full candidate set for a cut prediction (`FETCH.max_det` hit above current `conf`). */
+  async function completeIfCut(
+    itemSource: Extract<Source, { kind: 'file' }>,
+    p: Prediction,
+    id: string,
+    on: RunOn,
+    localFile: File | null,
+    signal: AbortSignal,
+  ): Promise<Prediction> {
+    if (!isPredictionCutAt(p, o.conf.peek())) return p;
+    try {
+      const all = await ask({
+        api: hub.api,
+        engine: o.engine,
+        model: id,
+        source: itemSource,
+        on,
+        file: localFile,
+        options: ALL,
+        signal,
+      });
+      if (signal.aborted) return p;
+      const next = { ...all, timing: p.timing, cold: p.cold };
+      markPredictionComplete(next);
+      return next;
+    } catch {
+      return p;
+    }
+  }
+
   /** Sequentially runs inference on every pending/failed batch item with full abort safety. */
   async function runAll() {
     const id = o.modelId();
@@ -302,11 +339,21 @@ export function useBatchSession(o: UseBatchSessionInput) {
     // If all items are already complete for this model/backend, nothing to run.
     if (list.every((it) => it.status === 'done' && it.pred && it.predKey === key)) return;
 
+    // Cancel any in-flight single-image request synchronously BEFORE dispatching batch work (zero duplicate requests).
+    o.cancelSinglePredict();
+    items.set((cur) =>
+      cur.some((it) => it.status === 'running')
+        ? cur.map((it) => (it.status === 'running' ? { ...it, status: it.pred ? 'done' : 'idle' } : it))
+        : cur,
+    );
+    o.predicting.set(false);
+
     stoppedKey = null;
     const seq = ++runSeq;
     runCtrl?.abort();
     const ctrl = (runCtrl = new AbortController());
     runningAll.set(true);
+    let haltedOnNotice = false;
 
     try {
       for (let i = 0; i < items.peek().length; i++) {
@@ -326,7 +373,7 @@ export function useBatchSession(o: UseBatchSessionInput) {
         const itemSource = batchItemSource(item);
         const frameKey = sourceImageKey(itemSource);
         try {
-          const p = await ask({
+          const raw = await ask({
             api: hub.api,
             engine: o.engine,
             model: id,
@@ -336,6 +383,8 @@ export function useBatchSession(o: UseBatchSessionInput) {
             options: FETCH,
             signal: ctrl.signal,
           });
+          if (destroyed || seq !== runSeq || ctrl.signal.aborted) break;
+          const p = await completeIfCut(itemSource, raw, id, on, localFile, ctrl.signal);
           if (destroyed || seq !== runSeq || ctrl.signal.aborted) break;
           updateItem(i, { pred: p, predKey: key, status: 'done', error: null });
           if (i === activeIndex.peek()) {
@@ -351,6 +400,7 @@ export function useBatchSession(o: UseBatchSessionInput) {
           if (destroyed || seq !== runSeq || ctrl.signal.aborted) break;
           if (localFile && on !== 'server' && isDetectorLoadError(e)) {
             updateItem(i, { status: 'idle', error: null });
+            haltedOnNotice = true;
             if (i === activeIndex.peek()) {
               o.predicting.set(false);
               o.pred.set(null);
@@ -361,6 +411,7 @@ export function useBatchSession(o: UseBatchSessionInput) {
           }
           if (on !== 'server' && !localFile && noServerWeights(e)) {
             updateItem(i, { status: 'idle', error: null });
+            haltedOnNotice = true;
             o.weightsMissing.set(true);
             if (i === activeIndex.peek()) {
               o.predicting.set(false);
@@ -377,7 +428,11 @@ export function useBatchSession(o: UseBatchSessionInput) {
             o.error.set(e);
           }
           if (isOom(e)) {
+            haltedOnNotice = true;
             o.error.set(e);
+            if (i !== activeIndex.peek()) {
+              toast.error(e, 'Batch stopped: out of GPU memory');
+            }
             break;
           }
         }
@@ -385,6 +440,11 @@ export function useBatchSession(o: UseBatchSessionInput) {
     } finally {
       if (seq === runSeq) {
         runCtrl = null;
+        const activeItem = items.peek()[activeIndex.peek()];
+        const curSrc = o.source.peek();
+        if (curSrc && (haltedOnNotice || activeItem?.status === 'error')) {
+          stoppedKey = sourceImageKey(curSrc);
+        }
         runningAll.set(false);
         runningIndex.set(null);
         items.set((cur) =>
@@ -402,8 +462,8 @@ export function useBatchSession(o: UseBatchSessionInput) {
     return filterBatchBoxes(item.pred, filter.get(), o.hidden.get()).length;
   }
 
-  function onExportJson() {
-    exportBatchJson({
+  function makeExportInput() {
+    return {
       items: items.peek(),
       modelId: o.modelId(),
       modelName: o.model()?.name ?? null,
@@ -411,20 +471,68 @@ export function useBatchSession(o: UseBatchSessionInput) {
       filter: filter.peek(),
       hidden: o.hidden.peek(),
       classes: o.classes(),
-    });
+    };
+  }
+
+  /** Completes any cut batch predictions before exporting; runs synchronously when no item is cut at current conf. */
+  function runExport(kind: 'json' | 'csv') {
+    const confNow = o.conf.peek();
+    const list = items.peek();
+    const cutIndices = list
+      .map((it, idx) => (it.status === 'done' && isPredictionCutAt(it.pred, confNow) ? idx : -1))
+      .filter((idx) => idx >= 0);
+
+    const doExport = () => (kind === 'json' ? exportBatchJson(makeExportInput()) : exportBatchCsv(makeExportInput()));
+    if (cutIndices.length === 0) {
+      doExport();
+      return;
+    }
+
+    const id = o.modelId();
+    const on = o.runOn.peek();
+    const key = id ? batchPredKey(id, on) : null;
+    const localFile = id && on !== 'server' ? (o.localWeights.peek().get(id) ?? null) : null;
+    if (!id || !key) {
+      doExport();
+      return;
+    }
+
+    exportCtrl?.abort();
+    const ctrl = (exportCtrl = new AbortController());
+    void (async () => {
+      for (const idx of cutIndices) {
+        if (destroyed || ctrl.signal.aborted) return;
+        const item = items.peek()[idx];
+        if (!item?.pred || item.predKey !== key) continue;
+        const itemSource = batchItemSource(item);
+        const next = await completeIfCut(itemSource, item.pred, id, on, localFile, ctrl.signal);
+        if (destroyed || ctrl.signal.aborted) return;
+        if (next !== item.pred) {
+          updateItem(idx, { pred: next });
+          if (idx === activeIndex.peek() && o.pred.peek() === item.pred) {
+            o.pred.set(next);
+          }
+        }
+      }
+      if (!destroyed && !ctrl.signal.aborted) doExport();
+    })();
+  }
+
+  function onExportJson() {
+    runExport('json');
   }
 
   function onExportCsv() {
-    exportBatchCsv({
-      items: items.peek(),
-      modelId: o.modelId(),
-      modelName: o.model()?.name ?? null,
-      runOn: o.runOn.peek(),
-      filter: filter.peek(),
-      hidden: o.hidden.peek(),
-      classes: o.classes(),
-    });
+    runExport('csv');
   }
+
+  // Keep stage `predicting` synced with whether the currently selected thumbnail is the one running in `Run all`.
+  effect(() => {
+    if (!runningAll.get()) return;
+    const curIdx = activeIndex.get();
+    const runIdx = runningIndex.get();
+    untrack(() => o.predicting.set(runIdx !== null && runIdx === curIdx));
+  });
 
   // Abort and invalidate cached batch predictions whenever model, backend, or local weights change.
   let lastModelKey: string | null = null;
@@ -443,7 +551,7 @@ export function useBatchSession(o: UseBatchSessionInput) {
     lastLocalFile = f;
   });
 
-  // Abort any in-flight Run All cleanly when thresholds change (completed raw predictions stay cached and re-filter live).
+  // Abort any in-flight Run All cleanly when thresholds or Compare A/B mode change (cached raw predictions stay intact).
   let lastThreshKey: string | null = null;
   effect(() => {
     const k = `${o.conf.get()}|${o.iou.get()}|${o.maxDet.get()}`;
@@ -451,6 +559,15 @@ export function useBatchSession(o: UseBatchSessionInput) {
       untrack(() => stopRunAll());
     }
     lastThreshKey = k;
+  });
+
+  let lastCompare: boolean | null = null;
+  effect(() => {
+    const c = o.compare.get();
+    if (lastCompare !== null && c !== lastCompare && untrack(() => runningAll.peek())) {
+      untrack(() => stopRunAll());
+    }
+    lastCompare = c;
   });
 
   // Global Left/Right keyboard stepping when a batch is active and focus is not inside an interactive arrow-handling control.

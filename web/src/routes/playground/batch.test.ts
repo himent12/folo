@@ -180,10 +180,16 @@ describe('playground batch helpers', () => {
         }),
       ],
     };
-    expect(exportBatchJson(doneInput)).toBe(true);
-    expect(exportBatchCsv(doneInput)).toBe(true);
-    expect(createUrl).toHaveBeenCalledTimes(2);
-    expect(click).toHaveBeenCalledTimes(2);
-    expect(revokeUrl).not.toThrow;
+    vi.useFakeTimers();
+    try {
+      expect(exportBatchJson(doneInput)).toBe(true);
+      expect(exportBatchCsv(doneInput)).toBe(true);
+      expect(createUrl).toHaveBeenCalledTimes(2);
+      expect(click).toHaveBeenCalledTimes(2);
+      vi.advanceTimersByTime(1000);
+      expect(revokeUrl).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

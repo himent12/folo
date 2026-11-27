@@ -41,6 +41,8 @@ export interface SinglePredictInput {
   onBatchResult?: (s: Source, model: string, runOn: RunOn, pred: Prediction | null, error: unknown) => void;
   /** Mirrors single-image running state into the active batch item. */
   onBatchBusy?: (s: Source, busy: boolean) => void;
+  /** Receives a synchronous abort callback so `Run all` cancels any in-flight single request before dispatching batch work. */
+  onRegisterAbort?: (abort: () => void) => void;
 }
 
 export function useSinglePredict(o: SinglePredictInput): () => boolean {
@@ -53,6 +55,11 @@ export function useSinglePredict(o: SinglePredictInput): () => boolean {
   });
 
   let lastRetry = 0;
+  let activeCtrl: AbortController | null = null;
+  o.onRegisterAbort?.(() => {
+    activeCtrl?.abort();
+    activeCtrl = null;
+  });
   effect(() => {
     const id = o.modelId();
     const s = o.source.get();
@@ -65,7 +72,11 @@ export function useSinglePredict(o: SinglePredictInput): () => boolean {
     if (batchRunning) return;
     if (!id || !s || untrack(() => o.restored(id, s, on) || !!o.consumeReuse?.(id, s, on))) {
       untrack(() => {
-        if (s && o.pred.peek()) o.predSourceKey.set(sourceImageKey(s));
+        const curPred = o.pred.peek();
+        if (s && curPred) {
+          o.predSourceKey.set(sourceImageKey(s));
+          if (id) o.onBatchResult?.(s, id, on, curPred, null);
+        }
         o.predicting.set(false);
         o.error.set(null);
         o.weightsMissing.set(false);
@@ -75,11 +86,15 @@ export function useSinglePredict(o: SinglePredictInput): () => boolean {
     const cached = !explicitRetry ? untrack(() => o.getCachedBatchPred?.(id, s, on) ?? null) : null;
     if (cached) {
       untrack(() => {
+        const sameDisplayed = o.pred.peek() === cached;
         o.pred.set(cached);
         o.predSourceKey.set(sourceImageKey(s));
         o.predicting.set(false);
-        o.error.set(null);
-        o.weightsMissing.set(false);
+        // Preserve batch-halting error / missing-weights notices if re-entering solely because Run All ended.
+        if (!sameDisplayed) {
+          o.error.set(null);
+          o.weightsMissing.set(false);
+        }
       });
       return;
     }
@@ -88,7 +103,7 @@ export function useSinglePredict(o: SinglePredictInput): () => boolean {
       return;
     }
     const frameKey = sourceImageKey(s);
-    const ctrl = new AbortController();
+    const ctrl = (activeCtrl = new AbortController());
     untrack(() => {
       o.predicting.set(true);
       o.error.set(null);
@@ -108,6 +123,7 @@ export function useSinglePredict(o: SinglePredictInput): () => boolean {
     run.then(
       (p) => {
         if (ctrl.signal.aborted) return;
+        if (activeCtrl === ctrl) activeCtrl = null;
         o.pred.set(p);
         o.predSourceKey.set(frameKey);
         o.hover.set(null);
@@ -117,6 +133,7 @@ export function useSinglePredict(o: SinglePredictInput): () => boolean {
       },
       (e: unknown) => {
         if (ctrl.signal.aborted) return;
+        if (activeCtrl === ctrl) activeCtrl = null;
         o.predicting.set(false);
         if (file && on !== 'server' && isDetectorLoadError(e)) {
           o.pred.set(null);
@@ -146,6 +163,7 @@ export function useSinglePredict(o: SinglePredictInput): () => boolean {
     );
     return () => {
       ctrl.abort();
+      if (activeCtrl === ctrl) activeCtrl = null;
       untrack(() => o.onBatchBusy?.(s, false));
     };
   });
@@ -160,5 +178,6 @@ export function useSinglePredict(o: SinglePredictInput): () => boolean {
     busy: () => o.predicting.get() || !!o.isLiveStream?.() || !!o.isBatchRunningAll?.(),
     engine: o.engine,
     weightsMissing: () => o.weightsMissing.set(true),
+    onCompleted: (s, id, on, next) => o.onBatchResult?.(s, id, on, next, null),
   });
 }
