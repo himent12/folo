@@ -161,7 +161,7 @@ pub fn analyze_entry_image(im: &BenchEntryImage) -> ImageErrorStats {
     for det_idx in order {
         let d = &im.detections[det_idx];
         let dr = det_rect(d);
-        if !valid_box(dr.0, dr.1, dr.2, dr.3) {
+        if !d.score.is_finite() || !valid_box(dr.0, dr.1, dr.2, dr.3) {
             continue;
         }
         let mut best_unmatched: Option<(usize, f64)> = None;
@@ -210,6 +210,7 @@ pub fn entry_image_matches_filter(im: &BenchEntryImage, filter: EntryImageFilter
 }
 
 /// Counts how many loaded images match each error-analysis filter chip.
+#[cfg(test)]
 pub fn count_filter_matches(images: &[BenchEntryImage]) -> FilterCounts {
     let mut counts = FilterCounts { all: images.len(), ..Default::default() };
     for im in images {
@@ -227,16 +228,14 @@ pub fn count_filter_matches(images: &[BenchEntryImage]) -> FilterCounts {
     counts
 }
 
-/// Filters and sorts loaded entry images according to `filter` and `order`.
-pub fn filter_and_sort_entry_images(
-    images: &[BenchEntryImage],
+/// Filters and sorts already-analyzed entry images according to `filter` and `order`.
+pub fn filter_and_sort_analyzed<'a>(
+    analyzed: Vec<(usize, &'a BenchEntryImage, ImageErrorStats)>,
     filter: EntryImageFilter,
     order: EntryImageOrder,
-) -> Vec<(usize, &BenchEntryImage, ImageErrorStats)> {
-    let mut out: Vec<(usize, &BenchEntryImage, ImageErrorStats)> = images
-        .iter()
-        .enumerate()
-        .map(|(i, im)| (i, im, analyze_entry_image(im)))
+) -> Vec<(usize, &'a BenchEntryImage, ImageErrorStats)> {
+    let mut out: Vec<(usize, &'a BenchEntryImage, ImageErrorStats)> = analyzed
+        .into_iter()
         .filter(|(_, _, st)| match filter {
             EntryImageFilter::All => true,
             EntryImageFilter::MissedGt => st.fn_count > 0,
@@ -289,6 +288,35 @@ pub fn filter_and_sort_entry_images(
     }
 
     out
+}
+
+/// Counts how many already-analyzed images match each error-analysis filter chip.
+pub fn count_analyzed_filters(analyzed: &[(usize, &BenchEntryImage, ImageErrorStats)]) -> FilterCounts {
+    let mut counts = FilterCounts { all: analyzed.len(), ..Default::default() };
+    for (_, _, st) in analyzed {
+        if st.fn_count > 0 {
+            counts.missed_gt += 1;
+        }
+        if st.fp > 0 {
+            counts.false_positives += 1;
+        }
+        if st.has_errors() {
+            counts.has_errors += 1;
+        }
+    }
+    counts
+}
+
+/// Filters and sorts loaded entry images according to `filter` and `order`.
+#[cfg(test)]
+pub fn filter_and_sort_entry_images(
+    images: &[BenchEntryImage],
+    filter: EntryImageFilter,
+    order: EntryImageOrder,
+) -> Vec<(usize, &BenchEntryImage, ImageErrorStats)> {
+    let analyzed: Vec<_> =
+        images.iter().enumerate().map(|(i, im)| (i, im, analyze_entry_image(im))).collect();
+    filter_and_sort_analyzed(analyzed, filter, order)
 }
 
 #[cfg(test)]
@@ -362,6 +390,14 @@ mod tests {
         );
         let nan_st = analyze_entry_image(&nan_im);
         assert_eq!((nan_st.tp, nan_st.fp, nan_st.fn_count), (0, 1, 1));
+        // Finite coordinates with NaN score must also be rejected (never claim a GT box).
+        let nan_score_im = entry_img(
+            "nan_score",
+            vec![gt(0, 0.0, 0.0, 100.0, 100.0)],
+            vec![det(0, f32::NAN, 0.0, 0.0, 100.0, 100.0)],
+        );
+        let nan_score_st = analyze_entry_image(&nan_score_im);
+        assert_eq!((nan_score_st.tp, nan_score_st.fp, nan_score_st.fn_count), (0, 1, 1));
 
         // Exact IoU tie (2/3 with both GT 0 and GT 1): `folo-bench` takes the last GT (GT 1),
         // leaving GT 0 free for the second detection -> 2 TP, 0 FP, 0 FN.

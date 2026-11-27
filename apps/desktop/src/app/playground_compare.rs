@@ -97,6 +97,10 @@ impl FoloApp {
             self.play_compare.pred_b_pending = false;
             self.play_compare.pred_b_dim = false;
             self.play_compare.model_b_gone = None;
+            // Restore fetched_floor_b to the last completed Model B prediction so cancelling a
+            // lowered-confidence rerun cannot mask a later refetch.
+            self.play_compare.fetched_floor_b =
+                self.play_compare.pred_b_meta.as_ref().map_or(PLAY_CONF_FLOOR, |m| m.floor);
         }
         cx.notify();
     }

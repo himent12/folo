@@ -329,6 +329,7 @@ impl FoloApp {
     /// rerun of the same image and model, an IoU change, keeps the old result up instead.
     pub fn rerun_predict(&mut self, cx: &mut Context<Self>) {
         self.play_pred_for = None;
+        self.play_compare.pred_a_meta = None;
         self.play_pred_dim = false;
         self.run_predict(cx);
     }
@@ -378,6 +379,7 @@ impl FoloApp {
         // Same image and model (an IoU change): keep showing the old boxes until the new ones land.
         if self.play_pred_for.as_ref() != Some(&key) {
             self.play_pred = Load::Loading;
+            self.play_compare.pred_a_meta = None;
             self.clear_play_hover();
         }
         self.play_pred_seq += 1;

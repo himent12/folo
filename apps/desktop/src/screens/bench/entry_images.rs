@@ -9,7 +9,8 @@ use folo_ui::{
 };
 
 use super::error_analysis::{
-    EntryImageFilter, EntryImageOrder, ImageErrorStats, count_filter_matches, filter_and_sort_entry_images,
+    EntryImageFilter, EntryImageOrder, ImageErrorStats, analyze_entry_image, count_analyzed_filters,
+    filter_and_sort_analyzed,
 };
 use super::format::images_shown;
 use crate::api::{Bench, BenchAccuracy, BenchEntry};
@@ -116,23 +117,20 @@ impl FoloApp {
             }
         };
 
-        let counts = count_filter_matches(&page.images);
+        let analyzed: Vec<_> =
+            page.images.iter().enumerate().map(|(i, im)| (i, im, analyze_entry_image(im))).collect();
+        let counts = count_analyzed_filters(&analyzed);
         let active_filter = self.bench.entry_image_filter;
         let show_truth = !self.bench.entry_inspect_hide_truth;
         let show_preds = !self.bench.entry_inspect_hide_preds;
         let filter_bar =
             self.entry_image_filter_bar(&t, active_filter, counts, show_truth, show_preds, window, cx);
 
-        // Preserve exact server page order for MostErrors/InOrder when server already sorted,
-        // and apply client-side error sorting for MostFn/MostFp/LowestIou.
+        // Reuse the single-pass error stats for filtering and client-side error sorting.
         let filtered = if active_filter == EntryImageFilter::All && order == EntryImageOrder::MostErrors {
-            page.images
-                .iter()
-                .enumerate()
-                .map(|(i, im)| (i, im, super::error_analysis::analyze_entry_image(im)))
-                .collect::<Vec<_>>()
+            analyzed
         } else {
-            filter_and_sort_entry_images(&page.images, active_filter, order)
+            filter_and_sort_analyzed(analyzed, active_filter, order)
         };
 
         let selected_id: Option<String> = self

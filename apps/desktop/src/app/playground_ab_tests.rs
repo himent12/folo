@@ -364,7 +364,7 @@ fn playground_compare_freshness_guards_reenable_exports_and_class_filter() {
             "re-enabling Compare after IoU change triggers a fresh Model B prediction"
         );
     });
-    drive(&mut app, window, |this, _, _| {
+    drive(&mut app, window, |this, _, cx| {
         assert!(this.pred_b_is_fresh(), "new Model B prediction completed");
         // While Model A is pending an IoU rerun, A must not be exported as fresh under new IoU.
         this.play_pred_pending = true;
@@ -373,5 +373,22 @@ fn playground_compare_freshness_guards_reenable_exports_and_class_filter() {
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert!(v["a"].is_null(), "stale pending Model A must be omitted from Compare export");
         assert!(v["b"].is_object(), "fresh Model B remains exported");
+        this.play_pred_pending = false;
+
+        // Regression (R2): cancelling a lowered-confidence Model B rerun via set_play_compare(false)
+        // restores fetched_floor_b to the last completed floor so a later low-threshold step refetches B.
+        this.play_compare.fetched_floor_b = 0.01;
+        this.set_play_compare(false, cx);
+        assert!(
+            (this.play_compare.fetched_floor_b - super::PLAY_CONF_FLOOR).abs() < 1e-6,
+            "disabling Compare restores fetched_floor_b to completed floor"
+        );
+        this.set_play_compare(true, cx);
+        let seq_before = this.play_compare.pred_b_seq;
+        this.set_play_conf(0.02, cx);
+        assert!(
+            this.play_compare.pred_b_seq > seq_before,
+            "lowering confidence below completed floor triggers a fresh Model B prediction"
+        );
     });
 }

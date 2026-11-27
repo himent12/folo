@@ -195,7 +195,7 @@ pub fn write_export_bytes(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 
 fn encode_png(img: &RgbaImage) -> anyhow::Result<Vec<u8>> {
     let mut buf = Cursor::new(Vec::new());
-    image::DynamicImage::ImageRgba8(img.clone()).write_to(&mut buf, ImageFormat::Png)?;
+    img.write_to(&mut buf, ImageFormat::Png)?;
     Ok(buf.into_inner())
 }
 

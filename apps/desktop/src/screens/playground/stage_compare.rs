@@ -339,6 +339,7 @@ impl FoloApp {
                 .bg(t.danger_muted)
                 .border_1()
                 .border_color(t.line_default)
+                .on_mouse_down(folo_ui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .flex()
                 .items_center()
                 .justify_between()
