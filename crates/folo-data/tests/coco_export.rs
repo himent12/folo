@@ -234,3 +234,79 @@ fn export_coco_rejects_invalid_inputs_before_writing() {
     assert!(err.to_string().contains("invalid box"), "{err}");
     assert!(!out_nan.exists(), "must not create output dir on invalid box");
 }
+
+#[test]
+fn export_coco_reference_resolves_unambiguously_even_with_decoy_image() {
+    let t = TempDir::new("coco-export-decoy");
+    let src = t.join("work/pictures");
+    write(&src.join("data.yaml"), "train: .\nnames: [target]\n");
+    write_png(&src.join("a.png"), 16, 16, [220, 10, 10]);
+    write(&src.join("a.txt"), "0 0.5 0.5 0.5 0.5\n");
+
+    // Place a same-sized decoy at `/work/exports/pictures/a.png` with completely different pixels.
+    let out = t.join("work/exports/batch");
+    let decoy = t.join("work/exports/pictures/a.png");
+    write_png(&decoy, 16, 16, [10, 220, 10]);
+
+    let ds = open(&src).unwrap();
+    let report =
+        export_coco(&ds, &out, &CocoExportOptions { images: CocoImageMode::Reference, ..Default::default() })
+            .unwrap();
+    assert_eq!(report.splits, [1, 0, 0]);
+
+    // Both directory open, single-JSON open, and ground-truth open must resolve to the original red image.
+    for target in [out.clone(), out.join("annotations/instances_train.json")] {
+        let reopened = open(&target).unwrap();
+        assert_eq!(reopened.train.len(), 1);
+        let sample = reopened.train.get(0).unwrap();
+        assert_eq!(
+            &sample.image.data[..3],
+            &[220, 10, 10],
+            "opened decoy instead of original via {}",
+            target.display()
+        );
+    }
+    let gt = open_coco_ground_truth(&out, Split::Train).unwrap();
+    assert_eq!(gt.images.len(), 1);
+    let resolved = std::fs::canonicalize(gt.images[0].path.as_ref().unwrap()).unwrap();
+    let expected = std::fs::canonicalize(src.join("a.png")).unwrap();
+    assert_eq!(resolved, expected, "ground truth resolved to decoy instead of original");
+}
+
+#[test]
+fn export_coco_link_resolves_relative_symlink_target() {
+    let t = TempDir::new("coco-export-symlink");
+    let blobs = t.join("blobs");
+    write_png(&blobs.join("real.png"), 16, 16, [10, 20, 230]);
+
+    let src = t.join("yolo");
+    write(&src.join("data.yaml"), "train: images/train\nnames: [thing]\n");
+    std::fs::create_dir_all(src.join("images/train")).unwrap();
+    let link_path = src.join("images/train/linked.png");
+
+    #[cfg(unix)]
+    let link_res = std::os::unix::fs::symlink("../../../blobs/real.png", &link_path);
+    #[cfg(windows)]
+    let link_res = std::os::windows::fs::symlink_file(r"..\..\..\blobs\real.png", &link_path);
+    if let Err(err) = link_res {
+        eprintln!("skipped symlink test (platform denied file symlink creation): {err}");
+        return;
+    }
+    write(&src.join("labels/train/linked.txt"), "0 0.5 0.5 0.5 0.5\n");
+
+    let ds = open(&src).unwrap();
+    assert_eq!(ds.train.len(), 1);
+    let out = t.join("coco-linked");
+    let report =
+        export_coco(&ds, &out, &CocoExportOptions { images: CocoImageMode::Link, ..Default::default() })
+            .unwrap();
+    assert_eq!(report.splits, [1, 0, 0]);
+    let exported_img = out.join("images/train/linked.png");
+    assert!(!std::fs::symlink_metadata(&exported_img).unwrap().file_type().is_symlink());
+
+    let reopened = open(&out).unwrap();
+    assert_eq!(reopened.train.len(), 1);
+    assert!(reopened.report.issues.is_empty(), "{:?}", reopened.report.issues);
+    let sample = reopened.train.get(0).unwrap();
+    assert_eq!(&sample.image.data[..3], &[10, 20, 230]);
+}

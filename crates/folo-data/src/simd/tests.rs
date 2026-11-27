@@ -771,12 +771,13 @@ fn hsv_avx2_fma_and_warp_u8_16px_match_scalar_bit_exact() {
     let mut v = vec![0u32; cols * 4];
     vblend_rgb_to_rgba32(&top, &bot, 1234, &mut v);
     let hsv = &hsv_cases[0];
+    let hsv_zero_sat = &hsv_cases[3];
     for &count in &[0usize, 1, 7, 8, 9, 15, 16, 17, 23, 24, 25, 31, 32, 33, 47, 48, 49, 63, 64, 65] {
         let width = count + 9;
         let x_start = 4;
         let x_end = x_start + count;
         for &(rel_fu0, du) in &[(100_000i64, 90_000i64), (8_000_000, -100_000)] {
-            for hsv_opt in [None, Some(hsv)] {
+            for hsv_opt in [None, Some(hsv), Some(hsv_zero_sat)] {
                 for flip_lr in [false, true] {
                     let (mut r0, mut g0, mut b0) =
                         (vec![0x5Au8; width], vec![0x5Au8; width], vec![0x5Au8; width]);

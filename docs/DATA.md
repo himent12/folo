@@ -201,10 +201,10 @@ rebuilds its dataset indexes then). Nothing installs one by default; `folo mcp
   `folo-data` library API).
 - `convert::export_coco(&loaded, out, &CocoExportOptions)` (`src/convert/coco.rs`, also backing `convert(..., Format::Coco)`)
   exports any loaded dataset to spec-compliant COCO instances JSON (`annotations/instances_<split>.json`) with
-  selectable splits (deduplicated into canonical `[train, val, test]` order), `CocoImageMode::Copy`, `Link` (hard-link
-  with transparent copy fallback), or `Reference` (forward-slash relative paths from `out`, no image copies),
-  deterministic sorted entry ordering, 1-based image/annotation/category IDs, `area = w * h`, `iscrowd = 0`, optional
-  pretty-printing, and typed streaming atomic JSON writes (sibling `.tmp` + rename).
+  selectable splits (deduplicated into canonical `[train, val, test]` order), `CocoImageMode::Copy`, `Link` (resolving
+  symlinks before hard-linking, with transparent copy fallback), or `Reference` (relative paths from `annotations/`, no
+  image copies), deterministic sorted entry ordering, 1-based image/annotation/category IDs, `area = w * h`,
+  `iscrowd = 0`, optional pretty-printing, and typed streaming atomic JSON writes (sibling `.tmp` + rename).
 - `detect_format(path, format)` finds the format without reading labels; a path with nothing recognisable fails with
   a `DataError::Format` whose message starts with `UNDETECTED`. A folder a writer has not finished (below) is refused
   as unfinished first, whatever it holds.

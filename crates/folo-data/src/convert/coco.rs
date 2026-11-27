@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::io::{BufWriter, ErrorKind, Write};
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::{copy, image_extension, mkdir};
 
@@ -31,8 +31,8 @@ pub enum CocoImageMode {
     /// is unsupported or crosses filesystems.
     Link,
     /// Do not copy or link images; write `annotations/instances_<split>.json` referencing the source images
-    /// via normalized forward-slash relative paths from `<out>` (falling back to normalized absolute paths only
-    /// when source and destination reside on different filesystem roots).
+    /// via relative paths from `<out>/annotations/` (falling back to normalized absolute paths only when source
+    /// and destination reside on different filesystem roots).
     Reference,
 }
 
@@ -131,7 +131,7 @@ struct CocoCategoryEntry<'a> {
 /// Validates all requested splits, class IDs, and box coordinates before writing anything.
 pub fn export_coco(ds: &LoadedDataset, out: &Path, opts: &CocoExportOptions) -> Result<CocoExportReport> {
     let selected = select_splits(ds, &opts.splits)?;
-    validate_entries(ds, &selected)?;
+    validate_entries(ds, &selected, opts.images)?;
 
     let claim = crate::unfinished::claim(out)?;
     let ann_dir = out.join("annotations");
@@ -166,7 +166,7 @@ pub fn export_coco(ds: &LoadedDataset, out: &Path, opts: &CocoExportOptions) -> 
             CocoImageMode::Copy => {
                 let img_dir = out.join("images").join(split.as_str());
                 mkdir(&img_dir)?;
-                let names = unique_safe_coco_names(ordered.iter().map(|e| e.image.as_path()))?;
+                let names = reserve_exclusive_copy_targets(&img_dir, &ordered)?;
                 ordered
                     .par_iter()
                     .zip(&names)
@@ -177,25 +177,18 @@ pub fn export_coco(ds: &LoadedDataset, out: &Path, opts: &CocoExportOptions) -> 
             CocoImageMode::Link => {
                 let img_dir = out.join("images").join(split.as_str());
                 mkdir(&img_dir)?;
-                let names = unique_safe_coco_names(ordered.iter().map(|e| e.image.as_path()))?;
-                let linked = AtomicUsize::new(0);
-                let copied = AtomicUsize::new(0);
-                ordered.par_iter().zip(&names).try_for_each(|(e, name)| {
-                    if link_or_copy(&e.image, &img_dir.join(name))? {
-                        linked.fetch_add(1, Ordering::Relaxed);
-                    } else {
-                        copied.fetch_add(1, Ordering::Relaxed);
-                    }
-                    Ok::<(), DataError>(())
-                })?;
-                (names, linked.load(Ordering::Relaxed), copied.load(Ordering::Relaxed), 0)
+                let (names, linked, copied) = materialize_links(&img_dir, &ordered)?;
+                (names, linked, copied, 0)
             }
             CocoImageMode::Reference => {
-                let base = canonical_or_normalized(out)?;
+                // Anchor relative paths at `<out>/annotations/` (candidate #0 in `coco::image_base`) so both
+                // `open(out)` and `open(out/annotations/instances_<split>.json)` resolve unambiguously even when
+                // a same-named decoy exists under `<out>/`.
+                let ann_base = canonical_or_normalized(&ann_dir)?;
                 let mut names = Vec::with_capacity(ordered.len());
                 for e in &ordered {
                     crate::guard::check(&e.image).map_err(|err| DataError::io(&e.image, err))?;
-                    names.push(reference_file_name(&base, &e.image)?);
+                    names.push(reference_file_name(&ann_base, &e.image)?);
                 }
                 let count = names.len();
                 (names, 0, 0, count)
@@ -293,14 +286,20 @@ fn select_splits(ds: &LoadedDataset, requested: &[Split]) -> Result<Vec<Split>> 
     Ok(candidates)
 }
 
-/// Validates class indices and box coordinates across selected splits before claiming or creating `out`.
-fn validate_entries(ds: &LoadedDataset, splits: &[Split]) -> Result<()> {
+/// Validates class indices, box coordinates, and (in `Reference` mode) UTF-8 paths before claiming `out`.
+fn validate_entries(ds: &LoadedDataset, splits: &[Split], image_mode: CocoImageMode) -> Result<()> {
     let nc = ds.classes.len();
     for &split in splits {
         for e in ds.split(split).entries() {
             if e.image.to_string_lossy().contains('\0') {
                 return Err(DataError::Config(format!(
                     "cannot export image path containing NUL byte: {}",
+                    e.image.display()
+                )));
+            }
+            if image_mode == CocoImageMode::Reference && e.image.to_str().is_none() {
+                return Err(DataError::Config(format!(
+                    "image path is not valid UTF-8 for COCO JSON: {}",
                     e.image.display()
                 )));
             }
@@ -329,44 +328,136 @@ fn validate_entries(ds: &LoadedDataset, splits: &[Split]) -> Result<()> {
     Ok(())
 }
 
-/// Orders entries deterministically by normalized forward-slash path so exports do not depend on filesystem
-/// directory iteration order.
+/// Orders entries deterministically so exports do not depend on filesystem directory iteration order.
 fn deterministic_entries(entries: &[ImageEntry]) -> Vec<&ImageEntry> {
+    #[cfg(windows)]
     let mut ordered: Vec<(&ImageEntry, String)> =
-        entries.iter().map(|e| (e, normalize_slashes(&e.image))).collect();
+        entries.iter().map(|e| (e, e.image.to_string_lossy().replace('\\', "/"))).collect();
+    #[cfg(not(windows))]
+    let mut ordered: Vec<(&ImageEntry, &std::ffi::OsStr)> =
+        entries.iter().map(|e| (e, e.image.as_os_str())).collect();
     ordered.sort_by(|a, b| a.1.cmp(&b.1));
     ordered.into_iter().map(|(e, _)| e).collect()
 }
 
-/// Sanitizes and deduplicates single-component filenames for `Copy` / `Link` mode, preventing path traversal
-/// (`..`, separators, drive prefixes, control characters) and case-insensitive collisions on Windows/macOS.
-fn unique_safe_coco_names<'a>(paths: impl Iterator<Item = &'a Path>) -> Result<Vec<String>> {
-    let mut taken = HashSet::new();
-    let mut out = Vec::new();
-    for p in paths {
-        let raw_stem = p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-        let mut stem: String = raw_stem
-            .chars()
-            .map(|c| if matches!(c, '/' | '\\' | ':' | '\0') || c.is_control() { '_' } else { c })
-            .collect();
-        if stem.is_empty() || stem == "." || stem == ".." || stem.chars().all(|c| c == '.') {
-            stem = "image".into();
-        }
-        let raw_ext = image_extension(p);
-        let ext: String = raw_ext.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
-        let ext = if ext.is_empty() { "jpg".to_string() } else { ext };
-
-        let mut candidate = stem.clone();
-        let mut n = 0usize;
-        while !taken.insert(candidate.to_lowercase()) {
-            n += 1;
-            candidate = format!("{stem}_{n}");
-        }
-        let file_name = format!("{candidate}.{ext}");
-        validate_single_component(&file_name)?;
-        out.push(file_name);
+/// Sanitizes a source image's stem and extension into safe single-component parts, stripping separators, drive
+/// prefixes, NULs, and control characters.
+fn sanitize_stem_and_ext(p: &Path) -> (String, String) {
+    let raw_stem = p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let mut stem: String = raw_stem
+        .chars()
+        .map(|c| if matches!(c, '/' | '\\' | ':' | '\0') || c.is_control() { '_' } else { c })
+        .collect();
+    if stem.is_empty() || stem == "." || stem == ".." || stem.chars().all(|c| c == '.') {
+        stem = "image".into();
     }
-    Ok(out)
+    let raw_ext = image_extension(p);
+    let ext: String = raw_ext.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+    let ext = if ext.is_empty() { "jpg".to_string() } else { ext };
+    (stem, ext)
+}
+
+/// Picks the next candidate filename not yet in `taken` (case-insensitively) and validates it as one path component.
+fn next_candidate_name(stem: &str, ext: &str, taken: &mut HashSet<String>, n: &mut usize) -> Result<String> {
+    loop {
+        let candidate = if *n == 0 { stem.to_string() } else { format!("{stem}_{}", *n) };
+        *n += 1;
+        if taken.insert(candidate.to_lowercase()) {
+            let file_name = format!("{candidate}.{ext}");
+            validate_single_component(&file_name)?;
+            return Ok(file_name);
+        }
+    }
+}
+
+/// Exclusively reserves destination filenames in `img_dir` via `create_new(true)` (dropping each handle
+/// immediately to keep open FDs bounded at 1), retrying with a numeric suffix on `AlreadyExists` so
+/// normalization- or case-insensitive filesystems (e.g. macOS APFS NFC/NFD) never overwrite another image.
+fn reserve_exclusive_copy_targets(img_dir: &Path, ordered: &[&ImageEntry]) -> Result<Vec<String>> {
+    let mut taken = HashSet::with_capacity(ordered.len());
+    let mut names = Vec::with_capacity(ordered.len());
+    for e in ordered {
+        let (stem, ext) = sanitize_stem_and_ext(&e.image);
+        let mut n = 0usize;
+        loop {
+            let file_name = next_candidate_name(&stem, &ext, &mut taken, &mut n)?;
+            let dest = img_dir.join(&file_name);
+            match std::fs::OpenOptions::new().write(true).create_new(true).open(&dest) {
+                Ok(_placeholder) => {
+                    names.push(file_name);
+                    break;
+                }
+                Err(err) if err.kind() == ErrorKind::AlreadyExists => continue,
+                Err(err) => return Err(DataError::io(&dest, err)),
+            }
+        }
+    }
+    Ok(names)
+}
+
+/// Resolves a source path for hard-linking: checks the read guard on `from`, and if `from` is a symlink,
+/// canonicalizes it and re-checks the read guard on the resolved target so relative symlinks are never
+/// hard-linked as broken symlinks and confinement cannot be bypassed.
+fn resolve_link_source(from: &Path) -> Result<PathBuf> {
+    crate::guard::check(from).map_err(|e| DataError::io(from, e))?;
+    let meta = std::fs::symlink_metadata(from).map_err(|e| DataError::io(from, e))?;
+    if meta.file_type().is_symlink() {
+        let target = std::fs::canonicalize(from).map_err(|e| DataError::io(from, e))?;
+        crate::guard::check(&target).map_err(|e| DataError::io(&target, e))?;
+        Ok(target)
+    } else {
+        Ok(from.to_path_buf())
+    }
+}
+
+/// Materializes images for `Link` mode with atomic exclusive naming: hard-links each resolved source file
+/// (bumping the suffix on `AlreadyExists`), and reserves any cross-device/unsupported fallbacks exclusively
+/// before copying them in parallel.
+fn materialize_links(img_dir: &Path, ordered: &[&ImageEntry]) -> Result<(Vec<String>, usize, usize)> {
+    let mut taken = HashSet::with_capacity(ordered.len());
+    let mut names = Vec::with_capacity(ordered.len());
+    let mut fallback_copies: Vec<(PathBuf, PathBuf)> = Vec::new();
+    let mut linked = 0usize;
+
+    for e in ordered {
+        let src = resolve_link_source(&e.image)?;
+        let (stem, ext) = sanitize_stem_and_ext(&e.image);
+        let mut n = 0usize;
+        loop {
+            let file_name = next_candidate_name(&stem, &ext, &mut taken, &mut n)?;
+            let dest = img_dir.join(&file_name);
+            match std::fs::hard_link(&src, &dest) {
+                Ok(()) => {
+                    linked += 1;
+                    names.push(file_name);
+                    break;
+                }
+                Err(err) if err.kind() == ErrorKind::AlreadyExists => continue,
+                Err(err) if should_fallback_from_link(&err) => {
+                    let mut chosen = file_name;
+                    let mut chosen_dest = dest;
+                    loop {
+                        match std::fs::OpenOptions::new().write(true).create_new(true).open(&chosen_dest) {
+                            Ok(_placeholder) => break,
+                            Err(ce) if ce.kind() == ErrorKind::AlreadyExists => {
+                                chosen = next_candidate_name(&stem, &ext, &mut taken, &mut n)?;
+                                chosen_dest = img_dir.join(&chosen);
+                            }
+                            Err(ce) => return Err(DataError::io(&chosen_dest, ce)),
+                        }
+                    }
+                    names.push(chosen);
+                    fallback_copies.push((src, chosen_dest));
+                    break;
+                }
+                Err(err) => return Err(DataError::io(&src, err)),
+            }
+        }
+    }
+
+    let copied = fallback_copies.len();
+    fallback_copies.par_iter().try_for_each(|(src, dest)| copy(src, dest))?;
+    Ok((names, linked, copied))
 }
 
 fn validate_single_component(name: &str) -> Result<()> {
@@ -378,29 +469,17 @@ fn validate_single_component(name: &str) -> Result<()> {
     }
 }
 
-/// Hard-links `from` to `to`, falling back to a byte-for-byte copy on cross-device or unsupported link errors.
-/// Returns `Ok(true)` if hard-linked, `Ok(false)` if copied.
-fn link_or_copy(from: &Path, to: &Path) -> Result<bool> {
-    crate::guard::check(from).map_err(|e| DataError::io(from, e))?;
-    match std::fs::hard_link(from, to) {
-        Ok(()) => Ok(true),
-        Err(e) if should_fallback_from_link(&e) => {
-            copy(from, to)?;
-            Ok(false)
-        }
-        Err(e) => Err(DataError::io(from, e)),
-    }
-}
-
 fn should_fallback_from_link(e: &std::io::Error) -> bool {
     matches!(e.kind(), ErrorKind::CrossesDevices | ErrorKind::Unsupported | ErrorKind::PermissionDenied)
         || (cfg!(windows) && matches!(e.raw_os_error(), Some(1 | 17 | 50 | 1142)))
 }
 
-/// Produces a clean forward-slash path for `CocoImageMode::Reference` relative to `base` (the export output
-/// root) when possible, or a normalized absolute path if `base` and `target` lie on different roots/drives.
+/// Produces a path for `CocoImageMode::Reference` relative to `base` (`<out>/annotations/`) when possible, or a
+/// normalized absolute path if `base` and `target` lie on different roots/drives. Enforces the read guard on the
+/// resolved target as well so symlinks cannot escape confinement.
 fn reference_file_name(base: &Path, target: &Path) -> Result<String> {
     let target_norm = canonical_or_normalized(target)?;
+    crate::guard::check(&target_norm).map_err(|e| DataError::io(&target_norm, e))?;
     let chosen = diff_paths(&target_norm, base).unwrap_or(target_norm);
     let s = chosen.to_str().ok_or_else(|| {
         DataError::Config(format!("image path is not valid UTF-8 for COCO JSON: {}", target.display()))
@@ -408,7 +487,15 @@ fn reference_file_name(base: &Path, target: &Path) -> Result<String> {
     if s.contains('\0') {
         return Err(DataError::Config(format!("image path contains NUL byte: {}", target.display())));
     }
-    Ok(s.replace('\\', "/"))
+    // Convert path separators only on Windows; on Unix `\` is a valid literal filename character.
+    #[cfg(windows)]
+    {
+        Ok(s.replace('\\', "/"))
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(s.to_string())
+    }
 }
 
 fn canonical_or_normalized(p: &Path) -> Result<PathBuf> {
@@ -447,13 +534,13 @@ fn lexical_normalize(p: &Path) -> PathBuf {
     for comp in p.components() {
         match comp {
             Component::CurDir => {}
-            Component::ParentDir => {
-                if matches!(out.components().next_back(), Some(Component::Normal(_))) {
+            Component::ParentDir => match out.components().next_back() {
+                Some(Component::Normal(_)) => {
                     out.pop();
-                } else {
-                    out.push(comp);
                 }
-            }
+                Some(Component::RootDir | Component::Prefix(_)) => {}
+                _ => out.push(comp),
+            },
             other => out.push(other),
         }
     }
@@ -510,12 +597,8 @@ fn components_equal(a: Component<'_>, b: Component<'_>) -> bool {
     }
 }
 
-fn normalize_slashes(p: &Path) -> String {
-    p.to_string_lossy().replace('\\', "/")
-}
-
-/// Writes `value` as JSON atomically via a unique sibling temporary file and rename, cleaning up the temporary
-/// file if serialization, flushing, or renaming fails.
+/// Writes `value` as JSON atomically via a unique sibling temporary file and rename, cleaning up only the
+/// temporary file created by this call if serialization, flushing, or renaming fails.
 fn write_json_atomic<T: Serialize>(path: &Path, value: &T, pretty: bool) -> Result<()> {
     let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("annotations.json");
@@ -523,12 +606,14 @@ fn write_json_atomic<T: Serialize>(path: &Path, value: &T, pretty: bool) -> Resu
     let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
     let tmp = parent.join(format!(".{name}.{pid}-{seq}.tmp"));
 
+    // Acquire the temporary file before enabling cleanup so a pre-existing file is never removed on `AlreadyExists`.
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)
+        .map_err(|e| DataError::io(&tmp, e))?;
+
     let write_res = (|| -> Result<()> {
-        let file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp)
-            .map_err(|e| DataError::io(&tmp, e))?;
         let mut writer = BufWriter::with_capacity(256 << 10, file);
         let ser = if pretty {
             serde_json::to_writer_pretty(&mut writer, value)
@@ -560,7 +645,15 @@ mod tests {
     fn safe_coco_names_prevent_traversal_and_collisions() {
         let paths =
             [Path::new("dir/a.jpg"), Path::new("other/A.png"), Path::new("x/.."), Path::new("y/a:b.jpg")];
-        let got = unique_safe_coco_names(paths.into_iter()).unwrap();
+        let mut taken = HashSet::new();
+        let got: Vec<String> = paths
+            .into_iter()
+            .map(|p| {
+                let (stem, ext) = sanitize_stem_and_ext(p);
+                let mut n = 0usize;
+                next_candidate_name(&stem, &ext, &mut taken, &mut n).unwrap()
+            })
+            .collect();
         assert_eq!(got, vec!["a.jpg", "A_1.png", "image.jpg", "a_b.jpg"]);
         for name in &got {
             assert!(!name.contains(['/', '\\', ':', '\0']) && !name.contains(".."), "{name}");
@@ -568,10 +661,11 @@ mod tests {
     }
 
     #[test]
-    fn diff_paths_computes_clean_relative_paths() {
-        let base = Path::new("/tmp/work/coco-ref");
+    fn diff_paths_and_lexical_normalize_handle_roots() {
+        let base = Path::new("/tmp/work/coco-ref/annotations");
         let target = Path::new("/tmp/work/yolo/images/train/img_01.png");
         let rel = diff_paths(target, base).unwrap();
-        assert_eq!(rel.to_string_lossy().replace('\\', "/"), "../yolo/images/train/img_01.png");
+        assert_eq!(rel.to_string_lossy().replace('\\', "/"), "../../yolo/images/train/img_01.png");
+        assert_eq!(lexical_normalize(Path::new("/../a/b/../c")), Path::new("/a/c"));
     }
 }
