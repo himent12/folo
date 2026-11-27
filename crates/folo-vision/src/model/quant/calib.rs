@@ -198,9 +198,10 @@ impl Stats {
         if self.hist.is_empty() {
             self.hist = vec![0; bins];
         }
-        let (lo, w) = (self.min, (self.max - self.min).max(1e-12) / bins as f32);
+        let span = (self.max as f64 - self.min as f64).max(1e-12);
+        let (lo, w) = (self.min as f64, span / bins as f64);
         for &x in v {
-            let b = (((x - lo) / w) as isize).clamp(0, bins as isize - 1) as usize;
+            let b = (((x as f64 - lo) / w) as isize).clamp(0, bins as isize - 1) as usize;
             self.hist[b] += 1;
         }
     }
@@ -208,16 +209,16 @@ impl Stats {
     /// `[lo, hi]` by `method`.
     fn range(&self, method: Method) -> [f32; 2] {
         let bins = self.hist.len();
-        if bins == 0 || method == Method::MinMax {
+        if bins == 0 || method == Method::MinMax || self.max <= self.min {
             return [self.min, self.max];
         }
-        let w = (self.max - self.min) as f64 / bins as f64;
+        let w = (self.max as f64 - self.min as f64) / bins as f64;
         let edge = |i: usize| self.min as f64 + w * i as f64;
         let total: u64 = self.hist.iter().sum();
         match method {
             Method::MinMax => unreachable!(),
             Method::Percentile { p } => {
-                let cut = (p * total as f64) as u64;
+                let cut = (p.clamp(0.0, 0.5) * total as f64) as u64;
                 let (mut lo, mut acc) = (0usize, 0u64);
                 while lo < bins && acc + self.hist[lo] <= cut {
                     acc += self.hist[lo];
@@ -228,7 +229,9 @@ impl Stats {
                     acc += self.hist[hi - 1];
                     hi -= 1;
                 }
-                [edge(lo) as f32, edge(hi.max(lo + 1)) as f32]
+                let lo = lo.min(bins - 1);
+                let hi = hi.clamp(lo + 1, bins);
+                [edge(lo) as f32, edge(hi) as f32]
             }
             Method::Mse => self.mse_range(w, bins),
         }
@@ -288,6 +291,17 @@ pub struct Calibrator {
     failed: bool,
 }
 
+fn validate_method(method: Method) -> Result<()> {
+    if let Method::Percentile { p } = method
+        && (!p.is_finite() || !(0.0..0.5).contains(&p))
+    {
+        return Err(folo_nn::Error::Invalid(format!(
+            "int8 calibration percentile p must be finite and in [0, 0.5), got {p}"
+        )));
+    }
+    Ok(())
+}
+
 impl Calibrator {
     /// An empty calibrator in its first pass.
     pub fn new() -> Self {
@@ -323,6 +337,7 @@ impl Calibrator {
                 "int8 calibration needs two passes over the same images, at least one (saw {a}, then {b})"
             )));
         }
+        validate_method(method)?;
         let ranges = self.stats.iter().map(|(k, s)| (k.clone(), s.tensor.range(method))).collect();
         let channel_ranges = self
             .stats
@@ -345,6 +360,11 @@ impl Calibrator {
         let (n, c, h, w) = t.dims4()?;
         let hw = h * w;
         let v = t.to_vec::<f32>()?;
+        if let Some(&bad) = v.iter().find(|x| !x.is_finite()) {
+            return Err(folo_nn::Error::Invalid(format!(
+                "int8 calibration: non-finite activation ({bad}) at `{name}`"
+            )));
+        }
         let pass = self.pass;
         let entry = self.stats.entry(name.to_string()).or_default();
         entry.tensor.add(&v, pass, BINS);
@@ -433,6 +453,7 @@ pub fn calibrate<I>(model: &FoloModel, mut batches: impl FnMut() -> I, method: M
 where
     I: Iterator<Item = Result<Tensor>>,
 {
+    validate_method(method)?;
     let mut c = Calibrator::new();
     for x in batches() {
         c.observe(model, &x?)?;
@@ -505,5 +526,61 @@ mod tests {
         assert_eq!(s.range(Method::MinMax), [0.0, 10_000.0]);
         let [lo, hi] = s.range(Method::Mse);
         assert!(lo == 0.0 && (3_900.0..4_900.0).contains(&hi), "[{lo}, {hi}]");
+    }
+
+    #[test]
+    fn stats_handles_constant_channels_wide_spans_and_clamped_percentile() {
+        // Constant (e.g. dead ReLU) channel: w == 0 must not produce NaN in Percentile or Mse.
+        let c = stats(&[0.0; 64]);
+        assert_eq!(c.range(Method::MinMax), [0.0, 0.0]);
+        assert_eq!(c.range(Method::Percentile { p: 0.01 }), [0.0, 0.0]);
+        assert_eq!(c.range(Method::Mse), [0.0, 0.0]);
+
+        let c_pos = stats(&[3.5; 64]);
+        assert_eq!(c_pos.range(Method::Percentile { p: 0.01 }), [3.5, 3.5]);
+        assert_eq!(c_pos.range(Method::Mse), [3.5, 3.5]);
+
+        // Wide span exceeding f32::MAX must not overflow to Inf/NaN in histogramming or range search.
+        let wide = stats(&[-2.0e38, -1.0e38, 0.0, 1.0e38, 2.0e38]);
+        for m in [Method::MinMax, Method::Percentile { p: 0.01 }, Method::Mse] {
+            let [lo, hi] = wide.range(m);
+            assert!(lo.is_finite() && hi.is_finite() && lo <= hi, "{m:?} -> [{lo}, {hi}]");
+            assert!(lo >= -2.0e38 && hi <= 2.0e38, "{m:?} -> [{lo}, {hi}]");
+        }
+
+        // Clamped internal percentile never walks past `bins` or emits `hi > max`.
+        let unit = stats(&[0.0, 1.0, 2.0, 3.0]);
+        let [lo, hi] = unit.range(Method::Percentile { p: 0.5 });
+        assert!(lo.is_finite() && hi.is_finite() && lo < hi && lo >= 0.0 && hi <= 3.0, "[{lo}, {hi}]");
+    }
+
+    #[test]
+    fn calibrator_rejects_invalid_percentile_and_nonfinite_activations() {
+        let mut cal = Calibrator::new();
+        let ok = Tensor::from_vec(vec![0.0f32, 1.0, 2.0, 3.0], [1, 1, 2, 2]).unwrap();
+        cal.record("stem", &ok).unwrap();
+        cal.images[0] = 1;
+        cal.next_pass();
+        cal.record("stem", &ok).unwrap();
+        cal.images[1] = 1;
+
+        for bad_p in [-0.01, 0.5, 1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let err = cal.finish(Method::Percentile { p: bad_p }).unwrap_err();
+            assert!(
+                err.to_string().contains("percentile p"),
+                "expected percentile validation error for {bad_p}, got: {err}"
+            );
+        }
+        assert!(cal.finish(Method::Percentile { p: 0.0 }).is_ok());
+        assert!(cal.finish(Method::Percentile { p: 0.49 }).is_ok());
+
+        let mut bad_cal = Calibrator::new();
+        let nan_t = Tensor::from_vec(vec![1.0f32, f32::NAN, 2.0, 3.0], [1, 1, 2, 2]).unwrap();
+        let err = bad_cal.record("stem", &nan_t).unwrap_err();
+        assert!(err.to_string().contains("non-finite"), "{err}");
+
+        let inf_t = Tensor::from_vec(vec![1.0f32, f32::INFINITY, 2.0, 3.0], [1, 1, 2, 2]).unwrap();
+        let err = bad_cal.record("stem", &inf_t).unwrap_err();
+        assert!(err.to_string().contains("non-finite"), "{err}");
     }
 }

@@ -330,7 +330,7 @@ impl Trainer {
         c
     }
 
-    fn optimizer_step(&mut self, e: u32, k: usize) -> Result<()> {
+    pub(super) fn optimizer_step(&mut self, e: u32, k: usize) -> Result<()> {
         self.sched.apply(self.opt.as_mut());
         // Scale `bias.backbone`'s warmup start by `backbone_lr_scale` so backbone biases do not start at the
         // unscaled `warmup_bias_lr` while `decay.backbone` and `bn.backbone` are scaled.
@@ -380,7 +380,20 @@ impl Trainer {
                 return Ok(());
             }
         } else if self.cfg.clip_grad_norm > 0.0 {
-            self.acc.clip_grad_norm(self.cfg.clip_grad_norm)?;
+            let norm = self.acc.clip_grad_norm(self.cfg.clip_grad_norm)?;
+            // On GPU `clip_grad_norm` clips on-device without reading back and returns `NaN`; on CPU it returns
+            // the exact global L2 norm, so a non-finite norm skips the step before corrupting weights or state.
+            if self.device.is_cpu() && !norm.is_finite() {
+                self.emitter.log(
+                    LogLevel::Warn,
+                    format!(
+                        "epoch {} batch {}: non-finite gradient norm ({norm}); optimizer step skipped",
+                        e + 1,
+                        k + 1
+                    ),
+                );
+                return Ok(());
+            }
         }
         self.opt.step(&self.acc)?;
         if let Some(ema) = &mut self.ema {

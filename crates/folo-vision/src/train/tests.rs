@@ -569,3 +569,40 @@ fn freeze_backbone_epochs_works_with_gpu_amp() {
         "head must train under GPU AMP while backbone is frozen"
     );
 }
+
+#[test]
+fn cpu_optimizer_step_skips_when_grad_norm_is_nonfinite() {
+    let mut t = micro(1, 100, TrainOptions::default());
+    assert!(t.cfg.clip_grad_norm > 0.0);
+    let params = t.model.parameters();
+    let p_inf = &params[0];
+    let p_huge = &params[1];
+    let before: Vec<Vec<u32>> =
+        params.iter().map(|p| p.to_vec::<f32>().unwrap().into_iter().map(f32::to_bits).collect()).collect();
+    let step_before = t.opt.step_count();
+    let sched_before = t.sched.step();
+    let ema_before = t.ema.as_ref().map(|e| e.updates());
+
+    // Inject +Inf on one parameter and a huge finite gradient (1e30) on another via backward.
+    let g_inf = folo_core::Tensor::full(p_inf.dims(), f32::INFINITY);
+    let g_huge = folo_core::Tensor::full(p_huge.dims(), 1.0e30f32);
+    let loss = p_inf
+        .mul(&g_inf)
+        .unwrap()
+        .sum_all()
+        .unwrap()
+        .add(&p_huge.mul(&g_huge).unwrap().sum_all().unwrap())
+        .unwrap();
+    let grads = loss.backward().unwrap();
+    t.acc.add_owned(grads).unwrap();
+
+    t.optimizer_step(0, 0).unwrap();
+
+    assert_eq!(t.opt.step_count(), step_before, "optimizer must not step on non-finite grad norm");
+    assert_eq!(t.sched.step(), sched_before, "schedule must not advance on skipped step");
+    assert_eq!(t.ema.as_ref().map(|e| e.updates()), ema_before, "EMA must not update on skipped step");
+    for (p, want) in params.iter().zip(before) {
+        let got: Vec<u32> = p.to_vec::<f32>().unwrap().into_iter().map(f32::to_bits).collect();
+        assert_eq!(got, want, "parameter was mutated despite non-finite gradient norm");
+    }
+}

@@ -343,3 +343,28 @@ fn sebf_agnostic_owner_none_matches_precomputed_owner() {
     );
     assert_eq!(without_owner[1], boxes[1], "later survivor C must not fuse B owned by earlier survivor A");
 }
+
+#[test]
+fn fuse_boxes_ignores_infinite_score_or_precision_without_nan() {
+    let b0 = Xyxy::new(10.0, 10.0, 50.0, 50.0);
+    let b1 = Xyxy::new(14.0, 14.0, 54.0, 54.0);
+    let boxes = [b0, b1];
+    let classes = [0, 0];
+
+    // +Inf score on a cluster member must not turn acc / sum into Inf / Inf = NaN.
+    let out_inf_score = fuse_boxes(&[0], &boxes, &[0.8, f32::INFINITY], &classes, false, 0.5, None);
+    assert_eq!(out_inf_score, vec![b0]);
+
+    // +Inf score on the sole contributing member falls back cleanly to the kept box.
+    let out_only_inf = fuse_boxes(&[0], &[b0], &[f32::INFINITY], &[0], false, 0.5, None);
+    assert_eq!(out_only_inf, vec![b0]);
+
+    // +Inf DFL precision on one side leaves finite sides fused and falls back on the non-finite side.
+    let prec = |j: usize| if j == 0 { [f32::INFINITY, 1.0, 1.0, 1.0] } else { [1.0, 1.0, 1.0, 1.0] };
+    let out_inf_prec = fuse_boxes(&[0], &boxes, &[0.8, 0.4], &classes, false, 0.5, Some(&prec));
+    let f = out_inf_prec[0];
+    assert!(f.x1.is_finite() && f.y1.is_finite() && f.x2.is_finite() && f.y2.is_finite(), "{f:?}");
+    // Side 0 only receives b1's finite contribution; sides 1..4 fuse both.
+    assert!((f.x1 - 14.0).abs() < 1e-5, "{f:?}");
+    assert!((f.y1 - (0.8 * 10.0 + 0.4 * 14.0) / 1.2).abs() < 1e-4, "{f:?}");
+}

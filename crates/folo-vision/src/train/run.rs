@@ -14,13 +14,15 @@ use crate::error::{Error, Result};
 use crate::val::{ValConfig, ValResult, val_metrics, validate};
 
 /// Early stopping (§8.7): record `fitness` of 0-based epoch `e` in `best`. Returns `(improved, stop)`: whether it
-/// is a new best, and whether the run stops after this epoch (`e − best.epoch >= patience`).
+/// is a new best, and whether the run stops after this epoch (`e − best.epoch >= patience`). Non-finite `fitness`
+/// values (`NaN`, `±Inf`) never become a new best and never poison `best.fitness`.
 pub fn update_best(best: &mut BestState, e: u32, fitness: f64, patience: u32) -> (bool, bool) {
-    let improved = best.fitness.is_none_or(|b| fitness > b);
+    let improved = fitness.is_finite() && best.fitness.is_none_or(|b| fitness > b);
     if improved {
         *best = BestState { epoch: e as i64, fitness: Some(fitness) };
     }
-    (improved, e as i64 - best.epoch >= patience as i64)
+    let stop = best.fitness.is_some() && e as i64 - best.epoch >= patience as i64;
+    (improved, stop)
 }
 
 impl Trainer {
@@ -284,5 +286,34 @@ impl Trainer {
         let fused = source.fused_eval_clone()?;
         fused.set_forward_plans(true);
         validate(&fused, ds, &vc)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn update_best_ignores_nonfinite_fitness_and_does_not_poison_best_state() {
+        let mut best = BestState::default();
+        assert_eq!(update_best(&mut best, 0, f64::NAN, 1), (false, false));
+        assert_eq!(best, BestState::default());
+
+        assert_eq!(update_best(&mut best, 1, f64::INFINITY, 1), (false, false));
+        assert_eq!(best, BestState::default());
+
+        assert_eq!(update_best(&mut best, 2, f64::NEG_INFINITY, 0), (false, false));
+        assert_eq!(best, BestState::default());
+
+        // First finite fitness establishes best; subsequent NaN/+Inf cannot overwrite it,
+        // and patience still counts from the real best epoch.
+        assert_eq!(update_best(&mut best, 3, 0.42, 2), (true, false));
+        assert_eq!(best, BestState { epoch: 3, fitness: Some(0.42) });
+
+        assert_eq!(update_best(&mut best, 4, f64::INFINITY, 2), (false, false));
+        assert_eq!(best, BestState { epoch: 3, fitness: Some(0.42) });
+
+        assert_eq!(update_best(&mut best, 5, f64::NAN, 2), (false, true));
+        assert_eq!(best, BestState { epoch: 3, fitness: Some(0.42) });
     }
 }

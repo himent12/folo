@@ -820,8 +820,8 @@ pub fn fuse_boxes_sebf(
 /// The fused boxes of the `kept` candidates (indices into `boxes` / `scores` / `classes`, the candidates that
 /// entered NMS), in `kept`'s order. Member `j` weighs `scores[j] · precision(j)[side]` on each side, with
 /// `precision` `None` meaning 1 (voting); the sums run in `f64` over the cluster in candidate order. A member side
-/// whose weight is not `> 0` (a zero score, a NaN) or whose edge is not finite is skipped, and a side with no weight
-/// keeps the kept box's edge.
+/// whose weight is not finite and `> 0` (a zero score, a NaN, or `+Inf`) or whose edge is not finite is skipped,
+/// and a side with no finite weight keeps the kept box's edge.
 pub fn fuse_boxes(
     kept: &[usize],
     boxes: &[Xyxy],
@@ -850,15 +850,22 @@ pub fn fuse_boxes(
                 let x = c.to_array();
                 for e in 0..4 {
                     let wt = s * p[e] as f64;
-                    // A non-finite edge (a NaN box can join a cluster: its IoU comes out as 1) is left out.
-                    if wt > 0.0 && x[e].is_finite() {
+                    // A non-finite edge (a NaN box can join a cluster: its IoU comes out as 1) or a
+                    // non-finite weight (+Inf score or precision) is left out so acc / sum never turns NaN.
+                    if wt.is_finite() && wt > 0.0 && x[e].is_finite() {
                         acc[e] += wt * x[e] as f64;
                         sum[e] += wt;
                     }
                 }
             }
             let old = b.to_array();
-            let e = |i: usize| if sum[i] > 0.0 { (acc[i] / sum[i]) as f32 } else { old[i] };
+            let e = |i: usize| {
+                if sum[i] > 0.0 && sum[i].is_finite() && acc[i].is_finite() {
+                    (acc[i] / sum[i]) as f32
+                } else {
+                    old[i]
+                }
+            };
             Xyxy::new(e(0), e(1), e(2), e(3))
         })
         .collect()
