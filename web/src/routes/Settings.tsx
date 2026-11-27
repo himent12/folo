@@ -99,7 +99,7 @@ export default function Settings() {
   const pool = computed(() => sys.data?.gpu_pool);
   const capRows = computed(() => {
     const c = caps.get();
-    return c ? capabilityRows(c, sys.data?.gpus ?? []) : [];
+    return c ? capabilityRows(c, sys.data?.gpus ?? [], sys.data?.cpu_simd) : [];
   });
 
   /** Cloud compute: where work runs, beside Connection (servers with the `cloud` feature). */

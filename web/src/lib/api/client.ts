@@ -32,6 +32,7 @@ import type {
   ConnectCloud,
   CreateDataset,
   CreateLabelJob,
+  CreateRunOptions,
   CreateSyntheticDataset,
   Dataset,
   DatasetImages,
@@ -140,7 +141,7 @@ export interface Api {
 
   runs(signal?: AbortSignal): Promise<Run[]>;
   run(id: string, signal?: AbortSignal): Promise<Run>;
-  createRun(config: TrainConfig): Promise<Run>;
+  createRun(config: TrainConfig, opts?: CreateRunOptions): Promise<Run>;
   /** `POST /api/runs/estimate` (feature `run_estimate`): the run's time and peak GPU memory; nothing is created. */
   estimateRun(config: TrainConfig, signal?: AbortSignal): Promise<RunEstimate>;
   stopRun(id: string): Promise<Run>;
@@ -484,8 +485,9 @@ export class HttpApi implements Api {
     const r = await this.#req<Run>('GET', `/runs/${encodeURIComponent(id)}`, undefined, signal);
     return this.#archs.hydrateRun(r, signal);
   }
-  async createRun(config: TrainConfig) {
-    const run = await this.#req<Run>('POST', '/runs', config);
+  async createRun(config: TrainConfig, opts?: CreateRunOptions) {
+    const body = opts?.max_preempt_retries !== undefined ? { ...config, max_preempt_retries: opts.max_preempt_retries } : config;
+    const run = await this.#req<Run>('POST', '/runs', body);
     this.#archs.recordRun(run.id, config.arch);
     return this.#archs.promoteRun(run);
   }

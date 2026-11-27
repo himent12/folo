@@ -21,6 +21,7 @@ const cleanErrors = (): FormErrors => ({
   runon: null,
   offer: null,
   hours: null,
+  preempt: null,
 });
 
 describe('New run validation summary & WhyLine', () => {
@@ -71,11 +72,12 @@ describe('New run validation summary & WhyLine', () => {
       seed: 'A whole number from 0 up.',
       close: 'A whole number up to the epoch count.',
     };
-    const fakeCloud = { provider: 'RunPod', offer: { gpu: 'RTX 4090' } } as unknown as CloudPick;
-    const rows = reviewRows(undefined, errs, 'folo-s', 50, 16, 640, true, fakeCloud, 'Auto', null, undefined, true, 'none', undefined, 'auto', false);
+    const fakeCloud = { provider: 'RunPod', provisions: true, preemptRetries: 0, offer: { gpu: 'RTX 4090' } } as unknown as CloudPick;
+    const rows = reviewRows(undefined, errs, 'folo-s', 50, 16, 640, true, fakeCloud, 'Auto', null, undefined, true, 'none', undefined, 'auto', false, true);
     const byKey = new Map(rows.map((r) => [r.key, r]));
     expect(byKey.get('runon')?.warn).toBe(false);
     expect(byKey.get('hours')).toEqual({ key: 'hours', label: 'Stop after', value: 'Invalid', warn: true });
+    expect(byKey.get('preempt')).toEqual({ key: 'preempt', label: 'Spot auto-resume', value: 'Off', warn: false });
     expect(byKey.get('amp')?.warn).toBe(true);
     expect(byKey.get('lr0')).toEqual({ key: 'lr0', label: 'Learning rate', value: 'Invalid', warn: true });
     expect(byKey.get('seed')).toEqual({ key: 'seed', label: 'Seed', value: 'Invalid', warn: true });

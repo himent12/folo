@@ -10,6 +10,7 @@ import type {
   CloudOfferList,
   CloudProvider,
   ConnectCloud,
+  CreateRunOptions,
   LogLine,
   QueueRequest,
   Run,
@@ -52,6 +53,7 @@ import {
 } from './cloud';
 import { applyQueueMove } from '../queue';
 import { archScaleRank, isFolo2Arch } from '../../arch';
+import { DEFAULT_MAX_PREEMPT_RETRIES, MAX_PREEMPT_RETRIES } from '../../cloud';
 import { trainCommand } from '../../trainCli';
 import { MockServer } from './server';
 import { STALE_AFTER } from './scenario';
@@ -74,7 +76,17 @@ export class MockTrainingApi extends MockServer {
     // The dataset as the run was created on it (docs/API.md, Run.dataset): it still names it once removed.
     p.datasetName ??= this.state.datasets.find((d) => d.id === p.config.dataset_id)?.name;
     const dataset = p.datasetName ? { dataset: { name: p.datasetName, classes: p.classNames } } : {};
-    return { ...toRun(p, now), queue_position: i < 0 ? null : i + 1, ...dataset };
+    const preemption =
+      p.cloud && this.state.cloudOn
+        ? {
+            cloud_preemption: {
+              retries: 0,
+              max_retries: p.maxPreemptRetries ?? DEFAULT_MAX_PREEMPT_RETRIES,
+              recovering: false,
+            },
+          }
+        : {};
+    return { ...toRun(p, now), queue_position: i < 0 ? null : i + 1, ...dataset, ...preemption };
   }
 
   /** Logs `message` for run `id`: kept for `/logs` and sent to its live subscribers. */
@@ -156,14 +168,23 @@ export class MockTrainingApi extends MockServer {
     }, 80);
   }
 
-  createRun(body: TrainConfig): Promise<Run> {
+  createRun(body: TrainConfig, opts?: CreateRunOptions): Promise<Run> {
     return this.call(() => {
       const ds = this.spec(body.dataset_id);
       // The real server's cap (docs/API.md, TrainConfig), as long as a dataset's name.
       if ([...body.name].length > 64) throw new ApiError(400, 'invalid_config', 'name: must be at most 64 characters');
+      const maxPreemptRetries = opts?.max_preempt_retries;
+      if (maxPreemptRetries !== undefined) {
+        if (!body.compute) {
+          throw new ApiError(400, 'invalid_config', 'max_preempt_retries is only valid for cloud runs (set `compute` alongside it)');
+        }
+        if (!Number.isInteger(maxPreemptRetries) || maxPreemptRetries < 0 || maxPreemptRetries > MAX_PREEMPT_RETRIES) {
+          throw new ApiError(400, 'invalid_config', `max_preempt_retries must be in 0..=${MAX_PREEMPT_RETRIES}, got ${maxPreemptRetries}`);
+        }
+      }
       const c = this.#withWeights(body);
       const cloud = this.#compute(c);
-      if (cloud) return this.#createCloudRun(c, ds, cloud);
+      if (cloud) return this.#createCloudRun(c, ds, cloud, maxPreemptRetries);
       // `gpu-unplugged`: the second adapter goes away as soon as a run asks for it.
       if (this.scenario === 'gpu-unplugged' && c.device === 'gpu:1') this.state.unplugged = true;
       const gpu = /^gpu:(\d+)$/.exec(c.device);
@@ -257,7 +278,12 @@ export class MockTrainingApi extends MockServer {
    * A cloud run: out of the training queue, through every phase (about 2 s each of provisioning, booting and the
    * upload), then training like any mock run, on the worker, then its weights collected and its instance released.
    */
-  #createCloudRun(c: TrainConfig, ds: MockDatasetSpec, cloud: { conn: CloudConnection; offer: CloudOffer; hours: number }): Run {
+  #createCloudRun(
+    c: TrainConfig,
+    ds: MockDatasetSpec,
+    cloud: { conn: CloudConnection; offer: CloudOffer; hours: number },
+    maxPreemptRetries?: number,
+  ): Run {
     const now = Date.now();
     const id = `run_${(hash(c.name + now + this.state.nextId++) & 0xffff).toString(16).padStart(4, '0')}`;
     const nonce = (hash(`${id}:nonce`) & 0xffff).toString(16).padStart(4, '0');
@@ -298,6 +324,7 @@ export class MockTrainingApi extends MockServer {
         modelId: `m_${id.slice(4)}`,
         device: `NVIDIA GeForce ${cloud.offer.gpu} (vulkan)`,
         cloud: timeline,
+        ...(maxPreemptRetries !== undefined ? { maxPreemptRetries } : {}),
       },
       ds.splits.train,
     );

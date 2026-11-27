@@ -113,8 +113,11 @@ export function SummaryRail(props: SummaryProps) {
               cli={s.cli.line.get()}
               cliPlaceholder={s.cli.placeholder.get()}
               onCpu={s.onCpu.get()}
+              onCloud={s.onCloud.get()}
               pending={!s.prefilled.get() ? 'Loading run settings…' : s.pendingWeights.get() ? 'Waiting for linked weights to load…' : null}
               seedMissing={!!s.errors.get().seed}
+              cloudBlocked={s.cliBlocked.get()}
+              cloudServer={s.cloudServerUrl.get()}
             />
           </div>
         </div>

@@ -14,6 +14,20 @@ const COLLECT_FAILURES: readonly string[] = ['cloud_sync_failed', 'cloud_instanc
  */
 export const hasCloud = (sys: SystemInfo | null | undefined): boolean => !!sys?.features?.includes('cloud');
 
+/** Feature flag advertised when `POST /api/runs` honours `max_preempt_retries` and `GET /api/runs/{id}` returns `cloud_preemption`. */
+export const CLOUD_SPOT_RESUME_FEATURE = 'cloud_spot_resume';
+/** Default maximum automatic spot preemption recovery attempts per cloud run (`crates/folo-server/src/store_diag.rs`). */
+export const DEFAULT_MAX_PREEMPT_RETRIES = 3;
+/** Upper bound on per-run `max_preempt_retries` (`0..=20`, where `0` disables automatic preemption recovery). */
+export const MAX_PREEMPT_RETRIES = 20;
+
+/** Whether the server supports per-run `max_preempt_retries` and structured `cloud_preemption` status. */
+export const hasCloudSpotResume = (sys: SystemInfo | null | undefined): boolean => !!sys?.features?.includes(CLOUD_SPOT_RESUME_FEATURE);
+
+/** Valid `max_preempt_retries` integer in `0..=20`. */
+export const validPreemptRetries = (n: number | null | undefined): n is number =>
+  typeof n === 'number' && Number.isInteger(n) && n >= 0 && n <= MAX_PREEMPT_RETRIES;
+
 /** Every phase of a cloud run, in order (`CloudPhase`). */
 export const PHASES: readonly CloudPhase[] = ['provisioning', 'booting', 'syncing', 'training', 'collecting', 'releasing', 'released'];
 

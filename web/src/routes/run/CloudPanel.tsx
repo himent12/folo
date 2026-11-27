@@ -15,7 +15,7 @@ import { computed, css, effect, For, signal, untrack } from 'fw';
 import { hub } from '$lib/api/index';
 import { Resource } from '$lib/api/resource';
 import { pollTogether } from '$lib/api/share';
-import type { RunCloud } from '$lib/api/types';
+import type { CloudPreemptionStatus, RunCloud } from '$lib/api/types';
 import { isAlive, offerLine, panelPhaseLabel, phaseIndex, phaseLabel, phaseStates, transferShare, transferText, type PhaseRun } from '$lib/cloud';
 import { ago, hoursText, timeOfDay, usd } from '$lib/format';
 import { prefs } from '$lib/prefs';
@@ -34,6 +34,8 @@ export interface CloudPanelProps {
   provisions?: boolean;
   /** Spot preemption auto-resume status derived from the run's logs and outcome (optional). */
   recovery?: SpotRecovery | null;
+  /** Structured spot preemption policy & counters from `GET /api/runs/{id}` (`cloud_preemption`). */
+  preemption?: CloudPreemptionStatus | null;
 }
 
 /** How often an instance whose termination is not confirmed is read again. */
@@ -100,6 +102,14 @@ export default function CloudPanel(props: CloudPanelProps) {
     if (rec.kind === 'failed') return `${count} · failed`;
     if (rec.resumeEpoch !== null) return `${count} · epoch ${rec.resumeEpoch}`;
     return count;
+  });
+  const spotPolicyFact = computed(() => {
+    if (recoveryFact.get() || !provisions()) return null;
+    const cp = props.preemption;
+    if (!cp) return null;
+    return cp.max_retries === 0
+      ? 'Disabled'
+      : `Up to ${cp.max_retries} ${cp.max_retries === 1 ? 'retry' : 'retries'}`;
   });
 
   return (
@@ -235,6 +245,11 @@ export default function CloudPanel(props: CloudPanelProps) {
               <div>
                 <dt>Spot recoveries</dt>
                 <dd class="num">{recoveryFact.get()}</dd>
+              </div>
+            ) : spotPolicyFact.get() ? (
+              <div>
+                <dt>Spot auto-resume</dt>
+                <dd class="num">{spotPolicyFact.get()}</dd>
               </div>
             ) : null}
           </dl>

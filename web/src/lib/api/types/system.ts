@@ -23,6 +23,22 @@ export interface Gpu {
   util: number | null;
 }
 
+/** CPU SIMD ISA availability and active int8 (`q8`) micro-kernel tier on this host (`/api/system`'s `cpu_simd`). */
+export interface CpuSimd {
+  /** x86-64 AVX2 instruction set detected. */
+  avx2: boolean;
+  /** x86-64 AVX-VNNI (256-bit VEX `vpdpbusd`) detected. */
+  avx_vnni: boolean;
+  /** x86-64 AVX-512 VNNI (`avx512vnni`) detected. */
+  avx512_vnni: boolean;
+  /** ARM64 NEON instruction set detected. */
+  neon: boolean;
+  /** True when the active int8 micro-kernel uses hardware VNNI (`vpdpbusd` via AVX-512 VNNI or AVX-VNNI). */
+  int8_fast: boolean;
+  /** Human-readable active CPU int8 micro-kernel tier (e.g. `"AVX-512 VNNI (512-bit)"`, `"AVX-VNNI"`, `"AVX2"`, `"portable"`). */
+  int8_kernel: string;
+}
+
 export interface SystemInfo {
   cpu: { name: string; threads: number; util: number };
   memory: { used_bytes: number; total_bytes: number };
@@ -35,6 +51,8 @@ export interface SystemInfo {
   capabilities?: Capabilities;
   /** FOLO's GPU buffer pool, once the server has used the GPU; absent otherwise and from older servers. */
   gpu_pool?: GpuPool;
+  /** CPU SIMD ISA flags and active int8 micro-kernel tier; absent from older servers. */
+  cpu_simd?: CpuSimd;
 }
 
 /** GPU memory held by FOLO's buffer pool (released after a run and when inference is idle). */

@@ -4,6 +4,7 @@
 // parsed by the real clap parser in crates/folo-cli/tests/studio_cli.rs (fixture: routes/runnew/cli-fixtures.json).
 
 import type { Model, TrainConfig } from '$lib/api/types';
+import { DEFAULT_MAX_PREEMPT_RETRIES, validPreemptRetries } from '$lib/cloud';
 
 /** Where the run's weights come from in the command: a file (or published name) the CLI opens, or a placeholder. */
 export type WeightsRef = { kind: 'path'; value: string } | { kind: 'placeholder'; value: string; file: string };
@@ -51,7 +52,8 @@ export const FLAGS: readonly Flag[] = [
   { flag: '--epochs', get: (c) => c.epochs, default: '100', always: true },
   { flag: '--batch', get: (c) => c.batch, default: '16', always: true },
   { flag: '--imgsz', get: (c) => c.imgsz, default: '640', always: true },
-  { flag: '--device', get: (c) => c.device, default: 'auto' },
+  // `--device` conflicts with `--cloud` in `folo train` (the cloud worker picks its own GPU).
+  { flag: '--device', get: (c) => (c.compute?.connection_id ? null : c.device), default: 'auto' },
   { flag: '--optimizer', get: (c) => c.optimizer, default: 'auto' },
   { flag: '--lr0', get: (c) => c.lr0, default: '0.01' },
   { flag: '--amp', get: (c) => !!c.amp },
@@ -67,6 +69,12 @@ export const FLAGS: readonly Flag[] = [
   { flag: '--close-mosaic', get: (c) => c.augment.close_mosaic, default: '10' },
   { flag: '--seed', get: (c) => c.seed, default: '0' },
   { flag: '--name', get: (c) => c.name.trim() || null },
+  // Cloud compute flags (`crates/folo-cli/src/cli.rs`, TrainArgs): `--offer`, `--max-hours`, `--disk-gb`,
+  // and `--max-preempt-retries` all require `--cloud`.
+  { flag: '--cloud', get: (c) => c.compute?.connection_id || null },
+  { flag: '--offer', get: (c) => (c.compute?.connection_id ? (c.compute.offer_id || null) : null) },
+  { flag: '--max-hours', get: (c) => (c.compute?.connection_id ? (c.compute.max_hours ?? null) : null), default: '12' },
+  { flag: '--disk-gb', get: (c) => (c.compute?.connection_id ? (c.compute.disk_gb ?? null) : null) },
 ];
 
 /**
@@ -139,13 +147,57 @@ export function withAutoBatch(parts: readonly string[], line: string): { parts: 
   return { parts: [...parts, AUTO_BATCH_FLAG], line: `${line} ${AUTO_BATCH_FLAG}` };
 }
 
+/** Normalizes an http(s) URL to ASCII (Punycode host + percent-encoded path) so the Rust CLI accepts it. */
+function normalizeServerUrl(raw: string): string | null {
+  const trimmed = raw.trim().replace(/\/+$/, '');
+  if (!trimmed) return null;
+  try {
+    const parsed = new URL(trimmed);
+    if (!/^https?:$/i.test(parsed.protocol)) return null;
+    // Drop the default `/` path URL.toString() adds to bare origins (`http://host:7878/` -> `http://host:7878`).
+    return parsed.toString().replace(/\/+$/, '');
+  } catch {
+    return trimmed;
+  }
+}
+
+/**
+ * Resolves the `--server` URL for CLI handoffs that reference IDs on the connected FOLO server.
+ * Uses the user's explicit `prefs.serverUrl` when set, else `location.origin` while connected to a live server
+ * (omitted in mock mode with no configured server URL).
+ */
+export function cliServerUrl(
+  configuredUrl: string,
+  mode: string,
+  origin = typeof location !== 'undefined' ? location.origin : '',
+): string | null {
+  const explicit = normalizeServerUrl(configuredUrl);
+  if (explicit) return explicit;
+  if (mode === 'live' && /^https?:\/\//i.test(origin)) return normalizeServerUrl(origin);
+  return null;
+}
+
 /**
  * `folo train` for `config`. `data` is the dataset's path on the server; `model` the model `config.weights` names,
- * where known (its `path` is the file to fine-tune from). Pass `{ autoBatch: true }` to preview CLI-only GPU
- * VRAM-budget auto-batching (`--set auto_batch=true`) without changing `TrainConfig`.
+ * where known (its `path` is the file to fine-tune from locally; `--cloud` takes the store model id directly).
+ * Pass `{ autoBatch: true }` to preview CLI-only GPU VRAM-budget auto-batching (`--set auto_batch=true`, local runs
+ * only) without changing `TrainConfig`, `{ maxPreemptRetries }` for cloud spot-preemption retry overrides
+ * (`--max-preempt-retries N`, omitted at default 3), and `{ serverUrl }` to pass `--server <URL>` for cloud runs.
  */
-export function trainCommand(config: TrainConfig, data: string, model?: Model, opts?: { autoBatch?: boolean }): TrainCommand {
-  const weights = config.weights ? weightsRef(config.weights, model) : null;
+export function trainCommand(
+  config: TrainConfig,
+  data: string,
+  model?: Model,
+  opts?: { autoBatch?: boolean; maxPreemptRetries?: number | null; serverUrl?: string | null },
+): TrainCommand {
+  const isCloud = !!config.compute?.connection_id;
+  // `folo train --cloud --weights <W>` resolves `<W>` through the server store by model id or published name
+  // (`crates/folo-cli/src/train/cloud.rs`), never a local `.folo` filesystem path.
+  const weights: WeightsRef | null = config.weights
+    ? isCloud
+      ? { kind: 'path', value: config.weights }
+      : weightsRef(config.weights, model)
+    : null;
   const ctx: Context = { data, weights };
   const argv = ['train'];
   const parts = ['folo train'];
@@ -172,7 +224,24 @@ export function trainCommand(config: TrainConfig, data: string, model?: Model, o
     const shown = f.flag === '--weights' && weights?.kind === 'placeholder' ? words : words.map(quote);
     parts.push(`${f.flag} ${shown.join(' ')}`);
   }
-  if (opts?.autoBatch) {
+  const retries = opts?.maxPreemptRetries;
+  if (isCloud && typeof retries === 'number' && validPreemptRetries(retries) && retries !== DEFAULT_MAX_PREEMPT_RETRIES) {
+    const val = String(retries);
+    argv.push('--max-preempt-retries', val);
+    parts.push(`--max-preempt-retries ${val}`);
+  }
+  const server = opts?.serverUrl?.trim();
+  if (isCloud && server) {
+    if (server.startsWith('-')) {
+      argv.push(`--server=${server}`);
+      parts.push(quote(`--server=${server}`));
+    } else {
+      argv.push('--server', server);
+      parts.push(`--server ${quote(server)}`);
+    }
+  }
+  // `--set` conflicts with `--cloud` in `folo train`, so auto-batch preview applies only to local runs.
+  if (opts?.autoBatch && !isCloud) {
     argv.push('--set', 'auto_batch=true');
     parts.push(AUTO_BATCH_FLAG);
   }

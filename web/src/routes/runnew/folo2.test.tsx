@@ -35,6 +35,7 @@ const cleanErrors = (): FormErrors => ({
   runon: null,
   offer: null,
   hours: null,
+  preempt: null,
 });
 
 afterEach(() => {

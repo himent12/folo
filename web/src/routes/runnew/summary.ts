@@ -1,5 +1,6 @@
 // What New run's Summary and its dock show: the server's estimate when there is one, else the reference figures.
 import type { Augment, Capabilities, Dataset, Model, Optimizer, RunEstimate } from '$lib/api/types';
+import { DEFAULT_MAX_PREEMPT_RETRIES } from '$lib/cloud';
 import { compact, deviceName, num, sentence } from '$lib/format';
 import { FROM_SCRATCH } from '$lib/lineage';
 import { referenceSource } from '$lib/reference';
@@ -114,7 +115,13 @@ export function reviewRows(
   picked: Model | undefined,
   optimizer: Optimizer,
   e2e: boolean,
+  spotResumeOn = false,
 ): { key: Jump; label: string; value: string; mono?: boolean; warn?: boolean }[] {
+  const showPreempt =
+    onCloud &&
+    cloudPick.provisions &&
+    spotResumeOn &&
+    (!!errors.preempt || (cloudPick.preemptRetries !== null && cloudPick.preemptRetries !== DEFAULT_MAX_PREEMPT_RETRIES));
   return [
     { key: 'data', label: 'Data', value: dataset ? `${dataset.name} · ${compact(dataset.splits.train)} ${dataset.splits.train === 1 ? 'image' : 'images'}` : '—', warn: !!errors.dataset },
     // An architecture is a name, in sans like a run's (design/UNIFIED.md §2); a weights path is an identifier, in mono.
@@ -127,6 +134,20 @@ export function reviewRows(
       ? { key: 'runon' as const, label: 'Runs on', value: cloudPick.offer ? `${cloudPick.provider} · ${deviceName(cloudPick.offer.gpu)}` : cloudPick.provider, warn: !!errors.runon || !!errors.offer }
       : { key: 'device' as const, label: 'Device', value: deviceLabel, warn: !!deviceMsg },
     ...(onCloud && errors.hours ? [{ key: 'hours' as const, label: 'Stop after', value: 'Invalid', warn: true }] : []),
+    ...(showPreempt
+      ? [
+          {
+            key: 'preempt' as const,
+            label: 'Spot auto-resume',
+            value: errors.preempt
+              ? 'Invalid'
+              : cloudPick.preemptRetries === 0
+                ? 'Off'
+                : `${cloudPick.preemptRetries} ${cloudPick.preemptRetries === 1 ? 'retry' : 'retries'}`,
+            warn: !!errors.preempt,
+          },
+        ]
+      : []),
     ...(caps || onCloud ? [{ key: 'amp' as const, label: 'Mixed precision', value: ampOn ? 'On' : 'Off', warn: !!errors.amp }] : []),
     {
       key: 'weights',

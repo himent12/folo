@@ -12,9 +12,12 @@ import NoValue from '$lib/ui/NoValue';
 import Panel from '$lib/ui/Panel';
 import Select from '$lib/ui/Select';
 import { diffAsPrinted } from '../charts';
+import CompareCli from './CompareCli';
 import type { Row } from './state';
 
 export interface SideBySideProps {
+  /** Benchmark id for the collapsible `folo bench compare` CLI regression-gate handoff. */
+  benchId?: string;
   shown: BenchEntry[];
   rows: Row[];
   /** Entries graded on an earlier benchmark fingerprint (never marked best or diffed). */
@@ -198,6 +201,9 @@ export default function SideBySide(props: SideBySideProps) {
           }}
         </For>
       </ul>
+      {props.benchId && props.shown.length >= 2 ? (
+        <CompareCli benchId={props.benchId} shown={props.shown} old={props.old} labelOf={props.labelOf} />
+      ) : null}
     </Panel>
   );
 }

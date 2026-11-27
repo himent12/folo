@@ -24,14 +24,18 @@ export interface SpotRecovery {
   summary: string;
 }
 
-export type SpotRecoveryRun = Pick<Run, 'status' | 'error' | 'error_code'> & { id?: string };
+export type SpotRecoveryRun = Pick<Run, 'status' | 'error' | 'error_code' | 'cloud_preemption'> & { id?: string };
 
 interface ScanAcc {
   sawRecovery: boolean;
   /** True while a preemption recovery attempt is in flight and no replacement worker has taken the run yet. */
   pendingAttempt: boolean;
+  /** True when `pendingAttempt` came only from `RELEASE_PREEMPTED_RE` before `AUTO_RESUME_RE` shifted phase out of `training`. */
+  releasingOld: boolean;
   /** Number of preemption recovery attempts where a replacement worker actually took the run. */
   completedRecoveries: number;
+  /** Lowest attempt number observed in the scanned log window (`> 1` indicates earlier attempts aged out of the tail). */
+  firstAttemptSeen: number | null;
   attempts: number;
   maxAttempts: number | null;
   resumeEpoch: number | null;
@@ -59,7 +63,9 @@ function emptyAcc(): ScanAcc {
   return {
     sawRecovery: false,
     pendingAttempt: false,
+    releasingOld: false,
     completedRecoveries: 0,
+    firstAttemptSeen: null,
     attempts: 0,
     maxAttempts: null,
     resumeEpoch: null,
@@ -82,27 +88,36 @@ function scanMessage(acc: ScanAcc, message: string): void {
   if (auto) {
     acc.sawRecovery = true;
     acc.pendingAttempt = true;
+    acc.releasingOld = false;
     const ep = Number(auto[1]);
     const att = Number(auto[2]);
     const max = Number(auto[3]);
     const backoff = auto[4] !== undefined ? Number(auto[4]) : null;
     if (Number.isFinite(ep)) acc.resumeEpoch = ep;
-    if (Number.isFinite(att)) acc.attempts = Math.max(acc.attempts, att);
+    if (Number.isFinite(att)) {
+      if (acc.firstAttemptSeen === null || att < acc.firstAttemptSeen) acc.firstAttemptSeen = att;
+      acc.attempts = Math.max(acc.attempts, att);
+    }
     if (Number.isFinite(max)) acc.maxAttempts = max;
     acc.backoffSeconds = backoff !== null && Number.isFinite(backoff) ? backoff : null;
     return;
   }
   if (RELEASE_PREEMPTED_RE.test(message) || RESTART_RECOVERY_RE.test(message)) {
+    const isRelease = RELEASE_PREEMPTED_RE.test(message);
     acc.sawRecovery = true;
     if (!acc.pendingAttempt) {
       acc.pendingAttempt = true;
+      acc.releasingOld = isRelease;
       acc.attempts = Math.max(acc.attempts, acc.completedRecoveries + 1);
+    } else if (!isRelease) {
+      acc.releasingOld = false;
     }
     return;
   }
   if (WORKER_TOOK_RUN_RE.test(message)) {
     if (acc.pendingAttempt) {
       acc.pendingAttempt = false;
+      acc.releasingOld = false;
       acc.completedRecoveries += 1;
     }
     return;
@@ -149,7 +164,7 @@ function sameRecovery(a: SpotRecovery | null, b: SpotRecovery | null): boolean {
 
 function resolveRecovery(
   acc: ScanAcc,
-  cloud: Pick<RunCloud, 'phase'>,
+  cloud: Pick<RunCloud, 'phase' | 'ended_in'>,
   run?: SpotRecoveryRun,
 ): SpotRecovery | null {
   // Also inspect run.error in case logs were truncated or not yet loaded on a failed/stopped run.
@@ -163,19 +178,63 @@ function resolveRecovery(
     if (STOPPED_RECOVERY_RE.test(run.error)) stoppedDuringRecovery = true;
   }
 
-  const attempts = exhaustedMax !== null ? Math.max(acc.attempts, exhaustedMax) : acc.attempts;
-  const maxAttempts = exhaustedMax ?? acc.maxAttempts;
+  // If the log stream crossed a manual-resume boundary and saw no new preemption recovery yet, ignore stale
+  // pre-resume `cloud_preemption` snapshot fields until the server's post-resume state arrives.
+  const cp = acc.sawManualReset && !acc.sawRecovery ? null : (run?.cloud_preemption ?? null);
+  const structuredRetries = cp?.retries ?? 0;
+  const attempts = Math.max(exhaustedMax ?? 0, acc.attempts, structuredRetries);
+  const maxAttempts = exhaustedMax ?? acc.maxAttempts ?? (cp ? cp.max_retries : null);
   const resumeEpoch = acc.resumeEpoch;
   const backoffSeconds = acc.backoffSeconds;
 
+  const effectivePhase = cloud.ended_in ?? cloud.phase;
+  const inPreTrainingPhase =
+    cloud.phase === 'provisioning' || cloud.phase === 'booting' || cloud.phase === 'syncing';
+  const phasePastLaunch =
+    cloud.phase === 'training' ||
+    cloud.phase === 'collecting' ||
+    cloud.phase === 'releasing' ||
+    cloud.phase === 'released';
+  const reachedTraining =
+    cloud.phase === 'training' ||
+    cloud.phase === 'collecting' ||
+    cloud.ended_in === 'training' ||
+    cloud.ended_in === 'collecting';
+  const endedInPreTraining =
+    effectivePhase === 'provisioning' || effectivePhase === 'booting' || effectivePhase === 'syncing';
+  const isPreTrainingError =
+    run?.error_code === 'cloud_boot_failed' ||
+    run?.error_code === 'cloud_launch_failed' ||
+    (run?.error_code === 'cloud_sync_failed' && cloud.ended_in !== 'collecting' && cloud.phase !== 'collecting');
+  // Live SSE updates `cloud.phase` and appends worker-takeover logs without re-fetching `GET /api/runs/{id}`.
+  // Treat a stale `cp.recovering === true` snapshot as cleared once the run moved past launch or logs confirm handoff.
+  // Likewise, once `AUTO_RESUME_RE` shifted phase to `provisioning` (`!acc.releasingOld`), reaching `training` /
+  // `collecting` confirms takeover even if the takeover log line was missed.
+  const pendingLog = acc.pendingAttempt && (acc.releasingOld || !reachedTraining);
+  const logCompleted =
+    acc.pendingAttempt && !pendingLog ? acc.completedRecoveries + 1 : acc.completedRecoveries;
+  const tailTruncated = acc.firstAttemptSeen !== null && acc.firstAttemptSeen > 1;
+  const resolvedCompleted = acc.sawRecovery
+    ? tailTruncated && (reachedTraining || run?.status === 'completed')
+      ? Math.max(logCompleted, structuredRetries, acc.firstAttemptSeen! - 1 + logCompleted)
+      : logCompleted
+    : run?.status === 'completed' || reachedTraining
+      ? structuredRetries
+      : 0;
+  const logsClearedRecovery =
+    !pendingLog && logCompleted > 0 && logCompleted >= structuredRetries;
+  const structuredRecovering = !!cp?.recovering && !phasePastLaunch && !logsClearedRecovery;
+
   if (run?.status === 'failed') {
     const isLostErr = run.error_code === 'cloud_instance_lost' || run.error_code == null;
+    // Exhaustion requires explicit evidence from the run error or log; `retries >= max_retries` alone can also hold
+    // after a successful recovery if the replacement instance was manually terminated later.
     if (isLostErr && exhaustedMax !== null) {
       const unit = exhaustedMax === 1 ? 'attempt' : 'attempts';
       return {
         kind: 'exhausted',
-        attempts,
-        maxAttempts,
+        attempts: Math.max(attempts, exhaustedMax),
+        maxAttempts: exhaustedMax,
         resumeEpoch,
         backoffSeconds,
         badge: 'Auto-resume exhausted',
@@ -194,15 +253,23 @@ function resolveRecovery(
           'Spot worker was preempted with no resumable synced checkpoint (weights/last.folo), so automatic recovery could not run. Permanent failure — start the run again to retry.',
       };
     }
-    if (acc.pendingAttempt) {
-      const attText = maxAttempts !== null ? `${attempts} of ${maxAttempts}` : `${attempts}`;
+    const failedBeforeTraining =
+      !acc.sawRecovery && structuredRetries > 0 && (endedInPreTraining || isPreTrainingError);
+    if (pendingLog || structuredRecovering || failedBeforeTraining) {
+      const attNum = Math.max(attempts, 1);
+      const attText = maxAttempts !== null ? `${attNum} of ${maxAttempts}` : `${attNum}`;
+      const priorDone = acc.sawRecovery
+        ? acc.completedRecoveries
+        : failedBeforeTraining && structuredRetries > 1
+          ? structuredRetries - 1
+          : 0;
       const priorNote =
-        acc.completedRecoveries > 0
-          ? ` (after ${acc.completedRecoveries} earlier ${acc.completedRecoveries === 1 ? 'recovery' : 'recoveries'})`
+        priorDone > 0
+          ? ` (after ${priorDone} earlier ${priorDone === 1 ? 'recovery' : 'recoveries'})`
           : '';
       return {
         kind: 'failed',
-        attempts,
+        attempts: attNum,
         maxAttempts,
         resumeEpoch,
         backoffSeconds,
@@ -210,8 +277,9 @@ function resolveRecovery(
         summary: `Spot recovery attempt ${attText} failed before a replacement worker resumed training${priorNote}. Permanent failure — resume manually to continue from the last synced checkpoint.`,
       };
     }
-    if (acc.completedRecoveries > 0) {
-      const n = acc.completedRecoveries;
+    // Without recovery logs, only report `Auto-resumed` when cloud state confirms a replacement reached training.
+    if (resolvedCompleted > 0) {
+      const n = resolvedCompleted;
       const count = n === 1 ? '1 spot preemption' : `${n} spot preemptions`;
       return {
         kind: 'resumed',
@@ -227,7 +295,8 @@ function resolveRecovery(
   }
 
   if (run?.status === 'stopped') {
-    if (stoppedDuringRecovery || acc.pendingAttempt) {
+    const stoppedBeforeTraining = !acc.sawRecovery && structuredRetries > 0 && endedInPreTraining;
+    if (stoppedDuringRecovery || pendingLog || structuredRecovering || stoppedBeforeTraining) {
       const attText =
         attempts > 0 ? ` (attempt ${attempts}${maxAttempts !== null ? ` of ${maxAttempts}` : ''})` : '';
       return {
@@ -240,8 +309,8 @@ function resolveRecovery(
         summary: `Stopped while auto-resuming from spot preemption${attText}. Synced checkpoint weights/last.folo was kept.`,
       };
     }
-    if (acc.completedRecoveries > 0) {
-      const n = acc.completedRecoveries;
+    if (resolvedCompleted > 0) {
+      const n = resolvedCompleted;
       const count = n === 1 ? '1 spot preemption' : `${n} spot preemptions`;
       return {
         kind: 'resumed',
@@ -256,22 +325,25 @@ function resolveRecovery(
     return null;
   }
 
-  if (!acc.sawRecovery) return null;
+  const sawStructured = structuredRecovering || structuredRetries > 0;
+  if (!acc.sawRecovery && !sawStructured) return null;
 
   const active =
     run?.status === undefined ||
     run.status === 'queued' ||
     run.status === 'running' ||
     run.status === 'stopping';
-  if (active && acc.pendingAttempt) {
+  const activeBeforeTraining = !acc.sawRecovery && structuredRetries > 0 && inPreTrainingPhase;
+  if (active && (pendingLog || structuredRecovering || activeBeforeTraining)) {
+    const curAttempt = Math.max(attempts, 1);
     const attemptBadge =
-      maxAttempts !== null ? `Spot auto-resume ${attempts}/${maxAttempts}` : `Spot auto-resume #${attempts}`;
+      maxAttempts !== null ? `Spot auto-resume ${curAttempt}/${maxAttempts}` : `Spot auto-resume #${curAttempt}`;
     const attemptDetail =
-      maxAttempts !== null ? `attempt ${attempts} of ${maxAttempts}` : `attempt ${attempts}`;
+      maxAttempts !== null ? `attempt ${curAttempt} of ${maxAttempts}` : `attempt ${curAttempt}`;
     const epochNote = resumeEpoch !== null ? ` from epoch ${resumeEpoch}` : '';
     return {
       kind: 'recovering',
-      attempts,
+      attempts: curAttempt,
       maxAttempts,
       resumeEpoch,
       backoffSeconds,
@@ -280,8 +352,8 @@ function resolveRecovery(
     };
   }
 
-  const completed = acc.completedRecoveries > 0 ? acc.completedRecoveries : attempts;
-  if (completed <= 0) return null;
+  if (resolvedCompleted <= 0) return null;
+  const completed = resolvedCompleted;
   const count = completed === 1 ? '1 spot preemption' : `${completed} spot preemptions`;
   return {
     kind: 'resumed',
@@ -296,7 +368,7 @@ function resolveRecovery(
 
 /** Pure helper deriving spot preemption recovery status from a cloud run's state and log lines. */
 export function parseSpotRecovery(
-  cloud: Pick<RunCloud, 'phase'>,
+  cloud: Pick<RunCloud, 'phase' | 'ended_in'>,
   run: SpotRecoveryRun | undefined,
   logs: readonly LogLine[],
 ): SpotRecovery | null {
@@ -317,7 +389,7 @@ export class SpotRecoveryTracker {
 
   sync(
     log: AppendLog<LogLine>,
-    cloud: Pick<RunCloud, 'phase'> | undefined,
+    cloud: Pick<RunCloud, 'phase' | 'ended_in'> | undefined,
     run: SpotRecoveryRun | undefined,
   ): SpotRecovery | null {
     const runId = run?.id ?? null;

@@ -1,7 +1,7 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import type { Model, TrainConfig } from '$lib/api/types';
-import { quote, serverCommand, trainCommand, weightsRef } from './trainCli';
+import { cliServerUrl, quote, serverCommand, trainCommand, weightsRef } from './trainCli';
 
 const base: TrainConfig = {
   name: 'fasteners-s',
@@ -124,6 +124,71 @@ describe('trainCommand (DOGFOOD-3 S1)', () => {
     expect(c.argv.slice(-2)).toEqual(['--set', 'auto_batch=true']);
     expect(c.parts.at(-1)).toBe('--set auto_batch=true');
     expect(split(c.line).slice(1)).toEqual(c.argv);
+  });
+
+  it('emits cloud flags and --max-preempt-retries while omitting conflicting --device and --set auto_batch=true', () => {
+    const cloudCfg: TrainConfig = {
+      ...base,
+      device: 'gpu:0',
+      compute: { connection_id: 'cc_4d2a', offer_id: 'NVIDIA GeForce RTX 4090@secure', max_hours: 8, disk_gb: 60 },
+    };
+    const custom = trainCommand(cloudCfg, 'D:/fasteners', undefined, { autoBatch: true, maxPreemptRetries: 5 });
+    expect(custom.argv).not.toContain('--device');
+    expect(custom.argv).not.toContain('--set');
+    expect(custom.line).toBe(
+      "folo train --data D:/fasteners --model folo-s --epochs 100 --batch 16 --imgsz 640 --name fasteners-s --cloud cc_4d2a --offer 'NVIDIA GeForce RTX 4090@secure' --max-hours 8 --disk-gb 60 --max-preempt-retries 5",
+    );
+    expect(split(custom.line).slice(1)).toEqual(custom.argv);
+
+    // Default max_hours (12) and default max_preempt_retries (3) are omitted; 0 is emitted to disable auto-resume.
+    const defaultCfg: TrainConfig = {
+      ...base,
+      compute: { connection_id: 'cc_4d2a', offer_id: 'gpu:0', max_hours: 12 },
+    };
+    const def = trainCommand(defaultCfg, 'D:/fasteners', undefined, { maxPreemptRetries: 3 });
+    expect(def.line).toBe('folo train --data D:/fasteners --model folo-s --epochs 100 --batch 16 --imgsz 640 --name fasteners-s --cloud cc_4d2a --offer gpu:0');
+    const disabled = trainCommand(defaultCfg, 'D:/fasteners', undefined, { maxPreemptRetries: 0 });
+    expect(disabled.line).toContain('--max-preempt-retries 0');
+    expect(split(disabled.line).slice(1)).toEqual(disabled.argv);
+
+    // Out-of-range retries (>20) and empty connection_id are ignored safely.
+    const invalidRetry = trainCommand(defaultCfg, 'D:/fasteners', undefined, { maxPreemptRetries: 21 });
+    expect(invalidRetry.argv).not.toContain('--max-preempt-retries');
+    const emptyConn = trainCommand({ ...base, compute: { connection_id: '', offer_id: 'gpu:0' } }, 'D:/fasteners');
+    expect(emptyConn.argv).not.toContain('--cloud');
+
+    // Cloud fine-tuning passes the registered store model ID (never a local file path or placeholder),
+    // and includes `--server` when connected to a FOLO server.
+    const cloudFt = trainCommand(
+      { ...ft({ weights: 'm_saved42' }), compute: { connection_id: 'cc_4d2a', offer_id: 'gpu:0' } },
+      'D:/fasteners',
+      model({ id: 'm_saved42', path: 'D:/folo/models/saved.folo', source: 'run' }),
+      { serverUrl: 'http://gpu-box:7878' },
+    );
+    expect(cloudFt.placeholder).toBeNull();
+    expect(cloudFt.argv).toContain('--weights');
+    expect(cloudFt.argv[cloudFt.argv.indexOf('--weights') + 1]).toBe('m_saved42');
+    expect(cloudFt.line).not.toContain('saved.folo');
+    expect(cloudFt.line).toContain('--server http://gpu-box:7878');
+    expect(split(cloudFt.line).slice(1)).toEqual(cloudFt.argv);
+
+    // Even when Model metadata has no path, cloud fine-tune never emits a placeholder.
+    const cloudFtNoPath = trainCommand(
+      { ...ft({ weights: 'm_imported' }), compute: { connection_id: 'cc_4d2a', offer_id: 'gpu:0' } },
+      'D:/fasteners',
+      model({ id: 'm_imported', path: undefined }),
+    );
+    expect(cloudFtNoPath.placeholder).toBeNull();
+    expect(cloudFtNoPath.argv[cloudFtNoPath.argv.indexOf('--weights') + 1]).toBe('m_imported');
+  });
+
+  it('resolves connected server URL for live and explicit server targets while staying null in bare mock mode', () => {
+    expect(cliServerUrl('http://gpu-box:7878/', 'mock', 'http://localhost:3000')).toBe('http://gpu-box:7878');
+    expect(cliServerUrl('https://büro.example/équipe/', 'mock', 'http://localhost:3000')).toBe(
+      'https://xn--bro-hoa.example/%C3%A9quipe',
+    );
+    expect(cliServerUrl('', 'live', 'https://studio.example.com/')).toBe('https://studio.example.com');
+    expect(cliServerUrl('', 'mock', 'http://localhost:3000')).toBeNull();
   });
 });
 

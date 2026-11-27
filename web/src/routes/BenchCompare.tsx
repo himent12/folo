@@ -320,7 +320,7 @@ export default function BenchCompare() {
           </ul>
         </Callout>
       ) : null}{' '}
-      <SideBySide shown={shown.get()} rows={rows.get()} old={old.get()} labelOf={labelOf} best={best} makeBaseline={setBaseline} keyMark={key} onCopyMarkdown={() => void copyComparisonMarkdown()} onDownloadCsv={() => exportComparison('csv')} copiedMd={copiedMd.get()} exportDisabled={!exportReady.get()} />{' '}
+      <SideBySide benchId={bench()?.id} shown={shown.get()} rows={rows.get()} old={old.get()} labelOf={labelOf} best={best} makeBaseline={setBaseline} keyMark={key} onCopyMarkdown={() => void copyComparisonMarkdown()} onDownloadCsv={() => exportComparison('csv')} copiedMd={copiedMd.get()} exportDisabled={!exportReady.get()} />{' '}
       <Panel title="mAP50-95 with 95% intervals" meta="unchanged images">
         {ivDomain.get() ? (
           <>

@@ -187,3 +187,18 @@ export interface CostEstimate {
   /** The most the run can cost: `price_per_hour` × `compute.max_hours`. */
   max_usd: number;
 }
+
+/**
+ * Spot preemption auto-resume status of a cloud run (`GET /api/runs/{id}` top-level `cloud_preemption`,
+ * advertised by `cloud_spot_resume` in `/api/health` and `/api/system` `features`).
+ */
+export interface CloudPreemptionStatus {
+  /** Automatic preemption recovery attempts already started for this run. */
+  retries: number;
+  /** Configured maximum automatic preemption recovery attempts (`0..=20`; `0` disables auto-resume). */
+  max_retries: number;
+  /** True while the run has released a preempted worker and is waiting to provision its replacement. */
+  recovering: boolean;
+  /** Ledger ids of earlier instances replaced after preemption, oldest first. */
+  preempted_instances?: string[];
+}

@@ -6,14 +6,14 @@
 // `folo doctor --tensor-cores` says why they are off, and on DirectX 12 (no `shader-f16`, no cooperative matrices in
 // wgpu) `FOLO_GPU_BACKEND=vulkan` picks the Vulkan adapter, which has both on the GPUs docs/GPU.md lists.
 
-import type { Capabilities, Gpu } from '$lib/api/types';
+import type { Capabilities, CpuSimd, Gpu } from '$lib/api/types';
 import { sentence } from '$lib/format';
 
 /** `on`: usable now; `off`: the hardware has it but it is not on; `none`: not usable on this server. */
 export type CapState = 'on' | 'off' | 'none';
 
 export interface CapRow {
-  id: 'f16' | 'tensor_cores' | 'amp';
+  id: 'f16' | 'tensor_cores' | 'amp' | 'cpu_simd';
   label: string;
   state: CapState;
   /** The state in one word, next to its mark (colour is never the only cue). */
@@ -91,11 +91,47 @@ function ampRow(c: Capabilities, tensorFix: Fix | null): Pick<CapRow, 'note' | '
   return { note: c.amp.reason ? sentence(c.amp.reason) : 'Not available on this server.', fix: null };
 }
 
+/** Detected CPU SIMD instruction sets, highest tier first. */
+export function simdExtensions(s: CpuSimd): string[] {
+  const out: string[] = [];
+  if (s.avx512_vnni) out.push('AVX-512 VNNI');
+  if (s.avx_vnni) out.push('AVX-VNNI');
+  if (s.avx2) out.push('AVX2');
+  if (s.neon) out.push('NEON');
+  return out;
+}
+
+/** Formats `/api/system`'s `cpu_simd` as a Settings › System capability row. */
+export function cpuSimdRow(s: CpuSimd): CapRow {
+  const exts = simdExtensions(s);
+  const extSuffix = exts.length ? ` (${exts.join(', ')})` : '';
+  const kernel = s.int8_kernel.trim() || 'portable';
+  const isPortable = kernel.toLowerCase() === 'portable';
+  const accelerated = s.int8_fast || !isPortable;
+  const note = s.int8_fast
+    ? `Hardware VNNI accelerates quantized int8 CPU inference${extSuffix}.`
+    : !isPortable
+      ? `SIMD accelerates quantized int8 CPU inference without hardware VNNI${extSuffix}.`
+      : exts.length
+        ? `Quantized int8 CPU inference runs on the portable scalar kernel (detected ISA: ${exts.join(', ')}).`
+        : 'Quantized int8 CPU inference runs on the portable scalar kernel (no AVX2, VNNI, or NEON detected).';
+  return {
+    id: 'cpu_simd',
+    label: 'CPU int8 SIMD',
+    state: accelerated ? 'on' : 'none',
+    word: kernel,
+    note,
+    fix: null,
+    raw: null,
+  };
+}
+
 /**
- * The three capability rows, in the order a run uses them: f16 shaders, then tensor cores, then mixed precision.
+ * The capability rows, in the order a run uses them: f16 shaders, tensor cores, mixed precision, and (when reported
+ * by `/api/system`) the active CPU int8 SIMD micro-kernel tier.
  * `gpus` (from `/api/system`) names the backend of the adapter in use, which decides whether Vulkan is worth a try.
  */
-export function capabilityRows(c: Capabilities, gpus: Gpu[] = []): CapRow[] {
+export function capabilityRows(c: Capabilities, gpus: Gpu[] = [], cpuSimd?: CpuSimd): CapRow[] {
   const t = c.tensor_cores;
   const dx12 = gpuOf(c, gpus)?.backend === 'dx12';
   const tensor = tensorRow(c, dx12);
@@ -130,6 +166,7 @@ export function capabilityRows(c: Capabilities, gpus: Gpu[] = []): CapRow[] {
       ...ampRow(c, tensor.fix),
       raw: c.amp.available ? null : c.amp.reason,
     },
+    ...(cpuSimd ? [cpuSimdRow(cpuSimd)] : []),
   ]);
 }
 

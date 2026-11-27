@@ -52,6 +52,7 @@ export interface TrainingSectionProps {
   IMGSZ: string[];
   cloudOn: boolean;
   onCloud: boolean;
+  spotResumeOn?: boolean;
   cloudPick: CloudPick;
   system: Resource<SystemInfo>;
   gpu: SystemInfo['gpus'][number] | undefined;
@@ -301,6 +302,29 @@ export default function TrainingSection(props: TrainingSectionProps) {
                     suffix="hours"
                   />
                 </Field>
+                {cloudPick.provisions && props.spotResumeOn ? (
+                  <Field
+                    label="Spot auto-resume"
+                    for="preempt"
+                    error={props.errors.preempt}
+                    hint={
+                      cloudPick.preemptRetries === 0
+                        ? 'Disabled: a preempted spot instance ends the run instead of re-provisioning.'
+                        : 'Automatic recovery attempts from synced checkpoints on spot preemption (0 disables).'
+                    }
+                  >
+                    <Input
+                      id="preempt"
+                      type="number"
+                      min="0"
+                      max="20"
+                      step="1"
+                      bind:value={field(cloudPick, 'preemptRetries')}
+                      invalid={!!props.errors.preempt}
+                      suffix="retries"
+                    />
+                  </Field>
+                ) : null}
               </>
             ) : null}
           </>
