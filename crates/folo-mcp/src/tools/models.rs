@@ -38,13 +38,14 @@ const MAX_FAILURES: usize = 50;
 impl Inner {
     pub(super) async fn list_models(&self, a: PageArgs) -> Result<Output, Error> {
         let (offset, limit) = page_window(a.cursor.as_deref(), a.limit)?;
-        let all = self.blocking(|s| s.list_models()).await?;
+        let all = self.blocking(|s| s.list_models_with_arch()).await?;
         let items: Vec<ModelSummary> = all
             .into_iter()
-            .map(|m: Model| ModelSummary {
+            .map(|(m, arch_name): (Model, String)| ModelSummary {
                 id: m.id,
                 name: short(&m.name, MAX_NAME_CHARS),
                 arch: m.arch,
+                arch_name,
                 imgsz: m.imgsz,
                 num_classes: m.classes.len(),
                 classes: summary_classes(&m.classes),
@@ -152,10 +153,14 @@ impl Inner {
 
     async fn resolve_predict_thresholds(
         &self,
-        default_conf: f32,
+        explicit_conf: Option<f32>,
         thresholds_path: Option<String>,
         per_class_conf: Option<BTreeMap<u32, f32>>,
     ) -> Result<(f32, Option<BTreeMap<u32, f32>>, bool), Error> {
+        if explicit_conf.is_some() && thresholds_path.is_some() {
+            return Err(invalid_arguments("give either conf or thresholds_path, not both"));
+        }
+        let default_conf = explicit_conf.unwrap_or_else(folo_api::default_conf);
         match (thresholds_path, per_class_conf) {
             (Some(_), Some(_)) => {
                 Err(invalid_arguments("give either thresholds_path or per_class_conf, not both"))
@@ -193,7 +198,9 @@ impl Inner {
         if a.model_id.trim().is_empty() {
             return Err(invalid_arguments("model_id must not be empty"));
         }
-        check_unit("conf", a.conf)?;
+        if let Some(conf) = a.conf {
+            check_unit("conf", conf)?;
+        }
         check_unit("iou", a.iou)?;
         if !(1..=300).contains(&a.max_det) {
             return Err(invalid_arguments(format!("max_det must be in 1..=300, got {}", a.max_det)));
@@ -285,7 +292,9 @@ impl Inner {
         a: PredictBatchArgs,
         progress: &mut Progress,
     ) -> Result<Output, Error> {
-        check_unit("conf", a.conf)?;
+        if let Some(conf) = a.conf {
+            check_unit("conf", conf)?;
+        }
         check_unit("iou", a.iou)?;
         let options = build_predict_options(
             a.tile,
@@ -315,8 +324,7 @@ impl Inner {
         let model_id = a.model_id.clone();
         let model = self.blocking(move |s| s.get_model(&model_id)).await?;
         if let Some(map) = &per_class_conf {
-            check_per_class_conf(map, Some(model.classes.len()))
-                .map_err(|e| invalid_arguments(e.body.message))?;
+            check_per_class_conf(map, Some(model.classes.len()))?;
         }
         check_predict_workload(&options, model.imgsz, None).map_err(|e| {
             let mut err = invalid_arguments(e.body.message);

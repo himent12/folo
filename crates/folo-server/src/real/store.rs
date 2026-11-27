@@ -357,6 +357,10 @@ impl Store for RealStore {
         Ok(self.all_models().into_iter().map(|m| m.model).collect())
     }
 
+    fn list_models_with_arch(&self) -> Result<Vec<(Model, String)>> {
+        Ok(self.all_models().into_iter().map(|m| (m.model, m.arch_name)).collect())
+    }
+
     fn get_model(&self, id: &str) -> Result<Model> {
         Ok(self.model(id)?.model)
     }

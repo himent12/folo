@@ -599,6 +599,17 @@ pub trait Store: Send + Sync + 'static {
 
     /// All models, newest first.
     fn list_models(&self) -> Result<Vec<Model>>;
+    /// All models together with their canonical architecture name (e.g. `"folo-n"` or `"folo2-n"`), newest first.
+    fn list_models_with_arch(&self) -> Result<Vec<(Model, String)>> {
+        Ok(self
+            .list_models()?
+            .into_iter()
+            .map(|m| {
+                let arch = m.arch.as_str().to_string();
+                (m, arch)
+            })
+            .collect())
+    }
     /// One model.
     fn get_model(&self, id: &str) -> Result<Model>;
     /// Exact architecture name of model `id` (e.g. `"folo-n"` or `"folo2-n"`).

@@ -305,10 +305,10 @@ pub struct PredictArgs {
     /// A dataset image: its id (with `dataset_id`).
     #[serde(default)]
     pub image_id: Option<String>,
-    /// Confidence threshold.
-    #[serde(default = "folo_api::default_conf")]
+    /// Confidence threshold (default 0.25; mutually exclusive with `thresholds_path`; fallback for classes omitted from `per_class_conf`).
+    #[serde(default)]
     #[schemars(range(min = 0.0, max = 1.0))]
-    pub conf: f32,
+    pub conf: Option<f32>,
     /// NMS IoU threshold.
     #[serde(default = "folo_api::default_iou")]
     #[schemars(range(min = 0.0, max = 1.0))]
@@ -336,10 +336,10 @@ pub struct PredictArgs {
     /// Include horizontally flipped views with TTA (requires `tta: true`; default true).
     #[serde(default)]
     pub tta_hflip: Option<bool>,
-    /// Path to a `ThresholdCalibration` JSON file from `folo val --save-thresholds`. Mutually exclusive with `per_class_conf`.
+    /// Path to a `ThresholdCalibration` JSON file from `folo val --save-thresholds`. Mutually exclusive with `conf` and `per_class_conf`.
     #[serde(default)]
     pub thresholds_path: Option<String>,
-    /// Per-class confidence thresholds (`class_id -> conf` in `0..=1`). Mutually exclusive with `thresholds_path`.
+    /// Per-class confidence thresholds (`class_id -> conf` in `0..=1`; unlisted classes use `conf`). Mutually exclusive with `thresholds_path`.
     #[serde(default)]
     pub per_class_conf: Option<BTreeMap<u32, f32>>,
 }
@@ -355,10 +355,10 @@ pub struct PredictBatchArgs {
     /// A glob such as `D:/photos/*.jpg` (relative patterns are relative to `--data-dir`).
     #[serde(default)]
     pub glob: Option<String>,
-    /// Confidence threshold.
-    #[serde(default = "folo_api::default_conf")]
+    /// Confidence threshold (default 0.25; mutually exclusive with `thresholds_path`; fallback for classes omitted from `per_class_conf`).
+    #[serde(default)]
     #[schemars(range(min = 0.0, max = 1.0))]
-    pub conf: f32,
+    pub conf: Option<f32>,
     /// NMS IoU threshold.
     #[serde(default = "folo_api::default_iou")]
     #[schemars(range(min = 0.0, max = 1.0))]
@@ -382,10 +382,10 @@ pub struct PredictBatchArgs {
     /// Include horizontally flipped views with TTA (requires `tta: true`; default true).
     #[serde(default)]
     pub tta_hflip: Option<bool>,
-    /// Path to a `ThresholdCalibration` JSON file from `folo val --save-thresholds`. Mutually exclusive with `per_class_conf`.
+    /// Path to a `ThresholdCalibration` JSON file from `folo val --save-thresholds`. Mutually exclusive with `conf` and `per_class_conf`.
     #[serde(default)]
     pub thresholds_path: Option<String>,
-    /// Per-class confidence thresholds (`class_id -> conf` in `0..=1`). Mutually exclusive with `thresholds_path`.
+    /// Per-class confidence thresholds (`class_id -> conf` in `0..=1`; unlisted classes use `conf`). Mutually exclusive with `thresholds_path`.
     #[serde(default)]
     pub per_class_conf: Option<BTreeMap<u32, f32>>,
 }
@@ -599,8 +599,10 @@ pub struct ModelSummary {
     pub id: String,
     /// Name.
     pub name: String,
-    /// Architecture.
+    /// Architecture scale (`folo-n`..`folo-x`).
     pub arch: Arch,
+    /// Exact architecture name (`folo-n`..`folo-x` or `folo2-n`..`folo2-x`).
+    pub arch_name: String,
     /// Input size.
     pub imgsz: u32,
     /// Number of classes.

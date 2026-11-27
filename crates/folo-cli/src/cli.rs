@@ -399,19 +399,19 @@ pub struct WeightsPullArgs {
 /// `folo cloud`.
 #[derive(Debug, Subcommand)]
 pub enum CloudCommand {
-    /// The providers FOLO can use and the values a connection to each takes.
+    /// The providers FOLO can use and the values a connection to each takes (`--json`: one record per provider).
     Providers(CloudDirArgs),
     /// Connect a provider: its values are checked with it before anything is stored.
     Connect(CloudConnectArgs),
-    /// The connections, with what their last check found.
+    /// The connections, with what their last check found (`--json`: one record per connection, zero lines when empty).
     Connections(CloudDirArgs),
     /// Check a connection's stored credentials again.
     Check(CloudIdArgs),
     /// Forget a connection (refused while it has live instances or active runs).
     Disconnect(CloudIdArgs),
-    /// What a connection can run on now, cheapest first.
+    /// What a connection can run on now, cheapest first (`--json`: one record per offer, zero lines when empty).
     Offers(CloudOffersArgs),
-    /// The instances FOLO launched: alive first, then those that ended in the last 7 days.
+    /// The instances FOLO launched: alive first, then those that ended in the last 7 days (`--json`: one record per instance, zero lines when empty).
     Instances(CloudDirArgs),
     /// Terminate an instance now (FOLO retries until the provider confirms); a run still using it fails.
     Terminate(CloudIdArgs),

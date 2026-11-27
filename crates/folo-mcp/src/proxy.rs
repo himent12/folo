@@ -390,21 +390,59 @@ impl Store for HttpStore {
         Ok(self.get::<ModelList>("/models")?.models)
     }
 
+    fn list_models_with_arch(&self) -> Result<Vec<(Model, String)>, Error> {
+        #[derive(serde::Deserialize)]
+        struct WireModel {
+            #[serde(flatten)]
+            model: Model,
+            #[serde(default)]
+            arch_name: Option<String>,
+        }
+        #[derive(serde::Deserialize)]
+        struct WireModelList {
+            models: Vec<WireModel>,
+        }
+        let list: WireModelList = self.get("/models")?;
+        Ok(list
+            .models
+            .into_iter()
+            .map(|m| {
+                let arch = m
+                    .arch_name
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| m.model.arch.as_str().to_string());
+                (m.model, arch)
+            })
+            .collect())
+    }
+
     fn get_model(&self, id: &str) -> Result<Model, Error> {
         check_segment("model", id)?;
         self.get(&format!("/models/{}", encode(id)))
     }
 
     fn model_arch(&self, id: &str) -> Result<String, Error> {
+        #[derive(serde::Deserialize)]
+        struct WireModel {
+            #[serde(flatten)]
+            model: Model,
+            #[serde(default)]
+            arch_name: Option<String>,
+        }
         check_segment("model", id)?;
-        let (headers, model) =
-            self.client.get_with_headers::<Model>(&format!("/models/{}", encode(id))).map_err(store_error)?;
+        let (headers, wire) = self
+            .client
+            .get_with_headers::<WireModel>(&format!("/models/{}", encode(id)))
+            .map_err(store_error)?;
         if let Some(arch) = headers.get("x-folo-arch").and_then(|v| v.to_str().ok()).filter(|v| !v.is_empty())
         {
             return Ok(arch.to_string());
         }
+        if let Some(arch) = wire.arch_name.filter(|s| !s.is_empty()) {
+            return Ok(arch);
+        }
         if self.has_feature(FEATURE_FOLO2_ARCH)? || self.is_mock() {
-            return Ok(model.arch.as_str().to_string());
+            return Ok(wire.model.arch.as_str().to_string());
         }
         // Older real servers list `folo2-*` weights under their v1 scale and omit `x-folo-arch`. Probe the
         // safetensors header via a bounded Range read so a weights-only fine-tune never silently runs as v1.

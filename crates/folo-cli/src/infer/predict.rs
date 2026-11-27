@@ -1,7 +1,7 @@
 //! `folo predict`: recursive image walking, `--save` confinement / collision avoidance, and atomic annotated image
 //! writing.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -10,8 +10,8 @@ use folo_vision::fusion::ScoreRule;
 use folo_vision::model::HeadMode;
 use folo_vision::tta::DEFAULT_TTA_SCALES;
 use folo_vision::{
-    ByteTracker, PredictConfig, PredictOptions, Predictor, TileConfig, TileMergeMetric, TrackConfig,
-    TrackedDetection, TtaConfig,
+    ByteTracker, Detection, PredictConfig, PredictOptions, Predictor, TileConfig, TileMergeMetric,
+    TrackConfig, TrackedDetection, TtaConfig,
 };
 use serde_json::json;
 
@@ -343,6 +343,71 @@ fn track_det_conf(pred_conf: f32, low_thresh: f32, score_rule: ScoreRule, head_m
     }
 }
 
+/// Filters and stages detections before [`ByteTracker::update`] when calibrated per-class thresholds are active.
+///
+/// Detections meeting their calibrated threshold (`score >= cls_thresh`, falling back to `global_conf`) pass through
+/// unchanged so they can participate in stage-1 association and new-track admission. Detections below their calibrated
+/// threshold can never spawn new tracks or match lost/tentative tracks: when there are active tracks and a stage-2
+/// recovery band exists (`low_thresh < high_thresh`), candidates with `score >= low_thresh` are routed exclusively to
+/// ByteTrack's stage-2 low-confidence pool (demoting any `high_thresh <= score < cls_thresh` into unique bit patterns
+/// strictly below `high_thresh` and returning a `bits -> real_score` map so emitted [`TrackedDetection::score`] values
+/// preserve the exact detector score).
+fn filter_detections_for_tracker(
+    detections: &[Detection],
+    tc: &TrackConfig,
+    has_active_tracks: bool,
+    global_conf: f32,
+    per_class: &BTreeMap<u32, f32>,
+) -> (Vec<Detection>, HashMap<u32, f32>) {
+    let mut kept = Vec::with_capacity(detections.len());
+    let mut demoted = Vec::new();
+    let mut used_low_bits: HashSet<u32> = HashSet::new();
+    let allow_stage2 = has_active_tracks && tc.low_thresh < tc.high_thresh;
+
+    for &d in detections {
+        if !d.score.is_finite() {
+            continue;
+        }
+        let cls_thresh = per_class.get(&d.class).copied().unwrap_or(global_conf);
+        if d.score >= cls_thresh {
+            if d.score >= tc.low_thresh && d.score < tc.high_thresh {
+                used_low_bits.insert(d.score.to_bits());
+            }
+            kept.push(d);
+        } else if allow_stage2 && d.score >= tc.low_thresh {
+            if d.score < tc.high_thresh {
+                used_low_bits.insert(d.score.to_bits());
+                kept.push(d);
+            } else {
+                demoted.push(d);
+            }
+        }
+    }
+
+    let mut restore_scores = HashMap::new();
+    if !demoted.is_empty() {
+        // Preserve descending real-score order inside ByteTrack's stage-2 pool.
+        demoted.sort_unstable_by(|a, b| b.score.total_cmp(&a.score));
+        let mut cursor = tc.high_thresh.next_down();
+        for mut d in demoted {
+            while cursor >= tc.low_thresh && used_low_bits.contains(&cursor.to_bits()) {
+                cursor = cursor.next_down();
+            }
+            if cursor < tc.low_thresh || !cursor.is_finite() {
+                break;
+            }
+            let real = d.score;
+            d.score = cursor;
+            let bits = cursor.to_bits();
+            used_low_bits.insert(bits);
+            restore_scores.insert(bits, real);
+            kept.push(d);
+            cursor = cursor.next_down();
+        }
+    }
+    (kept, restore_scores)
+}
+
 fn tracked_boxes_json(tracks: &[TrackedDetection], classes: &[String]) -> Vec<serde_json::Value> {
     let name = |c: u32| classes.get(c as usize).cloned().unwrap_or_else(|| c.to_string());
     tracks
@@ -407,6 +472,10 @@ pub fn predict(args: PredictArgs, out: Out) -> Result<(), CliError> {
     if let Some((_, cal)) = &calibration {
         predictor = predictor.with_calibrated_thresholds(cal).map_err(|e| engine_error("predict", e))?;
     }
+    let calibrated_gate = calibration
+        .as_ref()
+        .filter(|(_, cal)| !cal.is_empty())
+        .map(|(_, cal)| (cal.global.best_conf, cal.per_class_map()));
     if let Some(tc) = &track_cfg {
         let mut pcfg = predictor.config().clone();
         pcfg.conf = track_det_conf(pcfg.conf, tc.low_thresh, score_rule, effective_head);
@@ -417,7 +486,7 @@ pub fn predict(args: PredictArgs, out: Out) -> Result<(), CliError> {
                 .map(|(&cls, &v)| (cls, track_det_conf(v, tc.low_thresh, score_rule, effective_head)))
                 .collect();
             predictor.set_per_class_conf(Some(lowered)).map_err(|e| engine_error("predict", e))?;
-            predictor.set_conf_inclusive(false);
+            predictor.set_conf_inclusive(tc.low_thresh == 0.0);
         }
     }
     let mut tracker = match &track_cfg {
@@ -457,7 +526,26 @@ pub fn predict(args: PredictArgs, out: Out) -> Result<(), CliError> {
         p.timing.total_ms += decode_ms;
         let tracks = if let Some(trk) = &mut tracker {
             let t_trk = Instant::now();
-            let active = trk.update(&p.detections);
+            let active = if let Some((global_conf, per_class)) = &calibrated_gate {
+                let (filtered, restore) = filter_detections_for_tracker(
+                    &p.detections,
+                    trk.config(),
+                    trk.active_count() > 0,
+                    *global_conf,
+                    per_class,
+                );
+                let mut active = trk.update(&filtered);
+                if !restore.is_empty() {
+                    for tr in &mut active {
+                        if let Some(&real) = restore.get(&tr.score.to_bits()) {
+                            tr.score = real;
+                        }
+                    }
+                }
+                active
+            } else {
+                trk.update(&p.detections)
+            };
             let trk_ms = t_trk.elapsed().as_secs_f64() * 1e3;
             p.timing.postprocess_ms += trk_ms;
             p.timing.total_ms += trk_ms;
@@ -700,5 +788,94 @@ mod tests {
             "leftover temp file: {:?}",
             dir_names(dir.path())
         );
+    }
+
+    fn det(class: u32, score: f32, x1: f32, y1: f32, x2: f32, y2: f32) -> Detection {
+        Detection { bbox: folo_vision::Xyxy { x1, y1, x2, y2 }, score, class }
+    }
+
+    fn step_calibrated(
+        trk: &mut ByteTracker,
+        dets: &[Detection],
+        global_conf: f32,
+        per_class: &BTreeMap<u32, f32>,
+    ) -> Vec<TrackedDetection> {
+        let (filtered, restore) =
+            filter_detections_for_tracker(dets, trk.config(), trk.active_count() > 0, global_conf, per_class);
+        let mut active = trk.update(&filtered);
+        for tr in &mut active {
+            if let Some(&real) = restore.get(&tr.score.to_bits()) {
+                tr.score = real;
+            }
+        }
+        active
+    }
+
+    #[test]
+    fn calibrated_thresholds_gate_track_admission_and_preserve_stage2_recovery() {
+        // 1. All-1.0 calibration blocks new tracks even with low tracker thresholds.
+        let low_tc = TrackConfig {
+            high_thresh: 0.001,
+            low_thresh: 0.0,
+            new_track_thresh: 0.001,
+            ..TrackConfig::default()
+        };
+        let mut trk = ByteTracker::new(low_tc.clone()).unwrap();
+        let all_one = BTreeMap::from([(0, 1.0), (1, 1.0)]);
+        let frame0 = vec![det(0, 0.002, 10.0, 10.0, 30.0, 30.0), det(1, 0.006, 40.0, 40.0, 60.0, 60.0)];
+        assert!(step_calibrated(&mut trk, &frame0, 1.0, &all_one).is_empty());
+
+        // 2. Per-class `{0: 0.0, 1: 1.0}` admits class 0 while blocking class 1 on frames 0 and 1.
+        let mut trk = ByteTracker::new(low_tc).unwrap();
+        let mixed = BTreeMap::from([(0, 0.0), (1, 1.0)]);
+        let out0 = step_calibrated(&mut trk, &frame0, 0.0, &mixed);
+        assert_eq!(out0.len(), 1);
+        assert_eq!(out0[0].class_id, 0);
+        let out1 = step_calibrated(&mut trk, &frame0, 0.0, &mixed);
+        assert_eq!(out1.len(), 1);
+        assert_eq!(out1[0].class_id, 0);
+
+        // 3. Stage-2 occlusion recovery keeps an existing active track alive at both `high <= score < cls_thresh`
+        //    and `low <= score < high`, restores the exact detector score, and refuses spawning a new track below
+        //    `cls_thresh`.
+        let tc = TrackConfig {
+            high_thresh: 0.5,
+            low_thresh: 0.1,
+            new_track_thresh: 0.6,
+            ..TrackConfig::default()
+        };
+        let mut trk = ByteTracker::new(tc).unwrap();
+        let cal = BTreeMap::from([(0, 0.8)]);
+        let t0 = step_calibrated(&mut trk, &[det(0, 0.85, 10.0, 10.0, 50.0, 50.0)], 0.8, &cal);
+        assert_eq!(t0.len(), 1);
+        let id = t0[0].track_id;
+
+        // Frame 1: track 1 drops to 0.65 (in `[high_thresh, cls_thresh)`), and an unrelated box at 0.72 tries to spawn.
+        let t1 = step_calibrated(
+            &mut trk,
+            &[det(0, 0.65, 11.0, 10.0, 51.0, 50.0), det(0, 0.72, 120.0, 120.0, 160.0, 160.0)],
+            0.8,
+            &cal,
+        );
+        assert_eq!(t1.len(), 1, "unrelated 0.72 box below 0.8 calibration must not spawn a track");
+        assert_eq!(t1[0].track_id, id);
+        assert_eq!(t1[0].score, 0.65, "exact score must be restored after stage-2 demotion");
+
+        // Frame 2: track 1 drops further to 0.25 (in `[low_thresh, high_thresh)`): still recovered with exact score.
+        let t2 = step_calibrated(&mut trk, &[det(0, 0.25, 12.0, 10.0, 52.0, 50.0)], 0.8, &cal);
+        assert_eq!(t2.len(), 1);
+        assert_eq!(t2[0].track_id, id);
+        assert_eq!(t2[0].score, 0.25);
+
+        // 4. When `low_thresh == high_thresh`, stage-2 is disabled and sub-calibrated detections are dropped cleanly.
+        let tight = TrackConfig {
+            high_thresh: 0.5,
+            low_thresh: 0.5,
+            new_track_thresh: 0.5,
+            ..TrackConfig::default()
+        };
+        let mut trk = ByteTracker::new(tight).unwrap();
+        assert_eq!(step_calibrated(&mut trk, &[det(0, 0.9, 10.0, 10.0, 50.0, 50.0)], 0.8, &cal).len(), 1);
+        assert!(step_calibrated(&mut trk, &[det(0, 0.6, 10.0, 10.0, 50.0, 50.0)], 0.8, &cal).is_empty());
     }
 }
