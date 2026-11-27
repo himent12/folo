@@ -89,6 +89,8 @@ pub struct Store {
     pub previews: HashMap<String, Load<Vec<ImageInfo>>>,
     pub models: Load<Vec<Model>>,
     pub evals: HashMap<String, Load<ModelEval>>,
+    /// On-demand per-class confidence threshold calibrations (`POST /api/val`), keyed by model id.
+    pub calibrations: HashMap<String, Load<folo_vision::ThresholdCalibration>>,
     /// Per dataset, its issue counts by severity (fetched when it has broken labels).
     pub issues: HashMap<String, Load<IssueCounts>>,
     pub runs: Load<Vec<Run>>,
@@ -149,6 +151,7 @@ impl Store {
             previews: HashMap::new(),
             models: Load::Idle,
             evals: HashMap::new(),
+            calibrations: HashMap::new(),
             issues: HashMap::new(),
             runs: Load::Idle,
             run_data: HashMap::new(),
@@ -197,6 +200,11 @@ impl Store {
     /// Whether the connected server advertises `run_cli` (`GET /api/runs/{id}/cli`).
     pub fn supports_run_cli(&self) -> bool {
         self.features.iter().any(|f| f == "run_cli")
+    }
+
+    /// Whether the connected server advertises `threshold_calibration` (`POST /api/val`).
+    pub fn supports_threshold_calibration(&self) -> bool {
+        self.features.iter().any(|f| f == FEATURE_THRESHOLD_CALIBRATION)
     }
 
     /// Pull canonical `folo2-*` run/model architectures known to the backend into the store cache.

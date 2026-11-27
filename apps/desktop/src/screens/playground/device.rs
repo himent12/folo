@@ -2,13 +2,16 @@
 
 use std::rc::Rc;
 
+use folo_ui::prelude::FluentBuilder;
 use folo_ui::{
-    AnyElement, Context, FontWeight, IntoElement, ParentElement, SharedString, Styled, Window, div, px,
+    AnyElement, Context, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString,
+    StatefulInteractiveElement, Styled, Window, div, px, relative,
 };
 
+use crate::api::PredictResponse;
 use crate::app::FoloApp;
 use crate::store::Load;
-use crate::theme::{theme, ty};
+use crate::theme::{Theme, theme, ty};
 use crate::ui::*;
 
 impl FoloApp {
@@ -97,4 +100,107 @@ pub(super) fn device_name(device: &str, system: Option<&crate::api::SystemInfo>)
         .and_then(|n| n.parse::<u32>().ok())
         .and_then(|n| system?.gpus.iter().find(|g| g.ordinal == n))
         .map_or(device.to_string(), |g| crate::ui::short_gpu(&g.name))
+}
+
+/// Latency breakdown strip at the foot of the Playground side rail.
+pub(super) fn play_timing_panel(
+    t: &Theme,
+    p: &PredictResponse,
+    system: Option<&crate::api::SystemInfo>,
+    simulated: bool,
+    e2e: bool,
+) -> AnyElement {
+    let total = p.timing.total_ms.max(0.001);
+    let seg = |v: f64, c| {
+        let frac = if v.is_finite() { (v / total).clamp(0.0, 1.0) as f32 } else { 0.0 };
+        div().h_full().w(relative(frac)).bg(c)
+    };
+    let (c_pre, c_model, c_nms) = (
+        crate::theme::alpha(t.text_tertiary, if t.is_dark() { 0.7 } else { 0.8 }),
+        t.text_secondary,
+        crate::theme::alpha(t.text_tertiary, 0.3),
+    );
+    div()
+        .w_full()
+        .flex()
+        .flex_col()
+        .gap(px(8.))
+        .px(px(16.))
+        .py(px(12.))
+        .border_t_1()
+        .border_color(t.line_subtle)
+        .child(
+            div()
+                .flex()
+                .justify_between()
+                .items_start()
+                .gap(px(8.))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.))
+                        .child(
+                            text(ty::SM, t.text_secondary)
+                                .font_weight(FontWeight::MEDIUM)
+                                .child(if simulated { "Simulated latency" } else { "Latency" }),
+                        )
+                        .child(text(ty::SM, t.text_tertiary).tnum().whitespace_normal().child(
+                            if simulated {
+                                "one image".to_string()
+                            } else {
+                                format!("{} · one image", device_name(&p.device, system))
+                            },
+                        )),
+                )
+                .child(metric(t, format!("{:.1}", p.timing.total_ms), "ms", ty::LG, ty::SM)),
+        )
+        .child(
+            div()
+                .flex()
+                .h(px(6.))
+                .gap(px(2.))
+                .rounded_full()
+                .overflow_hidden()
+                .child(seg(p.timing.preprocess_ms, c_pre))
+                .child(seg(p.timing.inference_ms, c_model))
+                .child(seg(p.timing.postprocess_ms, c_nms).border_1().border_color(t.text_tertiary)),
+        )
+        .child(
+            div().flex().flex_wrap().gap_x(px(12.)).gap_y(px(4.)).children(
+                [
+                    ("Pre", "Preprocess", p.timing.preprocess_ms, c_pre),
+                    ("Infer", "Inference", p.timing.inference_ms, c_model),
+                    (
+                        "Post",
+                        if e2e {
+                            "Postprocess · box decoding"
+                        } else {
+                            "Postprocess · box decoding and NMS"
+                        },
+                        p.timing.postprocess_ms,
+                        c_nms,
+                    ),
+                ]
+                .into_iter()
+                .map(|(n, full, v, c)| {
+                    div()
+                        .id(SharedString::from(format!("lat-{n}")))
+                        .tooltip(crate::controls::tip(full, None))
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .gap(px(5.))
+                        .whitespace_nowrap()
+                        .child(
+                            swatch(c, 8.).when(n == "Post", |d| d.border_1().border_color(t.text_tertiary)),
+                        )
+                        .child(text(ty::SM, t.text_tertiary).child(n))
+                        .child(text(ty::SM, t.text_secondary).tnum().child(format!("{v:.1} ms")))
+                }),
+            ),
+        )
+        .into_any_element()
 }

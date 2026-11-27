@@ -80,11 +80,13 @@ impl FoloApp {
                 window,
                 cx,
                 act(move |this, w, cx| {
-                    this.play_pred = Load::Idle;
-                    this.navigate(Route::Playground, w, cx);
-                    this.pick_play_model(mid.clone(), cx);
+                    this.open_model_in_playground(mid.clone(), true, w, cx);
                 }),
             )
+            .tooltip(crate::controls::tip(
+                "Open in Playground with calibrated or optimal F1 thresholds when available",
+                None,
+            ))
             .into_any_element();
         let export_btn = self.export_menu(&m, window, cx);
         let e2e = self.model_e2e(&m);

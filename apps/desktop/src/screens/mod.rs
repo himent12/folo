@@ -243,6 +243,7 @@ impl FoloApp {
         s.images.clear();
         s.previews.clear();
         s.evals.clear();
+        s.calibrations.clear();
         // Per-dataset issue counts too: ids repeat across servers, and a fetch dropped by a
         // backend switch would otherwise stay Loading.
         s.issues.clear();

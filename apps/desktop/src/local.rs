@@ -256,6 +256,9 @@ fn run(
         ..p.config().clone()
     };
     p.set_config(cfg).map_err(engine_error)?;
+    p.set_per_class_conf(req.per_class_conf.as_ref().filter(|m| !m.is_empty()).cloned())
+        .map_err(engine_error)?;
+    p.set_conf_inclusive(req.conf_inclusive);
     let out = p.predict(&img).map_err(engine_error)?;
     let timing = folo_vision::Timing::new(
         out.timing.preprocess_ms + decode_ms,
@@ -315,6 +318,8 @@ mod tests {
             conf: 0.05,
             iou: 0.7,
             max_det: 300,
+            per_class_conf: None,
+            conf_inclusive: false,
         };
         let r = run(&p, &png(64, 48), &req, "CPU", &Ticket::take(&Arc::default())).unwrap();
         assert_eq!((r.image.width, r.image.height), (64, 48));
@@ -371,6 +376,8 @@ mod tests {
             conf: 0.05,
             iou: 0.7,
             max_det: 300,
+            per_class_conf: None,
+            conf_inclusive: false,
         };
         let ticket = Ticket::take(&Arc::default());
         let r = run(&retrained, &png(64, 48), &req, "CPU", &ticket).unwrap();
@@ -398,6 +405,8 @@ mod tests {
             conf: 0.05,
             iou: 0.7,
             max_det: 300,
+            per_class_conf: None,
+            conf_inclusive: false,
         };
         let image = png(64, 48);
         let line = Arc::default();
@@ -510,6 +519,8 @@ mod tests {
             conf: 0.05,
             iou: 0.7,
             max_det: 300,
+            per_class_conf: None,
+            conf_inclusive: false,
         };
         let server = api.predict(&req).unwrap();
         let top = |r: &PredictResponse| r.boxes.iter().filter(|b| b.score >= 0.25).count();

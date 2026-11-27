@@ -1,5 +1,6 @@
 //! Playground multi-image / folder batch state, folder scanner, and compact filmstrip UI.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
@@ -9,7 +10,7 @@ use folo_ui::{
     StatefulInteractiveElement, Styled, Window, div, px,
 };
 
-use super::page::filter_detections;
+use super::thresholds::{filter_detections_with_per_class, thresholds_match};
 use crate::api::{ApiError, ApiResult, PredictResponse};
 use crate::app::{FoloApp, act};
 use crate::controls::Btn;
@@ -76,6 +77,7 @@ pub struct BatchItemResult {
     pub iou_bits: u32,
     pub target: Option<crate::local::Target>,
     pub floor: f32,
+    pub per_class_conf: BTreeMap<u32, f32>,
     /// Content hash of file bytes used for inference (`None` for server dataset images).
     pub content_hash: Option<u64>,
 }
@@ -88,12 +90,13 @@ impl BatchItemResult {
         iou: f32,
         target: Option<crate::local::Target>,
         conf: f32,
+        per_class: &BTreeMap<u32, f32>,
         e2e: bool,
     ) -> bool {
         self.model_id == model_id
             && self.target == target
             && (e2e || self.iou_bits == iou.to_bits())
-            && conf >= self.floor - 1e-6
+            && thresholds_match(&self.per_class_conf, self.floor, conf, per_class)
     }
 }
 
@@ -257,11 +260,12 @@ impl PlayBatchState {
         }
     }
 
-    /// Marks any completed item whose fetched confidence floor is above `conf` back to `Pending`.
-    pub fn invalidate_below_conf(&mut self, conf: f32) {
+    /// Marks any completed item whose fetched confidence floor or per-class map no longer matches
+    /// `(conf, per_class)` back to `Pending`.
+    pub fn invalidate_for_thresholds(&mut self, conf: f32, per_class: &BTreeMap<u32, f32>) {
         for item in &mut self.items {
             if let BatchItemStatus::Done(res) = &item.status
-                && conf < res.floor - 1e-6
+                && !thresholds_match(&res.per_class_conf, res.floor, conf, per_class)
             {
                 item.status = BatchItemStatus::Pending;
             }
@@ -269,6 +273,7 @@ impl PlayBatchState {
     }
 
     /// Returns the fresh `BatchItemResult` for item `idx` if it matches current Playground params.
+    #[allow(clippy::too_many_arguments)]
     pub fn fresh_result(
         &self,
         idx: usize,
@@ -276,22 +281,29 @@ impl PlayBatchState {
         iou: f32,
         target: Option<crate::local::Target>,
         conf: f32,
+        per_class: &BTreeMap<u32, f32>,
         e2e: bool,
     ) -> Option<&BatchItemResult> {
         let item = self.items.get(idx)?;
         match &item.status {
-            BatchItemStatus::Done(res) if res.matches_current(model_id, iou, target, conf, e2e) => Some(res),
+            BatchItemStatus::Done(res)
+                if res.matches_current(model_id, iou, target, conf, per_class, e2e) =>
+            {
+                Some(res)
+            }
             _ => None,
         }
     }
 
-    /// Computes live done/failed/running/detection counts filtered at `(conf, class_filter)`.
+    /// Computes live done/failed/running/detection counts filtered at `(conf, per_class, class_filter)`.
+    #[allow(clippy::too_many_arguments)]
     pub fn summary(
         &self,
         model_id: Option<&str>,
         iou: f32,
         target: Option<crate::local::Target>,
         conf: f32,
+        per_class: &BTreeMap<u32, f32>,
         class_filter: Option<u32>,
         e2e: bool,
     ) -> BatchSummary {
@@ -301,9 +313,11 @@ impl PlayBatchState {
                 BatchItemStatus::Running => s.running += 1,
                 BatchItemStatus::Failed(_) => s.failed += 1,
                 BatchItemStatus::Done(res) => {
-                    if model_id.is_some_and(|m| res.matches_current(m, iou, target, conf, e2e)) {
+                    if model_id.is_some_and(|m| res.matches_current(m, iou, target, conf, per_class, e2e)) {
                         s.done += 1;
-                        s.total_detections += filter_detections(&res.pred.boxes, conf, class_filter).len();
+                        s.total_detections +=
+                            filter_detections_with_per_class(&res.pred.boxes, conf, per_class, class_filter)
+                                .len();
                     }
                 }
                 BatchItemStatus::Pending => {}
@@ -430,6 +444,7 @@ impl FoloApp {
             self.play_iou,
             self.play_target,
             self.play_conf,
+            &self.play_thresholds.per_class,
             eff_class,
             e2e,
         );
@@ -553,6 +568,7 @@ impl FoloApp {
             self.play_iou,
             self.play_target,
             self.play_conf,
+            &self.play_thresholds.per_class,
             self.play_class,
             e2e,
             &model_classes,
@@ -562,6 +578,7 @@ impl FoloApp {
             self.play_iou,
             self.play_target,
             self.play_conf,
+            &self.play_thresholds.per_class,
             self.play_class,
             e2e,
         );
@@ -636,10 +653,23 @@ impl FoloApp {
                         }
                         BatchItemStatus::Done(res) => {
                             let fresh = model_id.as_deref().is_some_and(|m| {
-                                res.matches_current(m, self.play_iou, self.play_target, self.play_conf, e2e)
+                                res.matches_current(
+                                    m,
+                                    self.play_iou,
+                                    self.play_target,
+                                    self.play_conf,
+                                    &self.play_thresholds.per_class,
+                                    e2e,
+                                )
                             });
                             if fresh {
-                                let n = filter_detections(&res.pred.boxes, self.play_conf, eff_class).len();
+                                let n = filter_detections_with_per_class(
+                                    &res.pred.boxes,
+                                    self.play_conf,
+                                    &self.play_thresholds.per_class,
+                                    eff_class,
+                                )
+                                .len();
                                 (t.success_solid, n.to_string(), plural(n, "detection"))
                             } else {
                                 (
@@ -789,6 +819,7 @@ mod tests {
             iou_bits: iou.to_bits(),
             target: None,
             floor,
+            per_class_conf: BTreeMap::new(),
             content_hash: None,
         }
     }
@@ -832,12 +863,18 @@ mod tests {
                 ScoredBox { class: 1, name: "square".into(), score: 0.2, x1: 60., y1: 10., x2: 90., y2: 40. },
             ],
         );
-        assert!(res.matches_current("m_1", 0.7, None, 0.25, false));
-        assert!(!res.matches_current("m_2", 0.7, None, 0.25, false));
-        assert!(!res.matches_current("m_1", 0.5, None, 0.25, false));
-        assert!(res.matches_current("m_1", 0.5, None, 0.25, true), "e2e ignores IoU");
-        assert!(!res.matches_current("m_1", 0.7, Some(crate::local::Target::Cpu), 0.25, false));
-        assert!(!res.matches_current("m_1", 0.7, None, 0.02, false), "below fetched floor");
+        let empty = BTreeMap::new();
+        assert!(res.matches_current("m_1", 0.7, None, 0.25, &empty, false));
+        assert!(!res.matches_current("m_2", 0.7, None, 0.25, &empty, false));
+        assert!(!res.matches_current("m_1", 0.5, None, 0.25, &empty, false));
+        assert!(res.matches_current("m_1", 0.5, None, 0.25, &empty, true), "e2e ignores IoU");
+        assert!(!res.matches_current("m_1", 0.7, Some(crate::local::Target::Cpu), 0.25, &empty, false));
+        assert!(!res.matches_current("m_1", 0.7, None, 0.02, &empty, false), "below fetched floor");
+        let ov = BTreeMap::from([(0u32, 0.8f32)]);
+        assert!(
+            !res.matches_current("m_1", 0.7, None, 0.25, &ov, false),
+            "per-class overrides invalidate scalar cache"
+        );
     }
 
     #[test]
@@ -885,7 +922,7 @@ mod tests {
         assert!(st.is_active());
         assert_eq!(batch_tile_label("shapes / a.png"), "a.png");
 
-        let s = st.summary(Some("m_1"), 0.7, None, 0.25, None, false);
+        let s = st.summary(Some("m_1"), 0.7, None, 0.25, &BTreeMap::new(), None, false);
         assert_eq!((s.total, s.done, s.running, s.total_detections), (2, 1, 1, 1));
 
         assert!(st.cancel());

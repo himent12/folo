@@ -2,14 +2,14 @@
 //! Batch Detections CSV (`filename,class,confidence,x1,y1,x2,y2,width,height`), and per-image
 //! Batch Summary CSV (`filename,status,detection_count,classes,top_confidence,total_ms,width,height,error`).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use folo_ui::{
     AnyElement, Context, IntoElement, ParentElement, StatefulInteractiveElement, Styled, Window, div, px,
 };
 
 use super::batch::{BatchItemResult, BatchItemStatus, batch_tile_label};
-use super::page::filter_detections;
+use super::thresholds::filter_detections_with_per_class;
 use crate::api::{PredictResponse, ScoredBox, Timing};
 use crate::app::{FoloApp, act};
 use crate::controls::Btn;
@@ -56,6 +56,7 @@ pub fn batch_detections_json(
     model: &str,
     model_id: &str,
     conf: f32,
+    per_class_conf: Option<&BTreeMap<u32, f32>>,
     iou: Option<f32>,
     class_filter: Option<u32>,
     total_images: usize,
@@ -78,6 +79,8 @@ pub fn batch_detections_json(
         model: &'a str,
         model_id: &'a str,
         conf: f32,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        per_class_conf: Option<&'a BTreeMap<u32, f32>>,
         #[serde(skip_serializing_if = "Option::is_none")]
         iou: Option<f32>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -107,6 +110,7 @@ pub fn batch_detections_json(
         model,
         model_id,
         conf,
+        per_class_conf: per_class_conf.filter(|m| !m.is_empty()),
         iou,
         class_filter,
         total_images,
@@ -211,7 +215,15 @@ impl FoloApp {
         let e2e = self.play_shown_model().is_some_and(|m| self.model_e2e(m));
         (0..self.play_batch.items.len()).any(|i| {
             self.play_batch
-                .fresh_result(i, model_id, self.play_iou, self.play_target, self.play_conf, e2e)
+                .fresh_result(
+                    i,
+                    model_id,
+                    self.play_iou,
+                    self.play_target,
+                    self.play_conf,
+                    &self.play_thresholds.per_class,
+                    e2e,
+                )
                 .is_some()
         })
     }
@@ -234,9 +246,15 @@ impl FoloApp {
                 self.play_iou,
                 self.play_target,
                 self.play_conf,
+                &self.play_thresholds.per_class,
                 e2e,
             ) {
-                let boxes = filter_detections(&res.pred.boxes, self.play_conf, eff_class);
+                let boxes = filter_detections_with_per_class(
+                    &res.pred.boxes,
+                    self.play_conf,
+                    &self.play_thresholds.per_class,
+                    eff_class,
+                );
                 owned.push((batch_tile_label(item.name.as_ref()).to_string(), res, boxes));
             }
         }
@@ -262,6 +280,7 @@ impl FoloApp {
             model_name,
             model_id,
             self.play_conf,
+            Some(&self.play_thresholds.per_class),
             iou,
             self.play_batch.effective_class(self.play_class),
             self.play_batch.items.len(),
@@ -322,10 +341,22 @@ impl FoloApp {
             match &item.status {
                 BatchItemStatus::Done(res) => {
                     let fresh = model_id.is_some_and(|m| {
-                        res.matches_current(m, self.play_iou, self.play_target, self.play_conf, e2e)
+                        res.matches_current(
+                            m,
+                            self.play_iou,
+                            self.play_target,
+                            self.play_conf,
+                            &self.play_thresholds.per_class,
+                            e2e,
+                        )
                     });
                     if fresh {
-                        let vis = filter_detections(&res.pred.boxes, self.play_conf, eff_class);
+                        let vis = filter_detections_with_per_class(
+                            &res.pred.boxes,
+                            self.play_conf,
+                            &self.play_thresholds.per_class,
+                            eff_class,
+                        );
                         let mut class_names: BTreeSet<String> = BTreeSet::new();
                         let mut top_conf: Option<f32> = None;
                         for b in &vis {
@@ -618,7 +649,7 @@ mod tests {
             BatchImageExport { filename: "a.jpg", width: 640, height: 480, pred: &p1, boxes: &refs1 },
             BatchImageExport { filename: "b.jpg", width: 640, height: 480, pred: &p2, boxes: &refs2 },
         ];
-        let json = batch_detections_json("folo-n", "m_1", 0.25, Some(0.7), None, 3, &entries).unwrap();
+        let json = batch_detections_json("folo-n", "m_1", 0.25, None, Some(0.7), None, 3, &entries).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["mode"], "batch");
         assert_eq!(v["model"], "folo-n");

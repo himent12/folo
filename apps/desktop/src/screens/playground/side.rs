@@ -8,7 +8,7 @@ use folo_ui::{
     StatefulInteractiveElement, Styled, Window, div, px, relative,
 };
 
-use super::device::device_name;
+use super::device::play_timing_panel;
 use super::samples::{offered_conf, pick_val_samples, sample_tile_tip};
 use crate::app::{FoloApp, act};
 use crate::controls::Btn;
@@ -70,12 +70,12 @@ impl FoloApp {
                 }
             }),
         );
-        // The range widens to an applied threshold below the usual floor (a best-F1 confidence).
+        // The range widens to an applied threshold outside the usual slider band (e.g. calibrated thresholds).
         let conf = self.slider(
             "play-conf",
             self.play_conf,
             crate::app::PLAY_CONF_FLOOR.min(self.play_conf),
-            0.95,
+            0.95f32.max(self.play_conf),
             0.01,
             window,
             cx,
@@ -127,6 +127,8 @@ impl FoloApp {
         // In Compare mode, hide the NMS IoU slider only when BOTH Model A and Model B are end-to-end.
         let e2e_b = self.play_shown_model_b().is_some_and(|m| self.model_e2e(m));
         let e2e_controls = if compare_on { e2e && e2e_b } else { e2e };
+        let per_class_toggle = (!no_models).then(|| self.play_per_class_toggle(&t, window, cx));
+        let per_class_drawer = if !no_models { self.play_per_class_drawer(&t, window, cx) } else { None };
         let run_on = self.run_on(window, cx);
         let controls = div()
             .flex()
@@ -192,46 +194,54 @@ impl FoloApp {
             .when(!no_models, |d| {
                 d.child(run_on)
                     .child(field("Confidence", fmt_conf(self.play_conf), conf.into_any_element(), conf_help))
-                    // The model's best-F1 threshold (where its precision and recall were taken), one
-                    // click away while the slider is elsewhere.
-                    // A fixed row, so using it moves nothing: a secondary link while the slider is
-                    // elsewhere, a quiet note once it's there (accent stays the slider's).
-                    // Always there for a picked model (empty without a best-F1 threshold), so picking
-                    // one doesn't push what is under it down.
-                    .when(best_conf.is_none() && model.is_some(), |d| d.child(div().h(px(20.))))
-                    .when_some(best_conf, |d, c| {
-                        let at = (c - self.play_conf).abs() < 0.0005;
-                        let row = div().h(px(20.)).flex().justify_end().items_center();
-                        if at {
-                            return d.child(row.child(
-                                text(ty::SM, t.text_tertiary).child(format!("At best F1 ({})", fmt_conf(c))),
-                            ));
-                        }
-                        let link = div()
-                            .id("play-best-conf")
-                            .px(px(4.))
-                            .rounded(px(radius::SM))
-                            .cursor_pointer()
-                            .hover(|s| s.bg(t.bg_hover))
-                            .active(|s| s.bg(t.bg_active))
-                            // The shared inline-link look; -4 px so its text ends on the value above.
-                            .mr(px(-4.))
-                            .child(inline_link(&t, format!("Use {} (best F1)", fmt_conf(c))));
-                        d.child(row.child(self.bind(
-                            link,
-                            "play-best-conf",
-                            radius::SM,
-                            window,
-                            cx,
-                            act(move |this, w, cx| {
-                                // Below what's been fetched: set_play_conf fetches down to it.
-                                this.set_play_conf(c, cx);
-                                // The link becomes a note: focus moves to the slider it set.
-                                this.focus_key("play-conf", w, cx);
-                                cx.notify();
-                            }),
-                        )))
+                    // Compact sub-row below the Confidence slider: Per-class thresholds toggle on
+                    // the left and the model's best-F1 link/note on the right, adding zero extra
+                    // vertical height when collapsed so the 800 px rail keeps detections visible.
+                    .child({
+                        let best_el: Option<AnyElement> = best_conf.map(|c| {
+                            let at = (c - self.play_conf).abs() < 0.0005;
+                            if at {
+                                text(ty::SM, t.text_tertiary)
+                                    .child(format!("At best F1 ({})", fmt_conf(c)))
+                                    .into_any_element()
+                            } else {
+                                let link = div()
+                                    .id("play-best-conf")
+                                    .px(px(4.))
+                                    .rounded(px(radius::SM))
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(t.bg_hover))
+                                    .active(|s| s.bg(t.bg_active))
+                                    // The shared inline-link look; -4 px so its text ends on the value above.
+                                    .mr(px(-4.))
+                                    .child(inline_link(&t, format!("Use {} (best F1)", fmt_conf(c))));
+                                self.bind(
+                                    link,
+                                    "play-best-conf",
+                                    radius::SM,
+                                    window,
+                                    cx,
+                                    act(move |this, w, cx| {
+                                        // Below what's been fetched: set_play_conf fetches down to it.
+                                        this.set_play_conf(c, cx);
+                                        // The link becomes a note: focus moves to the slider it set.
+                                        this.focus_key("play-conf", w, cx);
+                                        cx.notify();
+                                    }),
+                                )
+                                .into_any_element()
+                            }
+                        });
+                        div()
+                            .h(px(22.))
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap(px(6.))
+                            .children(per_class_toggle)
+                            .children(best_el)
                     })
+                    .children(per_class_drawer)
                     // "NMS IoU": the suppression overlap, not the evaluation's IoU 0.50. An end-to-end
                     // model has no suppression step: the row says so instead of offering an inert slider.
                     .map(|d| {
@@ -277,13 +287,26 @@ impl FoloApp {
                 Load::Ready(p) => {
                     let eff_class = self.play_effective_class();
                     let above_conf: Vec<crate::api::ScoredBox> =
-                        p.boxes.iter().filter(|b| b.score >= self.play_conf).cloned().collect();
+                        super::thresholds::filter_detections_with_per_class(
+                            &p.boxes,
+                            self.play_conf,
+                            &self.play_thresholds.per_class,
+                            None,
+                        )
+                        .into_iter()
+                        .cloned()
+                        .collect();
                     let below_conf = p.boxes.len() - above_conf.len();
                     let vis: Vec<crate::api::ScoredBox> =
-                        super::page::filter_detections(&p.boxes, self.play_conf, eff_class)
-                            .into_iter()
-                            .cloned()
-                            .collect();
+                        super::thresholds::filter_detections_with_per_class(
+                            &p.boxes,
+                            self.play_conf,
+                            &self.play_thresholds.per_class,
+                            eff_class,
+                        )
+                        .into_iter()
+                        .cloned()
+                        .collect();
                     let mut class_counts: std::collections::BTreeMap<u32, (String, u64)> =
                         std::collections::BTreeMap::new();
                     for b in &above_conf {
@@ -532,126 +555,7 @@ impl FoloApp {
                             .into_any_element()
                         })
                         .collect();
-                    let total = p.timing.total_ms.max(0.001);
-                    let seg = |v: f64, c| {
-                        let frac = if v.is_finite() { (v / total).clamp(0.0, 1.0) as f32 } else { 0.0 };
-                        div().h_full().w(relative(frac)).bg(c)
-                    };
-                    // One neutral ramp: Inference (the bulk) in secondary ink, Preprocess tertiary a step
-                    // below it (70 % dark, 80 % light: each 3:1 on its panel), and Postprocess an outline
-                    // (a faint fill in a tertiary edge), in the bar and its key alike.
-                    let (c_pre, c_model, c_nms) = (
-                        crate::theme::alpha(t.text_tertiary, if t.is_dark() { 0.7 } else { 0.8 }),
-                        t.text_secondary,
-                        crate::theme::alpha(t.text_tertiary, 0.3),
-                    );
-                    let timing_el = div()
-                        .w_full()
-                        .flex()
-                        .flex_col()
-                        .gap(px(8.))
-                        .px(px(16.))
-                        .py(px(12.))
-                        .border_t_1()
-                        .border_color(t.line_subtle)
-                        .child(
-                            div()
-                                .flex()
-                                .justify_between()
-                                .items_start()
-                                .gap(px(8.))
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .flex()
-                                        .flex_col()
-                                        .gap(px(2.))
-                                        // Where the number comes from: the built-in demo simulates it; a
-                                        // server or this app times one image (not sustained throughput).
-                                        .child(
-                                            text(ty::SM, t.text_secondary)
-                                                .font_weight(FontWeight::MEDIUM)
-                                                .child(if simulated {
-                                                    "Simulated latency"
-                                                } else {
-                                                    "Latency"
-                                                }),
-                                        )
-                                        // Under the label, whole: beside it a local GPU's name left no room
-                                        // ("RTX 4080 SUPER in this app · o…").
-                                        .child(
-                                            text(ty::SM, t.text_tertiary).tnum().whitespace_normal().child(
-                                                // The demo has no device of its own to name.
-                                                if simulated {
-                                                    "one image".to_string()
-                                                } else {
-                                                    format!(
-                                                        "{} · one image",
-                                                        device_name(&p.device, self.store.system.ready()),
-                                                    )
-                                                },
-                                            ),
-                                        ),
-                                )
-                                .child(metric(&t, format!("{:.1}", p.timing.total_ms), "ms", ty::LG, ty::SM)),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .h(px(6.))
-                                .gap(px(2.))
-                                .rounded_full()
-                                .overflow_hidden()
-                                .child(seg(p.timing.preprocess_ms, c_pre))
-                                .child(seg(p.timing.inference_ms, c_model))
-                                .child(
-                                    seg(p.timing.postprocess_ms, c_nms)
-                                        .border_1()
-                                        .border_color(t.text_tertiary),
-                                ),
-                        )
-                        .child(
-                            // One line in the 280 px rail: short stage names, the full name on hover. Whole
-                            // entries still wrap if the numbers get wide (100 ms inference on a narrow rail).
-                            div().flex().flex_wrap().gap_x(px(12.)).gap_y(px(4.)).children(
-                                [
-                                    ("Pre", "Preprocess", p.timing.preprocess_ms, c_pre),
-                                    ("Infer", "Inference", p.timing.inference_ms, c_model),
-                                    // The engine's postprocess: box decoding, and NMS unless the model
-                                    // is end-to-end (named as Studio names it).
-                                    (
-                                        "Post",
-                                        if e2e {
-                                            "Postprocess · box decoding"
-                                        } else {
-                                            "Postprocess · box decoding and NMS"
-                                        },
-                                        p.timing.postprocess_ms,
-                                        c_nms,
-                                    ),
-                                ]
-                                .into_iter()
-                                .map(|(n, full, v, c)| {
-                                    div()
-                                        .id(SharedString::from(format!("lat-{n}")))
-                                        .tooltip(crate::controls::tip(full, None))
-                                        .flex()
-                                        .flex_none()
-                                        .items_center()
-                                        .gap(px(5.))
-                                        .whitespace_nowrap()
-                                        .child(swatch(c, 8.).when(n == "Post", |d| {
-                                            d.border_1().border_color(t.text_tertiary)
-                                        }))
-                                        .child(text(ty::SM, t.text_tertiary).child(n))
-                                        .child(
-                                            text(ty::SM, t.text_secondary).tnum().child(format!("{v:.1} ms")),
-                                        )
-                                }),
-                            ),
-                        );
-                    timing = Some(timing_el.into_any_element());
+                    timing = Some(play_timing_panel(&t, p, self.store.system.ready(), simulated, e2e));
                     div()
                     .flex()
                     .flex_col()

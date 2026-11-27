@@ -47,6 +47,9 @@ pub(super) struct CloudSim {
     pub(super) release_error: Option<String>,
     /// Since when (seconds since `t0`) the worker hasn't answered: `unanswered_since` while it trains.
     pub(super) silent_since: Option<f64>,
+    /// Simulated prior spot preemption auto-resume (emits a replaced terminated instance in the
+    /// ledger and a realistic `folo-server` preemption recovery log entry).
+    pub(super) preempted: bool,
     /// What the last read of the run's log returned: the fixture's lines (how many) and its last
     /// epoch. The demo's lines are worked out from the clock when the log is read or streamed, so a
     /// read can return one its stream has not sent yet; the stream does not send it again (the demo
@@ -76,6 +79,7 @@ impl CloudSim {
             lost_at: None,
             release_error: None,
             silent_since: None,
+            preempted: false,
             read: (0, 0),
         }
     }
@@ -273,6 +277,32 @@ impl CloudSim {
             cost_usd: self.cost(self.lifetime()),
             error: self.release_error.clone().filter(|_| stuck),
         })
+    }
+
+    /// Prior replaced spot instance(s) in `/api/cloud/instances` when [`Self::preempted`] is set.
+    pub(super) fn prior_instances(&self, run_id: &str) -> Vec<CloudInstance> {
+        if !self.preempted {
+            return Vec::new();
+        }
+        let Some(base_id) = self.base.instance_id.as_deref() else {
+            return Vec::new();
+        };
+        let ended_at = (self.train_at() + 900.).min(self.elapsed()).max(self.train_at());
+        vec![CloudInstance {
+            id: format!("{base_id}_p1"),
+            connection_id: self.base.connection_id.clone(),
+            provider: self.base.provider.clone(),
+            provider_ref: Some(format!("{:016x}", hash(&format!("pod-p1-{run_id}")))[..14].to_string()),
+            name: format!("folo-{run_id}-p1"),
+            run_id: Some(run_id.to_string()),
+            offer: self.base.offer.clone(),
+            status: CloudInstanceStatus::Terminated,
+            created: self.at(0.),
+            ended: Some(self.at(ended_at)),
+            deadline: Some(self.at(self.base.max_hours as f64 * 3600.)),
+            cost_usd: self.cost(ended_at),
+            error: None,
+        }]
     }
 }
 
@@ -476,6 +506,28 @@ pub(super) fn no_instance(id: &str) -> ApiError {
 }
 
 impl MockBackend {
+    /// Marks the active training cloud run as having recovered from a spot preemption (1/3 retries
+    /// used, replaced instance in ledger, realistic `folo-server` preemption log entry).
+    pub fn cloud_preempted(self) -> Self {
+        for f in self.runs.lock().unwrap().iter_mut() {
+            if let Some(sim) =
+                f.cloud.as_mut().filter(|s| s.elapsed() >= s.train_at() && s.released_at().is_none())
+            {
+                sim.preempted = true;
+                let t = sim.at((sim.train_at() + 900.).min(sim.elapsed()).max(sim.train_at()));
+                let resume_epoch = ((sim.steps() / f.run.steps_per_epoch.max(1)).saturating_sub(2)).max(1);
+                f.logs.push(LogLine {
+                    t,
+                    level: LogLevel::Warn,
+                    message: format!(
+                        "worker preempted or lost (spot instance reclaimed); auto-resuming from synced checkpoint weights/last.folo (epoch {resume_epoch}, attempt 1/3 after 10.0s backoff)"
+                    ),
+                });
+            }
+        }
+        self
+    }
+
     pub(super) fn connection(&self, id: &str) -> ApiResult<CloudConnection> {
         self.connections.lock().unwrap().iter().find(|c| c.id == id).cloned().ok_or_else(|| no_connection(id))
     }

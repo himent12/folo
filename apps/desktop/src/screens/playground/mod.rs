@@ -14,6 +14,8 @@ mod side;
 mod side_compare;
 mod stage;
 mod stage_compare;
+mod thresholds;
+mod thresholds_ui;
 
 #[cfg(test)]
 pub(crate) use batch::batch_action_labels;
@@ -30,5 +32,12 @@ pub use export::{
     ExportPalette, export_filename, render_annotated_compare_png, render_annotated_single_png,
     render_image_to_rgba, write_export_bytes,
 };
-pub(crate) use page::{detections_json, filter_detections};
+pub(crate) use page::detections_json;
+#[cfg(test)]
+pub(crate) use page::filter_detections;
 pub(crate) use samples::pick_val_samples;
+pub use thresholds::{
+    MAX_THRESHOLDS_JSON_BYTES, PlayThresholdsState, calibration_to_overrides, effective_conf,
+    export_calibration_json, export_thresholds_json, filter_detections_with_per_class, fmt_threshold,
+    map_per_class_to_classes, parse_thresholds_json, round_conf, thresholds_match,
+};

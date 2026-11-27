@@ -131,6 +131,79 @@ impl MockBackend {
         })
     }
 
+    /// [`Backend::val_thresholds`]'s deterministic mock answer matching `folo-server`'s `mock/val.rs`.
+    pub(super) fn val_thresholds_for(
+        &self,
+        model_id: &str,
+        dataset_id: &str,
+        split: Split,
+    ) -> ApiResult<Option<folo_vision::ThresholdCalibration>> {
+        self.check()?;
+        let ds = self.fixture(dataset_id)?;
+        let images = match split {
+            Split::Train => ds.ds.splits.train,
+            Split::Val => ds.ds.splits.val,
+            Split::Test => ds.ds.splits.test,
+        };
+        if images == 0 {
+            return Err(ApiError::new(
+                "invalid_dataset",
+                format!("Dataset '{}' has no {} images", ds.ds.name, split.as_str()),
+            ));
+        }
+        let m = self
+            .models
+            .iter()
+            .find(|m| m.id == model_id)
+            .ok_or_else(|| ApiError::new("model_not_found", format!("No model {model_id}")))?;
+        let ev = self.eval_for(model_id)?;
+        let r3 = |v: f32| (v * 1000.0).round() / 1000.0;
+        let r4 = |v: f32| (v * 10000.0).round() / 10000.0;
+        let f1_of = |p: f32, r: f32| if p + r > 0.0 { r4(2.0 * p * r / (p + r)) } else { 0.0 };
+        let base_conf = m.metrics.and_then(|mm| mm.best_f1_conf).unwrap_or(0.35).clamp(0.05, 0.95);
+        let seed = hash(model_id) ^ hash(dataset_id);
+        let per_class: Vec<folo_vision::ClassThreshold> = ev
+            .per_class
+            .iter()
+            .map(|c| {
+                let h = hash(&format!("{seed}:{}:{}", c.class, split.as_str()));
+                let jitter = ((h % 17) as f32 - 8.0) * 0.015;
+                let best_conf = r3((base_conf + jitter).clamp(0.05, 0.95));
+                let precision = c.precision.clamp(0.0, 1.0);
+                let recall = c.recall.clamp(0.0, 1.0);
+                let truths = ((images.max(1) * 2) / ev.per_class.len().max(1) as u64).max(1);
+                let preds = ((truths as f32) * (recall / precision.max(0.05))).round().max(0.0) as u64;
+                folo_vision::ClassThreshold {
+                    class: c.class,
+                    best_conf,
+                    best_f1: f1_of(precision, recall),
+                    precision,
+                    recall,
+                    truths,
+                    preds,
+                }
+            })
+            .collect();
+        let macro_f1 = if per_class.is_empty() {
+            0.0
+        } else {
+            r4(per_class.iter().map(|c| c.best_f1).sum::<f32>() / per_class.len() as f32)
+        };
+        let (gp, gr) =
+            m.metrics.map_or((0.0, 0.0), |mm| (mm.precision.clamp(0.0, 1.0), mm.recall.clamp(0.0, 1.0)));
+        let global = if per_class.is_empty() {
+            folo_vision::OperatingPoint::default()
+        } else {
+            folo_vision::OperatingPoint {
+                best_conf: r3(base_conf),
+                best_f1: f1_of(gp, gr),
+                precision: gp,
+                recall: gr,
+            }
+        };
+        Ok(Some(folo_vision::ThresholdCalibration { global, per_class, macro_f1 }))
+    }
+
     /// [`Backend::predict`]'s answer.
     pub(super) fn predict_for(&self, req: &PredictRequest) -> ApiResult<PredictResponse> {
         self.check()?;
@@ -192,7 +265,14 @@ impl MockBackend {
                 (w, h, p, seed)
             }
         };
-        let mut boxes: Vec<ScoredBox> = raw.into_iter().filter(|b| b.score >= req.conf).collect();
+        let mut boxes: Vec<ScoredBox> = raw
+            .into_iter()
+            .filter(|b| {
+                let thresh =
+                    req.per_class_conf.as_ref().and_then(|m| m.get(&b.class).copied()).unwrap_or(req.conf);
+                if req.conf_inclusive { b.score >= thresh } else { b.score > thresh }
+            })
+            .collect();
         boxes.sort_by(|a, b| b.score.total_cmp(&a.score));
         boxes.truncate(req.max_det as usize);
         let scale = match m.arch.as_str() {

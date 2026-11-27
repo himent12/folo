@@ -5,12 +5,19 @@
 use std::rc::Rc;
 use std::sync::Arc;
 
-use folo_ui::{AnyElement, Context, IntoElement, ParentElement, Styled, Window, div, px};
+use folo_ui::prelude::FluentBuilder;
+use folo_ui::{
+    AnyElement, Context, FontWeight, IntoElement, ParentElement, StatefulInteractiveElement, Styled, Window,
+    div, px,
+};
 
-use crate::api::{Model, ModelEval, PrCurve};
-use crate::app::FoloApp;
+use crate::api::{Model, ModelEval, PrCurve, Split};
+use crate::app::{FoloApp, act};
 use crate::charts::{HoverFn, LineChart, Series, line_chart};
-use crate::theme::{theme, ty};
+use crate::controls::Btn;
+use crate::screens::playground::fmt_threshold;
+use crate::store::Load;
+use crate::theme::{radius, theme, ty};
 use crate::ui::*;
 
 /// The plot's height beside the table (its rows scroll inside the panel).
@@ -201,12 +208,230 @@ impl FoloApp {
         ));
         let stacked = self.pr_stacked(window);
         let table = self.class_table(m, ev, &lit, !stacked, window, cx);
+        let best_conf = super::detail::run_metrics(m)
+            .and_then(|mm| operating_conf(mm.best_f1_conf, mm.precision, mm.recall))
+            .or_else(|| ev.best_f1_conf.filter(|c| c.is_finite() && (0.0..=1.0).contains(c)));
+        let cal_dataset = ev.dataset_id.clone().or_else(|| {
+            m.run_id.as_deref().and_then(|rid| self.store.run(rid)).map(|r| r.config.dataset_id.clone())
+        });
+        let cal_split = ev.split.unwrap_or_else(|| {
+            cal_dataset
+                .as_deref()
+                .and_then(|id| self.store.dataset_summary(id))
+                .filter(|d| d.splits.val == 0)
+                .map_or(Split::Val, |_| Split::Train)
+        });
+        let cal_state = self.store.calibrations.get(&m.id).cloned();
+        let cal_loading = matches!(cal_state, Some(Load::Loading));
+        let cal_ready = matches!(&cal_state, Some(Load::Ready(cal)) if !cal.is_empty());
+        let can_calibrate = self.store.supports_threshold_calibration() && cal_dataset.is_some();
+
+        let cal_btn = can_calibrate.then(|| {
+            let mid = m.id.clone();
+            let dsid = cal_dataset.clone().unwrap();
+            if cal_loading {
+                self.button_disabled(
+                    "pr-calibrate-thresholds",
+                    "Calibrating…",
+                    Btn::Secondary,
+                    Some("icons/sliders-horizontal.svg"),
+                    "Computing per-class optimal F1 thresholds",
+                    window,
+                    cx,
+                )
+                .into_any_element()
+            } else {
+                self.button(
+                    "pr-calibrate-thresholds",
+                    if cal_ready { "Recalibrate" } else { "Calibrate thresholds" },
+                    Btn::Secondary,
+                    Some("icons/sliders-horizontal.svg"),
+                    window,
+                    cx,
+                    act(move |this, _, cx| {
+                        this.calibrate_model_thresholds(mid.clone(), dsid.clone(), cal_split, cx);
+                    }),
+                )
+                .tooltip(crate::controls::tip(
+                    "Run per-class optimal F1 confidence sweep via POST /api/val",
+                    None,
+                ))
+                .into_any_element()
+            }
+        });
+        let open_pg_btn = {
+            let mid = m.id.clone();
+            let label = if cal_ready { "Open calibrated in Playground" } else { "Open in Playground" };
+            self.button(
+                "pr-open-playground",
+                label,
+                if cal_ready { Btn::Primary } else { Btn::Secondary },
+                Some("icons/scan-eye.svg"),
+                window,
+                cx,
+                act(move |this, w, cx| {
+                    this.open_model_in_playground(mid.clone(), true, w, cx);
+                }),
+            )
+            .tooltip(crate::controls::tip(
+                if cal_ready {
+                    "Open in Playground with calibrated per-class thresholds applied"
+                } else {
+                    "Open in Playground at this model's best F1 operating threshold"
+                },
+                None,
+            ))
+            .into_any_element()
+        };
+
+        let cal_bar: Option<AnyElement> = match cal_state {
+            Some(Load::Ready(cal)) if cal.is_empty() => Some(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .px(px(16.))
+                    .py(px(8.))
+                    .border_b_1()
+                    .border_color(t.line_subtle)
+                    .bg(t.bg_raised)
+                    .child(
+                        text(ty::SM, t.text_tertiary)
+                            .whitespace_normal()
+                            .child("No ground-truth boxes in this split to calibrate per-class thresholds."),
+                    )
+                    .into_any_element(),
+            ),
+            Some(Load::Ready(cal)) => {
+                let mid_copy = m.id.clone();
+                let copy_btn = self.button(
+                    "pr-copy-thresholds",
+                    "Copy JSON",
+                    Btn::Secondary,
+                    Some("icons/copy.svg"),
+                    window,
+                    cx,
+                    act(move |this, _, cx| this.copy_model_calibration_json(&mid_copy, cx)),
+                );
+                let shown_limit = 6usize;
+                let extra_count = cal.per_class.len().saturating_sub(shown_limit);
+                let chips = cal.per_class.iter().take(shown_limit).map(|ct| {
+                    let cname = name(ct.class);
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(4.))
+                        .px(px(6.))
+                        .py(px(2.))
+                        .rounded(px(radius::SM))
+                        .bg(t.bg_inset)
+                        .border_1()
+                        .border_color(t.line_subtle)
+                        .child(div().size(px(6.)).rounded_full().bg(t.class_stroke(ct.class)))
+                        .child(text(ty::XS, t.text_secondary).child(cname))
+                        .child(text(ty::XS, t.text_primary).tnum().child(fmt_threshold(ct.best_conf)))
+                });
+                Some(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(10.))
+                        .px(px(16.))
+                        .py(px(8.))
+                        .border_b_1()
+                        .border_color(t.line_subtle)
+                        .bg(t.bg_raised)
+                        .child(
+                            div()
+                                .flex()
+                                .flex_wrap()
+                                .items_center()
+                                .gap(px(8.))
+                                .child(
+                                    text(ty::SM, t.text_primary)
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .tnum()
+                                        .child(format!(
+                                            "Calibrated · global {} · macro F1 {:.3}",
+                                            fmt_threshold(cal.global.best_conf),
+                                            cal.macro_f1
+                                        )),
+                                )
+                                .children(chips)
+                                .when(extra_count > 0, |d| {
+                                    d.child(
+                                        text(ty::XS, t.text_tertiary).child(format!("+{extra_count} more")),
+                                    )
+                                }),
+                        )
+                        .child(copy_btn)
+                        .into_any_element(),
+                )
+            }
+            Some(Load::Failed(err)) => {
+                let retry_btn = cal_dataset.map(|dsid| {
+                    let mid = m.id.clone();
+                    self.button(
+                        "pr-retry-calibrate",
+                        "Retry",
+                        Btn::Secondary,
+                        Some("icons/refresh-cw.svg"),
+                        window,
+                        cx,
+                        act(move |this, _, cx| {
+                            this.calibrate_model_thresholds(mid.clone(), dsid.clone(), cal_split, cx);
+                        }),
+                    )
+                });
+                Some(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(8.))
+                        .px(px(16.))
+                        .py(px(8.))
+                        .border_b_1()
+                        .border_color(t.line_subtle)
+                        .bg(t.danger_muted)
+                        .child(
+                            text(ty::SM, t.danger_text)
+                                .flex_1()
+                                .min_w_0()
+                                .whitespace_normal()
+                                .child(format!("Threshold calibration failed: {}", err.message)),
+                        )
+                        .children(retry_btn)
+                        .into_any_element(),
+                )
+            }
+            _ => None,
+        };
+
+        let header_meta = match best_conf {
+            Some(c) => format!("IoU 0.50 · best F1 @ {}", fmt_threshold(c)),
+            None => "IoU 0.50".to_string(),
+        };
         panel(&t)
             .flex_1()
             .min_w_0()
             .flex()
             .flex_col()
-            .child(panel_header(&t, "Precision–recall").child(caption(&t, "IoU 0.50")))
+            .child(
+                panel_header(&t, "Precision–recall").child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap(px(8.))
+                        .child(caption(&t, &header_meta))
+                        .children(cal_btn)
+                        .child(open_pg_btn),
+                ),
+            )
+            .children(cal_bar)
             .child(if stacked {
                 div()
                     .flex()

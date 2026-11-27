@@ -79,6 +79,7 @@ impl Backend for MockBackend {
             "run_cli".into(),
             "throughput".into(),
             "benchmark".into(),
+            FEATURE_THRESHOLD_CALIBRATION.into(),
             crate::arch::FEATURE_FOLO2_ARCH.into(),
             folo_api::FEATURE_CLOUD.into(),
         ];
@@ -232,6 +233,15 @@ impl Backend for MockBackend {
 
     fn model_eval(&self, id: &str) -> ApiResult<ModelEval> {
         self.eval_for(id)
+    }
+
+    fn val_thresholds(
+        &self,
+        model_id: &str,
+        dataset_id: &str,
+        split: Split,
+    ) -> ApiResult<Option<folo_vision::ThresholdCalibration>> {
+        self.val_thresholds_for(model_id, dataset_id, split)
     }
 
     fn model_arch(&self, id: &str) -> ApiResult<Option<String>> {
@@ -659,7 +669,13 @@ impl Backend for MockBackend {
             .lock()
             .unwrap()
             .iter()
-            .filter_map(|f| f.cloud.as_ref()?.instance(&f.run.id))
+            .flat_map(|f| {
+                f.cloud
+                    .as_ref()
+                    .map(|s| s.instance(&f.run.id).into_iter().chain(s.prior_instances(&f.run.id)))
+                    .into_iter()
+                    .flatten()
+            })
             .filter(|i| i.ended.as_ref().is_none_or(|e| *e >= week_ago))
             .collect();
         // Alive first, then the ended ones; newest first within each.

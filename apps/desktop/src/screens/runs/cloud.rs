@@ -6,12 +6,26 @@ use folo_ui::{
     StatefulInteractiveElement, Styled, Window, div, px,
 };
 
+use super::spot::{SpotRecoveryStatus, spot_recovery_status};
 use crate::api::{Label, Run, RunExt, time};
 use crate::app::{FoloApp, Route, act};
 use crate::theme::{radius, theme, ty};
 use crate::ui::*;
 
 impl FoloApp {
+    /// Spot preemption auto-resume status for cloud run `r` (`c = r.cloud`).
+    pub(super) fn run_spot_recovery(&self, r: &Run, c: &crate::api::RunCloud) -> SpotRecoveryStatus {
+        let provisions = self
+            .cloud
+            .providers
+            .ready()
+            .and_then(|ps| ps.iter().find(|p| p.id == c.provider))
+            .map_or(c.provider != "remote", |p| p.provisions);
+        let logs = self.store.logs.get(&r.id).and_then(|l| l.ready()).map(|h| h.lines.as_slice());
+        let instances = self.cloud.instances.ready().map(|v| v.as_slice());
+        spot_recovery_status(r, c, provisions, logs, instances)
+    }
+
     /// A cloud run's panel: its phases (done, current with its transfer, to come), then the
     /// instance, the cost so far (final once released), the time limit and the last checkpoint
     /// copied here. Before training its title says what the run waits on. As Studio's
@@ -179,6 +193,13 @@ impl FoloApp {
         };
         let synced =
             c.synced.as_deref().and_then(time::parse).map_or("none yet".to_string(), |s| time::ago(s, now));
+        let spot = self.run_spot_recovery(r, c);
+        let spot_banner = spot.banner().map(|(mark, words, tone)| spot_line(&t, mark, words, tone));
+        let spot_fact = div()
+            .id("cloud-spot-fact")
+            .tooltip(crate::controls::tip(spot.fact_tooltip(), None))
+            .child(value(spot.fact_value()))
+            .into_any_element();
         let title = match r.cloud_pending() {
             Some(c) => cloud_wait_title(c, &provider),
             None => "Cloud".to_string(),
@@ -190,18 +211,22 @@ impl FoloApp {
             .child(panel_header(&t, &title))
             .child(div().flex().gap(px(8.)).px(px(16.)).pt(px(14.)).pb(px(12.)).children(steps))
             .children(warn.map(|w| w.px(px(16.)).py(px(8.)).border_t_1().border_color(t.line_subtle)))
+            .children(spot_banner.map(|b| b.px(px(16.)).py(px(8.)).border_t_1().border_color(t.line_subtle)))
             .child(
                 div()
                     .flex()
-                    .gap(px(24.))
+                    .flex_wrap()
+                    .gap_x(px(24.))
+                    .gap_y(px(12.))
                     .px(px(16.))
                     .py(px(12.))
                     .border_t_1()
                     .border_color(t.line_subtle)
                     .child(fact("Instance", None, instance))
                     .child(fact("Cost", Some(120.), value(cost)))
-                    .child(fact("Limit", Some(240.), value(limit)))
-                    .child(fact("Last checkpoint copy", Some(140.), value(synced))),
+                    .child(fact("Limit", Some(220.), value(limit)))
+                    .child(fact("Last checkpoint copy", Some(140.), value(synced)))
+                    .child(fact("Spot auto-resume", Some(170.), spot_fact)),
             )
             .into_any_element()
     }
@@ -216,4 +241,21 @@ fn warn_line(t: &crate::theme::Theme, mark: &'static str, words: String) -> folo
         .gap(px(8.))
         .child(div().pt(px(2.)).flex_none().child(icon(mark, 14., t.warning_solid)))
         .child(text(ty::SM, t.text_secondary).flex_1().min_w_0().child(words))
+}
+
+/// Spot preemption auto-resume status line inside the Cloud panel.
+fn spot_line(t: &crate::theme::Theme, mark: &'static str, words: String, tone: Tone) -> folo_ui::Div {
+    let icon_color = match tone {
+        Tone::Danger => t.danger_solid,
+        Tone::Warning => t.warning_solid,
+        Tone::Info | Tone::Accent => t.accent_text,
+        Tone::Success => t.success_solid,
+        Tone::Neutral => t.text_secondary,
+    };
+    div()
+        .flex()
+        .items_start()
+        .gap(px(8.))
+        .child(div().pt(px(2.)).flex_none().child(icon(mark, 14., icon_color)))
+        .child(text(ty::SM, t.text_secondary).flex_1().min_w_0().whitespace_normal().child(words))
 }

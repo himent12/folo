@@ -152,9 +152,10 @@ impl FoloApp {
 
     fn play_det_sig(&self, idx: usize) -> Option<DetSig> {
         let pred = self.play_pred.ready()?;
-        let b = crate::screens::playground::filter_detections(
+        let b = crate::screens::playground::filter_detections_with_per_class(
             &pred.boxes,
             self.play_conf,
+            &self.play_thresholds.per_class,
             self.play_effective_class(),
         )
         .get(idx)

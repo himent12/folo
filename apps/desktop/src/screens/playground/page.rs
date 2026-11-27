@@ -13,6 +13,7 @@ use crate::ui::Tone;
 use crate::viz::DrawBox;
 
 /// Filters `boxes` by confidence threshold and optional class index.
+#[cfg(test)]
 pub(crate) fn filter_detections(boxes: &[ScoredBox], conf: f32, class: Option<u32>) -> Vec<&ScoredBox> {
     boxes.iter().filter(|b| b.score >= conf && class.is_none_or(|c| b.class == c)).collect()
 }
@@ -22,6 +23,7 @@ pub(crate) fn detections_json(
     model: &str,
     image: &str,
     conf: f32,
+    per_class_conf: Option<&std::collections::BTreeMap<u32, f32>>,
     iou: Option<f32>,
     class_filter: Option<u32>,
     boxes: &[&ScoredBox],
@@ -32,12 +34,23 @@ pub(crate) fn detections_json(
         image: &'a str,
         conf: f32,
         #[serde(skip_serializing_if = "Option::is_none")]
+        per_class_conf: Option<&'a std::collections::BTreeMap<u32, f32>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         iou: Option<f32>,
         #[serde(skip_serializing_if = "Option::is_none")]
         class_filter: Option<u32>,
         detections: &'a [&'a ScoredBox],
     }
-    Ok(serde_json::to_string_pretty(&Export { model, image, conf, iou, class_filter, detections: boxes })?)
+    let per_class_conf = per_class_conf.filter(|m| !m.is_empty());
+    Ok(serde_json::to_string_pretty(&Export {
+        model,
+        image,
+        conf,
+        per_class_conf,
+        iou,
+        class_filter,
+        detections: boxes,
+    })?)
 }
 
 impl FoloApp {
@@ -104,17 +117,22 @@ impl FoloApp {
 
     /// Boxes of the current prediction that pass the confidence threshold and active class filter.
     pub(crate) fn visible_boxes(&self, p: &PredictResponse, active: Option<usize>) -> Vec<DrawBox> {
-        filter_detections(&p.boxes, self.play_conf, self.play_effective_class())
-            .into_iter()
-            .enumerate()
-            .map(|(i, b)| DrawBox {
-                label: Some(b.name.clone().into()),
-                score: Some(b.score),
-                highlight: active == Some(i),
-                dim: active.is_some_and(|h| h != i),
-                ..DrawBox::new(b.class, b.x1, b.y1, b.x2, b.y2)
-            })
-            .collect()
+        super::thresholds::filter_detections_with_per_class(
+            &p.boxes,
+            self.play_conf,
+            &self.play_thresholds.per_class,
+            self.play_effective_class(),
+        )
+        .into_iter()
+        .enumerate()
+        .map(|(i, b)| DrawBox {
+            label: Some(b.name.clone().into()),
+            score: Some(b.score),
+            highlight: active == Some(i),
+            dim: active.is_some_and(|h| h != i),
+            ..DrawBox::new(b.class, b.x1, b.y1, b.x2, b.y2)
+        })
+        .collect()
     }
 
     /// Boxes of Model B's prediction that pass the confidence threshold and active class filter.
@@ -250,10 +268,15 @@ impl FoloApp {
     /// doesn't win); otherwise the hover does, as in the inspector.
     pub fn play_active(&self, window: &Window, cx: &mut Context<Self>) -> Option<usize> {
         let eff_class = self.play_effective_class();
-        let n = self
-            .play_pred
-            .ready()
-            .map_or(0, |p| filter_detections(&p.boxes, self.play_conf, eff_class).len());
+        let n = self.play_pred.ready().map_or(0, |p| {
+            super::thresholds::filter_detections_with_per_class(
+                &p.boxes,
+                self.play_conf,
+                &self.play_thresholds.per_class,
+                eff_class,
+            )
+            .len()
+        });
         let focused = (0..n).find(|i| self.fh(format!("det-{i}"), cx).is_focused(window));
         let hover = self.play_hover.filter(|&i| i < n);
         if self.kb { focused.or(hover) } else { hover.or(focused) }

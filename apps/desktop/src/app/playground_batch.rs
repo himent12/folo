@@ -15,7 +15,7 @@ use crate::screens::playground::{
 use crate::store::{ImgKey, ImgKind, Load, decode_upright, to_render_image};
 use crate::ui::*;
 
-use super::playground::{OpenRequest, PLAY_CONF_FLOOR};
+use super::playground::OpenRequest;
 use super::playground_compare::{export_default_dir, picked_save};
 use super::{FoloApp, PlayImage, Route, act};
 
@@ -272,7 +272,9 @@ impl FoloApp {
         self.navigate(Route::Playground, window, cx);
         if let Some((id, _)) = req.model {
             if self.play_model.as_deref() != Some(id.as_str()) {
+                let prev_classes = self.play_shown_model().map(|m| m.classes.clone());
                 self.play_class = None;
+                self.remap_play_thresholds_for_model(prev_classes, Some(id.as_str()));
             }
             self.play_model_run = self.store.model(&id).and_then(|m| m.run_id.clone());
             self.play_model = Some(id);
@@ -615,7 +617,15 @@ impl FoloApp {
         let e2e = self.play_shown_model().is_some_and(|m| self.model_e2e(m));
         let cached = self.play_model.as_deref().and_then(|m| {
             self.play_batch
-                .fresh_result(idx, m, self.play_iou, self.play_target, self.play_conf, e2e)
+                .fresh_result(
+                    idx,
+                    m,
+                    self.play_iou,
+                    self.play_target,
+                    self.play_conf,
+                    &self.play_thresholds.per_class,
+                    e2e,
+                )
                 .filter(|res| res.content_hash == img_hash)
                 .cloned()
         });
@@ -658,6 +668,7 @@ impl FoloApp {
                     iou_bits: meta.iou_bits,
                     target: meta.target,
                     floor: meta.floor,
+                    per_class_conf: meta.per_class_conf.clone(),
                     content_hash,
                 });
             }
@@ -698,7 +709,15 @@ impl FoloApp {
     fn next_pending_batch_index(&self, from: usize, model_id: &str, e2e: bool) -> Option<usize> {
         (from..self.play_batch.items.len()).find(|&i| {
             self.play_batch
-                .fresh_result(i, model_id, self.play_iou, self.play_target, self.play_conf, e2e)
+                .fresh_result(
+                    i,
+                    model_id,
+                    self.play_iou,
+                    self.play_target,
+                    self.play_conf,
+                    &self.play_thresholds.per_class,
+                    e2e,
+                )
                 .is_none()
         })
     }
@@ -718,7 +737,8 @@ impl FoloApp {
         item.status = BatchItemStatus::Running;
         let source = item.source.clone();
         let name = item.name.to_string();
-        let floor = self.play_conf.min(PLAY_CONF_FLOOR);
+        let per_class = self.play_thresholds.per_class.clone();
+        let (req_conf, req_per_class, req_inclusive, floor) = self.play_predict_threshold_params(&per_class);
         let iou = self.play_iou;
         let iou_bits = iou.to_bits();
         let target = self.play_target;
@@ -767,8 +787,15 @@ impl FoloApp {
                         }
                     }
                 };
-                let req =
-                    PredictRequest { model_id: model_req.clone(), input, conf: floor, iou, max_det: 300 };
+                let req = PredictRequest {
+                    model_id: model_req.clone(),
+                    input,
+                    conf: req_conf,
+                    iou,
+                    max_det: 300,
+                    per_class_conf: req_per_class,
+                    conf_inclusive: req_inclusive,
+                };
                 let mut pred = match target {
                     Some(t) => crate::local::predict(api, &req, t, local_gen, &ticket)?,
                     None => api.predict(&req)?,
@@ -787,6 +814,7 @@ impl FoloApp {
                     iou_bits,
                     target,
                     floor,
+                    per_class_conf: per_class,
                     content_hash,
                 })
             },
@@ -829,11 +857,13 @@ impl FoloApp {
                         iou_bits: res.iou_bits,
                         target: res.target,
                         floor: res.floor,
+                        per_class_conf: res.per_class_conf.clone(),
                     };
                     self.play_compare.pred_a_meta = Some(meta);
                     self.play_pred = Load::Ready(res.pred.clone());
                     self.play_pred_for = Some((self.play_image_gen, res.model_id.clone()));
                     self.play_fetched_floor = res.floor;
+                    self.play_fetched_per_class = res.per_class_conf.clone();
                     self.clear_play_hover();
                 }
                 self.play_batch.items[idx].status = BatchItemStatus::Done(res);
@@ -856,6 +886,7 @@ impl FoloApp {
                 self.play_iou,
                 self.play_target,
                 self.play_conf,
+                &self.play_thresholds.per_class,
                 self.play_class,
                 e2e,
             );

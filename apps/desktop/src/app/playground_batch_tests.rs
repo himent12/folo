@@ -62,6 +62,7 @@ fn fake_batch_result(model_id: &str, iou: f32, floor: f32, n: usize) -> BatchIte
         iou_bits: iou.to_bits(),
         target: None,
         floor,
+        per_class_conf: Default::default(),
         content_hash: None,
     }
 }
@@ -371,6 +372,7 @@ fn playground_batch_same_basename_corrupt_first_iou_and_dataset_refresh_guards()
             iou_bits: this.play_iou.to_bits(),
             target: this.play_target,
             floor: super::PLAY_CONF_FLOOR,
+            per_class_conf: Default::default(),
         };
         let pred_a = fake_batch_result(&model_id, this.play_iou, super::PLAY_CONF_FLOOR, 3).pred;
         this.sync_stage_pred_to_batch(Some(&meta), &Ok(pred_a));
@@ -584,6 +586,7 @@ fn playtest_r13_compare_failed_banner_model_a_labels_inline_completion_and_mid_l
             this.play_iou,
             this.play_target,
             this.play_conf,
+            &this.play_thresholds.per_class,
             this.play_class,
             e2e,
         );
