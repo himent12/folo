@@ -28,19 +28,19 @@ pub(super) fn minps(a: f32, b: f32) -> f32 {
 }
 
 // Chebyshev-economised degree-5 minimax coefficients for 2^f on f ∈ [-0.5, 0.5].
-const C5: f32 = 1.340_029e-3;
-const C4: f32 = 9.675_892e-3;
-const C3: f32 = 5.550_327_5e-2;
-const C2: f32 = 2.402_210_9e-1;
-const C1: f32 = 6.931_472e-1;
-const C0: f32 = 1.0;
+pub(super) const C5: f32 = 1.340_029e-3;
+pub(super) const C4: f32 = 9.675_892e-3;
+pub(super) const C3: f32 = 5.550_327_5e-2;
+pub(super) const C2: f32 = 2.402_210_9e-1;
+pub(super) const C1: f32 = 6.931_472e-1;
+pub(super) const C0: f32 = 1.0;
 
-const NEG_LOG2_E: f32 = -std::f32::consts::LOG2_E;
+pub(super) const NEG_LOG2_E: f32 = -std::f32::consts::LOG2_E;
 /// `1.5 * 2^23 + 127` (`0x4B40_007F`): adding `u ∈ [-124, 124]` puts `n + 127 ∈ [3, 251]` in bits 0..8, so
 /// `bits(z) << 23` is IEEE-754 `2^n` directly.
-const MAGIC_EXP: f32 = 12_583_039.0;
+pub(super) const MAGIC_EXP: f32 = 12_583_039.0;
 /// Bit-hack reciprocal seed constant (`max |1 - d·r0| ≈ 0.05051`, exact `r(1.0) == 1.0` & `r(2.0) == 0.5`).
-const RECIP_MAGIC: u32 = 0x7EF3_11C3;
+pub(super) const RECIP_MAGIC: u32 = 0x7EF3_11C3;
 
 /// The epilogue's SiLU, `x / (1 + e^{−x})`, division-free and bit-exact between scalar and AVX2 on all non-NaN
 /// inputs (`|err| / max(1, |ref|) < 2.5e-7` on `[-86, 86]`, finite at extremes, `silu_q8(0.0) == 0.0`,

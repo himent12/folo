@@ -6,7 +6,7 @@
 //! per-tile 8-way epilogue dispatch, `r.rows` pointer-table loads on single-part 1×1 convs,
 //! and 24-iteration `pix` scatter loops on non-contiguous `3×3` chunks.
 //!
-//! Each K-loop stores its 12 finished `i32` accumulators into a 32-byte aligned L1 buffer ([`AlignedTile`])
+//! Each K-loop stores its finished `i32` accumulators into a 32-byte aligned L1 buffer ([`AlignedTile`])
 //! with zero YMM live-ins across the K-loop, preventing LLVM from spilling `vpdpbusd` accumulators on long-K
 //! `3×3` convs. Arithmetic order is bit-for-bit identical to [`super::kernel::kernel_scalar`] +
 //! [`super::kernel::Epi::apply`].
@@ -22,19 +22,43 @@ pub(super) use super::fused_epi::{
 };
 use super::kernel::{MR, NR};
 
-/// Generates one ISA-specific fused suite (K-loop helpers + single-part task + multi-part task + stem row).
+/// Generates one ISA-specific 256-bit fused suite (K-loop helpers + single-part + multi-part + stem row).
 macro_rules! define_fused_isa {
     (
         mod $mod_name:ident,
         feature = $feat:literal,
-        dp_mode = $dp_mode:ident
+        dp_mode = $dp_mode:ident,
+        unroll2 = $unroll2:literal
     ) => {
         mod $mod_name {
             use super::*;
+            const UNROLL2: bool = $unroll2;
+
+            macro_rules! store_tile {
+                ($vecs:expr, $acc:ident,
+                 $c00:ident, $c01:ident, $c02:ident,
+                 $c10:ident, $c11:ident, $c12:ident,
+                 $c20:ident, $c21:ident, $c22:ident,
+                 $c30:ident, $c31:ident, $c32:ident) => {
+                    let out = $acc.0.as_mut_ptr() as *mut __m256i;
+                    _mm256_store_si256(out, $c00);
+                    if $vecs >= 2 { _mm256_store_si256(out.add(1), $c01); }
+                    if $vecs >= 3 { _mm256_store_si256(out.add(2), $c02); }
+                    _mm256_store_si256(out.add(3), $c10);
+                    if $vecs >= 2 { _mm256_store_si256(out.add(4), $c11); }
+                    if $vecs >= 3 { _mm256_store_si256(out.add(5), $c12); }
+                    _mm256_store_si256(out.add(6), $c20);
+                    if $vecs >= 2 { _mm256_store_si256(out.add(7), $c21); }
+                    if $vecs >= 3 { _mm256_store_si256(out.add(8), $c22); }
+                    _mm256_store_si256(out.add(9), $c30);
+                    if $vecs >= 2 { _mm256_store_si256(out.add(10), $c31); }
+                    if $vecs >= 3 { _mm256_store_si256(out.add(11), $c32); }
+                };
+            }
 
             #[target_feature(enable = $feat)]
             #[inline]
-            unsafe fn k_loop_rows(
+            unsafe fn k_loop_rows<const VECS: usize>(
                 ks: usize,
                 a: *const i32,
                 rows: *const *const u32,
@@ -46,36 +70,41 @@ macro_rules! define_fused_isa {
                 let (mut c10, mut c11, mut c12) = (z, z, z);
                 let (mut c20, mut c21, mut c22) = (z, z, z);
                 let (mut c30, mut c31, mut c32) = (z, z, z);
-                // SAFETY: caller guarantees `ks * MR` weights and `col + NR` words per row.
-                unsafe {
-                    for p in 0..ks {
-                        let bp = (*rows.add(p)).add(col) as *const __m256i;
+                macro_rules! step_row {
+                    ($p:expr) => {
+                        let bp = (*rows.add($p)).add(col) as *const __m256i;
                         let b0 = _mm256_loadu_si256(bp);
-                        let b1 = _mm256_loadu_si256(bp.add(1));
-                        let b2 = _mm256_loadu_si256(bp.add(2));
-                        let ap = a.add(p * MR);
-                        define_fused_isa!(@dp $dp_mode, b0, b1, b2, ap,
+                        let b1 = if VECS >= 2 { _mm256_loadu_si256(bp.add(1)) } else { z };
+                        let b2 = if VECS >= 3 { _mm256_loadu_si256(bp.add(2)) } else { z };
+                        let ap = a.add(($p) * MR);
+                        define_fused_isa!(@dp_v $dp_mode, VECS, b0, b1, b2, ap,
                             c00, c01, c02, c10, c11, c12, c20, c21, c22, c30, c31, c32);
+                    };
+                }
+                // SAFETY: caller guarantees `ks * MR` weights and `col + VECS * 8` words per row.
+                unsafe {
+                    if UNROLL2 {
+                        let mut p = 0;
+                        while p + 2 <= ks {
+                            step_row!(p);
+                            step_row!(p + 1);
+                            p += 2;
+                        }
+                        if p < ks {
+                            step_row!(p);
+                        }
+                    } else {
+                        for p in 0..ks {
+                            step_row!(p);
+                        }
                     }
-                    let out = acc.0.as_mut_ptr() as *mut __m256i;
-                    _mm256_store_si256(out, c00);
-                    _mm256_store_si256(out.add(1), c01);
-                    _mm256_store_si256(out.add(2), c02);
-                    _mm256_store_si256(out.add(3), c10);
-                    _mm256_store_si256(out.add(4), c11);
-                    _mm256_store_si256(out.add(5), c12);
-                    _mm256_store_si256(out.add(6), c20);
-                    _mm256_store_si256(out.add(7), c21);
-                    _mm256_store_si256(out.add(8), c22);
-                    _mm256_store_si256(out.add(9), c30);
-                    _mm256_store_si256(out.add(10), c31);
-                    _mm256_store_si256(out.add(11), c32);
+                    store_tile!(VECS, acc, c00, c01, c02, c10, c11, c12, c20, c21, c22, c30, c31, c32);
                 }
             }
 
             #[target_feature(enable = $feat)]
             #[inline]
-            unsafe fn k_loop_1x1(
+            unsafe fn k_loop_1x1<const VECS: usize>(
                 ks: usize,
                 a: *const i32,
                 base: *const u32,
@@ -88,43 +117,49 @@ macro_rules! define_fused_isa {
                 let (mut c10, mut c11, mut c12) = (z, z, z);
                 let (mut c20, mut c21, mut c22) = (z, z, z);
                 let (mut c30, mut c31, mut c32) = (z, z, z);
-                // SAFETY: caller guarantees `ks` planes of stride `hw` with `col + NR` readable words in each
-                // plane (within `ks * hw + SLACK`). Pointer stays strictly within `0..ks * hw + col + NR`.
+                macro_rules! step_bp {
+                    ($bp:expr, $ap:expr) => {
+                        let bp = $bp;
+                        let ap = $ap;
+                        let b0 = _mm256_loadu_si256(bp as *const __m256i);
+                        let b1 = if VECS >= 2 { _mm256_loadu_si256(bp.add(8) as *const __m256i) } else { z };
+                        let b2 = if VECS >= 3 { _mm256_loadu_si256(bp.add(16) as *const __m256i) } else { z };
+                        define_fused_isa!(@dp_v $dp_mode, VECS, b0, b1, b2, ap,
+                            c00, c01, c02, c10, c11, c12, c20, c21, c22, c30, c31, c32);
+                    };
+                }
+                // SAFETY: caller guarantees `ks` planes of stride `hw` with `col + VECS * 8` readable words
+                // (within `ks * hw + SLACK`). Trailing `wrapping_add` pointers are never dereferenced.
                 unsafe {
-                    if ks > 0 {
-                        let mut bp = base.add(col);
-                        let mut ap = a;
-                        for p in 0..ks {
-                            let b0 = _mm256_loadu_si256(bp as *const __m256i);
-                            let b1 = _mm256_loadu_si256(bp.add(8) as *const __m256i);
-                            let b2 = _mm256_loadu_si256(bp.add(16) as *const __m256i);
-                            define_fused_isa!(@dp $dp_mode, b0, b1, b2, ap,
-                                c00, c01, c02, c10, c11, c12, c20, c21, c22, c30, c31, c32);
-                            if p + 1 < ks {
-                                bp = bp.add(hw);
-                                ap = ap.add(MR);
-                            }
+                    let mut bp = base.add(col);
+                    let mut ap = a;
+                    if UNROLL2 {
+                        let hw2 = hw.wrapping_mul(2);
+                        let mut p = 0;
+                        while p + 2 <= ks {
+                            step_bp!(bp, ap);
+                            step_bp!(bp.add(hw), ap.add(MR));
+                            bp = bp.wrapping_add(hw2);
+                            ap = ap.wrapping_add(2 * MR);
+                            p += 2;
+                        }
+                        if p < ks {
+                            step_bp!(bp, ap);
+                        }
+                    } else {
+                        for _ in 0..ks {
+                            step_bp!(bp, ap);
+                            bp = bp.wrapping_add(hw);
+                            ap = ap.wrapping_add(MR);
                         }
                     }
-                    let out = acc.0.as_mut_ptr() as *mut __m256i;
-                    _mm256_store_si256(out, c00);
-                    _mm256_store_si256(out.add(1), c01);
-                    _mm256_store_si256(out.add(2), c02);
-                    _mm256_store_si256(out.add(3), c10);
-                    _mm256_store_si256(out.add(4), c11);
-                    _mm256_store_si256(out.add(5), c12);
-                    _mm256_store_si256(out.add(6), c20);
-                    _mm256_store_si256(out.add(7), c21);
-                    _mm256_store_si256(out.add(8), c22);
-                    _mm256_store_si256(out.add(9), c30);
-                    _mm256_store_si256(out.add(10), c31);
-                    _mm256_store_si256(out.add(11), c32);
+                    store_tile!(VECS, acc, c00, c01, c02, c10, c11, c12, c20, c21, c22, c30, c31, c32);
                 }
             }
 
             #[target_feature(enable = $feat)]
             #[inline]
-            unsafe fn k_loop_1x1_parts(
+            unsafe fn k_loop_1x1_parts<const VECS: usize>(
                 parts: &[(*const u32, usize)],
                 hw: usize,
                 a: *const i32,
@@ -136,40 +171,71 @@ macro_rules! define_fused_isa {
                 let (mut c10, mut c11, mut c12) = (z, z, z);
                 let (mut c20, mut c21, mut c22) = (z, z, z);
                 let (mut c30, mut c31, mut c32) = (z, z, z);
+                macro_rules! step_bp {
+                    ($bp:expr, $ap:expr) => {
+                        let bp = $bp;
+                        let ap = $ap;
+                        let b0 = _mm256_loadu_si256(bp as *const __m256i);
+                        let b1 = if VECS >= 2 { _mm256_loadu_si256(bp.add(8) as *const __m256i) } else { z };
+                        let b2 = if VECS >= 3 { _mm256_loadu_si256(bp.add(16) as *const __m256i) } else { z };
+                        define_fused_isa!(@dp_v $dp_mode, VECS, b0, b1, b2, ap,
+                            c00, c01, c02, c10, c11, c12, c20, c21, c22, c30, c31, c32);
+                    };
+                }
                 // SAFETY: caller guarantees each part `(base, g_cnt)` has `g_cnt` planes of stride `hw` with
-                // `col + NR` readable words, and `a` holds `sum(g_cnt) * MR` words.
+                // `col + VECS * 8` readable words, and `a` holds `sum(g_cnt) * MR` words.
                 unsafe {
+                    let hw2 = hw.wrapping_mul(2);
                     let mut ap = a;
                     for &(base, g_cnt) in parts {
                         if g_cnt == 0 {
                             continue;
                         }
                         let mut bp = base.add(col);
-                        for p in 0..g_cnt {
-                            let b0 = _mm256_loadu_si256(bp as *const __m256i);
-                            let b1 = _mm256_loadu_si256(bp.add(8) as *const __m256i);
-                            let b2 = _mm256_loadu_si256(bp.add(16) as *const __m256i);
-                            define_fused_isa!(@dp $dp_mode, b0, b1, b2, ap,
-                                c00, c01, c02, c10, c11, c12, c20, c21, c22, c30, c31, c32);
-                            ap = ap.add(MR);
-                            if p + 1 < g_cnt {
-                                bp = bp.add(hw);
+                        if UNROLL2 {
+                            let mut p = 0;
+                            while p + 2 <= g_cnt {
+                                step_bp!(bp, ap);
+                                step_bp!(bp.add(hw), ap.add(MR));
+                                bp = bp.wrapping_add(hw2);
+                                ap = ap.wrapping_add(2 * MR);
+                                p += 2;
+                            }
+                            if p < g_cnt {
+                                step_bp!(bp, ap);
+                                ap = ap.wrapping_add(MR);
+                            }
+                        } else {
+                            for _ in 0..g_cnt {
+                                step_bp!(bp, ap);
+                                bp = bp.wrapping_add(hw);
+                                ap = ap.wrapping_add(MR);
                             }
                         }
                     }
-                    let out = acc.0.as_mut_ptr() as *mut __m256i;
-                    _mm256_store_si256(out, c00);
-                    _mm256_store_si256(out.add(1), c01);
-                    _mm256_store_si256(out.add(2), c02);
-                    _mm256_store_si256(out.add(3), c10);
-                    _mm256_store_si256(out.add(4), c11);
-                    _mm256_store_si256(out.add(5), c12);
-                    _mm256_store_si256(out.add(6), c20);
-                    _mm256_store_si256(out.add(7), c21);
-                    _mm256_store_si256(out.add(8), c22);
-                    _mm256_store_si256(out.add(9), c30);
-                    _mm256_store_si256(out.add(10), c31);
-                    _mm256_store_si256(out.add(11), c32);
+                    store_tile!(VECS, acc, c00, c01, c02, c10, c11, c12, c20, c21, c22, c30, c31, c32);
+                }
+            }
+
+            #[target_feature(enable = $feat)]
+            #[inline]
+            unsafe fn k_loop_bmode<const VECS: usize>(
+                b_mode: BMode<'_>,
+                ks: usize,
+                a: *const i32,
+                rows: *const *const u32,
+                col: usize,
+                acc: &mut AlignedTile,
+            ) {
+                // SAFETY: forwarded from caller.
+                unsafe {
+                    match b_mode {
+                        BMode::Pointwise1x1 { base, hw } => k_loop_1x1::<VECS>(ks, a, base, hw, col, acc),
+                        BMode::Pointwise1x1Parts { parts, hw } => {
+                            k_loop_1x1_parts::<VECS>(parts, hw, a, col, acc)
+                        }
+                        BMode::Rows => k_loop_rows::<VECS>(ks, a, rows, col, acc),
+                    }
                 }
             }
 
@@ -208,19 +274,7 @@ macro_rules! define_fused_isa {
                     tap!(6);
                     tap!(7);
                     tap!(8);
-                    let out = acc.0.as_mut_ptr() as *mut __m256i;
-                    _mm256_store_si256(out, c00);
-                    if VECS >= 2 { _mm256_store_si256(out.add(1), c01); }
-                    if VECS >= 3 { _mm256_store_si256(out.add(2), c02); }
-                    _mm256_store_si256(out.add(3), c10);
-                    if VECS >= 2 { _mm256_store_si256(out.add(4), c11); }
-                    if VECS >= 3 { _mm256_store_si256(out.add(5), c12); }
-                    _mm256_store_si256(out.add(6), c20);
-                    if VECS >= 2 { _mm256_store_si256(out.add(7), c21); }
-                    if VECS >= 3 { _mm256_store_si256(out.add(8), c22); }
-                    _mm256_store_si256(out.add(9), c30);
-                    if VECS >= 2 { _mm256_store_si256(out.add(10), c31); }
-                    if VECS >= 3 { _mm256_store_si256(out.add(11), c32); }
+                    store_tile!(VECS, acc, c00, c01, c02, c10, c11, c12, c20, c21, c22, c30, c31, c32);
                 }
             }
 
@@ -238,10 +292,13 @@ macro_rules! define_fused_isa {
                 let mut resw = [0u32; NR];
                 let mut fv = [[0f32; NR]; MR];
                 let mut c0 = t.cb_start;
+                let full_end = (t.r_n / NR).min(t.cb_end);
+                let flat = t.wq == t.ow;
                 // SAFETY: caller validated all slice extents and disjoint task ownership.
                 unsafe {
                     while c0 < t.cb_end {
                         let c1 = (c0 + cb_tile).min(t.cb_end);
+                        let c1_full = c1.min(full_end);
                         for g in t.ob_start..t.ob_end {
                             let a_panel = t.a.as_ptr().add(g * ks * MR);
                             let corr: [i32; MR] = t.corr[4 * g..4 * g + 4].try_into().unwrap();
@@ -258,67 +315,134 @@ macro_rules! define_fused_isa {
                             let res_plane = if HAS_RES { t.res_img_ptr.add(g * ohw) } else { std::ptr::null() };
                             let q_plane = if OUT_U8 { t.q_img_ptr.add(g * ohw) } else { std::ptr::null_mut() };
                             let f_base = if !OUT_U8 { t.f_img_ptr.add(4 * g * ohw) } else { std::ptr::null_mut() };
-                            for chunk in c0..c1 {
-                                let col = chunk * NR;
-                                let cols = NR.min(t.r_n - col);
-                                let (oy0, ox0) = if t.wq == t.ow { (0, col) } else { (col / t.wq, col % t.wq) };
-                                let contiguous = cols == NR && (t.wq == t.ow || (oy0 < t.oh && ox0 + NR <= t.ow));
-                                let pix0 = if t.wq == t.ow { col } else { oy0 * t.ow + ox0 };
+                            if flat {
+                                macro_rules! run_full_loop {
+                                    ($k_call:expr) => {
+                                        for chunk in c0..c1_full {
+                                            let col = chunk * NR;
+                                            $k_call(col, &mut acc);
+                                            let res_ptr = if HAS_RES { res_plane.add(col) } else { std::ptr::null() };
+                                            apply_epi_aligned::<SILU, HAS_RES, OUT_U8, 3>(
+                                                &acc, &corr, &scale, &bias, res_ptr, &rs, &rz, &inv,
+                                                &z01_arr, &z23_arr,
+                                                if OUT_U8 { q_plane.add(col) } else { std::ptr::null_mut() },
+                                                &mut fv,
+                                            );
+                                            if !OUT_U8 {
+                                                for (rr, row) in fv.iter().enumerate() {
+                                                    std::ptr::copy_nonoverlapping(
+                                                        row.as_ptr(),
+                                                        f_base.add(rr * ohw + col),
+                                                        NR,
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    };
+                                }
                                 match t.b_mode {
                                     BMode::Pointwise1x1 { base, hw } => {
-                                        k_loop_1x1(ks, a_panel, base, hw, col, &mut acc);
+                                        run_full_loop!(|col, acc| k_loop_1x1::<3>(ks, a_panel, base, hw, col, acc));
                                     }
                                     BMode::Pointwise1x1Parts { parts, hw } => {
-                                        k_loop_1x1_parts(parts, hw, a_panel, col, &mut acc);
+                                        run_full_loop!(|col, acc| k_loop_1x1_parts::<3>(
+                                            parts, hw, a_panel, col, acc
+                                        ));
                                     }
                                     BMode::Rows => {
-                                        k_loop_rows(ks, a_panel, t.rows.as_ptr(), col, &mut acc);
+                                        run_full_loop!(|col, acc| k_loop_rows::<3>(
+                                            ks, a_panel, t.rows.as_ptr(), col, acc
+                                        ));
                                     }
                                 }
-                                let res_ptr = if HAS_RES {
-                                    if contiguous {
-                                        res_plane.add(pix0)
+                                for chunk in c1_full..c1 {
+                                    let col = chunk * NR;
+                                    let cols = NR.min(t.r_n - col);
+                                    macro_rules! run_tail {
+                                        ($vecs:literal) => {{
+                                            k_loop_bmode::<$vecs>(t.b_mode, ks, a_panel, t.rows.as_ptr(), col, &mut acc);
+                                            let direct = cols == $vecs * 8;
+                                            let res_ptr = if HAS_RES {
+                                                if direct {
+                                                    res_plane.add(col)
+                                                } else {
+                                                    resw = [0u32; NR];
+                                                    std::ptr::copy_nonoverlapping(
+                                                        res_plane.add(col),
+                                                        resw.as_mut_ptr(),
+                                                        cols,
+                                                    );
+                                                    resw.as_ptr()
+                                                }
+                                            } else {
+                                                std::ptr::null()
+                                            };
+                                            let q_dst = if OUT_U8 {
+                                                if direct { q_plane.add(col) } else { qw.as_mut_ptr() }
+                                            } else {
+                                                std::ptr::null_mut()
+                                            };
+                                            apply_epi_aligned::<SILU, HAS_RES, OUT_U8, $vecs>(
+                                                &acc, &corr, &scale, &bias, res_ptr, &rs, &rz, &inv,
+                                                &z01_arr, &z23_arr, q_dst, &mut fv,
+                                            );
+                                            if OUT_U8 {
+                                                if !direct {
+                                                    std::ptr::copy_nonoverlapping(qw.as_ptr(), q_plane.add(col), cols);
+                                                }
+                                            } else {
+                                                for (rr, row) in fv.iter().enumerate() {
+                                                    std::ptr::copy_nonoverlapping(
+                                                        row.as_ptr(),
+                                                        f_base.add(rr * ohw + col),
+                                                        cols,
+                                                    );
+                                                }
+                                            }
+                                        }};
+                                    }
+                                    if cols <= 8 {
+                                        run_tail!(1);
+                                    } else if cols <= 16 {
+                                        run_tail!(2);
                                     } else {
-                                        if t.wq == t.ow {
-                                            resw = [0u32; NR];
-                                            std::ptr::copy_nonoverlapping(res_plane.add(col), resw.as_mut_ptr(), cols);
+                                        run_tail!(3);
+                                    }
+                                }
+                            } else {
+                                for chunk in c0..c1 {
+                                    let col = chunk * NR;
+                                    let cols = NR.min(t.r_n - col);
+                                    let (oy0, ox0) = (col / t.wq, col % t.wq);
+                                    let contiguous = cols == NR && oy0 < t.oh && ox0 + NR <= t.ow;
+                                    let pix0 = oy0 * t.ow + ox0;
+                                    k_loop_bmode::<3>(t.b_mode, ks, a_panel, t.rows.as_ptr(), col, &mut acc);
+                                    let res_ptr = if HAS_RES {
+                                        if contiguous {
+                                            res_plane.add(pix0)
                                         } else {
                                             read_u8_noncontiguous(&mut resw, cols, oy0, ox0, t.oh, t.ow, t.wq, res_plane);
+                                            resw.as_ptr()
                                         }
-                                        resw.as_ptr()
-                                    }
-                                } else {
-                                    std::ptr::null()
-                                };
-                                if OUT_U8 {
-                                    if contiguous {
-                                        apply_epi_aligned::<SILU, HAS_RES, true, 3>(
-                                            &acc, &corr, &scale, &bias, res_ptr, &rs, &rz, &inv,
-                                            &z01_arr, &z23_arr, q_plane.add(pix0), &mut fv,
-                                        );
                                     } else {
-                                        apply_epi_aligned::<SILU, HAS_RES, true, 3>(
-                                            &acc, &corr, &scale, &bias, res_ptr, &rs, &rz, &inv,
-                                            &z01_arr, &z23_arr, qw.as_mut_ptr(), &mut fv,
-                                        );
-                                        if t.wq == t.ow {
-                                            std::ptr::copy_nonoverlapping(qw.as_ptr(), q_plane.add(col), cols);
-                                        } else {
+                                        std::ptr::null()
+                                    };
+                                    let q_dst = if OUT_U8 {
+                                        if contiguous { q_plane.add(pix0) } else { qw.as_mut_ptr() }
+                                    } else {
+                                        std::ptr::null_mut()
+                                    };
+                                    apply_epi_aligned::<SILU, HAS_RES, OUT_U8, 3>(
+                                        &acc, &corr, &scale, &bias, res_ptr, &rs, &rz, &inv,
+                                        &z01_arr, &z23_arr, q_dst, &mut fv,
+                                    );
+                                    if OUT_U8 {
+                                        if !contiguous {
                                             write_u8_noncontiguous(&qw, cols, oy0, ox0, t.oh, t.ow, t.wq, q_plane);
                                         }
-                                    }
-                                } else {
-                                    apply_epi_aligned::<SILU, HAS_RES, false, 3>(
-                                        &acc, &corr, &scale, &bias, res_ptr, &rs, &rz, &inv,
-                                        &z01_arr, &z23_arr, std::ptr::null_mut(), &mut fv,
-                                    );
-                                    if contiguous {
+                                    } else if contiguous {
                                         for (rr, row) in fv.iter().enumerate() {
                                             std::ptr::copy_nonoverlapping(row.as_ptr(), f_base.add(rr * ohw + pix0), NR);
-                                        }
-                                    } else if t.wq == t.ow {
-                                        for (rr, row) in fv.iter().enumerate() {
-                                            std::ptr::copy_nonoverlapping(row.as_ptr(), f_base.add(rr * ohw + col), cols);
                                         }
                                     } else {
                                         write_f32_noncontiguous(&fv, cols, oy0, ox0, t.oh, t.ow, t.wq, ohw, f_base);
@@ -384,93 +508,146 @@ macro_rules! define_fused_isa {
                                 let (oy0, ox0) = if t.wq == t.ow { (0, col) } else { (col / t.wq, col % t.wq) };
                                 let contiguous = cols == NR && (t.wq == t.ow || (oy0 < t.oh && ox0 + NR <= t.ow));
                                 let pix0 = if t.wq == t.ow { col } else { oy0 * t.ow + ox0 };
-                                let zf = _mm256_setzero_ps();
-                                let tfp = tile_f32.0.as_mut_ptr() as *mut f32;
-                                for i in 0..12 {
-                                    _mm256_store_ps(tfp.add(i * 8), zf);
-                                }
-                                for part in t.parts {
-                                    if t.pointwise_hw > 0 {
-                                        k_loop_1x1(
-                                            part.ks,
-                                            part.a.as_ptr().add(g * part.ks * MR),
-                                            part.b_base,
-                                            t.pointwise_hw,
-                                            col,
-                                            &mut acc,
-                                        );
-                                    } else {
-                                        k_loop_rows(
-                                            part.ks,
-                                            part.a.as_ptr().add(g * part.ks * MR),
-                                            t.rows.as_ptr().add(part.row_offset),
-                                            col,
-                                            &mut acc,
-                                        );
-                                    }
-                                    for r in 0..MR {
-                                        let vc = _mm256_set1_epi32(part.corr[4 * g + r]);
-                                        let vs = _mm256_set1_ps(part.scale[4 * g + r]);
-                                        for k in 0..3 {
-                                            let a_v = _mm256_load_si256(acc.0[r].as_ptr().add(8 * k) as *const __m256i);
-                                            let cur = _mm256_load_ps(tile_f32.0[r].as_ptr().add(8 * k));
-                                            let next = _mm256_fmadd_ps(_mm256_cvtepi32_ps(_mm256_sub_epi32(a_v, vc)), vs, cur);
-                                            _mm256_store_ps(tile_f32.0[r].as_mut_ptr().add(8 * k), next);
+                                macro_rules! multi_vecs {
+                                    ($vecs:literal) => {{
+                                        let zf = _mm256_setzero_ps();
+                                        for r in 0..MR {
+                                            for k in 0..$vecs {
+                                                _mm256_store_ps(tile_f32.0[r].as_mut_ptr().add(8 * k), zf);
+                                            }
                                         }
-                                    }
-                                }
-                                let res_ptr = if HAS_RES {
-                                    if contiguous {
-                                        res_plane.add(pix0)
-                                    } else {
-                                        if t.wq == t.ow {
-                                            resw = [0u32; NR];
-                                            std::ptr::copy_nonoverlapping(res_plane.add(col), resw.as_mut_ptr(), cols);
+                                        for part in t.parts {
+                                            if t.pointwise_hw > 0 {
+                                                k_loop_1x1::<$vecs>(
+                                                    part.ks,
+                                                    part.a.as_ptr().add(g * part.ks * MR),
+                                                    part.b_base,
+                                                    t.pointwise_hw,
+                                                    col,
+                                                    &mut acc,
+                                                );
+                                            } else {
+                                                k_loop_rows::<$vecs>(
+                                                    part.ks,
+                                                    part.a.as_ptr().add(g * part.ks * MR),
+                                                    t.rows.as_ptr().add(part.row_offset),
+                                                    col,
+                                                    &mut acc,
+                                                );
+                                            }
+                                            for r in 0..MR {
+                                                let vc = _mm256_set1_epi32(part.corr[4 * g + r]);
+                                                let vs = _mm256_set1_ps(part.scale[4 * g + r]);
+                                                for k in 0..$vecs {
+                                                    let a_v = _mm256_load_si256(
+                                                        acc.0[r].as_ptr().add(8 * k) as *const __m256i,
+                                                    );
+                                                    let cur = _mm256_load_ps(tile_f32.0[r].as_ptr().add(8 * k));
+                                                    let next = _mm256_fmadd_ps(
+                                                        _mm256_cvtepi32_ps(_mm256_sub_epi32(a_v, vc)),
+                                                        vs,
+                                                        cur,
+                                                    );
+                                                    _mm256_store_ps(tile_f32.0[r].as_mut_ptr().add(8 * k), next);
+                                                }
+                                            }
+                                        }
+                                        let direct_u8 = contiguous || (t.wq == t.ow && cols == $vecs * 8);
+                                        let res_ptr = if HAS_RES {
+                                            if direct_u8 {
+                                                res_plane.add(pix0)
+                                            } else {
+                                                if t.wq == t.ow {
+                                                    resw = [0u32; NR];
+                                                    std::ptr::copy_nonoverlapping(
+                                                        res_plane.add(col),
+                                                        resw.as_mut_ptr(),
+                                                        cols,
+                                                    );
+                                                } else {
+                                                    read_u8_noncontiguous(
+                                                        &mut resw, cols, oy0, ox0, t.oh, t.ow, t.wq, res_plane,
+                                                    );
+                                                }
+                                                resw.as_ptr()
+                                            }
                                         } else {
-                                            read_u8_noncontiguous(&mut resw, cols, oy0, ox0, t.oh, t.ow, t.wq, res_plane);
-                                        }
-                                        resw.as_ptr()
-                                    }
-                                } else {
-                                    std::ptr::null()
-                                };
-                                let q_dst = if OUT_U8 {
-                                    if contiguous { q_plane.add(pix0) } else { qw.as_mut_ptr() }
-                                } else {
-                                    std::ptr::null_mut()
-                                };
-                                for k in 0..3 {
-                                    let off = 8 * k;
-                                    let y0 = _mm256_add_ps(_mm256_load_ps(tile_f32.0[0].as_ptr().add(off)), _mm256_set1_ps(bias[0]));
-                                    let y1 = _mm256_add_ps(_mm256_load_ps(tile_f32.0[1].as_ptr().add(off)), _mm256_set1_ps(bias[1]));
-                                    let y2 = _mm256_add_ps(_mm256_load_ps(tile_f32.0[2].as_ptr().add(off)), _mm256_set1_ps(bias[2]));
-                                    let y3 = _mm256_add_ps(_mm256_load_ps(tile_f32.0[3].as_ptr().add(off)), _mm256_set1_ps(bias[3]));
-                                    finish_col8::<SILU, HAS_RES, OUT_U8>(
-                                        y0, y1, y2, y3,
-                                        if HAS_RES { res_ptr.add(off) } else { res_ptr },
-                                        &rs, &rz, &inv, &z01_arr, &z23_arr,
-                                        if OUT_U8 { q_dst.add(off) } else { q_dst },
-                                        &mut fv, off,
-                                    );
-                                }
-                                if OUT_U8 {
-                                    if !contiguous {
-                                        if t.wq == t.ow {
-                                            std::ptr::copy_nonoverlapping(qw.as_ptr(), q_plane.add(col), cols);
+                                            std::ptr::null()
+                                        };
+                                        let q_dst = if OUT_U8 {
+                                            if direct_u8 { q_plane.add(pix0) } else { qw.as_mut_ptr() }
                                         } else {
-                                            write_u8_noncontiguous(&qw, cols, oy0, ox0, t.oh, t.ow, t.wq, q_plane);
+                                            std::ptr::null_mut()
+                                        };
+                                        for k in 0..$vecs {
+                                            let off = 8 * k;
+                                            let y0 = _mm256_add_ps(
+                                                _mm256_load_ps(tile_f32.0[0].as_ptr().add(off)),
+                                                _mm256_set1_ps(bias[0]),
+                                            );
+                                            let y1 = _mm256_add_ps(
+                                                _mm256_load_ps(tile_f32.0[1].as_ptr().add(off)),
+                                                _mm256_set1_ps(bias[1]),
+                                            );
+                                            let y2 = _mm256_add_ps(
+                                                _mm256_load_ps(tile_f32.0[2].as_ptr().add(off)),
+                                                _mm256_set1_ps(bias[2]),
+                                            );
+                                            let y3 = _mm256_add_ps(
+                                                _mm256_load_ps(tile_f32.0[3].as_ptr().add(off)),
+                                                _mm256_set1_ps(bias[3]),
+                                            );
+                                            finish_col8::<SILU, HAS_RES, OUT_U8>(
+                                                y0, y1, y2, y3,
+                                                if HAS_RES { res_ptr.add(off) } else { res_ptr },
+                                                &rs, &rz, &inv, &z01_arr, &z23_arr,
+                                                if OUT_U8 { q_dst.add(off) } else { q_dst },
+                                                &mut fv, off,
+                                            );
                                         }
-                                    }
-                                } else if contiguous {
-                                    for (rr, row) in fv.iter().enumerate() {
-                                        std::ptr::copy_nonoverlapping(row.as_ptr(), f_base.add(rr * ohw + pix0), NR);
-                                    }
-                                } else if t.wq == t.ow {
-                                    for (rr, row) in fv.iter().enumerate() {
-                                        std::ptr::copy_nonoverlapping(row.as_ptr(), f_base.add(rr * ohw + col), cols);
-                                    }
+                                        if OUT_U8 {
+                                            if !direct_u8 {
+                                                if t.wq == t.ow {
+                                                    std::ptr::copy_nonoverlapping(
+                                                        qw.as_ptr(),
+                                                        q_plane.add(col),
+                                                        cols,
+                                                    );
+                                                } else {
+                                                    write_u8_noncontiguous(
+                                                        &qw, cols, oy0, ox0, t.oh, t.ow, t.wq, q_plane,
+                                                    );
+                                                }
+                                            }
+                                        } else if contiguous {
+                                            for (rr, row) in fv.iter().enumerate() {
+                                                std::ptr::copy_nonoverlapping(
+                                                    row.as_ptr(),
+                                                    f_base.add(rr * ohw + pix0),
+                                                    NR,
+                                                );
+                                            }
+                                        } else if t.wq == t.ow {
+                                            for (rr, row) in fv.iter().enumerate() {
+                                                std::ptr::copy_nonoverlapping(
+                                                    row.as_ptr(),
+                                                    f_base.add(rr * ohw + col),
+                                                    cols,
+                                                );
+                                            }
+                                        } else {
+                                            write_f32_noncontiguous(
+                                                &fv, cols, oy0, ox0, t.oh, t.ow, t.wq, ohw, f_base,
+                                            );
+                                        }
+                                    }};
+                                }
+                                if cols > 16 {
+                                    multi_vecs!(3);
+                                } else if cols > 8 {
+                                    multi_vecs!(2);
                                 } else {
-                                    write_f32_noncontiguous(&fv, cols, oy0, ox0, t.oh, t.ow, t.wq, ohw, f_base);
+                                    multi_vecs!(1);
                                 }
                             }
                         }
@@ -640,15 +817,6 @@ macro_rules! define_fused_isa {
         }
     };
 
-    (@dp $mode:ident, $b0:ident, $b1:ident, $b2:ident, $ap:ident,
-        $c00:ident, $c01:ident, $c02:ident,
-        $c10:ident, $c11:ident, $c12:ident,
-        $c20:ident, $c21:ident, $c22:ident,
-        $c30:ident, $c31:ident, $c32:ident) => {
-        define_fused_isa!(@dp_v $mode, 3, $b0, $b1, $b2, $ap,
-            $c00, $c01, $c02, $c10, $c11, $c12, $c20, $c21, $c22, $c30, $c31, $c32);
-    };
-
     (@dp_v avxvnni, $vecs:expr, $b0:ident, $b1:ident, $b2:ident, $ap:ident,
         $c00:ident, $c01:ident, $c02:ident,
         $c10:ident, $c11:ident, $c12:ident,
@@ -733,9 +901,9 @@ fn split_w_avx2(w: i32) -> (i32, i32) {
     (ev as i32, od as i32)
 }
 
-define_fused_isa!(mod vnni_impl, feature = "avx2,fma,avxvnni", dp_mode = avxvnni);
-define_fused_isa!(mod avx512vnni_impl, feature = "avx2,fma,avx512vnni,avx512vl", dp_mode = avx512vnni);
-define_fused_isa!(mod avx2_impl, feature = "avx2,fma", dp_mode = avx2);
+define_fused_isa!(mod vnni_impl, feature = "avx2,fma,avxvnni", dp_mode = avxvnni, unroll2 = true);
+define_fused_isa!(mod avx512vnni_impl, feature = "avx2,fma,avx512vnni,avx512vl", dp_mode = avx512vnni, unroll2 = true);
+define_fused_isa!(mod avx2_impl, feature = "avx2,fma", dp_mode = avx2, unroll2 = false);
 
 /// Execute one single-part fused task on the active x86-64 ISA.
 ///
@@ -745,6 +913,7 @@ pub(super) unsafe fn run_single_part(isa: FusedIsa, t: &SinglePartTask<'_>) {
     // SAFETY: forwarded from caller.
     unsafe {
         match isa {
+            FusedIsa::Avx512Vnni512 => super::vnni512::run_single_part(t),
             FusedIsa::AvxVnni => vnni_impl::run_single(t),
             FusedIsa::Avx512Vnni => avx512vnni_impl::run_single(t),
             FusedIsa::Avx2 => avx2_impl::run_single(t),
@@ -760,6 +929,7 @@ pub(super) unsafe fn run_multi_part(isa: FusedIsa, t: &MultiPartTask<'_>) {
     // SAFETY: forwarded from caller.
     unsafe {
         match isa {
+            FusedIsa::Avx512Vnni512 => super::vnni512::run_multi_part(t),
             FusedIsa::AvxVnni => vnni_impl::run_multi(t),
             FusedIsa::Avx512Vnni => avx512vnni_impl::run_multi(t),
             FusedIsa::Avx2 => avx2_impl::run_multi(t),
@@ -792,6 +962,9 @@ pub(super) unsafe fn run_stem_row(
     // SAFETY: forwarded from caller.
     unsafe {
         match isa {
+            FusedIsa::Avx512Vnni512 => super::vnni512::run_stem_row(
+                a, scale, bias, og, ow, ohw, img, oy, silu, is_u8, row_ptrs, group_out, qptr, fptr,
+            ),
             FusedIsa::AvxVnni => vnni_impl::run_stem_row(
                 a, scale, bias, og, ow, ohw, img, oy, silu, is_u8, row_ptrs, group_out, qptr, fptr,
             ),

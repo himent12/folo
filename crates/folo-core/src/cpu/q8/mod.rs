@@ -14,11 +14,13 @@
 //!   `conv_per_channel`, and `stem_u8`.
 //! - `fused_3x3.rs`: single-barrier L1-hot rotating row-strip x86-64 driver for single-part `3×3, pad = 1` convs
 //!   at stride 2 and large-input stride 1.
+//! - `vnni512/`: 512-bit ZMM AVX-512 VNNI (`4 × 48` / hybrid `4 × 24`) microkernels, bit-exact 16-lane SiLU,
+//!   and fused drivers (`avx512f + avx512bw + avx512vl + avx512vnni`).
 //! - `rows.rs`: input row-pointer preparation and row-band parallelised padded phase copies (`image_rows`).
 //! - `stem.rs`: direct `u8` RGB0-to-C4 AVX-VNNI stem ([`QStem`], [`stem_u8`], [`pack_f32_to_rgb0_u8`]).
 //! - `conv.rs`: packed weights ([`QConv`]) and the conv drivers ([`conv`], [`conv_per_channel`]).
 //! - this file: grids, C4 views, AVX2-vectorised packing from and to `f32`, max pools and upsamples on codes.
-//! - `tests.rs`: everything against a scalar integer reference.
+//! - `tests.rs` + `vnni_tests.rs`: everything against a scalar integer reference.
 
 mod conv;
 #[cfg(target_arch = "x86_64")]
@@ -34,6 +36,10 @@ mod silu;
 mod stem;
 #[cfg(test)]
 mod tests;
+#[cfg(target_arch = "x86_64")]
+mod vnni512;
+#[cfg(test)]
+mod vnni_tests;
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
 mod wasm_simd;
 

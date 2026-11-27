@@ -81,17 +81,17 @@ pub(super) struct Conv3x3Params<'a> {
 }
 
 /// Per-row arguments passed into the target-feature-specialized `compute_row` / `run_row` kernels.
-struct RowArgs<'a> {
-    p: &'a Conv3x3Params<'a>,
-    img: usize,
-    oy: usize,
-    ob_start: usize,
-    ob_end: usize,
-    group_stride: usize,
-    ev_w: usize,
-    slot_words: usize,
-    ord: [usize; 3],
-    buf: &'a [u32],
+pub(super) struct RowArgs<'a> {
+    pub(super) p: &'a Conv3x3Params<'a>,
+    pub(super) img: usize,
+    pub(super) oy: usize,
+    pub(super) ob_start: usize,
+    pub(super) ob_end: usize,
+    pub(super) group_stride: usize,
+    pub(super) ev_w: usize,
+    pub(super) slot_words: usize,
+    pub(super) ord: [usize; 3],
+    pub(super) buf: &'a [u32],
 }
 
 /// Source group lookup `(part_index, local_group_index)` and precomputed packed zero word.
@@ -129,13 +129,13 @@ macro_rules! define_3x3_strip_isa {
                 let (mut c20, mut c21, mut c22) = (z, z, z);
                 let (mut c30, mut c31, mut c32) = (z, z, z);
                 // SAFETY: caller guarantees `groups * 9 * MR` weights and valid `(ev, od)` extents per slot
-                // (`col + VECS * 8 <= ev_w`). Pointer advances are guarded by `g + 1 < groups`.
+                // (`col + VECS * 8 <= ev_w`). Trailing `wrapping_add` pointers are never dereferenced.
                 unsafe {
                     let mut p0 = slots[0].add(col);
                     let mut p1 = slots[1].add(col);
                     let mut p2 = slots[2].add(col);
                     let mut ap = a;
-                    for g in 0..groups {
+                    for _ in 0..groups {
                         let ptrs = [p0, p1, p2];
                         for ev in ptrs {
                             let od = ev.add(ev_w);
@@ -153,13 +153,11 @@ macro_rules! define_3x3_strip_isa {
                             tap!(od, 0);
                             tap!(ev, 1);
                             tap!(od.add(1), 2);
-                            ap = ap.add(3 * MR);
+                            ap = ap.wrapping_add(3 * MR);
                         }
-                        if g + 1 < groups {
-                            p0 = p0.add(ch_stride);
-                            p1 = p1.add(ch_stride);
-                            p2 = p2.add(ch_stride);
-                        }
+                        p0 = p0.wrapping_add(ch_stride);
+                        p1 = p1.wrapping_add(ch_stride);
+                        p2 = p2.wrapping_add(ch_stride);
                     }
                     let out = acc.0.as_mut_ptr() as *mut __m256i;
                     _mm256_store_si256(out, c00);
@@ -194,13 +192,13 @@ macro_rules! define_3x3_strip_isa {
                 let (mut c20, mut c21, mut c22) = (z, z, z);
                 let (mut c30, mut c31, mut c32) = (z, z, z);
                 // SAFETY: caller guarantees `groups * 9 * MR` weights and `col + VECS * 8 + 2 <= slot_w` per group row.
-                // Pointer advances are guarded by `g + 1 < groups` so no pointer steps past the buffer end.
+                // Trailing `wrapping_add` pointers are never dereferenced.
                 unsafe {
                     let mut p0 = slots[0].add(col);
                     let mut p1 = slots[1].add(col);
                     let mut p2 = slots[2].add(col);
                     let mut ap = a;
-                    for g in 0..groups {
+                    for _ in 0..groups {
                         for row_ptr in [p0, p1, p2] {
                             macro_rules! tap {
                                 ($bp:expr, $aoff:expr) => {
@@ -216,13 +214,11 @@ macro_rules! define_3x3_strip_isa {
                             tap!(row_ptr, 0);
                             tap!(row_ptr.add(1), 1);
                             tap!(row_ptr.add(2), 2);
-                            ap = ap.add(3 * MR);
+                            ap = ap.wrapping_add(3 * MR);
                         }
-                        if g + 1 < groups {
-                            p0 = p0.add(slot_w);
-                            p1 = p1.add(slot_w);
-                            p2 = p2.add(slot_w);
-                        }
+                        p0 = p0.wrapping_add(slot_w);
+                        p1 = p1.wrapping_add(slot_w);
+                        p2 = p2.wrapping_add(slot_w);
                     }
                     let out = acc.0.as_mut_ptr() as *mut __m256i;
                     _mm256_store_si256(out, c00);
@@ -755,6 +751,7 @@ pub(super) unsafe fn try_run_3x3_strip(
                     // SAFETY: ISA checked by caller; `(img, oy, ob_start..ob_end)` is disjointly owned.
                     unsafe {
                         match isa {
+                            FusedIsa::Avx512Vnni512 => super::vnni512::run_3x3_row::<true>(&row_args),
                             FusedIsa::AvxVnni => vnni_3x3::run_row::<true>(&row_args),
                             FusedIsa::Avx512Vnni => avx512vnni_3x3::run_row::<true>(&row_args),
                             FusedIsa::Avx2 => avx2_3x3::run_row::<true>(&row_args),
@@ -811,6 +808,7 @@ pub(super) unsafe fn try_run_3x3_strip(
                     // SAFETY: ISA checked by caller; `(img, oy, ob_start..ob_end)` is disjointly owned.
                     unsafe {
                         match isa {
+                            FusedIsa::Avx512Vnni512 => super::vnni512::run_3x3_row::<false>(&row_args),
                             FusedIsa::AvxVnni => vnni_3x3::run_row::<false>(&row_args),
                             FusedIsa::Avx512Vnni => avx512vnni_3x3::run_row::<false>(&row_args),
                             FusedIsa::Avx2 => avx2_3x3::run_row::<false>(&row_args),
