@@ -911,6 +911,17 @@ impl FoloApp {
                 )
                 .when(picker_open, |d| d.child(div().flex().gap(px(6.)).children(thumbs)))
         });
+        let standalone_batch_exports = (!compare_on
+            && self.play_batch.is_active()
+            && !matches!(self.play_pred, Load::Ready(_)))
+        .then(|| {
+            div()
+                .px(px(12.))
+                .py(px(8.))
+                .border_b_1()
+                .border_color(t.line_subtle)
+                .child(self.play_batch_export_row(window, cx))
+        });
         // One scrolling column: controls and sample images, then detections and their latency (no
         // pinned footer, so no dead band and nothing hidden on short windows).
         let rail = if window.viewport_size().width < px(1100.) { 280. } else { 320. };
@@ -951,6 +962,7 @@ impl FoloApp {
                                     .flex_col()
                                     .border_t_1()
                                     .border_color(t.line_subtle)
+                                    .children(standalone_batch_exports)
                                     .child(detections),
                             )
                             .children(timing)

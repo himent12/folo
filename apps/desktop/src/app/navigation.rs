@@ -249,6 +249,7 @@ impl FoloApp {
         self.after_label_navigate();
         if self.route != Route::Playground {
             self.cancel_play_batch();
+            self.play_batch.load_gen += 1;
         }
         if let Route::Dataset(id) = &self.route
             && self.ds_img_dataset.as_deref() != Some(id.as_str())

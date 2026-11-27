@@ -109,7 +109,10 @@ impl FoloApp {
                         if this.store.images_px.failed(&thumb) {
                             this.store.images_px.retry(&thumb);
                         }
-                        this.set_play_image(PlayImage { name, input, encoded, image, width, height }, cx);
+                        this.set_play_image(
+                            PlayImage { name, input, encoded, image, width, height, batch_ref: None },
+                            cx,
+                        );
                     }
                     Err(e) => {
                         this.toast(Tone::Danger, "Could not open the image", Some(e.message.into()), cx)
@@ -200,7 +203,9 @@ impl FoloApp {
         if self.play_batch.items.iter().any(|it| {
             matches!(&it.source, crate::screens::playground::PlayBatchSource::Dataset { dataset_id, .. } if dataset_id == dataset)
         }) {
-            self.invalidate_play_batch();
+            // Dataset image ids are positional, so deleting/adding images can shift ids and leave
+            // cached batch filenames pointing at different images. Clear the affected dataset batch.
+            self.clear_play_batch();
         }
         let shown = self.play_image.as_ref().and_then(|p| match &p.input {
             PredictInput::Dataset { dataset_id, image_id } if dataset_id == dataset => Some(image_id.clone()),
@@ -300,6 +305,7 @@ impl FoloApp {
             self.play_class = None;
             self.clear_play_hover();
             self.invalidate_play_batch();
+            self.play_batch.load_gen += 1;
         }
         self.play_model_run = self.store.model(&id).and_then(|m| m.run_id.clone());
         self.play_model = Some(id);
@@ -405,12 +411,17 @@ impl FoloApp {
         }
     }
 
-    /// Commits a Playground NMS IoU change: cancels/invalidates batch work and reruns predictions.
+    /// Commits a Playground NMS IoU change: cancels/invalidates mismatched batch work and reruns
+    /// predictions. A no-op slider release (value unchanged) preserves completed batch results.
     pub(crate) fn on_play_iou_changed(&mut self, cx: &mut Context<Self>) {
+        if (self.play_iou - self.play_iou_committed).abs() <= 1e-4 {
+            return;
+        }
+        self.play_iou_committed = self.play_iou;
         let e2e = self.play_shown_model().is_some_and(|m| self.model_e2e(m));
         self.cancel_play_batch();
         if !e2e {
-            self.play_batch.invalidate_results();
+            self.play_batch.invalidate_mismatched_iou(self.play_iou);
         }
         self.run_predict(cx);
         if self.play_compare.enabled {
@@ -586,7 +597,7 @@ impl FoloApp {
                 .map_err(|e| ApiError::new("read_failed", format!("Could not read {n2}: {e}")))?;
             let (image, width, height) = upright_render(&bytes).ok_or_else(|| undecodable(&n2, &bytes))?;
             let input = PredictInput::File { name: n2, bytes: Arc::new(bytes) };
-            Ok(PlayImage { name, input, encoded: None, image, width, height })
+            Ok(PlayImage { name, input, encoded: None, image, width, height, batch_ref: None })
         });
         self.open_decoding(req, read, window, cx);
     }
@@ -655,6 +666,7 @@ impl FoloApp {
             self.play_model_run = self.store.model(&id).and_then(|m| m.run_id.clone());
             self.play_model = Some(id);
         }
+        self.clear_play_batch();
         self.set_play_image(image, cx);
     }
 

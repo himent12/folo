@@ -58,6 +58,7 @@ fn a_local_run_predicts_on_the_dataset_image_already_here() {
         image,
         width: 1,
         height: 1,
+        batch_ref: None,
     };
     // The server reads it from its disk by id; a local run needs no server for it.
     assert_eq!(shown.predict_input(false), input);
@@ -476,7 +477,15 @@ fn an_image_dropped_on_a_model_page_runs_that_model() {
 fn decoded(name: &str) -> crate::api::ApiResult<PlayImage> {
     let image = Arc::new(folo_ui::RenderImage::new(vec![image::Frame::new(image::RgbaImage::new(1, 1))]));
     let input = PredictInput::File { name: name.into(), bytes: Arc::new(Vec::new()) };
-    Ok(PlayImage { name: name.to_string().into(), input, encoded: None, image, width: 1, height: 1 })
+    Ok(PlayImage {
+        name: name.to_string().into(),
+        input,
+        encoded: None,
+        image,
+        width: 1,
+        height: 1,
+        batch_ref: None,
+    })
 }
 
 /// The name of the image on the Playground's stage.

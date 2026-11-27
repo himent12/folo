@@ -295,14 +295,15 @@ impl Render for FoloApp {
                     return;
                 }
                 if this.route == Route::Playground
-                    && this.play_image.is_some()
+                    && (this.play_image.is_some() || this.play_batch.is_active())
                     && !this.modal_open()
                     && this.palette.is_none()
                     && this.menu_open.is_none()
                     && !(m.control || m.alt || m.platform)
                 {
                     let d = if m.shift { 128. } else { 32. };
-                    let zoomed = this.play_zoom > 1.0;
+                    let has_img = this.play_image.is_some();
+                    let zoomed = has_img && this.play_zoom > 1.0;
                     let has_batch = this.play_batch.is_active();
                     let clamp_play_pan = |this: &mut Self| {
                         this.play_drag = None;
@@ -348,9 +349,9 @@ impl Render for FoloApp {
                             this.play_pan.1 -= d;
                             clamp_play_pan(this);
                         }
-                        "+" | "=" => this.play_zoom_by(1.4, cx),
-                        "-" => this.play_zoom_by(1.0 / 1.4, cx),
-                        "0" => {
+                        "+" | "=" if has_img => this.play_zoom_by(1.4, cx),
+                        "-" if has_img => this.play_zoom_by(1.0 / 1.4, cx),
+                        "0" if has_img => {
                             this.play_zoom = 1.0;
                             this.play_pan = (0., 0.);
                             this.play_drag = None;

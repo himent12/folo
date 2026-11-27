@@ -250,6 +250,9 @@ pub struct PlayImage {
     pub image: Arc<folo_ui::RenderImage>,
     pub width: u32,
     pub height: u32,
+    /// When loaded from a Playground batch, identifies `(batch_id, item_index)` so predictions and
+    /// cached results never cross-contaminate same-basename files or failed stage loads.
+    pub batch_ref: Option<(u64, usize)>,
 }
 
 pub struct Palette {
@@ -480,6 +483,8 @@ pub struct FoloApp {
     /// Short windows fold the validation-image picker to one line; this opens it.
     pub play_picker_open: bool,
     pub play_iou: f32,
+    /// Last committed NMS IoU value; used so a no-op slider click doesn't invalidate completed batch work.
+    pub(crate) play_iou_committed: f32,
     /// Where Playground runs the model: on the server (`None`), or in this process.
     pub play_target: Option<crate::local::Target>,
     /// The Playground's line of predictions ([`crate::local::Ticket`]): a newer one skips the
@@ -840,6 +845,7 @@ impl FoloApp {
             play_class: None,
             play_picker_open: false,
             play_iou: 0.7,
+            play_iou_committed: 0.7,
             play_target: None,
             play_line: Default::default(),
             local_gpu: Load::Idle,

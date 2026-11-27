@@ -127,6 +127,9 @@ pub struct LabelEditor {
     pub expect_rev: String,
     /// Working boxes currently rendered and edited.
     pub draft: Vec<BBox>,
+    /// Monotonic counter bumped whenever `draft` changes; transforms verify this at commit so a
+    /// concurrent Delete, Reclassify, Undo, or clean SSE sync can never be clobbered on mouse-up.
+    pub draft_gen: u64,
     /// Past snapshots for `Ctrl+Z` (most recent last).
     pub undo: Vec<Vec<BBox>>,
     /// Future snapshots for `Ctrl+Shift+Z` / `Ctrl+Y` (most recent last).
@@ -156,6 +159,7 @@ impl LabelEditor {
         self.base.clear();
         self.expect_rev.clear();
         self.draft.clear();
+        self.draft_gen += 1;
         self.undo.clear();
         self.redo.clear();
         self.tool = EditTool::Select;
@@ -223,6 +227,7 @@ impl LabelEditor {
             self.base = image.boxes.clone();
             self.expect_rev = label_box_revision(&image.boxes);
             self.draft = image.boxes.clone();
+            self.draft_gen += 1;
             self.undo.clear();
             self.redo.clear();
             self.drawing = None;
@@ -237,12 +242,17 @@ impl LabelEditor {
             return;
         }
         if same_boxes(&self.draft, &self.base) {
-            // Clean draft: adopt the fresh server boxes transparently.
+            // Clean draft: adopt the fresh server boxes transparently and drop any stale drag.
             self.base = image.boxes.clone();
             self.expect_rev = label_box_revision(&image.boxes);
             self.draft = image.boxes.clone();
+            self.draft_gen += 1;
             self.undo.clear();
             self.redo.clear();
+            self.drawing = None;
+            self.transforming = None;
+            self.hover_handle = None;
+            self.hover_move = false;
             self.changed_elsewhere = false;
         } else if !saving {
             // Dirty draft changed elsewhere (another tab, CLI, or agent): keep user's edits safe
@@ -262,7 +272,12 @@ impl LabelEditor {
         if same_boxes(&self.draft, &next) {
             return false;
         }
+        self.drawing = None;
+        self.transforming = None;
+        self.hover_handle = None;
+        self.hover_move = false;
         self.undo.push(std::mem::replace(&mut self.draft, next));
+        self.draft_gen += 1;
         if self.undo.len() > MAX_HISTORY {
             self.undo.remove(0);
         }
@@ -321,10 +336,13 @@ impl LabelEditor {
     pub fn undo(&mut self) -> bool {
         self.drawing = None;
         self.transforming = None;
+        self.hover_handle = None;
+        self.hover_move = false;
         let Some(prev) = self.undo.pop() else {
             return false;
         };
         self.redo.push(std::mem::replace(&mut self.draft, prev));
+        self.draft_gen += 1;
         if self.redo.len() > MAX_HISTORY {
             self.redo.remove(0);
         }
@@ -340,10 +358,13 @@ impl LabelEditor {
     pub fn redo(&mut self) -> bool {
         self.drawing = None;
         self.transforming = None;
+        self.hover_handle = None;
+        self.hover_move = false;
         let Some(next) = self.redo.pop() else {
             return false;
         };
         self.undo.push(std::mem::replace(&mut self.draft, next));
+        self.draft_gen += 1;
         if self.undo.len() > MAX_HISTORY {
             self.undo.remove(0);
         }
@@ -364,6 +385,8 @@ impl LabelEditor {
     pub fn discard(&mut self) -> bool {
         self.drawing = None;
         self.transforming = None;
+        self.hover_handle = None;
+        self.hover_move = false;
         self.pending_switch = None;
         let was_conflict = self.changed_elsewhere;
         self.changed_elsewhere = false;
@@ -372,6 +395,7 @@ impl LabelEditor {
         if was_conflict {
             let changed = !same_boxes(&self.draft, &base);
             self.draft = base;
+            self.draft_gen += 1;
             self.undo.clear();
             self.redo.clear();
             changed
@@ -386,10 +410,13 @@ impl LabelEditor {
         self.expect_rev = label_box_revision(&saved_boxes);
         self.base = saved_boxes.clone();
         self.draft = saved_boxes;
+        self.draft_gen += 1;
         self.changed_elsewhere = false;
         self.pending_switch = None;
         self.drawing = None;
         self.transforming = None;
+        self.hover_handle = None;
+        self.hover_move = false;
     }
 
     /// Begins a Move or Resize drag on `draft[index]`.
@@ -404,7 +431,7 @@ impl LabelEditor {
             return false;
         };
         self.drawing = None;
-        self.transforming = Some(BoxTransform::new(index, orig, start_img, start_px, kind));
+        self.transforming = Some(BoxTransform::new(index, orig, start_img, start_px, kind, self.draft_gen));
         true
     }
 
@@ -413,6 +440,10 @@ impl LabelEditor {
         let Some(t) = self.transforming.as_mut() else {
             return false;
         };
+        if t.start_draft_gen != self.draft_gen {
+            self.transforming = None;
+            return false;
+        }
         t.update(cur_img, cur_px);
         true
     }
@@ -420,7 +451,7 @@ impl LabelEditor {
     /// Live preview `(index, transformed_box)` while moving or resizing past threshold.
     pub fn preview_transform(&self, img_w: f32, img_h: f32) -> Option<(usize, BBox)> {
         let t = self.transforming.as_ref()?;
-        if !t.moved || t.index >= self.draft.len() {
+        if !t.moved || t.start_draft_gen != self.draft_gen || t.index >= self.draft.len() {
             return None;
         }
         Some((t.index, t.apply(img_w, img_h)))
@@ -430,7 +461,7 @@ impl LabelEditor {
     /// the box actually changed.
     pub fn finish_transform(&mut self, img_w: f32, img_h: f32) -> Option<usize> {
         let t = self.transforming.take()?;
-        if !t.moved || t.index >= self.draft.len() {
+        if !t.moved || t.start_draft_gen != self.draft_gen || t.index >= self.draft.len() {
             return None;
         }
         let next = t.apply(img_w, img_h);
@@ -439,6 +470,8 @@ impl LabelEditor {
 
     /// Cancels an active Move or Resize drag without modifying `draft` or undo history.
     pub fn cancel_transform(&mut self) -> bool {
+        self.hover_handle = None;
+        self.hover_move = false;
         self.transforming.take().is_some()
     }
 

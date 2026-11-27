@@ -199,7 +199,75 @@ impl FoloApp {
                         ),
                 )
                 .max_h(px(420.));
-            return div().flex_1().min_w_0().flex().flex_col().child(zone).into_any_element();
+            let stage_w = {
+                let rail = if window.viewport_size().width < px(1100.) { 280. } else { 320. };
+                (self.content_width(window) - rail - 16. - 2.).max(0.)
+            };
+            let batch_strip =
+                self.play_batch.is_active().then(|| self.play_batch_filmstrip(&t, stage_w, window, cx));
+            let active_err = self
+                .play_batch
+                .is_active()
+                .then(|| {
+                    let idx = self.play_batch.active;
+                    self.play_batch.items.get(idx).and_then(|it| match &it.status {
+                        super::BatchItemStatus::Failed(msg) => Some((it.name.clone(), msg.clone(), idx)),
+                        _ => None,
+                    })
+                })
+                .flatten();
+            let err_banner = active_err.map(|(fname, msg, idx)| {
+                let retry = self.button(
+                    "play-batch-retry-active",
+                    "Retry",
+                    Btn::Secondary,
+                    Some("icons/refresh-cw.svg"),
+                    window,
+                    cx,
+                    act(move |this, _, cx| this.select_play_batch_item(idx, cx)),
+                );
+                let next = self.button(
+                    "play-batch-skip-next",
+                    "Next image",
+                    Btn::Secondary,
+                    Some("icons/chevron-right.svg"),
+                    window,
+                    cx,
+                    act(|this, _, cx| this.step_play_batch(1, cx)),
+                );
+                div()
+                    .px(px(12.))
+                    .py(px(8.))
+                    .rounded(px(radius::MD))
+                    .bg(t.danger_muted)
+                    .border_1()
+                    .border_color(crate::theme::alpha(t.danger_fill, 0.35))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(10.))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.))
+                            .child(text(ty::SM, t.danger_text).child(format!("Could not load {fname}")))
+                            .child(text(ty::XS, t.text_secondary).whitespace_normal().child(msg)),
+                    )
+                    .child(div().flex().items_center().gap(px(6.)).flex_none().child(retry).child(next))
+            });
+            return div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(px(10.))
+                .children(batch_strip)
+                .children(err_banner)
+                .child(zone)
+                .into_any_element();
         }
         if self.play_compare.enabled && !no_models {
             return self.compare_stage(window, cx);

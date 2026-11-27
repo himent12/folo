@@ -4,13 +4,14 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use folo_ui::{Context, SharedString, Window};
+use folo_ui::{Context, Window};
 
 use crate::api::*;
 use crate::screens::playground::{
     BatchImageExport, BatchItemResult, BatchItemStatus, MAX_BATCH_FILES, PlayBatchItem, PlayBatchSource,
     PlayPredMeta, batch_detections_csv, batch_detections_json, batch_export_filename, batch_tile_label,
-    filter_detections, is_supported_image_ext, pick_val_samples, scan_image_folder, write_export_bytes,
+    disambiguate_file_labels, filter_detections, is_supported_image_ext, pick_val_samples, scan_image_folder,
+    write_export_bytes,
 };
 use crate::store::{ImgKey, ImgKind, Load, decode_upright, to_render_image};
 use crate::ui::*;
@@ -153,7 +154,6 @@ impl FoloApp {
             if p.is_dir() {
                 self.open_play_folder(p, req, window, cx);
             } else {
-                self.clear_play_batch();
                 self.open_play_file(p, req, window, cx);
             }
             return;
@@ -236,7 +236,6 @@ impl FoloApp {
             return;
         }
         if paths.len() == 1 {
-            self.clear_play_batch();
             self.open_play_file(paths.into_iter().next().unwrap(), req, window, cx);
             return;
         }
@@ -267,7 +266,6 @@ impl FoloApp {
             );
         }
         if supported.len() == 1 {
-            self.clear_play_batch();
             self.open_play_file(supported.into_iter().next().unwrap(), req, window, cx);
             return;
         }
@@ -288,12 +286,14 @@ impl FoloApp {
             self.play_model_run = self.store.model(&id).and_then(|m| m.run_id.clone());
             self.play_model = Some(id);
         }
+        let labels = disambiguate_file_labels(&supported);
         let items: Vec<PlayBatchItem> = supported
             .into_iter()
-            .map(|p| {
-                let name: SharedString =
-                    p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default().into();
-                PlayBatchItem { name, source: PlayBatchSource::File(p), status: BatchItemStatus::Pending }
+            .zip(labels)
+            .map(|(p, name)| PlayBatchItem {
+                name,
+                source: PlayBatchSource::File(p),
+                status: BatchItemStatus::Pending,
             })
             .collect();
         self.install_play_batch(items, cx);
@@ -403,7 +403,10 @@ impl FoloApp {
         if idx >= self.play_batch.items.len() {
             return;
         }
-        if self.play_batch.active == idx && self.play_image.is_some() {
+        let already_staged = self.play_image.as_ref().and_then(|i| i.batch_ref)
+            == Some((self.play_batch.batch_id, idx))
+            && !matches!(self.play_batch.items[idx].status, BatchItemStatus::Failed(_));
+        if self.play_batch.active == idx && already_staged {
             return;
         }
         self.play_batch.active = idx;
@@ -429,6 +432,8 @@ impl FoloApp {
         let Some(item) = self.play_batch.items.get(idx).cloned() else { return };
         self.play_load_seq += 1;
         let seq = self.play_load_seq;
+        let batch_id = self.play_batch.batch_id;
+        let load_gen = self.play_batch.load_gen;
         let name = item.name.clone();
         match item.source.clone() {
             PlayBatchSource::Dataset { dataset_id, image_id } => {
@@ -452,7 +457,10 @@ impl FoloApp {
                         }
                     },
                     move |this, r, cx| {
-                        if seq != this.play_load_seq {
+                        if seq != this.play_load_seq
+                            || batch_id != this.play_batch.batch_id
+                            || load_gen != this.play_batch.load_gen
+                        {
                             return;
                         }
                         this.play_loading = None;
@@ -462,8 +470,17 @@ impl FoloApp {
                                     this.store.images_px.retry(&thumb);
                                 }
                                 this.stage_batch_image(
+                                    batch_id,
                                     idx,
-                                    PlayImage { name, input, encoded, image, width, height },
+                                    PlayImage {
+                                        name,
+                                        input,
+                                        encoded,
+                                        image,
+                                        width,
+                                        height,
+                                        batch_ref: Some((batch_id, idx)),
+                                    },
                                     cx,
                                 );
                             }
@@ -492,17 +509,28 @@ impl FoloApp {
                         ApiError::new("decode_failed", format!("{n2} could not be decoded"))
                     })?;
                     let input = PredictInput::File { name: n2, bytes: Arc::new(bytes) };
-                    Ok::<PlayImage, ApiError>(PlayImage { name, input, encoded: None, image, width, height })
+                    Ok::<PlayImage, ApiError>(PlayImage {
+                        name,
+                        input,
+                        encoded: None,
+                        image,
+                        width,
+                        height,
+                        batch_ref: Some((batch_id, idx)),
+                    })
                 });
                 cx.spawn(async move |this, cx| {
                     let r = read.await;
                     this.update(cx, |this, cx| {
-                        if seq != this.play_load_seq {
+                        if seq != this.play_load_seq
+                            || batch_id != this.play_batch.batch_id
+                            || load_gen != this.play_batch.load_gen
+                        {
                             return;
                         }
                         this.play_loading = None;
                         match r {
-                            Ok(img) => this.stage_batch_image(idx, img, cx),
+                            Ok(img) => this.stage_batch_image(batch_id, idx, img, cx),
                             Err(e) => {
                                 if let Some(slot) = this.play_batch.items.get_mut(idx) {
                                     slot.status = BatchItemStatus::Failed(e.message.clone());
@@ -519,8 +547,11 @@ impl FoloApp {
         }
     }
 
-    fn stage_batch_image(&mut self, idx: usize, img: PlayImage, cx: &mut Context<Self>) {
-        if self.play_batch.active != idx || idx >= self.play_batch.items.len() {
+    fn stage_batch_image(&mut self, batch_id: u64, idx: usize, img: PlayImage, cx: &mut Context<Self>) {
+        if self.play_batch.batch_id != batch_id
+            || self.play_batch.active != idx
+            || idx >= self.play_batch.items.len()
+        {
             cx.drop_image(img.image, None);
             return;
         }
@@ -537,8 +568,9 @@ impl FoloApp {
         }
     }
 
-    /// Records the stage's completed Model A prediction back into the active batch item when its
-    /// image matches, so navigating item-by-item automatically populates batch counts & exports.
+    /// Records the stage's completed Model A prediction back into its exact staged batch item
+    /// (verified via `(batch_id, item_index)` so same-basename files or concurrent stage loads
+    /// never cross-contaminate cached detections).
     pub(super) fn sync_stage_pred_to_batch(
         &mut self,
         meta: Option<&PlayPredMeta>,
@@ -547,21 +579,12 @@ impl FoloApp {
         if !self.play_batch.is_active() {
             return;
         }
-        let idx = self.play_batch.active;
-        let (Some(img), Some(item)) = (self.play_image.as_ref(), self.play_batch.items.get_mut(idx)) else {
-            return;
-        };
-        let same_img = match (&item.source, &img.input) {
-            (
-                PlayBatchSource::Dataset { dataset_id, image_id },
-                PredictInput::Dataset { dataset_id: d, image_id: i },
-            ) => dataset_id == d && image_id == i,
-            (PlayBatchSource::File(_), PredictInput::File { .. }) => item.name == img.name,
-            _ => false,
-        };
-        if !same_img {
+        let Some(img) = self.play_image.as_ref() else { return };
+        let Some((bid, idx)) = img.batch_ref else { return };
+        if bid != self.play_batch.batch_id {
             return;
         }
+        let Some(item) = self.play_batch.items.get_mut(idx) else { return };
         match (r, meta) {
             (Ok(pred), Some(meta)) => {
                 item.status = BatchItemStatus::Done(BatchItemResult {
@@ -707,8 +730,10 @@ impl FoloApp {
         }
         match r {
             Ok(res) => {
+                let stage_matches = self.play_image.as_ref().and_then(|i| i.batch_ref)
+                    == Some((self.play_batch.batch_id, idx));
                 if idx == self.play_batch.active
-                    && self.play_image.is_some()
+                    && stage_matches
                     && self.play_loading.is_none()
                     && !self.play_pred_pending
                 {

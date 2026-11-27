@@ -103,8 +103,8 @@ pub fn batch_detections_json(
     Ok(serde_json::to_string_pretty(&payload)?)
 }
 
-/// Formats completed Playground batch detections as RFC 4180 CSV with columns:
-/// `filename,class,confidence,x1,y1,x2,y2,width,height`.
+/// Formats completed Playground batch detections as CSV with RFC 4180 field quoting and LF (`\n`)
+/// record endings, using columns: `filename,class,confidence,x1,y1,x2,y2,width,height`.
 pub fn batch_detections_csv(entries: &[BatchImageExport<'_>]) -> String {
     let mut out = String::from("filename,class,confidence,x1,y1,x2,y2,width,height\n");
     for entry in entries {

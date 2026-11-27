@@ -415,10 +415,14 @@ impl FoloApp {
             || self.label.editor.pending_switch.take().is_some()
             || self.label.selected_box.take().is_some()
         {
+            self.label.editor.hover_handle = None;
+            self.label.editor.hover_move = false;
             cx.notify();
             true
         } else if self.label.editor.tool == super::editor::EditTool::Draw {
             self.label.editor.tool = super::editor::EditTool::Select;
+            self.label.editor.hover_handle = None;
+            self.label.editor.hover_move = false;
             cx.notify();
             true
         } else {

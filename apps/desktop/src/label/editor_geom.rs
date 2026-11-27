@@ -47,6 +47,8 @@ pub struct BoxTransform {
     pub start_px: (f32, f32),
     pub cur_px: (f32, f32),
     pub kind: TransformKind,
+    /// `LabelEditor::draft_gen` when the drag began; checked before preview/commit.
+    pub start_draft_gen: u64,
     /// Becomes true once pointer travel exceeds [`DRAG_THRESHOLD_PX`].
     pub moved: bool,
 }
@@ -58,8 +60,19 @@ impl BoxTransform {
         start_img: (f32, f32),
         start_px: (f32, f32),
         kind: TransformKind,
+        start_draft_gen: u64,
     ) -> Self {
-        Self { index, orig, start_img, cur_img: start_img, start_px, cur_px: start_px, kind, moved: false }
+        Self {
+            index,
+            orig,
+            start_img,
+            cur_img: start_img,
+            start_px,
+            cur_px: start_px,
+            kind,
+            start_draft_gen,
+            moved: false,
+        }
     }
 
     /// Updates pointer coordinates; marks `moved` once travel passes `DRAG_THRESHOLD_PX`.
@@ -73,24 +86,31 @@ impl BoxTransform {
         }
     }
 
-    /// Computes the clamped preview/final bounding box for this drag gesture.
+    /// Computes the clamped preview/final bounding box for this drag gesture using pointer delta
+    /// from mouse-down so off-center grabs never jump.
     pub fn apply(&self, img_w: f32, img_h: f32) -> BBox {
+        let dx = self.cur_img.0 - self.start_img.0;
+        let dy = self.cur_img.1 - self.start_img.1;
         match self.kind {
-            TransformKind::Move => {
-                let dx = self.cur_img.0 - self.start_img.0;
-                let dy = self.cur_img.1 - self.start_img.1;
-                apply_box_move(self.orig, dx, dy, img_w, img_h)
-            }
-            TransformKind::Resize(handle) => apply_box_resize(self.orig, handle, self.cur_img, img_w, img_h),
+            TransformKind::Move => apply_box_move(self.orig, dx, dy, img_w, img_h),
+            TransformKind::Resize(handle) => apply_box_resize(self.orig, handle, (dx, dy), img_w, img_h),
         }
     }
 }
 
-fn round_tenth(v: f32) -> f32 {
-    (v * 10.0).round() / 10.0
+/// Minimum resized box span in exact tenth-pixel units (`4.0 px = 40 tenths`).
+const MIN_BOX_TENTHS: i64 = (MIN_BOX_PX as i64) * 10;
+
+fn to_tenths(v: f32) -> i64 {
+    (f64::from(v) * 10.0).round() as i64
 }
 
-/// Translates `orig` by `(dx, dy)` while preserving its width/height and clamping inside `[0, img_w] × [0, img_h]`.
+fn from_tenths(t: i64) -> f32 {
+    (t as f64 / 10.0) as f32
+}
+
+/// Translates `orig` by `(dx, dy)` while preserving its existing dimensions (including valid
+/// sub-4px boxes) and clamping inside `[0, img_w] × [0, img_h]` in exact tenth-pixel coordinates.
 pub fn apply_box_move(orig: BBox, dx: f32, dy: f32, img_w: f32, img_h: f32) -> BBox {
     if !dx.is_finite()
         || !dy.is_finite()
@@ -101,28 +121,32 @@ pub fn apply_box_move(orig: BBox, dx: f32, dy: f32, img_w: f32, img_h: f32) -> B
     {
         return orig;
     }
-    let bw = (orig.x2 - orig.x1).clamp(MIN_BOX_PX.min(img_w), img_w);
-    let bh = (orig.y2 - orig.y1).clamp(MIN_BOX_PX.min(img_h), img_h);
-    let max_x1 = (img_w - bw).max(0.0);
-    let max_y1 = (img_h - bh).max(0.0);
-    let x1 = round_tenth((orig.x1 + dx).clamp(0.0, max_x1));
-    let y1 = round_tenth((orig.y1 + dy).clamp(0.0, max_y1));
-    let x2 = round_tenth((x1 + bw).min(img_w));
-    let y2 = round_tenth((y1 + bh).min(img_h));
-    BBox { class: orig.class, x1, y1, x2, y2 }
+    let max_w = to_tenths(img_w).max(0);
+    let max_h = to_tenths(img_h).max(0);
+    let ox1 = to_tenths(orig.x1).clamp(0, max_w);
+    let oy1 = to_tenths(orig.y1).clamp(0, max_h);
+    let ox2 = to_tenths(orig.x2).clamp(ox1, max_w);
+    let oy2 = to_tenths(orig.y2).clamp(oy1, max_h);
+    let bw = (ox2 - ox1).clamp(0, max_w);
+    let bh = (oy2 - oy1).clamp(0, max_h);
+    let x1 = (ox1 + to_tenths(dx)).clamp(0, max_w - bw);
+    let y1 = (oy1 + to_tenths(dy)).clamp(0, max_h - bh);
+    BBox {
+        class: orig.class,
+        x1: from_tenths(x1),
+        y1: from_tenths(y1),
+        x2: from_tenths(x1 + bw),
+        y2: from_tenths(y1 + bh),
+    }
 }
 
-/// Resizes `orig` by dragging `handle` toward `target` in image coordinates, keeping the opposite
-/// edge anchored, clamping to `[0, img_w] × [0, img_h]`, and enforcing [`MIN_BOX_PX`].
-pub fn apply_box_resize(
-    orig: BBox,
-    handle: ResizeHandle,
-    target: (f32, f32),
-    img_w: f32,
-    img_h: f32,
-) -> BBox {
-    if !target.0.is_finite()
-        || !target.1.is_finite()
+/// Resizes `orig` by applying pointer `delta = (dx, dy)` to the edge(s) owned by `handle`, keeping
+/// the opposite edge anchored, clamping to `[0, img_w] × [0, img_h]`, and enforcing [`MIN_BOX_PX`]
+/// in exact tenth-pixel integer coordinates on the dragged axis (preventing IEEE-754 `f32`
+/// snap-back on fractional edges or off-center handle grabs).
+pub fn apply_box_resize(orig: BBox, handle: ResizeHandle, delta: (f32, f32), img_w: f32, img_h: f32) -> BBox {
+    if !delta.0.is_finite()
+        || !delta.1.is_finite()
         || !img_w.is_finite()
         || !img_h.is_finite()
         || img_w < MIN_BOX_PX
@@ -130,49 +154,47 @@ pub fn apply_box_resize(
     {
         return orig;
     }
-    let mut x1 = orig.x1.clamp(0.0, img_w);
-    let mut y1 = orig.y1.clamp(0.0, img_h);
-    let mut x2 = orig.x2.clamp(0.0, img_w);
-    let mut y2 = orig.y2.clamp(0.0, img_h);
-    let tx = target.0.clamp(0.0, img_w);
-    let ty = target.1.clamp(0.0, img_h);
+    let max_w = to_tenths(img_w);
+    let max_h = to_tenths(img_h);
+    let mut x1 = to_tenths(orig.x1).clamp(0, max_w);
+    let mut y1 = to_tenths(orig.y1).clamp(0, max_h);
+    let mut x2 = to_tenths(orig.x2).clamp(0, max_w);
+    let mut y2 = to_tenths(orig.y2).clamp(0, max_h);
+    let dx = to_tenths(delta.0);
+    let dy = to_tenths(delta.1);
+    let min_x = MIN_BOX_TENTHS.min(max_w);
+    let min_y = MIN_BOX_TENTHS.min(max_h);
 
-    match handle {
-        ResizeHandle::Nw => {
-            x1 = tx.min(x2 - MIN_BOX_PX).max(0.0);
-            y1 = ty.min(y2 - MIN_BOX_PX).max(0.0);
-        }
-        ResizeHandle::N => {
-            y1 = ty.min(y2 - MIN_BOX_PX).max(0.0);
-        }
-        ResizeHandle::Ne => {
-            x2 = tx.max(x1 + MIN_BOX_PX).min(img_w);
-            y1 = ty.min(y2 - MIN_BOX_PX).max(0.0);
-        }
-        ResizeHandle::E => {
-            x2 = tx.max(x1 + MIN_BOX_PX).min(img_w);
-        }
-        ResizeHandle::Se => {
-            x2 = tx.max(x1 + MIN_BOX_PX).min(img_w);
-            y2 = ty.max(y1 + MIN_BOX_PX).min(img_h);
-        }
-        ResizeHandle::S => {
-            y2 = ty.max(y1 + MIN_BOX_PX).min(img_h);
-        }
-        ResizeHandle::Sw => {
-            x1 = tx.min(x2 - MIN_BOX_PX).max(0.0);
-            y2 = ty.max(y1 + MIN_BOX_PX).min(img_h);
-        }
-        ResizeHandle::W => {
-            x1 = tx.min(x2 - MIN_BOX_PX).max(0.0);
-        }
+    let moves_w = matches!(handle, ResizeHandle::Nw | ResizeHandle::W | ResizeHandle::Sw);
+    let moves_e = matches!(handle, ResizeHandle::Ne | ResizeHandle::E | ResizeHandle::Se);
+    let moves_n = matches!(handle, ResizeHandle::Nw | ResizeHandle::N | ResizeHandle::Ne);
+    let moves_s = matches!(handle, ResizeHandle::Sw | ResizeHandle::S | ResizeHandle::Se);
+
+    if moves_w {
+        let hi = (x2 - min_x).max(0);
+        x1 = (x1 + dx).clamp(0, hi);
+    } else if moves_e {
+        let lo = (x1 + min_x).min(max_w);
+        x2 = (x2 + dx).clamp(lo, max_w);
+    }
+    if moves_n {
+        let hi = (y2 - min_y).max(0);
+        y1 = (y1 + dy).clamp(0, hi);
+    } else if moves_s {
+        let lo = (y1 + min_y).min(max_h);
+        y2 = (y2 + dy).clamp(lo, max_h);
     }
 
-    let (rx1, ry1, rx2, ry2) = (round_tenth(x1), round_tenth(y1), round_tenth(x2), round_tenth(y2));
-    if (rx2 - rx1) < MIN_BOX_PX || (ry2 - ry1) < MIN_BOX_PX {
+    if x2 <= x1 || y2 <= y1 {
         return orig;
     }
-    BBox { class: orig.class, x1: rx1, y1: ry1, x2: rx2, y2: ry2 }
+    BBox {
+        class: orig.class,
+        x1: from_tenths(x1),
+        y1: from_tenths(y1),
+        x2: from_tenths(x2),
+        y2: from_tenths(y2),
+    }
 }
 
 /// Screen-space center positions of the 8 resize handles for `bbox` painted inside `rect`.
@@ -253,6 +275,13 @@ mod tests {
         let clamped_br = apply_box_move(b, 900.0, 900.0, 640.0, 480.0);
         assert_eq!(clamped_br, BBox { class: 1, x1: 540.0, y1: 400.0, x2: 640.0, y2: 480.0 });
 
+        // Moving a valid sub-4px box preserves its exact dimensions instead of enlarging it.
+        let tiny = BBox { class: 0, x1: 10.0, y1: 12.0, x2: 12.0, y2: 14.5 };
+        assert_eq!(
+            apply_box_move(tiny, 5.0, 3.0, 640.0, 480.0),
+            BBox { class: 0, x1: 15.0, y1: 15.0, x2: 17.0, y2: 17.5 }
+        );
+
         // Non-finite delta is a safe no-op.
         assert_eq!(apply_box_move(b, f32::NAN, 10.0, 640.0, 480.0), b);
     }
@@ -261,24 +290,51 @@ mod tests {
     fn apply_box_resize_clamps_and_enforces_min_size_across_handles() {
         let b = BBox { class: 2, x1: 100.0, y1: 100.0, x2: 200.0, y2: 200.0 };
         assert_eq!(
-            apply_box_resize(b, ResizeHandle::Se, (260.0, 240.0), 640.0, 480.0),
+            apply_box_resize(b, ResizeHandle::Se, (60.0, 40.0), 640.0, 480.0),
             BBox { class: 2, x1: 100.0, y1: 100.0, x2: 260.0, y2: 240.0 }
         );
         // Dragging NW past SE stops at MIN_BOX_PX instead of inverting.
         assert_eq!(
-            apply_box_resize(b, ResizeHandle::Nw, (300.0, 300.0), 640.0, 480.0),
+            apply_box_resize(b, ResizeHandle::Nw, (200.0, 200.0), 640.0, 480.0),
             BBox { class: 2, x1: 200.0 - MIN_BOX_PX, y1: 200.0 - MIN_BOX_PX, x2: 200.0, y2: 200.0 }
         );
         // Dragging E past image width clamps to 640.
         assert_eq!(
-            apply_box_resize(b, ResizeHandle::E, (999.0, 150.0), 640.0, 480.0),
+            apply_box_resize(b, ResizeHandle::E, (999.0, 50.0), 640.0, 480.0),
             BBox { class: 2, x1: 100.0, y1: 100.0, x2: 640.0, y2: 200.0 }
         );
-        // Dragging N above 0 clamps to 0.
+        // Dragging N above 0 clamps to 0; horizontal delta on N has zero vertical effect.
         assert_eq!(
-            apply_box_resize(b, ResizeHandle::N, (150.0, -50.0), 640.0, 480.0),
+            apply_box_resize(b, ResizeHandle::N, (50.0, -150.0), 640.0, 480.0),
             BBox { class: 2, x1: 100.0, y1: 0.0, x2: 200.0, y2: 200.0 }
         );
+
+        // Off-center grab on N handle + horizontal-only drag produces zero jump on y1.
+        let mut tr = BoxTransform::new(
+            0,
+            b,
+            (150.0, 104.0),
+            (150.0, 104.0),
+            TransformKind::Resize(ResizeHandle::N),
+            1,
+        );
+        tr.update((180.0, 104.0), (180.0, 104.0));
+        assert_eq!(tr.apply(640.0, 480.0), b, "horizontal drag on N must not move top edge");
+
+        // Fractional f32 edges (0.2, 0.7, 4.4) clamp cleanly to MIN_BOX_PX without snapping back.
+        for x1 in [0.2_f32, 0.7, 1.2, 4.4, 4.9] {
+            let frac = BBox { class: 0, x1, y1: 10.0, x2: x1 + 50.0, y2: 60.0 };
+            let clamped = apply_box_resize(frac, ResizeHandle::E, (-100.0, 0.0), 640.0, 480.0);
+            assert!(
+                (clamped.x2 - (x1 + MIN_BOX_PX)).abs() < 1e-3,
+                "x1={x1} must hold at MIN_BOX_PX, not snap back: {clamped:?}"
+            );
+        }
+
+        // Resizing horizontally on a server box whose height is < 4px still works without snapping back.
+        let thin = BBox { class: 0, x1: 10.0, y1: 20.0, x2: 50.0, y2: 22.0 };
+        let widened = apply_box_resize(thin, ResizeHandle::E, (20.0, 0.0), 640.0, 480.0);
+        assert_eq!(widened, BBox { class: 0, x1: 10.0, y1: 20.0, x2: 70.0, y2: 22.0 });
     }
 
     #[test]

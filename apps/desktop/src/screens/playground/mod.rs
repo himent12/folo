@@ -16,7 +16,7 @@ mod stage_compare;
 
 pub use batch::{
     BatchItemResult, BatchItemStatus, MAX_BATCH_FILES, PlayBatchItem, PlayBatchSource, PlayBatchState,
-    batch_tile_label, is_supported_image_ext, scan_image_folder,
+    batch_tile_label, disambiguate_file_labels, is_supported_image_ext, scan_image_folder,
 };
 pub use batch_export::{
     BatchImageExport, batch_detections_csv, batch_detections_json, batch_export_filename,

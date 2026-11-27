@@ -162,7 +162,8 @@ impl FoloApp {
         let active_id_click = active.id.clone();
         let draft_rev_click = draft_rev.to_string();
         let n_classes = job.classes.len();
-        let sel_box_for_click = sel_box.and_then(|i| draft_boxes.get(i).copied().map(|b| (i, b)));
+        let sel_box_for_click =
+            show_handles.then(|| sel_box.and_then(|i| draft_boxes.get(i).copied().map(|b| (i, b)))).flatten();
         let sel_box_for_hover = sel_box_for_click;
 
         let cursor = if let Some(tr) = &self.label.editor.transforming {
@@ -172,10 +173,14 @@ impl FoloApp {
             }
         } else if is_drawing || self.label.editor.tool == EditTool::Draw {
             CursorStyle::Crosshair
-        } else if let Some(h) = self.label.editor.hover_handle {
-            h.cursor()
-        } else if self.label.editor.hover_move {
-            CursorStyle::OpenHand
+        } else if show_handles && sel_box.is_some() {
+            if let Some(h) = self.label.editor.hover_handle {
+                h.cursor()
+            } else if self.label.editor.hover_move {
+                CursorStyle::OpenHand
+            } else {
+                CursorStyle::PointingHand
+            }
         } else {
             CursorStyle::PointingHand
         };

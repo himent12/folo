@@ -324,6 +324,7 @@ impl FoloApp {
                 cx,
                 Rc::new(|this, idx, _, cx| {
                     this.label.editor.cancel_draw();
+                    this.label.editor.cancel_transform();
                     this.label.editor.tool = if idx == 1 { EditTool::Draw } else { EditTool::Select };
                     cx.notify();
                 }),

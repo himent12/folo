@@ -290,3 +290,148 @@ fn playground_folder_and_multifile_pick_and_cancellation_staleness_guards() {
         assert!(!this.play_batch.running);
     });
 }
+
+#[test]
+fn playground_batch_same_basename_corrupt_first_iou_and_dataset_refresh_guards() {
+    let (mut app, window) = open();
+    app.update(|cx| {
+        crate::app::bind_keys(cx);
+        crate::input::bind_keys(cx);
+    });
+    settle(&mut app, window);
+
+    // 1. Corrupt first image on empty Playground still exposes batch strip & keyboard stepping.
+    let dir = folo_test_support::TestDir::new("desktop-play-batch-corrupt-first");
+    let bad = dir.path().join("01_corrupt.png");
+    let good = dir.path().join("02_valid.png");
+    std::fs::write(&bad, b"\x89PNG\r\n\x1a\nnot-a-real-png").unwrap();
+    write_test_png(&good, 30, 180, 90);
+
+    drive(&mut app, window, |this, w, cx| this.navigate(Route::Playground, w, cx));
+    settle(&mut app, window);
+    assert!(drive(&mut app, window, |this, _, _| this.play_image.is_none()));
+
+    app.platform().answer_prompts(Some(vec![dir.path().to_path_buf()]));
+    drive(&mut app, window, |this, w, cx| this.pick_play_folder(w, cx));
+    settle(&mut app, window);
+
+    drive(&mut app, window, |this, _, _| {
+        assert!(this.play_batch.is_active(), "batch stays active even when item 0 fails to decode");
+        assert!(this.play_image.is_none(), "corrupt item 0 leaves stage without an image");
+        assert!(matches!(this.play_batch.items[0].status, BatchItemStatus::Failed(_)));
+    });
+
+    // Keyboard ']' steps past corrupt item 0 onto valid item 1 even while play_image is None.
+    press(&mut app, window, "]");
+    settle(&mut app, window);
+    drive(&mut app, window, |this, _, _| {
+        assert_eq!(this.play_batch.active, 1);
+        assert!(this.play_image.is_some(), "stepping from empty failed item 0 loads valid item 1");
+        assert_eq!(this.play_image.as_ref().map(|i| i.name.as_ref()), Some("02_valid.png"));
+    });
+
+    // Dropping/picking a single corrupt file must NOT wipe the active batch.
+    app.platform().answer_prompts(Some(vec![bad.clone()]));
+    drive(&mut app, window, |this, w, cx| this.pick_image(w, cx));
+    settle(&mut app, window);
+    assert!(
+        drive(&mut app, window, |this, _, _| this.play_batch.is_active()),
+        "failed single-file open preserves existing batch"
+    );
+
+    // 2. Same-basename files from different directories never cross-contaminate cache or stage.
+    let sub_a = dir.path().join("dir_a");
+    let sub_b = dir.path().join("dir_b");
+    std::fs::create_dir_all(&sub_a).unwrap();
+    std::fs::create_dir_all(&sub_b).unwrap();
+    let file_a = sub_a.join("frame.png");
+    let file_b = sub_b.join("frame.png");
+    write_test_png(&file_a, 220, 40, 40);
+    write_test_png(&file_b, 40, 40, 220);
+
+    app.platform().answer_prompts(Some(vec![file_a, file_b]));
+    drive(&mut app, window, |this, w, cx| this.pick_image(w, cx));
+    settle(&mut app, window);
+
+    drive(&mut app, window, |this, _, cx| {
+        assert_eq!(this.play_batch.items.len(), 2);
+        assert_eq!(this.play_batch.items[0].name.as_ref(), "dir_a/frame.png");
+        assert_eq!(this.play_batch.items[1].name.as_ref(), "dir_b/frame.png");
+        let bid = this.play_batch.batch_id;
+        assert_eq!(this.play_image.as_ref().and_then(|i| i.batch_ref), Some((bid, 0)));
+
+        // Simulate active advancing to item 1 while item 0 is still staged on screen.
+        let model_id = this.play_model.clone().unwrap();
+        this.play_batch.active = 1;
+        this.play_batch.items[1].status = BatchItemStatus::Pending;
+        let meta = crate::screens::playground::PlayPredMeta {
+            image_gen: this.play_image_gen,
+            model_id: model_id.clone(),
+            iou_bits: this.play_iou.to_bits(),
+            target: this.play_target,
+            floor: super::PLAY_CONF_FLOOR,
+        };
+        let pred_a = fake_batch_result(&model_id, this.play_iou, super::PLAY_CONF_FLOOR, 3).pred;
+        this.sync_stage_pred_to_batch(Some(&meta), &Ok(pred_a));
+        assert!(
+            matches!(this.play_batch.items[1].status, BatchItemStatus::Pending),
+            "item 0 prediction must NEVER write into item 1 while item 0 is still staged"
+        );
+        assert!(
+            matches!(this.play_batch.items[0].status, BatchItemStatus::Done(_)),
+            "item 0 prediction records into its own batch_ref slot 0"
+        );
+
+        // Reverse check: Run All answering for active item 1 while item 0 is still on stage
+        // must NOT overwrite stage play_pred with item 1's detections.
+        let stage_boxes_before = this.play_pred.ready().map(|p| p.boxes.len());
+        this.play_batch.running = true;
+        this.play_batch.run_gen += 1;
+        let rgen = this.play_batch.run_gen;
+        let res_b = fake_batch_result(&model_id, this.play_iou, super::PLAY_CONF_FLOOR, 7);
+        this.play_batch_step_answered(rgen, 1, &model_id, Ok(res_b), cx);
+        assert_eq!(
+            this.play_pred.ready().map(|p| p.boxes.len()),
+            stage_boxes_before,
+            "item 1 Run All answer must not paint onto staged item 0"
+        );
+        assert!(matches!(this.play_batch.items[1].status, BatchItemStatus::Done(_)));
+
+        // 3. IoU slider drag cancels immediately; no-op release preserves completed results.
+        this.play_batch.running = true;
+        this.play_batch.run_gen += 1;
+        this.on_play_iou_changed(cx);
+        assert!(
+            matches!(this.play_batch.items[1].status, BatchItemStatus::Done(_)),
+            "no-op IoU release preserves completed batch items"
+        );
+        this.set_slider("play-iou", 0.1, cx);
+        assert!(!this.play_batch.running, "dragging IoU slider cancels Run All immediately");
+        this.on_play_iou_changed(cx);
+        assert!(
+            matches!(this.play_batch.items[1].status, BatchItemStatus::Pending),
+            "committing a different IoU invalidates mismatched batch items"
+        );
+
+        // 4. Changing inference target cancels Run All and invalidates batch results.
+        this.play_batch.running = true;
+        this.play_batch.items[0].status =
+            BatchItemStatus::Done(fake_batch_result(&model_id, this.play_iou, super::PLAY_CONF_FLOOR, 2));
+        this.set_play_target(Some(crate::local::Target::Cpu), cx);
+        assert!(!this.play_batch.running);
+        assert!(matches!(this.play_batch.items[0].status, BatchItemStatus::Pending));
+    });
+
+    // 5. Dataset refresh clears affected dataset batch so shifted positional IDs never export stale names.
+    drive(&mut app, window, |this, w, cx| this.load_play_demo_batch(w, cx));
+    settle(&mut app, window);
+    drive(&mut app, window, |this, _, cx| {
+        assert!(this.play_batch.is_active());
+        let ds_id = match &this.play_batch.items[0].source {
+            crate::screens::playground::PlayBatchSource::Dataset { dataset_id, .. } => dataset_id.clone(),
+            _ => panic!("expected dataset demo batch"),
+        };
+        let _ = this.forget_play_dataset(&ds_id, cx);
+        assert!(!this.play_batch.is_active(), "dataset edit clears affected dataset batch");
+    });
+}

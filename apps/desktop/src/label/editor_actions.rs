@@ -135,6 +135,9 @@ impl FoloApp {
             }
             "b" | "B" => {
                 self.label.show_boxes = !self.label.show_boxes;
+                if !self.label.show_boxes {
+                    self.label.editor.cancel_transform();
+                }
             }
             "l" | "L" => {
                 self.label.show_labels = !self.label.show_labels;

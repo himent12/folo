@@ -173,7 +173,13 @@ impl FoloApp {
                 let v = q(at(0.05, 0.95), 0.01).max(lo);
                 self.set_play_conf(v, cx);
             }
-            "play-iou" => self.play_iou = q(at(0.3, 0.95), 0.01),
+            "play-iou" => {
+                let v = q(at(0.3, 0.95), 0.01);
+                if (v - self.play_iou).abs() > 1e-4 {
+                    self.play_iou = v;
+                    self.cancel_play_batch();
+                }
+            }
             "sample-conf" => {
                 let (lo, hi, step) = crate::screens::runs::SAMPLE_CONF;
                 self.sample_conf = q(at(lo, hi), step).clamp(lo, hi);

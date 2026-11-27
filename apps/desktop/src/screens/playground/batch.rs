@@ -113,6 +113,8 @@ pub struct BatchSummary {
 
 /// Playground multi-image / folder batch state owned by `FoloApp`.
 pub struct PlayBatchState {
+    /// Monotonic id identifying the currently loaded batch; bumped on install and clear.
+    pub batch_id: u64,
     pub items: Vec<PlayBatchItem>,
     pub active: usize,
     /// True while sequential `Run All` is actively running.
@@ -120,7 +122,7 @@ pub struct PlayBatchState {
     /// Generation counter bumped on start, cancel, clear, or any parameter/route/backend change so
     /// in-flight batch callbacks can never write stale results.
     pub run_gen: u64,
-    /// Generation counter for async folder scan / multi-file intake.
+    /// Generation counter for async folder scan / multi-file / demo-batch intake.
     pub load_gen: u64,
     /// Dedicated local-inference ticket line for batch runs (bumped on cancel).
     pub line: Arc<AtomicU64>,
@@ -129,6 +131,7 @@ pub struct PlayBatchState {
 impl Default for PlayBatchState {
     fn default() -> Self {
         Self {
+            batch_id: 0,
             items: Vec::new(),
             active: 0,
             running: false,
@@ -137,6 +140,33 @@ impl Default for PlayBatchState {
             line: Arc::new(AtomicU64::new(0)),
         }
     }
+}
+
+/// Builds display/export names for local file paths, disambiguating duplicate basenames across
+/// different directories by prepending the parent directory name(s).
+pub fn disambiguate_file_labels(paths: &[PathBuf]) -> Vec<SharedString> {
+    let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let bases: Vec<String> = paths
+        .iter()
+        .map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default())
+        .collect();
+    for b in &bases {
+        *counts.entry(b.clone()).or_default() += 1;
+    }
+    paths
+        .iter()
+        .zip(bases)
+        .map(|(p, base)| {
+            if counts.get(&base).copied().unwrap_or(0) <= 1 {
+                return base.into();
+            }
+            if let Some(parent) = p.parent().and_then(|d| d.file_name()).map(|n| n.to_string_lossy()) {
+                format!("{parent}/{base}").into()
+            } else {
+                p.to_string_lossy().to_string().into()
+            }
+        })
+        .collect()
 }
 
 impl PlayBatchState {
@@ -162,6 +192,7 @@ impl PlayBatchState {
     /// Clears the entire batch list and cancels any in-flight scan or Run All.
     pub fn clear(&mut self) {
         self.cancel();
+        self.batch_id += 1;
         self.load_gen += 1;
         self.items.clear();
         self.active = 0;
@@ -171,6 +202,19 @@ impl PlayBatchState {
     pub fn invalidate_results(&mut self) {
         for item in &mut self.items {
             if !matches!(item.status, BatchItemStatus::Pending) {
+                item.status = BatchItemStatus::Pending;
+            }
+        }
+    }
+
+    /// Marks any completed item whose recorded NMS IoU differs from `iou` back to `Pending`,
+    /// preserving results whose recorded IoU still matches.
+    pub fn invalidate_mismatched_iou(&mut self, iou: f32) {
+        let bits = iou.to_bits();
+        for item in &mut self.items {
+            if let BatchItemStatus::Done(res) = &item.status
+                && res.iou_bits != bits
+            {
                 item.status = BatchItemStatus::Pending;
             }
         }
@@ -293,6 +337,20 @@ impl FoloApp {
                 cx.notify();
             }),
         );
+
+        // Keep keyboard focus continuous when Run all <-> Cancel <-> disabled swap.
+        let run_disabled = !running && model_id.is_none();
+        if running && self.fh("play-batch-run-all", cx).is_focused(window) {
+            window.focus(&self.fh("play-batch-cancel", cx));
+        } else if !running && self.fh("play-batch-cancel", cx).is_focused(window) {
+            window.focus(
+                &self.fh(if run_disabled { "play-batch-run-all-disabled" } else { "play-batch-run-all" }, cx),
+            );
+        } else if run_disabled && self.fh("play-batch-run-all", cx).is_focused(window) {
+            window.focus(&self.fh("play-batch-run-all-disabled", cx));
+        } else if !run_disabled && !running && self.fh("play-batch-run-all-disabled", cx).is_focused(window) {
+            window.focus(&self.fh("play-batch-run-all", cx));
+        }
 
         let run_action: AnyElement = if running {
             self.button(
