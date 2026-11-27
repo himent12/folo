@@ -180,16 +180,16 @@ export default function BenchEntryPage() {
     stopBusy.set(true);
     try {
       const stopped = await hub.api.stopBenchEntry(bid, targetId);
-      const same = mounted && id.peek() === bid && entryId.peek() === targetId && hub.epoch === epoch;
+      const same = mounted && id.peek() === bid && entryId.peek() === targetId && hub.epoch === epoch && hub.mode !== 'connecting';
       if (same) {
         live.putEntry(stopped, mark);
         stopping.set(false);
       }
     } catch (err) {
-      const same = mounted && id.peek() === bid && entryId.peek() === targetId && hub.epoch === epoch;
+      const same = mounted && id.peek() === bid && entryId.peek() === targetId && hub.epoch === epoch && hub.mode !== 'connecting';
       if (same && stopping.peek()) stopStatus.error(err, 'Could not stop the entry');
       // page-level: the stop confirm is closed, unmounted, or on another entry.
-      else if (hub.epoch === epoch) toast.error(err, 'Could not stop the entry');
+      else if (hub.epoch === epoch && hub.mode !== 'connecting') toast.error(err, 'Could not stop the entry');
     } finally {
       if (seq === stopSeq) stopBusy.set(false);
     }
@@ -202,19 +202,19 @@ export default function BenchEntryPage() {
     removeBusy.set(true);
     try {
       await hub.api.deleteBenchEntry(bid, targetId);
-      const same = mounted && id.peek() === bid && entryId.peek() === targetId && hub.epoch === epoch;
+      const same = mounted && id.peek() === bid && entryId.peek() === targetId && hub.epoch === epoch && hub.mode !== 'connecting';
       if (same) {
         live.dropEntry(targetId);
         removing.set(false);
       }
       // page-level: its confirm dialog has closed above or moved off this entry.
-      if (hub.epoch === epoch) toast.success(`Deleted ${e.name}`, 'Its result is gone from the leaderboard. The model and its files were not touched.');
+      if (hub.epoch === epoch && hub.mode !== 'connecting') toast.success(`Deleted ${e.name}`, 'Its result is gone from the leaderboard. The model and its files were not touched.');
       if (same && router.location.path === startPath) router.go(`/benchmarks/${bid}`, { replace: true });
     } catch (err) {
-      const same = mounted && id.peek() === bid && entryId.peek() === targetId && hub.epoch === epoch;
+      const same = mounted && id.peek() === bid && entryId.peek() === targetId && hub.epoch === epoch && hub.mode !== 'connecting';
       if (same && removing.peek()) removeStatus.error(err, 'Could not delete the entry');
       // page-level: the delete confirm is closed, unmounted, or on another entry.
-      else if (hub.epoch === epoch) toast.error(err, 'Could not delete the entry');
+      else if (hub.epoch === epoch && hub.mode !== 'connecting') toast.error(err, 'Could not delete the entry');
     } finally {
       if (seq === removeSeq) removeBusy.set(false);
     }

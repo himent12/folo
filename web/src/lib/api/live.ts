@@ -428,20 +428,15 @@ export class LiveRun {
         }
         let snap: { run: Run; claim: () => boolean }, metrics: RunMetrics;
         const snapP = snapshot();
-        let snapFailed = false;
-        const snapTracked = snapP.catch((e) => {
-          snapFailed = true;
-          throw e;
-        });
         if (opts?.onSnap) snapP.then(opts.onSnap, () => {});
         if (opts?.trackPostOpen) postOpenSnap = snapP;
         try {
-          [snap, metrics] = await Promise.all([snapTracked, api.runMetrics(runId, view.signal)]);
+          [snap, metrics] = await Promise.all([snapP, api.runMetrics(runId, view.signal)]);
         } catch (e) {
           if (my !== loadIssued) return false;
           // Only treat a 404 as "run gone" if the run snapshot itself returned 404 or the API returned run_not_found:
-          // a proxy 404 on /metrics alone while the run snapshot succeeds must not tear down a live stream.
-          if (e instanceof ApiError && e.status === 404 && !snapFailed && e.code !== 'run_not_found') {
+          // a proxy 404 on /metrics alone while /runs/{id} succeeds or fails transiently must not tear down a live stream.
+          if (e instanceof ApiError && e.status === 404 && e.code !== 'run_not_found') {
             const snapErr = await snapP.then(() => null, (se) => se);
             if (my !== loadIssued) return false;
             if (snapErr instanceof ApiError && snapErr.status === 404) throw snapErr;

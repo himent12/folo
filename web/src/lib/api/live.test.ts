@@ -675,4 +675,31 @@ describe('LiveRun ordering', () => {
       stop();
     }
   });
+
+  it('keeps the live stream open when /metrics returns a generic 404 alongside a transient /run 503', async () => {
+    const closes = vi.fn();
+    hub.api = {
+      ...hub.api,
+      run: vi.fn(() => Promise.reject(new ApiError(503, 'http_503', 'Service Unavailable'))),
+      runMetrics: vi.fn(() => Promise.reject(new ApiError(404, 'http_404', 'Not Found'))),
+      runLogs: vi.fn(async () => ({ lines: [] })),
+      runEvents: (_id, h) => {
+        handlers = h;
+        return closes;
+      },
+    } as Api;
+    let live!: LiveRun;
+    const stop = root(() => {
+      live = new LiveRun(() => 'run_7d1e');
+    });
+    try {
+      flushSync();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(live.error).toBeInstanceOf(ApiError);
+      expect(live.loading).toBe(false);
+      expect(closes).not.toHaveBeenCalled();
+    } finally {
+      stop();
+    }
+  });
 });
