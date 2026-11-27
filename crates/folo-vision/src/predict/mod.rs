@@ -110,8 +110,8 @@ impl Predictor {
     }
 
     /// Wrap any [`Detector`] (`folo-*` or `folo2-*`): it is fused (a no-op if it already is) and stays in eval
-    /// mode. The model keeps its dtype (an f16 model predicts in f16). On v1 models, GPU forwards are recorded and
-    /// replayed ([`FoloModel::set_forward_plans`]).
+    /// mode. The model keeps its dtype (an f16 model predicts in f16). GPU forwards and candidate-first site passes
+    /// are recorded and replayed on both v1 and v2 models ([`Detector::set_forward_plans`]).
     pub fn from_detector(mut model: Detector, cfg: PredictConfig) -> Result<Self> {
         cfg.validate()?;
         if let Some(h) = cfg.head {

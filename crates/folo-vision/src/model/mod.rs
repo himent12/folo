@@ -833,7 +833,7 @@ impl FoloModel {
 }
 
 /// Calls `f` with every tensor of `m` and its descendants, in canonical order, without allocating.
-fn each_tensor(m: &dyn Module, f: &mut dyn FnMut(&Tensor)) {
+pub(crate) fn each_tensor(m: &dyn Module, f: &mut dyn FnMut(&Tensor)) {
     m.visit_tensors(&mut |_, t, _| f(t));
     m.visit_children(&mut |_, c| each_tensor(c, f));
 }

@@ -14,6 +14,7 @@ pub mod head;
 mod io;
 pub mod iou;
 mod lazy;
+mod lazy_gpu;
 
 use std::sync::Arc;
 
@@ -293,6 +294,9 @@ pub struct FoloV2Model {
     mode: Mode,
     fused: bool,
     head_mode: HeadMode,
+    /// Recorded GPU forward plans (dense eval forwards and candidate-first site passes; off until
+    /// [`FoloV2Model::set_forward_plans`] enables them).
+    plans: folo_gpu::ForwardPlans,
     /// The int8 plan of the backbone and neck on the CPU ([`FoloV2Model::set_int8`]; off until set).
     int8: Option<Arc<quant::Int8Plan>>,
     /// Backbone (`backbone.*`).
@@ -373,6 +377,7 @@ impl FoloV2Model {
             mode: Mode::new(),
             fused: false,
             head_mode,
+            plans: folo_gpu::ForwardPlans::new(),
             int8: None,
             backbone,
             neck,
@@ -736,7 +741,8 @@ impl FoloV2Model {
     }
 
     /// Run the detector forward pass selecting `mode` in eval mode (in training mode, `o2m` and optional
-    /// `o2o` both run).
+    /// `o2o` both run). A fused eval-mode model on a GPU goes through its recorded plans
+    /// ([`FoloV2Model::set_forward_plans`]).
     pub fn forward_head(&self, x: &Tensor, mode: HeadMode) -> Result<HeadOutputV2> {
         if mode == HeadMode::O2o && !self.has_o2o() {
             return Err(Error::Invalid(format!("{} has no one-to-one head branch", self.arch())));
@@ -747,11 +753,67 @@ impl FoloV2Model {
                 let feats = self.forward_features(x)?;
                 self.head_from_features(feats, h, w, mode)
             })
+        } else if self.fused && !self.is_training() {
+            self.forward_planned(x, mode)
         } else {
             let (h, w) = self.check_input(x)?;
             let feats = self.forward_features(x)?;
             self.head_from_features(feats, h, w, mode)
         }
+    }
+
+    /// Eval forward through [`folo_gpu::ForwardPlans`]: with plans enabled ([`FoloV2Model::set_forward_plans`])
+    /// and under `no_grad`, the second call per input shape, dtype, and head mode records the forward's GPU
+    /// dispatches and later calls replay them bit for bit until any model tensor changes.
+    fn forward_planned(&self, x: &Tensor, mode: HeadMode) -> Result<HeadOutputV2> {
+        let (h, w) = self.check_input(x)?;
+        let o2o = mode == HeadMode::O2o && self.has_o2o();
+        let has_iou = self.head.has_iou_head;
+        let tensors = |f: &mut dyn FnMut(&Tensor)| crate::model::each_tensor(self, f);
+        let mut out = self.plans.run(&[0, o2o as u64, has_iou as u64], x, &tensors, |x| {
+            let feats = self.forward_features(x)?;
+            let o = self.head_from_features(feats, h, w, mode)?;
+            let mut tensors = Vec::with_capacity(if o.iou_raw.is_some() { 3 } else { 2 });
+            tensors.push(o.box_raw);
+            tensors.push(o.cls_raw);
+            if let Some(iou) = o.iou_raw {
+                tensors.push(iou);
+            }
+            Ok::<_, Error>(tensors)
+        })?;
+        let iou_raw = if has_iou { out.pop() } else { None };
+        let (Some(cls_raw), Some(box_raw)) = (out.pop(), out.pop()) else {
+            unreachable!("dense forward_planned returns box_raw and cls_raw");
+        };
+        Ok(HeadOutputV2 {
+            box_raw,
+            cls_raw,
+            iou_raw,
+            mode: if o2o { HeadMode::O2o } else { HeadMode::O2m },
+            o2o: None,
+            anchors: self.anchors(h, w),
+            reg_max: self.head.reg_max,
+            num_classes: self.head.num_classes,
+        })
+    }
+
+    /// Enable or disable recorded GPU forwards for this model (disabling drops cached plans;
+    /// [`folo_gpu::ForwardPlans`]). Off for a standalone model and enabled inside [`crate::predict::Predictor`]
+    /// and distillation teachers. With plans on, a fused eval-mode forward (or candidate-first GPU site pass)
+    /// under `no_grad` is recorded on its second call per input shape/mode and replayed bit for bit thereafter
+    /// until a model tensor changes.
+    pub fn set_forward_plans(&self, on: bool) {
+        self.plans.set_enabled(on);
+    }
+
+    /// Number of GPU forwards or candidate-first passes answered from a recorded plan so far.
+    pub fn plan_replays(&self) -> u64 {
+        self.plans.replays()
+    }
+
+    /// Why the last recording of this model's forward did not become a plan ([`folo_gpu::ForwardPlans::refusal`]).
+    pub fn plan_refusal(&self) -> Option<String> {
+        self.plans.refusal()
     }
 
     fn head_from_features(

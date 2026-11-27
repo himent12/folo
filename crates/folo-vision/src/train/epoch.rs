@@ -122,7 +122,7 @@ impl Trainer {
             let f32_head = |t: &folo_core::Tensor| t.to_dtype(folo_core::DType::F32);
             let (box_raw, cls_raw) = (f32_head(&out.box_raw)?, f32_head(&out.cls_raw)?);
             let need_asg = need_kd_asg || iou_raw.is_some();
-            let (mut loss, kd_asg) = detection_loss_for_distill_with_wiou_mean(
+            let (mut loss, mut kd_asg) = detection_loss_for_distill_with_wiou_mean(
                 &box_raw,
                 &cls_raw,
                 &out.anchors,
@@ -131,17 +131,24 @@ impl Trainer {
                 need_asg,
                 self.wiou_iou_mean,
             )?;
+            let kd_needs_host_asg = need_kd_asg
+                && teacher_batch.as_ref().is_some_and(super::teacher::TeacherBatch::is_host_targets);
+            let mut cached_host_asg = None;
             let iou_loss = match (&iou_raw, &kd_asg) {
                 (Some(iou_t), Some(asg)) if loss.is_finite() => {
                     let host_asg = asg.as_host(n, out.num_anchors(), out.num_classes, &targets)?;
-                    Some(crate::model::v2::iou_quality_loss(
+                    let l = crate::model::v2::iou_quality_loss(
                         &f32_head(iou_t)?,
                         &box_raw,
                         &out.anchors,
                         host_asg.as_ref(),
                         out.reg_max,
                         1.0,
-                    )?)
+                    )?;
+                    if kd_needs_host_asg && matches!(asg, crate::loss::DistillAssignment::Device(_)) {
+                        cached_host_asg = Some(host_asg.into_owned());
+                    }
+                    Some(l)
                 }
                 _ => None,
             };
@@ -149,14 +156,27 @@ impl Trainer {
             // Skip distillation when the supervised loss is already non-finite (e.g. early AMP forward overflow,
             // where `kd_asg` is `None`) so the bad-batch BN rollback & skip handler below runs cleanly.
             let kd = match (&teacher_batch, &self.cfg.distill) {
-                (Some(t), Some(d)) if loss.is_finite() => Some(t.loss(
-                    &box_raw,
-                    &cls_raw,
-                    &out.anchors,
-                    loss.target_score_sum,
-                    d,
-                    kd_asg.as_ref(),
-                )?),
+                (Some(t), Some(d)) if loss.is_finite() => {
+                    let asg_for_kd = if need_kd_asg {
+                        if t.is_host_targets()
+                            && matches!(kd_asg, Some(crate::loss::DistillAssignment::Device(_)))
+                        {
+                            let host = match cached_host_asg.take() {
+                                Some(h) => h,
+                                None => kd_asg
+                                    .as_ref()
+                                    .expect("device assignment")
+                                    .as_host(n, out.num_anchors(), out.num_classes, &targets)?
+                                    .into_owned(),
+                            };
+                            kd_asg = Some(crate::loss::DistillAssignment::Host(host));
+                        }
+                        kd_asg.as_ref()
+                    } else {
+                        None
+                    };
+                    Some(t.loss(&box_raw, &cls_raw, &out.anchors, loss.target_score_sum, d, asg_for_kd)?)
+                }
                 _ => None,
             };
             drop(kd_asg);

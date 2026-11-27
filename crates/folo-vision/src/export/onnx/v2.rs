@@ -131,7 +131,7 @@ pub fn export_v2_with_axes(model: &FoloV2Model, opts: &OnnxOptions, axes: Dynami
         }
     }
 
-    let metadata = metadata_v2(model, opts, axes, &outputs);
+    let metadata = metadata_v2(model, opts, axes, &outputs)?;
     let ops = g.nodes.iter().map(|n| n.op.to_string()).collect();
     let initializers = g.inits.len();
     let bytes = g.finish(&input, &outputs, &metadata);
@@ -405,8 +405,15 @@ fn metadata_v2(
     opts: &OnnxOptions,
     axes: DynamicAxes,
     outputs: &[OnnxValue],
-) -> BTreeMap<String, String> {
+) -> Result<BTreeMap<String, String>> {
     let mut m = opts.metadata.clone();
+    let mut meta = model.metadata()?;
+    meta.dtype = if opts.half { folo_nn::io::FloatDType::F16 } else { folo_nn::io::FloatDType::F32 };
+    meta.fused = true;
+    m.extend(meta.to_map());
+    let names: serde_json::Map<String, serde_json::Value> =
+        model.classes().iter().enumerate().map(|(i, c)| (i.to_string(), c.clone().into())).collect();
+    m.insert("names".into(), serde_json::Value::Object(names).to_string());
     let cfg = model.config();
     let s = |v: serde_json::Value| v.to_string();
     let e2e = model.head_mode() == HeadMode::O2o;
@@ -415,16 +422,7 @@ fn metadata_v2(
         (true, false) => "decoded",
         (true, true) => "end2end",
     };
-    let classes: Vec<String> = (0..cfg.num_classes).map(|i| i.to_string()).collect();
-    let names: serde_json::Map<String, serde_json::Value> =
-        classes.iter().enumerate().map(|(i, c)| (i.to_string(), c.clone().into())).collect();
-    m.entry("names".into()).or_insert_with(|| serde_json::Value::Object(names).to_string());
-    m.entry("folo.classes".into()).or_insert_with(|| s(serde_json::json!(classes)));
-    m.insert("folo.arch".into(), model.arch());
-    m.insert("folo.dtype".into(), if opts.half { "F16" } else { "F32" }.into());
-    m.insert("folo.fused".into(), "true".into());
     m.insert("folo.head".into(), model.head_mode().as_str().into());
-    m.insert("folo.imgsz".into(), opts.height.max(opts.width).to_string());
     m.remove("folo.onnx.max_det");
     m.remove("folo.onnx.iou_head");
     m.remove("folo.onnx.iou_fusion_alpha");
@@ -452,5 +450,5 @@ fn metadata_v2(
             m.insert("folo.onnx.iou_fusion_alpha".into(), DEFAULT_IOU_FUSION_ALPHA.to_string());
         }
     }
-    m
+    Ok(m)
 }
