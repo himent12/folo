@@ -5,7 +5,7 @@
 import { computed, css, For, Index } from 'fw';
 import type { Epoch } from '$lib/api/types';
 import { classInk } from '$lib/design/classInk';
-import { unitTop } from '$lib/charts/domain';
+import { stepDecimals, unitTop } from '$lib/charts/domain';
 import { score } from '$lib/format';
 import Panel from '$lib/ui/Panel';
 import Skeleton from '$lib/ui/Skeleton';
@@ -27,6 +27,17 @@ export interface PerClassProps {
 
 /** The last two epochs, compared by identity: a step (which bumps `version` too) leaves them as they were. */
 const sameTwo = (a: [Epoch | undefined, Epoch | undefined], b: [Epoch | undefined, Epoch | undefined]) => a[0] === b[0] && a[1] === b[1];
+
+/** Formats a positive bar scale upper bound without rounding near-zero AP scales (e.g. 0.000042) to "0". */
+function formatBarTop(top: number): string {
+  const d = stepDecimals(top);
+  if (d > 12) return top.toExponential(1);
+  const s = top
+    .toFixed(d)
+    .replace(/(\.\d*?[1-9])0+$/, '$1')
+    .replace(/\.0+$/, '');
+  return s === '0' ? top.toExponential(1) : s;
+}
 
 export default function PerClass(props: PerClassProps) {
   // `epochs` changes in place; `version` is the signal that it did. Steps bump it several times a second while epochs
@@ -65,7 +76,7 @@ export default function PerClass(props: PerClassProps) {
   return (
     <Panel
       title="Per class"
-      meta={epochNo.get() ? `epoch ${epochNo.get()}${barTop.get() < 1 ? ` · bars 0–${+barTop.get().toFixed(3)}` : ''}` : undefined}
+      meta={epochNo.get() ? `epoch ${epochNo.get()}${barTop.get() < 1 ? ` · bars 0–${formatBarTop(barTop.get())}` : ''}` : undefined}
       pad="none"
       id="per-class"
     >
@@ -97,7 +108,7 @@ export default function PerClass(props: PerClassProps) {
                   <span class="sr-only">Change since the previous epoch</span>
                 </th>
                 <th class="bar-col">
-                  <span class="sr-only">{barTop.get() < 1 ? `AP50-95 bar, scaled to 0–${+barTop.get().toFixed(3)}` : 'AP50-95 bar'}</span>
+                  <span class="sr-only">{barTop.get() < 1 ? `AP50-95 bar, scaled to 0–${formatBarTop(barTop.get())}` : 'AP50-95 bar'}</span>
                 </th>
                 {!compact() ? (
                   <>

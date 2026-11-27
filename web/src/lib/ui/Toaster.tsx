@@ -177,20 +177,23 @@ css`
     right: var(--space-4);
     bottom: var(--space-4);
     z-index: var(--z-toast);
-    /* Wide enough for the title on one line and the detail on the next (round 24's 380 px toast wrapped a one-line
-       result into three beside its action): the text column is at least 240 px beside an action, 360 px without. */
-    width: min(440px, calc(100vw - 32px));
+    /* Action toasts keep up to 440 px (round 24); compact non-action toasts fit inside the 320 px desktop rail width
+       so bottom-right notifications never spill across the Playground stage toolbar (Batch CSV / Detect frame). */
+    width: auto;
+    max-width: min(440px, calc(100vw - 32px));
     pointer-events: none;
   }
   ol {
     display: flex;
     flex-direction: column;
+    align-items: flex-end;
     gap: var(--space-2);
   }
   /* Two rows: the icon, the title, the action and close on the first (centred on one another); the detail on the
      second, from the title's left edge to the toast's padding. */
   .toast {
     pointer-events: auto;
+    width: min(440px, calc(100vw - 32px));
     display: grid;
     grid-template-columns: auto minmax(0, 1fr) auto auto;
     align-items: center;
@@ -201,9 +204,13 @@ css`
     background: var(--bg-overlay);
     box-shadow: var(--shadow-lg);
   }
-  /* No action: three columns, so the close button keeps its place with no empty gap before it. */
+  /* No action: three columns, sized to content up to 328 px (16 px gutter + 328 px = 344 px = desktop rail edge),
+     so the close button keeps its place and desktop stage buttons stay clear. */
   .toast:not(:has(.action)) {
     grid-template-columns: auto minmax(0, 1fr) auto;
+    width: fit-content;
+    min-width: min(240px, calc(100vw - 32px));
+    max-width: min(328px, calc(100vw - 32px));
   }
   .icon {
     grid-row: 1;
@@ -298,7 +305,17 @@ css`
       right: var(--space-4);
       left: var(--space-4);
       width: auto;
+      max-width: none;
       bottom: calc(var(--tabbar-h) + var(--dock-h) + var(--space-4) + env(safe-area-inset-bottom));
+    }
+    ol {
+      align-items: stretch;
+    }
+    .toast,
+    .toast:not(:has(.action)) {
+      width: 100%;
+      min-width: 0;
+      max-width: none;
     }
   }
 `;
