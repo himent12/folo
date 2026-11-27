@@ -369,6 +369,52 @@ pub(super) unsafe fn apply_epi_aligned<
     q_dst: *mut u32,
     f_dst: &mut [[f32; NR]; MR],
 ) {
+    // SAFETY: `f_dst` has 4 rows of stride `NR`; other bounds forwarded from caller.
+    unsafe {
+        apply_epi_aligned_fstride::<SILU, HAS_RES, OUT_U8, VECS>(
+            acc,
+            corr,
+            scale,
+            bias,
+            res_ptr,
+            rs,
+            rz,
+            inv,
+            z01_arr,
+            z23_arr,
+            q_dst,
+            f_dst.as_mut_ptr() as *mut f32,
+            NR,
+        );
+    }
+}
+
+/// Apply the single-part epilogue from a 32-byte aligned L1 accumulator tile `acc`, writing `f32` outputs
+/// directly to `f_dst.add(r * f_stride + off)` when `!OUT_U8` (avoiding intermediate stack copies on contiguous
+/// output planes).
+#[target_feature(enable = "avx2,fma")]
+#[inline]
+#[allow(clippy::too_many_arguments)]
+pub(super) unsafe fn apply_epi_aligned_fstride<
+    const SILU: bool,
+    const HAS_RES: bool,
+    const OUT_U8: bool,
+    const VECS: usize,
+>(
+    acc: &AlignedTile,
+    corr: &[i32; MR],
+    scale: &[f32; MR],
+    bias: &[f32; MR],
+    res_ptr: *const u32,
+    rs: &[f32; MR],
+    rz: &[i32; MR],
+    inv: &[f32; MR],
+    z01_arr: &[i16; 16],
+    z23_arr: &[i16; 16],
+    q_dst: *mut u32,
+    f_dst: *mut f32,
+    f_stride: usize,
+) {
     // SAFETY: `acc.0` is 32-byte aligned (`MR x NR = 4 x 24` `i32`s); `VECS <= 3`; pointer bounds guaranteed by caller.
     unsafe {
         for k in 0..VECS {
@@ -422,8 +468,8 @@ pub(super) unsafe fn apply_epi_aligned<
                 let z01 = _mm256_loadu_si256(z01_arr.as_ptr() as *const __m256i);
                 _mm256_adds_epi16(_mm256_packs_epi32(v0, v1), z01)
             } else {
-                _mm256_storeu_ps(f_dst[0].as_mut_ptr().add(off), y0);
-                _mm256_storeu_ps(f_dst[1].as_mut_ptr().add(off), y1);
+                _mm256_storeu_ps(f_dst.add(off), y0);
+                _mm256_storeu_ps(f_dst.add(f_stride + off), y1);
                 _mm256_setzero_si256()
             };
 
@@ -482,8 +528,124 @@ pub(super) unsafe fn apply_epi_aligned<
                 let bytes = _mm256_shuffle_epi8(_mm256_packus_epi16(p01, p23), transpose);
                 _mm256_storeu_si256(q_dst.add(off) as *mut __m256i, bytes);
             } else {
-                _mm256_storeu_ps(f_dst[2].as_mut_ptr().add(off), y2);
-                _mm256_storeu_ps(f_dst[3].as_mut_ptr().add(off), y3);
+                _mm256_storeu_ps(f_dst.add(2 * f_stride + off), y2);
+                _mm256_storeu_ps(f_dst.add(3 * f_stride + off), y3);
+            }
+        }
+    }
+}
+
+/// Split-pair zero-spill epilogue for pre-accumulated [`AlignedTileF32`] (decoupled multi-part convs):
+/// processes channels `(0, 1)` to `p01` (or direct store) before loading `(2, 3)`, matching
+/// [`apply_epi_aligned_fstride`]'s `<= 13` YMM peak across `silu_q8_avx2_x2`.
+#[target_feature(enable = "avx2,fma")]
+#[inline]
+#[allow(clippy::too_many_arguments)]
+pub(super) unsafe fn apply_epi_f32_aligned<
+    const SILU: bool,
+    const HAS_RES: bool,
+    const OUT_U8: bool,
+    const VECS: usize,
+>(
+    tile: &AlignedTileF32,
+    bias: &[f32; MR],
+    res_ptr: *const u32,
+    rs: &[f32; MR],
+    rz: &[i32; MR],
+    inv: &[f32; MR],
+    z01_arr: &[i16; 16],
+    z23_arr: &[i16; 16],
+    q_dst: *mut u32,
+    f_dst: *mut f32,
+    f_stride: usize,
+) {
+    // SAFETY: `tile.0` is 32-byte aligned (`MR x NR`); `VECS <= 3`; pointer bounds guaranteed by caller.
+    unsafe {
+        for k in 0..VECS {
+            let off = 8 * k;
+            let mut y0 = _mm256_add_ps(_mm256_load_ps(tile.0[0].as_ptr().add(off)), _mm256_set1_ps(bias[0]));
+            let mut y1 = _mm256_add_ps(_mm256_load_ps(tile.0[1].as_ptr().add(off)), _mm256_set1_ps(bias[1]));
+            if SILU {
+                [y0, y1] = silu_q8_avx2_x2([y0, y1]);
+            }
+            if HAS_RES {
+                let mask_ff = _mm256_set1_epi32(0xFF);
+                let w = _mm256_loadu_si256(res_ptr.add(off) as *const __m256i);
+                let b0 = _mm256_and_si256(w, mask_ff);
+                let b1 = _mm256_and_si256(_mm256_srli_epi32::<8>(w), mask_ff);
+                y0 = _mm256_fmadd_ps(
+                    _mm256_set1_ps(rs[0]),
+                    _mm256_cvtepi32_ps(_mm256_sub_epi32(b0, _mm256_set1_epi32(rz[0]))),
+                    y0,
+                );
+                y1 = _mm256_fmadd_ps(
+                    _mm256_set1_ps(rs[1]),
+                    _mm256_cvtepi32_ps(_mm256_sub_epi32(b1, _mm256_set1_epi32(rz[1]))),
+                    y1,
+                );
+            }
+            let p01 = if OUT_U8 {
+                let lo = _mm256_set1_ps(-512.0);
+                let hi = _mm256_set1_ps(512.0);
+                let v0 = _mm256_cvtps_epi32(_mm256_min_ps(
+                    _mm256_max_ps(_mm256_mul_ps(y0, _mm256_set1_ps(inv[0])), lo),
+                    hi,
+                ));
+                let v1 = _mm256_cvtps_epi32(_mm256_min_ps(
+                    _mm256_max_ps(_mm256_mul_ps(y1, _mm256_set1_ps(inv[1])), lo),
+                    hi,
+                ));
+                let z01 = _mm256_loadu_si256(z01_arr.as_ptr() as *const __m256i);
+                _mm256_adds_epi16(_mm256_packs_epi32(v0, v1), z01)
+            } else {
+                _mm256_storeu_ps(f_dst.add(off), y0);
+                _mm256_storeu_ps(f_dst.add(f_stride + off), y1);
+                _mm256_setzero_si256()
+            };
+
+            let mut y2 = _mm256_add_ps(_mm256_load_ps(tile.0[2].as_ptr().add(off)), _mm256_set1_ps(bias[2]));
+            let mut y3 = _mm256_add_ps(_mm256_load_ps(tile.0[3].as_ptr().add(off)), _mm256_set1_ps(bias[3]));
+            if SILU {
+                [y2, y3] = silu_q8_avx2_x2([y2, y3]);
+            }
+            if HAS_RES {
+                let mask_ff = _mm256_set1_epi32(0xFF);
+                let w = _mm256_loadu_si256(res_ptr.add(off) as *const __m256i);
+                let b2 = _mm256_and_si256(_mm256_srli_epi32::<16>(w), mask_ff);
+                let b3 = _mm256_srli_epi32::<24>(w);
+                y2 = _mm256_fmadd_ps(
+                    _mm256_set1_ps(rs[2]),
+                    _mm256_cvtepi32_ps(_mm256_sub_epi32(b2, _mm256_set1_epi32(rz[2]))),
+                    y2,
+                );
+                y3 = _mm256_fmadd_ps(
+                    _mm256_set1_ps(rs[3]),
+                    _mm256_cvtepi32_ps(_mm256_sub_epi32(b3, _mm256_set1_epi32(rz[3]))),
+                    y3,
+                );
+            }
+            if OUT_U8 {
+                let lo = _mm256_set1_ps(-512.0);
+                let hi = _mm256_set1_ps(512.0);
+                let transpose = _mm256_setr_epi8(
+                    0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15, 0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10,
+                    14, 3, 7, 11, 15,
+                );
+                let v2 = _mm256_cvtps_epi32(_mm256_min_ps(
+                    _mm256_max_ps(_mm256_mul_ps(y2, _mm256_set1_ps(inv[2])), lo),
+                    hi,
+                ));
+                let v3 = _mm256_cvtps_epi32(_mm256_min_ps(
+                    _mm256_max_ps(_mm256_mul_ps(y3, _mm256_set1_ps(inv[3])), lo),
+                    hi,
+                ));
+                let z23 = _mm256_loadu_si256(z23_arr.as_ptr() as *const __m256i);
+                let p23 = _mm256_adds_epi16(_mm256_packs_epi32(v2, v3), z23);
+                let bytes = _mm256_shuffle_epi8(_mm256_packus_epi16(p01, p23), transpose);
+                _mm256_storeu_si256(q_dst.add(off) as *mut __m256i, bytes);
+            } else {
+                _mm256_storeu_ps(f_dst.add(2 * f_stride + off), y2);
+                _mm256_storeu_ps(f_dst.add(3 * f_stride + off), y3);
             }
         }
     }

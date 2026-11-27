@@ -710,3 +710,274 @@ fn kernel_name_and_uses_vnni_consistent() {
         "kernel_name={name} disagrees with uses_vnni={vnni}"
     );
 }
+
+#[test]
+fn packed_1x1_direct_and_multipart_bit_exact_across_tails_and_outputs() {
+    let mut seed = 0x9AC4_1011_u64;
+    let mut next_f32 = |lo: f32, hi: f32| {
+        let u = ((lcg(&mut seed) >> 40) as f32) / ((1u32 << 24) as f32);
+        lo + u * (hi - lo)
+    };
+    // Exercises `fused_pack::should_pack_1x1`: `ks >= 12`, `og >= 4`, both `hw >= 1024` (with odd tails
+    // hitting VECS ∈ {1, 2, 3} and exact-8/16 direct tails) and `hw < 1024` with `ks >= 48`, single-part
+    // and multi-input `Pointwise1x1Parts`, U8 + F32 direct stores, SiLU + identity, with & without residual.
+    struct PackedCase {
+        h: usize,
+        w: usize,
+        parts: &'static [usize],
+        o: usize,
+        silu: bool,
+        has_res: bool,
+        out_u8: bool,
+    }
+    let cases = [
+        PackedCase { h: 32, w: 33, parts: &[48], o: 16, silu: true, has_res: false, out_u8: true },
+        PackedCase { h: 33, w: 33, parts: &[48], o: 16, silu: true, has_res: true, out_u8: true },
+        PackedCase { h: 32, w: 34, parts: &[24, 24], o: 20, silu: false, has_res: true, out_u8: false },
+        PackedCase { h: 31, w: 35, parts: &[28, 20, 4], o: 16, silu: true, has_res: false, out_u8: false },
+        PackedCase { h: 32, w: 35, parts: &[48], o: 16, silu: false, has_res: false, out_u8: true },
+        PackedCase { h: 33, w: 35, parts: &[48], o: 16, silu: true, has_res: true, out_u8: true },
+        PackedCase { h: 20, w: 20, parts: &[192], o: 16, silu: true, has_res: true, out_u8: true },
+        PackedCase { h: 17, w: 19, parts: &[96, 96], o: 16, silu: true, has_res: false, out_u8: false },
+    ];
+    for &PackedCase { h, w, parts, o, silu, has_res, out_u8 } in &cases {
+        let hw = h * w;
+        let c: usize = parts.iter().sum();
+        let x_grid = Grid::from_range(-2.0, 3.0);
+        let res_grid = Grid::from_range(-1.5, 1.5);
+        let out_grid = Grid::from_range(-3.0, 4.0);
+        let mut x_bufs = Vec::with_capacity(parts.len());
+        for &pc in parts {
+            let xf: Vec<f32> = (0..pc * hw).map(|_| next_f32(-2.0, 3.0)).collect();
+            let mut xb = alloc(1, pc, hw);
+            quantize(&xf, 1, pc, hw, x_grid, &mut xb);
+            x_bufs.push(xb);
+        }
+        let xvs: Vec<C4<'_>> = x_bufs
+            .iter()
+            .zip(parts)
+            .map(|(xb, &pc)| C4 { data: xb, offset: 0, img_stride: (pc / 4) * hw, c: pc, zero: x_grid.zero })
+            .collect();
+        let rf: Vec<f32> = (0..o * hw).map(|_| next_f32(-1.5, 1.5)).collect();
+        let mut rb = alloc(1, o, hw);
+        quantize(&rf, 1, o, hw, res_grid, &mut rb);
+        let rv = C4 { data: &rb, offset: 0, img_stride: (o / 4) * hw, c: o, zero: res_grid.zero };
+        let wf: Vec<f32> = (0..o * c).map(|_| next_f32(-0.6, 0.6)).collect();
+        let bias: Vec<f32> = (0..o).map(|_| next_f32(-0.4, 0.4)).collect();
+        let x_grids = vec![x_grid; c];
+        let res_grids = vec![res_grid; o];
+        let out_grids = vec![out_grid; o];
+        let cv = QConv::new(&wf, &bias, (o, c, 1), 1, 0, silu, &x_grids);
+        let (ref_u8, ref_f32) = conv_ref_packed(
+            &xvs,
+            1,
+            h,
+            w,
+            &cv,
+            has_res.then_some((rv, res_grids.as_slice())),
+            out_u8.then_some(out_grids.as_slice()),
+        );
+        if out_u8 {
+            let mut got = alloc(1, o, hw);
+            conv(
+                &xvs,
+                1,
+                h,
+                w,
+                &cv,
+                has_res.then_some((rv, res_grid)),
+                QOut::U8 { data: &mut got, grid: out_grid },
+            );
+            assert_eq!(
+                &got[..(o / 4) * hw],
+                &ref_u8[..],
+                "packed 1x1 u8 mismatch at {h}x{w} parts={parts:?} o={o} silu={silu} res={has_res}"
+            );
+            recycle(got);
+        } else {
+            let mut got = vec![0.0f32; o * hw];
+            conv(&xvs, 1, h, w, &cv, has_res.then_some((rv, res_grid)), QOut::F32 { data: &mut got });
+            assert_eq!(
+                got.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                ref_f32.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                "packed 1x1 f32 mismatch at {h}x{w} parts={parts:?} o={o} silu={silu} res={has_res}"
+            );
+        }
+        for xb in x_bufs {
+            recycle(xb);
+        }
+        recycle(rb);
+    }
+}
+
+#[test]
+fn fused_3x3_multirow_and_shared_small_s1_bit_exact() {
+    let mut seed = 0x3333_B47C_u64;
+    let mut next_f32 = |lo: f32, hi: f32| {
+        let u = ((lcg(&mut seed) >> 40) as f32) / ((1u32 << 24) as f32);
+        lo + u * (hi - lo)
+    };
+    // Exercises:
+    // - shared-strip small-spatial `s=1` (`oh <= 24`: 1x7, 7x20, 20x20, 24x25, n=2)
+    // - multi-row batched `s=1` (`oh >= 25, ow <= 96`: 33x40, 40x33, RB=4 & RB=2)
+    // - multi-row batched `s=2` (`ow <= 96`: 10x18, 22x40, 40x40, RB=2 & RB=4 with slot rotation)
+    struct Conv3x3Case {
+        n: usize,
+        h: usize,
+        w: usize,
+        c: usize,
+        o: usize,
+        stride: usize,
+        silu: bool,
+        has_res: bool,
+        out_u8: bool,
+    }
+    let cases = [
+        Conv3x3Case { n: 1, h: 1, w: 7, c: 8, o: 8, stride: 1, silu: true, has_res: false, out_u8: true },
+        Conv3x3Case { n: 2, h: 7, w: 20, c: 16, o: 12, stride: 1, silu: true, has_res: true, out_u8: true },
+        Conv3x3Case { n: 1, h: 20, w: 20, c: 64, o: 16, stride: 1, silu: true, has_res: false, out_u8: true },
+        Conv3x3Case {
+            n: 1,
+            h: 24,
+            w: 25,
+            c: 16,
+            o: 12,
+            stride: 1,
+            silu: false,
+            has_res: true,
+            out_u8: false,
+        },
+        Conv3x3Case { n: 1, h: 33, w: 40, c: 16, o: 12, stride: 1, silu: true, has_res: true, out_u8: true },
+        Conv3x3Case {
+            n: 1,
+            h: 40,
+            w: 33,
+            c: 32,
+            o: 16,
+            stride: 1,
+            silu: true,
+            has_res: false,
+            out_u8: false,
+        },
+        Conv3x3Case { n: 2, h: 10, w: 18, c: 12, o: 8, stride: 2, silu: true, has_res: true, out_u8: true },
+        Conv3x3Case {
+            n: 1,
+            h: 22,
+            w: 40,
+            c: 16,
+            o: 16,
+            stride: 2,
+            silu: false,
+            has_res: false,
+            out_u8: false,
+        },
+        Conv3x3Case { n: 1, h: 40, w: 40, c: 32, o: 16, stride: 2, silu: true, has_res: true, out_u8: true },
+    ];
+    for &Conv3x3Case { n, h, w, c, o, stride, silu, has_res, out_u8 } in &cases {
+        let hw = h * w;
+        let x_grid = Grid::from_range(-1.8, 2.4);
+        let res_grid = Grid::from_range(-1.2, 1.2);
+        let out_grid = Grid::from_range(-2.5, 3.5);
+        let xf: Vec<f32> = (0..n * c * hw).map(|_| next_f32(-1.8, 2.4)).collect();
+        let mut xb = alloc(n, c, hw);
+        quantize(&xf, n, c, hw, x_grid, &mut xb);
+        let xv = C4 { data: &xb, offset: 0, img_stride: (c / 4) * hw, c, zero: x_grid.zero };
+        let wf: Vec<f32> = (0..o * c * 9).map(|_| next_f32(-0.5, 0.5)).collect();
+        let bias: Vec<f32> = (0..o).map(|_| next_f32(-0.3, 0.3)).collect();
+        let x_grids = vec![x_grid; c];
+        let res_grids = vec![res_grid; o];
+        let out_grids = vec![out_grid; o];
+        let cv = QConv::new(&wf, &bias, (o, c, 3), stride, 1, silu, &x_grids);
+        let (oh, ow) = cv.out_hw(h, w);
+        let ohw = oh * ow;
+        let rf: Vec<f32> = (0..n * o * ohw).map(|_| next_f32(-1.2, 1.2)).collect();
+        let mut rb = alloc(n, o, ohw);
+        quantize(&rf, n, o, ohw, res_grid, &mut rb);
+        let rv = C4 { data: &rb, offset: 0, img_stride: (o / 4) * ohw, c: o, zero: res_grid.zero };
+        let (ref_u8, ref_f32) = conv_ref_packed(
+            &[xv],
+            n,
+            h,
+            w,
+            &cv,
+            has_res.then_some((rv, res_grids.as_slice())),
+            out_u8.then_some(out_grids.as_slice()),
+        );
+        if out_u8 {
+            let mut got = alloc(n, o, ohw);
+            conv(
+                &[xv],
+                n,
+                h,
+                w,
+                &cv,
+                has_res.then_some((rv, res_grid)),
+                QOut::U8 { data: &mut got, grid: out_grid },
+            );
+            assert_eq!(
+                &got[..n * (o / 4) * ohw],
+                &ref_u8[..],
+                "fused_3x3 u8 mismatch at n={n} {h}x{w} c={c} o={o} s={stride} silu={silu} res={has_res}"
+            );
+            recycle(got);
+        } else {
+            let mut got = vec![0.0f32; n * o * ohw];
+            conv(&[xv], n, h, w, &cv, has_res.then_some((rv, res_grid)), QOut::F32 { data: &mut got });
+            assert_eq!(
+                got.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                ref_f32.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                "fused_3x3 f32 mismatch at n={n} {h}x{w} c={c} o={o} s={stride} silu={silu} res={has_res}"
+            );
+        }
+        recycle(xb);
+        recycle(rb);
+    }
+}
+
+#[test]
+fn pack_f32_to_rgb0_u8_and_deinterleave_unrolled_bit_exact() {
+    let mut seed = 0x57E4_2222_u64;
+    let mut next_f32 = |lo: f32, hi: f32| {
+        let u = ((lcg(&mut seed) >> 40) as f32) / ((1u32 << 24) as f32);
+        lo + u * (hi - lo)
+    };
+    // Both serial (< PAR_MIN) and parallel (>= PAR_MIN) lengths across 16-wide, 8-wide, and scalar tails.
+    for &(n, h, w) in &[(1usize, 1usize, 33usize), (2, 17, 19), (1, 160, 211)] {
+        let hw = h * w;
+        let src: Vec<f32> = (0..n * 3 * hw).map(|_| next_f32(-0.1, 1.1)).collect();
+        let mut got = vec![0u32; n * hw];
+        super::pack_f32_to_rgb0_u8(&src, n, h, w, &mut got);
+        for img in 0..n {
+            let base = img * 3 * hw;
+            for p in 0..hw {
+                let cvt = |v: f32| {
+                    let s = v * 255.0;
+                    let s = if s > 0.0 { s } else { 0.0 };
+                    let s = if s < 255.0 { s } else { 255.0 };
+                    s.round_ties_even() as i32 as u8
+                };
+                let exp = u32::from_le_bytes([
+                    cvt(src[base + p]),
+                    cvt(src[base + hw + p]),
+                    cvt(src[base + 2 * hw + p]),
+                    0,
+                ]);
+                assert_eq!(got[img * hw + p], exp, "rgb0 mismatch at n={n} {h}x{w} img={img} p={p}");
+            }
+        }
+    }
+    // 2× unrolled deinterleave_even_odd across 32-word, 16-word, and odd tails.
+    for &w in &[0usize, 1, 15, 16, 17, 31, 32, 33, 63, 64, 65] {
+        let src: Vec<u32> = (0..w).map(|_| lcg(&mut seed) as u32).collect();
+        let pairs = w.div_ceil(2) + 3;
+        let pad = 0x1122_3344u32;
+        let mut ev = vec![0u32; pairs];
+        let mut od = vec![0u32; pairs];
+        super::deinterleave_even_odd(&src, &mut ev, &mut od, pad);
+        for j in 0..pairs {
+            let e_exp = src.get(2 * j).copied().unwrap_or(pad);
+            let o_exp = src.get(2 * j + 1).copied().unwrap_or(pad);
+            assert_eq!((ev[j], od[j]), (e_exp, o_exp), "deinterleave mismatch at w={w} j={j}");
+        }
+    }
+}

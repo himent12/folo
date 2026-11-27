@@ -17,15 +17,17 @@ use std::arch::x86_64::*;
 
 pub(super) use super::fused_epi::{
     AlignedTile, AlignedTileF32, BMode, FusedIsa, MAX_INLINE_1X1_PARTS, MultiPartTask, PartSlice,
-    SinglePartTask, active_isa, apply_epi_aligned, finish_col8, read_u8_noncontiguous,
+    SinglePartTask, active_isa, apply_epi_aligned_fstride, apply_epi_f32_aligned, read_u8_noncontiguous,
     write_f32_noncontiguous, write_u8_noncontiguous, zero_pairs,
 };
+use super::fused_pack::{avx2_pack, avx512vnni_pack, should_pack_1x1, vnni_pack};
 use super::kernel::{MR, NR};
 
 /// Generates one ISA-specific 256-bit fused suite (K-loop helpers + single-part + multi-part + stem row).
 macro_rules! define_fused_isa {
     (
         mod $mod_name:ident,
+        pack_mod = $pack_mod:ident,
         feature = $feat:literal,
         dp_mode = $dp_mode:ident,
         unroll2 = $unroll2:literal
@@ -85,13 +87,16 @@ macro_rules! define_fused_isa {
                 unsafe {
                     if UNROLL2 {
                         let mut p = 0;
-                        while p + 2 <= ks {
+                        while p + 4 <= ks {
                             step_row!(p);
                             step_row!(p + 1);
-                            p += 2;
+                            step_row!(p + 2);
+                            step_row!(p + 3);
+                            p += 4;
                         }
-                        if p < ks {
+                        while p < ks {
                             step_row!(p);
+                            p += 1;
                         }
                     } else {
                         for p in 0..ks {
@@ -138,16 +143,23 @@ macro_rules! define_fused_isa {
                         let mut ap = a;
                         if UNROLL2 {
                             let hw2 = hw.wrapping_mul(2);
+                            let hw3 = hw.wrapping_mul(3);
+                            let hw4 = hw.wrapping_mul(4);
                             let mut p = 0;
-                            while p + 2 <= ks {
+                            while p + 4 <= ks {
                                 step_bp!(bp, ap);
                                 step_bp!(bp.add(hw), ap.add(MR));
-                                bp = bp.wrapping_add(hw2);
-                                ap = ap.wrapping_add(2 * MR);
-                                p += 2;
+                                step_bp!(bp.add(hw2), ap.add(2 * MR));
+                                step_bp!(bp.add(hw3), ap.add(3 * MR));
+                                bp = bp.wrapping_add(hw4);
+                                ap = ap.wrapping_add(4 * MR);
+                                p += 4;
                             }
-                            if p < ks {
+                            while p < ks {
                                 step_bp!(bp, ap);
+                                bp = bp.wrapping_add(hw);
+                                ap = ap.wrapping_add(MR);
+                                p += 1;
                             }
                         } else {
                             for _ in 0..ks {
@@ -190,6 +202,8 @@ macro_rules! define_fused_isa {
                 // `col + VECS * 8` readable words, and `a` holds `sum(g_cnt) * MR` words.
                 unsafe {
                     let hw2 = hw.wrapping_mul(2);
+                    let hw3 = hw.wrapping_mul(3);
+                    let hw4 = hw.wrapping_mul(4);
                     let mut ap = a;
                     for &(base, g_cnt) in parts {
                         if g_cnt == 0 {
@@ -198,16 +212,20 @@ macro_rules! define_fused_isa {
                         let mut bp = base.add(col);
                         if UNROLL2 {
                             let mut p = 0;
-                            while p + 2 <= g_cnt {
+                            while p + 4 <= g_cnt {
                                 step_bp!(bp, ap);
                                 step_bp!(bp.add(hw), ap.add(MR));
-                                bp = bp.wrapping_add(hw2);
-                                ap = ap.wrapping_add(2 * MR);
-                                p += 2;
+                                step_bp!(bp.add(hw2), ap.add(2 * MR));
+                                step_bp!(bp.add(hw3), ap.add(3 * MR));
+                                bp = bp.wrapping_add(hw4);
+                                ap = ap.wrapping_add(4 * MR);
+                                p += 4;
                             }
-                            if p < g_cnt {
+                            while p < g_cnt {
                                 step_bp!(bp, ap);
+                                bp = bp.wrapping_add(hw);
                                 ap = ap.wrapping_add(MR);
+                                p += 1;
                             }
                         } else {
                             for _ in 0..g_cnt {
@@ -286,6 +304,10 @@ macro_rules! define_fused_isa {
             unsafe fn run_single_spec<const SILU: bool, const HAS_RES: bool, const OUT_U8: bool>(
                 t: &SinglePartTask<'_>,
             ) {
+                if should_pack_1x1(t) {
+                    // SAFETY: ISA and buffer bounds forwarded from caller; `should_pack_1x1(t)` holds.
+                    return unsafe { $pack_mod::run_packed_1x1_spec::<SILU, HAS_RES, OUT_U8>(t) };
+                }
                 let ohw = t.oh * t.ow;
                 let ks = t.ks;
                 // L1-resident chunk tile: keeps `cb_tile * ks * NR * 4 <= 24 KiB` so B stays hot in L1 across `g`,
@@ -326,21 +348,13 @@ macro_rules! define_fused_isa {
                                             let col = chunk * NR;
                                             $k_call(col, &mut acc);
                                             let res_ptr = if HAS_RES { res_plane.add(col) } else { std::ptr::null() };
-                                            apply_epi_aligned::<SILU, HAS_RES, OUT_U8, 3>(
+                                            apply_epi_aligned_fstride::<SILU, HAS_RES, OUT_U8, 3>(
                                                 &acc, &corr, &scale, &bias, res_ptr, &rs, &rz, &inv,
                                                 &z01_arr, &z23_arr,
                                                 if OUT_U8 { q_plane.add(col) } else { std::ptr::null_mut() },
-                                                &mut fv,
+                                                if !OUT_U8 { f_base.add(col) } else { std::ptr::null_mut() },
+                                                ohw,
                                             );
-                                            if !OUT_U8 {
-                                                for (rr, row) in fv.iter().enumerate() {
-                                                    std::ptr::copy_nonoverlapping(
-                                                        row.as_ptr(),
-                                                        f_base.add(rr * ohw + col),
-                                                        NR,
-                                                    );
-                                                }
-                                            }
                                         }
                                     };
                                 }
@@ -386,15 +400,20 @@ macro_rules! define_fused_isa {
                                             } else {
                                                 std::ptr::null_mut()
                                             };
-                                            apply_epi_aligned::<SILU, HAS_RES, OUT_U8, $vecs>(
+                                            let (f_dst, f_stride) = if !OUT_U8 {
+                                                if direct { (f_base.add(col), ohw) } else { (fv.as_mut_ptr() as *mut f32, NR) }
+                                            } else {
+                                                (std::ptr::null_mut(), 0)
+                                            };
+                                            apply_epi_aligned_fstride::<SILU, HAS_RES, OUT_U8, $vecs>(
                                                 &acc, &corr, &scale, &bias, res_ptr, &rs, &rz, &inv,
-                                                &z01_arr, &z23_arr, q_dst, &mut fv,
+                                                &z01_arr, &z23_arr, q_dst, f_dst, f_stride,
                                             );
                                             if OUT_U8 {
                                                 if !direct {
                                                     std::ptr::copy_nonoverlapping(qw.as_ptr(), q_plane.add(col), cols);
                                                 }
-                                            } else {
+                                            } else if !direct {
                                                 for (rr, row) in fv.iter().enumerate() {
                                                     std::ptr::copy_nonoverlapping(
                                                         row.as_ptr(),
@@ -436,19 +455,20 @@ macro_rules! define_fused_isa {
                                     } else {
                                         std::ptr::null_mut()
                                     };
-                                    apply_epi_aligned::<SILU, HAS_RES, OUT_U8, 3>(
+                                    let (f_dst, f_stride) = if !OUT_U8 {
+                                        if contiguous { (f_base.add(pix0), ohw) } else { (fv.as_mut_ptr() as *mut f32, NR) }
+                                    } else {
+                                        (std::ptr::null_mut(), 0)
+                                    };
+                                    apply_epi_aligned_fstride::<SILU, HAS_RES, OUT_U8, 3>(
                                         &acc, &corr, &scale, &bias, res_ptr, &rs, &rz, &inv,
-                                        &z01_arr, &z23_arr, q_dst, &mut fv,
+                                        &z01_arr, &z23_arr, q_dst, f_dst, f_stride,
                                     );
                                     if OUT_U8 {
                                         if !contiguous {
                                             write_u8_noncontiguous(&qw, cols, oy0, ox0, t.oh, t.ow, t.wq, q_plane);
                                         }
-                                    } else if contiguous {
-                                        for (rr, row) in fv.iter().enumerate() {
-                                            std::ptr::copy_nonoverlapping(row.as_ptr(), f_base.add(rr * ohw + pix0), NR);
-                                        }
-                                    } else {
+                                    } else if !contiguous {
                                         write_f32_noncontiguous(&fv, cols, oy0, ox0, t.oh, t.ow, t.wq, ohw, f_base);
                                     }
                                 }
@@ -583,32 +603,19 @@ macro_rules! define_fused_isa {
                                         } else {
                                             std::ptr::null_mut()
                                         };
-                                        for k in 0..$vecs {
-                                            let off = 8 * k;
-                                            let y0 = _mm256_add_ps(
-                                                _mm256_load_ps(tile_f32.0[0].as_ptr().add(off)),
-                                                _mm256_set1_ps(bias[0]),
-                                            );
-                                            let y1 = _mm256_add_ps(
-                                                _mm256_load_ps(tile_f32.0[1].as_ptr().add(off)),
-                                                _mm256_set1_ps(bias[1]),
-                                            );
-                                            let y2 = _mm256_add_ps(
-                                                _mm256_load_ps(tile_f32.0[2].as_ptr().add(off)),
-                                                _mm256_set1_ps(bias[2]),
-                                            );
-                                            let y3 = _mm256_add_ps(
-                                                _mm256_load_ps(tile_f32.0[3].as_ptr().add(off)),
-                                                _mm256_set1_ps(bias[3]),
-                                            );
-                                            finish_col8::<SILU, HAS_RES, OUT_U8>(
-                                                y0, y1, y2, y3,
-                                                if HAS_RES { res_ptr.add(off) } else { res_ptr },
-                                                &rs, &rz, &inv, &z01_arr, &z23_arr,
-                                                if OUT_U8 { q_dst.add(off) } else { q_dst },
-                                                &mut fv, off,
-                                            );
-                                        }
+                                        let (f_dst, f_stride) = if !OUT_U8 {
+                                            if direct_u8 {
+                                                (f_base.add(pix0), ohw)
+                                            } else {
+                                                (fv.as_mut_ptr() as *mut f32, NR)
+                                            }
+                                        } else {
+                                            (std::ptr::null_mut(), 0)
+                                        };
+                                        apply_epi_f32_aligned::<SILU, HAS_RES, OUT_U8, $vecs>(
+                                            &tile_f32, &bias, res_ptr, &rs, &rz, &inv, &z01_arr, &z23_arr,
+                                            q_dst, f_dst, f_stride,
+                                        );
                                         if OUT_U8 {
                                             if !direct_u8 {
                                                 if t.wq == t.ow {
@@ -623,26 +630,20 @@ macro_rules! define_fused_isa {
                                                     );
                                                 }
                                             }
-                                        } else if contiguous {
-                                            for (rr, row) in fv.iter().enumerate() {
-                                                std::ptr::copy_nonoverlapping(
-                                                    row.as_ptr(),
-                                                    f_base.add(rr * ohw + pix0),
-                                                    NR,
+                                        } else if !direct_u8 {
+                                            if t.wq == t.ow {
+                                                for (rr, row) in fv.iter().enumerate() {
+                                                    std::ptr::copy_nonoverlapping(
+                                                        row.as_ptr(),
+                                                        f_base.add(rr * ohw + col),
+                                                        cols,
+                                                    );
+                                                }
+                                            } else {
+                                                write_f32_noncontiguous(
+                                                    &fv, cols, oy0, ox0, t.oh, t.ow, t.wq, ohw, f_base,
                                                 );
                                             }
-                                        } else if t.wq == t.ow {
-                                            for (rr, row) in fv.iter().enumerate() {
-                                                std::ptr::copy_nonoverlapping(
-                                                    row.as_ptr(),
-                                                    f_base.add(rr * ohw + col),
-                                                    cols,
-                                                );
-                                            }
-                                        } else {
-                                            write_f32_noncontiguous(
-                                                &fv, cols, oy0, ox0, t.oh, t.ow, t.wq, ohw, f_base,
-                                            );
                                         }
                                     }};
                                 }
@@ -727,44 +728,39 @@ macro_rules! define_fused_isa {
                         for chunk in 0..full_chunks {
                             let col = chunk * NR;
                             k_loop_stem9::<3>(panel, row_ptrs, col, &mut acc);
-                            if OUT_U8 {
-                                apply_epi_aligned::<SILU, false, true, 3>(
-                                    &acc, &zero_corr, &sc, &bi, std::ptr::null(), &zero_rs, &zero_rz,
-                                    &inv, &z01_arr, &z23_arr, q_row.add(col), &mut fv,
-                                );
-                            } else {
-                                apply_epi_aligned::<SILU, false, false, 3>(
-                                    &acc, &zero_corr, &sc, &bi, std::ptr::null(), &zero_rs, &zero_rz,
-                                    &inv, &z01_arr, &z23_arr, std::ptr::null_mut(), &mut fv,
-                                );
-                                for (rr, row) in fv.iter().enumerate() {
-                                    std::ptr::copy_nonoverlapping(row.as_ptr(), f_row.add(rr * ohw + col), NR);
-                                }
-                            }
+                            apply_epi_aligned_fstride::<SILU, false, OUT_U8, 3>(
+                                &acc, &zero_corr, &sc, &bi, std::ptr::null(), &zero_rs, &zero_rz,
+                                &inv, &z01_arr, &z23_arr,
+                                if OUT_U8 { q_row.add(col) } else { std::ptr::null_mut() },
+                                if !OUT_U8 { f_row.add(col) } else { std::ptr::null_mut() },
+                                ohw,
+                            );
                         }
                         if tail > 0 {
                             let col = full_chunks * NR;
                             macro_rules! stem_tail {
                                 ($vecs:literal) => {{
                                     k_loop_stem9::<$vecs>(panel, row_ptrs, col, &mut acc);
+                                    let direct = tail == $vecs * 8;
+                                    let q_dst = if OUT_U8 {
+                                        if direct { q_row.add(col) } else { qw.as_mut_ptr() }
+                                    } else {
+                                        std::ptr::null_mut()
+                                    };
+                                    let (f_dst, f_stride) = if !OUT_U8 {
+                                        if direct { (f_row.add(col), ohw) } else { (fv.as_mut_ptr() as *mut f32, NR) }
+                                    } else {
+                                        (std::ptr::null_mut(), 0)
+                                    };
+                                    apply_epi_aligned_fstride::<SILU, false, OUT_U8, $vecs>(
+                                        &acc, &zero_corr, &sc, &bi, std::ptr::null(), &zero_rs, &zero_rz,
+                                        &inv, &z01_arr, &z23_arr, q_dst, f_dst, f_stride,
+                                    );
                                     if OUT_U8 {
-                                        if tail == $vecs * 8 {
-                                            apply_epi_aligned::<SILU, false, true, $vecs>(
-                                                &acc, &zero_corr, &sc, &bi, std::ptr::null(), &zero_rs, &zero_rz,
-                                                &inv, &z01_arr, &z23_arr, q_row.add(col), &mut fv,
-                                            );
-                                        } else {
-                                            apply_epi_aligned::<SILU, false, true, $vecs>(
-                                                &acc, &zero_corr, &sc, &bi, std::ptr::null(), &zero_rs, &zero_rz,
-                                                &inv, &z01_arr, &z23_arr, qw.as_mut_ptr(), &mut fv,
-                                            );
+                                        if !direct {
                                             std::ptr::copy_nonoverlapping(qw.as_ptr(), q_row.add(col), tail);
                                         }
-                                    } else {
-                                        apply_epi_aligned::<SILU, false, false, $vecs>(
-                                            &acc, &zero_corr, &sc, &bi, std::ptr::null(), &zero_rs, &zero_rz,
-                                            &inv, &z01_arr, &z23_arr, std::ptr::null_mut(), &mut fv,
-                                        );
+                                    } else if !direct {
                                         for (rr, row) in fv.iter().enumerate() {
                                             std::ptr::copy_nonoverlapping(row.as_ptr(), f_row.add(rr * ohw + col), tail);
                                         }
@@ -905,9 +901,9 @@ fn split_w_avx2(w: i32) -> (i32, i32) {
     (ev as i32, od as i32)
 }
 
-define_fused_isa!(mod vnni_impl, feature = "avx2,fma,avxvnni", dp_mode = avxvnni, unroll2 = true);
-define_fused_isa!(mod avx512vnni_impl, feature = "avx2,fma,avx512vnni,avx512vl", dp_mode = avx512vnni, unroll2 = true);
-define_fused_isa!(mod avx2_impl, feature = "avx2,fma", dp_mode = avx2, unroll2 = false);
+define_fused_isa!(mod vnni_impl, pack_mod = vnni_pack, feature = "avx2,fma,avxvnni", dp_mode = avxvnni, unroll2 = true);
+define_fused_isa!(mod avx512vnni_impl, pack_mod = avx512vnni_pack, feature = "avx2,fma,avx512vnni,avx512vl", dp_mode = avx512vnni, unroll2 = true);
+define_fused_isa!(mod avx2_impl, pack_mod = avx2_pack, feature = "avx2,fma", dp_mode = avx2, unroll2 = false);
 
 /// Execute one single-part fused task on the active x86-64 ISA.
 ///
