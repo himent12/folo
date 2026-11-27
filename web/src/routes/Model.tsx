@@ -7,7 +7,7 @@ import Copy from '$icons/copy';
 import Play from '$icons/play';
 import ScanSearch from '$icons/scan-search';
 import TriangleAlert from '$icons/triangle-alert';
-import { computed, css, effect, MediaQuery, signal, tick } from 'fw';
+import { computed, css, effect, MediaQuery, onCleanup, signal, tick } from 'fw';
 import { copyText, pageCommands, type PageCommand } from '$lib/shell/pageCommands';
 import { hub } from '$lib/api/index';
 import { fromModelEval } from '$lib/api/evaluation';
@@ -35,6 +35,7 @@ import ExportDialog from './model/ExportDialog';
 import { FROM_SCRATCH_META, origin } from '$lib/lineage';
 import Lineage from '$lib/ui/Lineage';
 import Meta from '$lib/ui/Meta';
+import { toast } from '$lib/ui/toast';
 import PrCurves from './model/PrCurves';
 import Callout from './run/Callout';
 import { MODEL_SECTIONS, sectionShown, type ModelSection } from './model/sections';
@@ -43,6 +44,17 @@ import KpiSummary from './model/KpiSummary';
 import DetailsList, { type ModelContext, type ProvenanceErrors } from './model/DetailsList';
 import { finishedEpochs, weightsEpoch } from './model/weightsEpoch';
 import ConfusionPanel from './model/ConfusionPanel';
+import ThresholdsBar from './model/ThresholdsBar';
+import {
+  buildModelOperatingPoint,
+  downloadModelThresholds,
+  formatServerCalibration,
+  THRESHOLD_CALIBRATION_FEATURE,
+  type ServerModelCalibration,
+} from './model/thresholds';
+import { formatConfThreshold } from './playground/perClassConf';
+import { playgroundPath, stageThresholdHandoff } from './playground/session';
+import { DEFAULTS as PLAYGROUND_DEFAULTS } from './playground/predict';
 import { datasetPresence, datasetsFor } from './overview/newDatasets';
 
 export default function Model() {
@@ -76,6 +88,28 @@ export default function Model() {
           ]
         : []),
       { id: 'model-export', label: `Export ${m.name}`, match: ['Export model', 'ONNX'], icon: Download, run: () => exportOpen.set(true) },
+      ...(operatingPoint.get()
+        ? [
+            ...(serverCal.get() || canCalibrate.get()
+              ? [
+                  {
+                    id: 'model-download-thresholds',
+                    label: 'Download calibrated thresholds (JSON)',
+                    match: ['thresholds.json', 'per-class'],
+                    icon: Download,
+                    run: () => void downloadThresholds(),
+                  },
+                ]
+              : []),
+            {
+              id: 'model-apply-playground',
+              label: `Apply calibrated thresholds in Playground`,
+              match: ['Playground', 'thresholds'],
+              icon: ScanSearch,
+              run: () => applyThresholdsInPlayground(),
+            },
+          ]
+        : []),
       { id: 'model-try', label: `Try ${m.name} in Playground`, match: ['Try model'], icon: ScanSearch, run: () => router.go(`/playground?model=${encodeURIComponent(m.id)}`) },
       { id: 'model-copy-id', label: 'Copy model id', match: [m.id], icon: Copy, run: () => void copyText(m.id, 'model id') },
     ];
@@ -134,6 +168,8 @@ export default function Model() {
 
   // PR curves, confusion matrix and per-class metrics from GET /api/models/{id}/eval.
   const evaluation = new Resource((s) => hub.api.modelEval(id.get(), s));
+  // Server capabilities (used to detect `threshold_calibration` support on `POST /api/val`).
+  const sys = new Resource((s) => hub.api.system(s));
   // This server's measured latency for the architecture (GET /api/system/throughput), where it has predicted with it.
   const tp = new Resource((s) => loadThroughput(hub.api, s));
   /** No registered dataset has this model's classes (an imported file): nothing to evaluate on, and no retry helps. */
@@ -163,6 +199,127 @@ export default function Model() {
     if (ds && e.source.datasetId === null && e.source.datasetName === null) e.source = { ...e.source, datasetId: ds.id, datasetName: ds.name };
     return e;
   });
+  const operatingPoint = computed(() => (ev.get() ? buildModelOperatingPoint(ev.get()!) : null));
+  const serverCal = signal<ServerModelCalibration | null>(null);
+  const calibrating = signal(false);
+  let calAbort: AbortController | null = null;
+  let calSeq = 0;
+
+  effect(() => {
+    void id.get();
+    calAbort?.abort();
+    calAbort = null;
+    calSeq++;
+    serverCal.set(null);
+    calibrating.set(false);
+  });
+  onCleanup(() => calAbort?.abort());
+
+  const canCalibrate = computed(() => {
+    const e = ev.get();
+    const feats = sys.data?.features ?? [];
+    return Boolean(
+      hub.api.valModel &&
+        e?.source.datasetId &&
+        e?.source.split &&
+        feats.includes(THRESHOLD_CALIBRATION_FEATURE),
+    );
+  });
+
+  async function fetchServerCalibration(): Promise<ServerModelCalibration | null> {
+    const existing = serverCal.peek();
+    if (existing) return existing;
+    const mData = model.data;
+    const e = ev.peek();
+    if (!mData || !e?.source.datasetId || !e.source.split || !hub.api.valModel) return null;
+    calAbort?.abort();
+    const ctrl = (calAbort = new AbortController());
+    const seq = ++calSeq;
+    calibrating.set(true);
+    try {
+      const res = await hub.api.valModel(
+        { model_id: mData.id, dataset_id: e.source.datasetId, split: e.source.split },
+        ctrl.signal,
+      );
+      if (ctrl.signal.aborted || seq !== calSeq) return null;
+      const formatted = formatServerCalibration(res.thresholds, mData.classes);
+      if (!formatted) {
+        toast.error(
+          new Error('Validation did not return calibrated per-class thresholds.'),
+          'Calibration unavailable',
+          { key: 'model-thresholds' },
+        );
+        return null;
+      }
+      serverCal.set(formatted);
+      return formatted;
+    } catch (err) {
+      if (ctrl.signal.aborted || seq !== calSeq) return null;
+      toast.error(err, 'Could not calibrate thresholds', { key: 'model-thresholds' });
+      return null;
+    } finally {
+      if (seq === calSeq) {
+        calAbort = null;
+        calibrating.set(false);
+      }
+    }
+  }
+
+  async function calibrateThresholds() {
+    const cal = await fetchServerCalibration();
+    if (!cal) return;
+    const n = cal.payload.per_class.length;
+    toast.success(
+      'Thresholds calibrated',
+      `Global ${formatConfThreshold(cal.payload.global.best_conf)} and ${n} ${n === 1 ? 'class threshold' : 'class thresholds'} ready for download or Playground.`,
+      undefined,
+      { key: 'model-thresholds' },
+    );
+  }
+
+  async function downloadThresholds() {
+    const mData = model.data;
+    if (!mData) return;
+    const cal = await fetchServerCalibration();
+    if (!cal) return;
+    if (downloadModelThresholds(mData.name, cal)) {
+      const n = cal.payload.per_class.length;
+      toast.success(
+        'Thresholds downloaded',
+        `Saved global ${formatConfThreshold(cal.payload.global.best_conf)} and ${n} ${n === 1 ? 'class threshold' : 'class thresholds'} (ready for folo predict --thresholds or Playground).`,
+        undefined,
+        { key: 'model-thresholds' },
+      );
+    }
+  }
+
+  function applyThresholdsInPlayground() {
+    const mData = model.data;
+    const op = operatingPoint.peek();
+    if (!mData || !op) return;
+    const cal = serverCal.peek();
+    const globalConf = cal?.payload.global.best_conf ?? op.globalConf;
+    const perClassConf = cal?.perClassConf ?? {};
+    stageThresholdHandoff({
+      modelId: mData.id,
+      modelName: mData.name,
+      globalConf,
+      perClassConf,
+      classes: mData.classes,
+    });
+    router.go(
+      playgroundPath({
+        model: mData.id,
+        source: null,
+        conf: globalConf,
+        iou: PLAYGROUND_DEFAULTS.iou,
+        maxDet: PLAYGROUND_DEFAULTS.maxDet,
+        perClassConf,
+        explicitConf: true,
+        explicitPerClass: true,
+      }),
+    );
+  }
   /**
    * What the page's numbers were measured on. Before the evaluation loads (or when it fails), the run's dataset: its
    * validation split, or its training split when it has no validation images, as training and /eval both fall back.
@@ -441,18 +598,31 @@ export default function Model() {
                   )}
                 >
                   {ev.get() ? (
-                    <PrCurves
-                      classes={m().classes}
-                      ev={ev.get()!}
-                      // A file's stored AP50 (imported, published) may be on another dataset than these curves.
-                      map50={m().run_id ? (m().metrics?.map50 ?? null) : null}
-                      view={phone.current ? 'curves' : 'all'}
-                      bind:allCurves={allCurves}
-                      modeInHeader
-                      bind:selected={prSelected}
-                      bind:hovered={prHovered}
-                      onback={backTo.get() !== null ? backToClasses : undefined}
-                    />
+                    <>
+                      <PrCurves
+                        classes={m().classes}
+                        ev={ev.get()!}
+                        // A file's stored AP50 (imported, published) may be on another dataset than these curves.
+                        map50={m().run_id ? (m().metrics?.map50 ?? null) : null}
+                        view={phone.current ? 'curves' : 'all'}
+                        bind:allCurves={allCurves}
+                        modeInHeader
+                        bind:selected={prSelected}
+                        bind:hovered={prHovered}
+                        onback={backTo.get() !== null ? backToClasses : undefined}
+                      />
+                      {operatingPoint.get() ? (
+                        <ThresholdsBar
+                          operatingPoint={operatingPoint.get()!}
+                          calibrated={serverCal.get()}
+                          canCalibrate={canCalibrate.get()}
+                          calibrating={calibrating.get()}
+                          onCalibrate={() => void calibrateThresholds()}
+                          onDownload={() => void downloadThresholds()}
+                          onApplyPlayground={applyThresholdsInPlayground}
+                        />
+                      ) : null}
+                    </>
                   ) : unevaluable.get() ? (
                     notEvaluated()
                   ) : evaluation.error ? (
@@ -518,7 +688,12 @@ export default function Model() {
               </div>
             </div>
           </Page>
-          <ExportDialog model={m()} bind:open={exportOpen} />
+          <ExportDialog
+            model={m()}
+            bind:open={exportOpen}
+            datasetPath={context.data?.dataset?.path ?? null}
+            evalSplit={source.get().split ?? null}
+          />
         </>
       )}
     </>

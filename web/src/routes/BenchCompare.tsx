@@ -10,6 +10,7 @@
  */
 import ArrowLeft from '$icons/arrow-left';
 import ArrowUpRight from '$icons/arrow-up-right';
+import Copy from '$icons/copy';
 import Download from '$icons/download';
 import GitCompare from '$icons/git-compare-arrows';
 import Scale from '$icons/scale';
@@ -26,7 +27,6 @@ import { href } from '$lib/router';
 import Page from '$lib/shell/Page';
 import { pageKeys } from '$lib/shell/pageCommands';
 import { gChord } from '$lib/shell/shortcuts';
-import { exportTableCsv, exportTableJson } from '$lib/tableExport';
 import Button from '$lib/ui/Button';
 import EmptyState from '$lib/ui/EmptyState';
 import ErrorState from '$lib/ui/ErrorState';
@@ -37,7 +37,7 @@ import Panel from '$lib/ui/Panel';
 import Skeleton from '$lib/ui/Skeleton';
 import Callout from './run/Callout';
 import { RELIABILITY_X, SLOT_PATTERN } from './bench/charts';
-import { compareExport } from './bench/export';
+import { runCompareCopyMarkdown, runCompareDownload } from './bench/export';
 import DotRows from './bench/compare/DotRows';
 import SideBySide from './bench/compare/SideBySide';
 import { CLS_SHOWN, compareState } from './bench/compare/state';
@@ -102,11 +102,15 @@ export default function BenchCompare() {
 
   const key = (eid: string) => <i class="key" style={{ '--c': fill(eid) }} data-pattern={SLOT_PATTERN[slotOf(eid)]} aria-hidden="true"></i>;
   const liveNote = signal('');
+  const copiedMd = signal(false);
   let alive = true;
   let noteSeq = 0;
+  let copiedTimer: ReturnType<typeof setTimeout> | undefined;
   onCleanup(() => {
     alive = false;
     noteSeq++;
+    clearTimeout(copiedTimer);
+    copiedTimer = undefined;
   });
   function announce(message: string) {
     const seq = ++noteSeq;
@@ -189,19 +193,21 @@ export default function BenchCompare() {
     });
   }
 
+  const exportConditions = () => condRows.peek().map((r) => ({ key: r.key, name: nameOf(r.key), values: r.values }));
   function exportComparison(format: 'csv' | 'json') {
-    const b = bench();
-    const list = shown.peek();
-    if (!b || list.length < 2) return;
-    const payload = compareExport(b, list, rows.peek(), old.peek(), best, caveats.peek(), res.peek());
-    const ok =
-      format === 'csv'
-        ? exportTableCsv(payload.filenameBase, payload.headers, payload.rows)
-        : exportTableJson(payload.filenameBase, payload.json);
-    if (ok) announce(`Exported comparison of ${list.length} entries as ${format.toUpperCase()}.`);
+    const msg = runCompareDownload(format, bench(), shown.peek(), rows.peek(), old.peek(), best, caveats.peek(), res.peek(), exportConditions(), labelOf);
+    if (msg) announce(msg);
   }
-
+  async function copyComparisonMarkdown() {
+    const msg = await runCompareCopyMarkdown(bench(), shown.peek(), rows.peek(), old.peek(), best, caveats.peek(), exportConditions(), labelOf);
+    if (!msg || !alive) return;
+    copiedMd.set(true);
+    clearTimeout(copiedTimer);
+    copiedTimer = setTimeout(() => { copiedTimer = undefined; if (alive) copiedMd.set(false); }, 1600);
+    announce(msg);
+  }
   const exportItems: MenuItem[] = [
+    { label: 'Copy Markdown', icon: Copy, onclick: () => void copyComparisonMarkdown() },
     { label: 'Export CSV', icon: Download, onclick: () => exportComparison('csv') },
     { label: 'Export JSON', icon: Download, onclick: () => exportComparison('json') },
   ];
@@ -310,7 +316,7 @@ export default function BenchCompare() {
           </ul>
         </Callout>
       ) : null}{' '}
-      <SideBySide shown={shown.get()} rows={rows.get()} old={old.get()} labelOf={labelOf} best={best} makeBaseline={setBaseline} keyMark={key} />{' '}
+      <SideBySide shown={shown.get()} rows={rows.get()} old={old.get()} labelOf={labelOf} best={best} makeBaseline={setBaseline} keyMark={key} onCopyMarkdown={() => void copyComparisonMarkdown()} onDownloadCsv={() => exportComparison('csv')} copiedMd={copiedMd.get()} />{' '}
       <Panel title="mAP50-95 with 95% intervals" meta="unchanged images">
         {ivDomain.get() ? (
           <>

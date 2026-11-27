@@ -9,9 +9,21 @@ import { inferenceMetaKey, type InferenceConfig } from '$lib/inference/browser';
 import { router } from '$lib/router';
 import { toast } from '$lib/ui/toast';
 import { DEFAULTS } from './predict';
-import { normalizePerClassConf, type PerClassConfMap } from './perClassConf';
+import { formatConfThreshold, normalizePerClassConf, type PerClassConfMap } from './perClassConf';
 import type { CompareViewMode } from './compare';
-import { compareFromUrl, findImage, fromUrl, keep, playgroundPath, restore, session, type FromUrl, type ImageRef } from './session';
+import {
+  compareFromUrl,
+  consumeThresholdHandoff,
+  findImage,
+  fromUrl,
+  keep,
+  perClassFromUrl,
+  playgroundPath,
+  restore,
+  session,
+  type FromUrl,
+  type ImageRef,
+} from './session';
 import type { Source } from './source';
 
 /** How long the URL waits after the last change before it is written. */
@@ -67,7 +79,9 @@ const sourceKey = (s: Source) => (s.kind === 'file' ? `file:${s.name}:${s.file.s
 export function keepSession(k: Kept): (model: string, s: Source, runOn: string, infKey?: string) => boolean {
   const saved = session.get();
   const url = fromUrl(router.route.query);
+  const urlPcc = perClassFromUrl(router.route.query);
   const cmpUrl = compareFromUrl(router.route.query);
+  const handoff = consumeThresholdHandoff(url.model);
   if (k.compare) {
     if (cmpUrl.compare) k.compare.set(true);
     if (cmpUrl.modelB && k.pickModelB) k.pickModelB(cmpUrl.modelB);
@@ -79,15 +93,39 @@ export function keepSession(k: Kept): (model: string, s: Source, runOn: string, 
     k.truth.set(saved.truth);
     k.runOn.set(saved.runOn);
     if (saved.inference && k.inference) k.inference.restore(saved.inference);
-    if (saved.perClassConf && k.perClassConf) {
-      k.perClassConf.set(normalizePerClassConf(saved.perClassConf));
-      k.onRestorePerClassOrigin?.({
-        modelId: saved.perClassModelId ?? saved.pred?.model_id ?? null,
-        classes: saved.perClassClasses ?? [],
-      });
-    }
   }
-  k.conf.set(url.conf ?? saved?.conf ?? DEFAULTS.conf);
+  // Track the active per-class origin (so handoff / URL overrides are never misattributed to a prior saved model
+  // while the models list is still loading) and preserve explicit default threshold links across debounced URL writes.
+  let perClassOrigin: { modelId: string | null; classes: string[] } | null = null;
+  let keepExplicitConf = handoff !== null || url.conf === DEFAULTS.conf;
+  let keepExplicitEmptyPcc =
+    (handoff !== null && Object.keys(handoff.perClassConf).length === 0) ||
+    (urlPcc !== null && Object.keys(urlPcc).length === 0);
+
+  if (handoff && k.perClassConf) {
+    const norm = normalizePerClassConf(handoff.perClassConf);
+    perClassOrigin = { modelId: handoff.modelId, classes: [...handoff.classes] };
+    k.perClassConf.set(norm);
+    k.onRestorePerClassOrigin?.(perClassOrigin);
+    const n = Object.keys(norm).length;
+    const detail =
+      n > 0
+        ? `Global ${formatConfThreshold(handoff.globalConf)} and ${n} ${n === 1 ? 'class threshold' : 'class thresholds'}${handoff.modelName ? ` from ${handoff.modelName}` : ''}.`
+        : `Global confidence ${formatConfThreshold(handoff.globalConf)}${handoff.modelName ? ` from ${handoff.modelName}` : ''}.`;
+    toast.success('Calibrated thresholds applied', detail, undefined, { key: 'playground-thresholds' });
+  } else if (urlPcc !== null && k.perClassConf) {
+    perClassOrigin = url.model ? { modelId: url.model, classes: [] } : null;
+    k.perClassConf.set(normalizePerClassConf(urlPcc));
+    if (perClassOrigin) k.onRestorePerClassOrigin?.(perClassOrigin);
+  } else if (saved?.perClassConf && k.perClassConf) {
+    perClassOrigin = {
+      modelId: saved.perClassModelId ?? saved.pred?.model_id ?? null,
+      classes: [...(saved.perClassClasses ?? [])],
+    };
+    k.perClassConf.set(normalizePerClassConf(saved.perClassConf));
+    k.onRestorePerClassOrigin?.(perClassOrigin);
+  }
+  k.conf.set(handoff?.globalConf ?? url.conf ?? saved?.conf ?? DEFAULTS.conf);
   k.iou.set(url.iou ?? saved?.iou ?? DEFAULTS.iou);
   k.maxDet.set(url.maxDet ?? saved?.maxDet ?? DEFAULTS.maxDet);
 
@@ -153,6 +191,8 @@ export function keepSession(k: Kept): (model: string, s: Source, runOn: string, 
    * default (playgroundPath writes only the others); a model or image it leaves out stays.
    */
   function apply(u: FromUrl, q: URLSearchParams, skipModel = false) {
+    const extHandoff = consumeThresholdHandoff(u.model);
+    const extPcc = perClassFromUrl(q);
     if (!skipModel && u.model) k.pickModel(u.model);
     if (k.compare) {
       const c = compareFromUrl(q);
@@ -160,7 +200,31 @@ export function keepSession(k: Kept): (model: string, s: Source, runOn: string, 
       if (c.modelB && k.pickModelB) k.pickModelB(c.modelB);
       if (k.compareView) k.compareView.set(c.view ?? 'side-by-side');
     }
-    k.conf.set(u.conf ?? DEFAULTS.conf);
+    if (extHandoff && k.perClassConf) {
+      const norm = normalizePerClassConf(extHandoff.perClassConf);
+      perClassOrigin = { modelId: extHandoff.modelId, classes: [...extHandoff.classes] };
+      keepExplicitConf = true;
+      keepExplicitEmptyPcc = Object.keys(norm).length === 0;
+      k.onRestorePerClassOrigin?.(perClassOrigin);
+      k.perClassConf.set(norm);
+      k.conf.set(extHandoff.globalConf);
+    } else {
+      keepExplicitConf = u.conf === DEFAULTS.conf;
+      keepExplicitEmptyPcc = extPcc !== null && Object.keys(extPcc).length === 0;
+      if (k.perClassConf) {
+        if (extPcc !== null) {
+          perClassOrigin = u.model ? { modelId: u.model, classes: [] } : null;
+          if (perClassOrigin) k.onRestorePerClassOrigin?.(perClassOrigin);
+          k.perClassConf.set(normalizePerClassConf(extPcc));
+        } else {
+          // Omitting `pcc` on a live history/URL navigation clears overrides, matching omitted `conf`/`iou`/`max`.
+          perClassOrigin = u.model ? { modelId: u.model, classes: [] } : null;
+          k.onRestorePerClassOrigin?.(perClassOrigin ?? { modelId: null, classes: [] });
+          k.perClassConf.set({});
+        }
+      }
+      k.conf.set(u.conf ?? DEFAULTS.conf);
+    }
     k.iou.set(u.iou ?? DEFAULTS.iou);
     k.maxDet.set(u.maxDet ?? DEFAULTS.maxDet);
     const ref = u.image;
@@ -208,6 +272,9 @@ export function keepSession(k: Kept): (model: string, s: Source, runOn: string, 
       conf: k.conf.peek(),
       iou: k.iou.peek(),
       maxDet: k.maxDet.peek(),
+      perClassConf: k.perClassConf?.peek(),
+      explicitConf: keepExplicitConf,
+      explicitPerClass: keepExplicitEmptyPcc,
       compare: k.compare?.peek(),
       modelB: k.modelB ? untrack(() => k.modelB!()) : null,
       view: k.compareView?.peek(),
@@ -234,12 +301,19 @@ export function keepSession(k: Kept): (model: string, s: Source, runOn: string, 
       maxDet: k.maxDet.get(),
       ...(k.perClassConf
         ? (() => {
+            const normPcc = normalizePerClassConf(k.perClassConf.get());
+            if (Object.keys(normPcc).length > 0) keepExplicitEmptyPcc = false;
             const cls = k.classes ? [...k.classes()] : [];
-            const keepOrigin = cls.length === 0 && !!(saved?.perClassModelId ?? saved?.pred?.model_id);
+            const curModel = k.model();
+            if (cls.length > 0) {
+              perClassOrigin = { modelId: curModel, classes: cls };
+            }
+            const keepOrigin =
+              cls.length === 0 && perClassOrigin !== null && (curModel === null || perClassOrigin.modelId === curModel);
             return {
-              perClassConf: normalizePerClassConf(k.perClassConf.get()),
-              perClassModelId: keepOrigin ? (saved?.perClassModelId ?? saved?.pred?.model_id ?? null) : k.model(),
-              perClassClasses: keepOrigin ? (saved?.perClassClasses ?? []) : cls,
+              perClassConf: normPcc,
+              perClassModelId: keepOrigin ? perClassOrigin!.modelId : curModel,
+              perClassClasses: keepOrigin ? [...perClassOrigin!.classes] : cls,
             };
           })()
         : {}),
@@ -262,6 +336,9 @@ export function keepSession(k: Kept): (model: string, s: Source, runOn: string, 
       conf: k.conf.get(),
       iou: k.iou.get(),
       maxDet: k.maxDet.get(),
+      perClassConf: k.perClassConf?.get(),
+      explicitConf: keepExplicitConf,
+      explicitPerClass: keepExplicitEmptyPcc,
       compare: cmpOn,
       modelB: cmpOn && k.modelB ? k.modelB() : null,
       view: cmpOn && k.compareView ? k.compareView.get() : undefined,

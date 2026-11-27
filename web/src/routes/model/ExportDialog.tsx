@@ -36,6 +36,10 @@ import { ONNX_AXES_OPTIONS, onnxSwitchesForRequest, type OnnxDynamicAxes } from 
 export interface ExportDialogProps {
   model: Model;
   open?: boolean;
+  /** Optional local dataset path (for `folo val --data` in CLI commands). */
+  datasetPath?: string | null;
+  /** Evaluated split (non-`val` splits emit `--split <split>` in `folo val`). */
+  evalSplit?: string | null;
 }
 
 const formats: { value: ExportFormat; label: string; ext: string; desc: string; bytesPerParam: number }[] = [
@@ -570,6 +574,8 @@ export default function ExportDialog(props: ExportDialogProps) {
               half={switches.get().half}
               axes={axes.get()}
               showAxesPicker={!dynamicAxesOk.get()}
+              datasetPath={props.datasetPath}
+              evalSplit={props.evalSplit}
             />
           ) : null}
           {demo.get() && phase.get() !== 'running' ? (

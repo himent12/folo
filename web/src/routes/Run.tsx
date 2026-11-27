@@ -1,12 +1,6 @@
-//
-// A run's page (design/UNIFIED.md §4 Run): the header, the outcome callout, the KPI strip, Validation mAP beside
-// Training loss, Precision / Recall beside Learning rate, Validation samples beside Per class, Logs beside Config. While
-// the run trains its stream updates `live.run` and the step / epoch / log lists several times a second; what reads them
-// here does work in proportion to what changed, not to the run's history: the charts read the append logs
-// (run/runModel, run/metricSeries), the log keeps its level lists as lines arrive (run/Logs), the schedule warnings are
-// looked for in new lines only (run/warningsLog, the Svelte page scanned the whole log on every step), and the parts
-// that depend on the run's settings (Config, lineage, the dataset, the menus) get values that keep their identity
-// while only its progress moves, so a step re-renders the progress and nothing else.
+// A run's page (design/UNIFIED.md §4 Run): header, outcome callout, KPI strip, charts, samples, per-class, logs,
+// cloud panel, and config. Live SSE updates do work proportional to deltas (append logs, incremental warnings & spot
+// recovery, identity-preserving menus) so 10 Hz training ticks never re-render static panels.
 import ArrowLeft from '$icons/arrow-left';
 import Box from '$icons/box';
 import ChevronsUp from '$icons/chevrons-up';
@@ -67,6 +61,7 @@ import Samples from './run/Samples';
 import { queueItems, REMOVE_LABEL, removedToast, removeDescription, removeQueued, removeTitle, startHint, startLabel } from './run/queueActions';
 import { queueState } from './run/queueState';
 import { WarningsLog } from './run/warningsLog';
+import { SpotRecoveryTracker } from './run/cloudRecovery';
 import { beforeTraining, cloudGpu, phaseTitle, phaseWhat, providerName } from '$lib/cloud';
 import { prefs } from '$lib/prefs';
 import CloudPanel from './run/CloudPanel';
@@ -234,13 +229,10 @@ export default function Run() {
     const r = run.get();
     return r ? trainingSeconds(r) : null;
   });
-  // The trainer's "too short to learn" warnings, from the log (./run/warnings): one callout, never a toast. Read from
-  // the lines added since the last update only (./run/warningsLog).
   const warningsLog = new WarningsLog();
-  const warnings = computed(() => {
-    void live.version;
-    return warningsLog.sync(live.logsLog);
-  });
+  const warnings = computed(() => (void live.version, warningsLog.sync(live.logsLog)));
+  const spotTracker = new SpotRecoveryTracker();
+  const spotRecovery = computed(() => (void live.version, spotTracker.sync(live.logsLog, cloud.get(), run.get())));
 
   // Phones show one section at a time, Precision / Recall and Learning rate among them (design/UNIFIED.md §4 Run); a
   // tablet stacks them. A run that never trained opens on its log; once picked, the choice holds.
@@ -499,8 +491,11 @@ export default function Run() {
                   <Badge tone="warning">
                     <WifiOff size={12} /> Reconnecting
                   </Badge>
+                ) : spotRecovery.get()?.kind === 'recovering' ? (
+                  <Badge tone="warning">
+                    <RotateCcw size={12} /> {spotRecovery.get()!.badge}
+                  </Badge>
                 ) : cloud.get()?.unanswered_since ? (
-                  // The worker is silent: the numbers stand still for that, not because training does (Cloud says more).
                   <Badge tone="warning">
                     <WifiOff size={12} /> Worker not answering
                   </Badge>
@@ -636,7 +631,7 @@ export default function Run() {
                   <ConfigPanel config={config.get()!} resolved={resolved.get()} datasetName={datasetName.get()} weights={lineage.get()} essential={phone.current} cli={runCli.get()} runId={R().id} />
                 </div>
                 <div class="w-side">
-                  {cloud.get() ? <CloudPanel cloud={cloud.get()!} provider={provider.get()} run={R()} provisions={provisions.get()} /> : null}
+                  {cloud.get() ? <CloudPanel cloud={cloud.get()!} provider={provider.get()} run={R()} provisions={provisions.get()} recovery={spotRecovery.get()} /> : null}
                   <WaitingPanels
                     queue={place.get() !== null ? queue.get() : []}
                     ahead={ahead.get()}
@@ -746,7 +741,7 @@ export default function Run() {
                   </div>
                   {cloud.get() ? (
                     <div class="part" data-part="cloud">
-                      <CloudPanel cloud={cloud.get()!} provider={provider.get()} run={R()} provisions={provisions.get()} />
+                      <CloudPanel cloud={cloud.get()!} provider={provider.get()} run={R()} provisions={provisions.get()} recovery={spotRecovery.get()} />
                     </div>
                   ) : null}
                   {/* One column beside the log (laptops up) and on phones; on a tablet it is stacked at the panel's full

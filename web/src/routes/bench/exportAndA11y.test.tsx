@@ -174,7 +174,7 @@ describe('Benchmarks, BenchCompare, and Models export & a11y', () => {
     await clickMenuItem('Export comparison', 'Export JSON');
     expect(downloads).toHaveLength(2);
     expect(downloads[0]!.filename).toBe('benchmark-fasteners-val-compare.csv');
-    expect(downloads[0]!.text).toContain(`${e1!.name} (baseline)`);
+    expect(downloads[0]!.text).toContain(`${e1Label} (baseline)`);
     const parsed = JSON.parse(downloads[1]!.text);
     expect(parsed.baseline_id).toBe(e1!.id);
     expect(parsed.entries).toHaveLength(3);

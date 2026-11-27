@@ -1,7 +1,9 @@
 /**
  * Collapsible Checkpoint CLI quick-copy block inside Run › Config: one-click copyable `folo val` and
- * `folo predict` commands for the run's best checkpoint (matching docs/CLI.md).
+ * `folo predict` commands for the run's best checkpoint (matching docs/CLI.md), with an optional
+ * calibrated-thresholds toggle (`--save-thresholds` / `--thresholds`).
  */
+import Check from '$icons/check';
 import ChevronRight from '$icons/chevron-right';
 import { computed, css, signal } from 'fw';
 import { SHELL } from '$lib/trainCli';
@@ -21,11 +23,24 @@ const MODES: { value: CheckpointCliMode; label: string }[] = [
 export default function CheckpointCli(props: CheckpointCliProps) {
   const open = signal(false);
   const mode = signal<CheckpointCliMode>('val');
-  const command = computed(() => (mode.get() === 'val' ? props.bundle.val : props.bundle.predict));
+  const calibrated = signal(false);
+  const command = computed(() =>
+    mode.get() === 'val'
+      ? calibrated.get()
+        ? props.bundle.valThresholds
+        : props.bundle.val
+      : calibrated.get()
+        ? props.bundle.predictThresholds
+        : props.bundle.predict,
+  );
   const copied = computed(() =>
     mode.get() === 'val'
-      ? 'Run this command in a terminal to evaluate the run checkpoint.'
-      : 'Run this command in a terminal to predict with the run checkpoint.',
+      ? calibrated.get()
+        ? 'Run this command to evaluate the checkpoint and write calibrated thresholds JSON.'
+        : 'Run this command in a terminal to evaluate the run checkpoint.'
+      : calibrated.get()
+        ? 'Run this command to predict with calibrated per-class thresholds.'
+        : 'Run this command in a terminal to predict with the run checkpoint.',
   );
   const placeholders = computed(() => {
     const list: string[] = [];
@@ -53,6 +68,27 @@ export default function CheckpointCli(props: CheckpointCliProps) {
             <span class="ckpt-shell">In {SHELL}:</span>
             <Segmented label="Checkpoint CLI command" size="sm" bind:value={mode} options={MODES} />
           </div>
+          <label class="ckpt-check">
+            <input
+              type="checkbox"
+              checked={calibrated.get()}
+              onchange={(e) => calibrated.set((e.currentTarget as HTMLInputElement).checked)}
+            />
+            <span class="cbox" aria-hidden="true">
+              <Check size={11} strokeWidth={2.5} />
+            </span>
+            <span>
+              {mode.get() === 'val' ? (
+                <>
+                  Save calibrated thresholds (<span class="mono">--save-thresholds</span>)
+                </>
+              ) : (
+                <>
+                  Use calibrated thresholds (<span class="mono">--thresholds</span>)
+                </>
+              )}
+            </span>
+          </label>
           <CommandLine
             command={command.get()}
             label={mode.get() === 'val' ? 'Validate checkpoint CLI command' : 'Predict checkpoint CLI command'}
@@ -131,12 +167,50 @@ css`
     line-height: var(--type-sm-line);
     color: var(--text-tertiary);
   }
+  .ckpt-check {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    color: var(--text-secondary);
+    cursor: pointer;
+    width: fit-content;
+  }
+  .ckpt-check input {
+    position: absolute;
+    opacity: 0;
+    width: 1px;
+    height: 1px;
+  }
+  .cbox {
+    display: grid;
+    place-items: center;
+    width: 14px;
+    height: 14px;
+    border-radius: var(--radius-xs);
+    border: 1px solid var(--line-control);
+    background: var(--bg-inset);
+    color: transparent;
+    flex-shrink: 0;
+  }
+  .ckpt-check input:checked + .cbox {
+    border-color: var(--text-primary);
+    background: var(--text-primary);
+    color: var(--bg-panel);
+  }
+  .ckpt-check input:focus-visible + .cbox {
+    outline: var(--size-focus-ring) solid var(--focus);
+    outline-offset: 2px;
+  }
   .ckpt-hint {
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
     color: var(--text-tertiary);
   }
-  .ckpt-hint .mono {
+  .ckpt-hint .mono,
+  .ckpt-check .mono {
     color: var(--text-secondary);
   }
   @media (pointer: coarse) {

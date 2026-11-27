@@ -1,6 +1,7 @@
 // Pure CLI command builders for Model Detail ExportDialog: `folo export` (with dynamic ONNX axes,
-// decode, and half precision), `folo predict` (standard, SAHI tiled `--tile`, `--tta`, and ByteTrack `--track`),
-// and `folo quantize` (int8 calibration with selective-f32 sensitivity policy).
+// decode, and half precision), `folo val` (with `--save-thresholds`), `folo predict` (standard, SAHI tiled
+// `--tile`, `--tta`, ByteTrack `--track`, and optional `--thresholds`), and `folo quantize` (int8 calibration
+// with selective-f32 sensitivity policy).
 // Every flag matches crates/folo-cli/src/cli/infer.rs and docs/CLI.md verbatim.
 import type { ExportFormat, Model, OnnxSwitches } from '$lib/api/types';
 import { quote, weightsRef } from '$lib/trainCli';
@@ -108,11 +109,46 @@ export function buildExportCli(
   return { line: parts.join(' '), placeholder };
 }
 
-/** Builds a copy-ready `folo predict` snippet (Standard, SAHI `--tile`, `--tta`, or ByteTrack `--track`). */
-export function buildPredictCli(model: Model, mode: PredictSnippetMode): ModelCliResult {
+function flagPart(flag: string, value: string): string {
+  return value.startsWith('-') ? quote(`${flag}=${value}`) : `${flag} ${quote(value)}`;
+}
+
+/** Builds a copy-ready `folo val` command, optionally writing calibrated per-class F1 thresholds (`--save-thresholds`). */
+export function buildValCli(
+  model: Model,
+  opts?: {
+    datasetPath?: string | null;
+    split?: string | null;
+    saveThresholds?: boolean;
+    thresholdsPath?: string;
+  },
+): ModelCliResult {
+  const { part, placeholder } = modelFlag(model);
+  const dataPart = opts?.datasetPath ? flagPart('--data', opts.datasetPath) : '--data <dataset>';
+  const parts = ['folo val', part, dataPart];
+  if (opts?.split && opts.split !== 'val') parts.push('--split', opts.split);
+  if (opts?.saveThresholds !== false) {
+    const file = opts?.thresholdsPath?.trim() || 'thresholds.json';
+    parts.push(flagPart('--save-thresholds', file));
+  }
+  return { line: parts.join(' '), placeholder };
+}
+
+/**
+ * Builds a copy-ready `folo predict` snippet (Standard, SAHI `--tile`, `--tta`, or ByteTrack `--track`),
+ * optionally applying calibrated per-class thresholds (`--thresholds <FILE>`, mutually exclusive with `--conf`).
+ */
+export function buildPredictCli(
+  model: Model,
+  mode: PredictSnippetMode,
+  opts?: { thresholdsPath?: string | null },
+): ModelCliResult {
   const { part, placeholder } = modelFlag(model);
   const target = mode === 'track' ? '<frames_dir>' : '<images>';
   const parts = ['folo predict', part, target];
+  if (opts?.thresholdsPath) {
+    parts.push(flagPart('--thresholds', opts.thresholdsPath));
+  }
   if (mode === 'sahi') {
     parts.push('--tile', '640', '--tile-overlap', '0.2');
   } else if (mode === 'tta') {

@@ -7,6 +7,7 @@
  * way and the instance may still be billed, and the instance is read again every 30 s (also while it cannot be read).
  */
 import Check from '$icons/check';
+import RotateCcw from '$icons/rotate-ccw';
 import TriangleAlert from '$icons/triangle-alert';
 import WifiOff from '$icons/wifi-off';
 import X from '$icons/x';
@@ -19,8 +20,10 @@ import { isAlive, offerLine, panelPhaseLabel, phaseIndex, phaseLabel, phaseState
 import { ago, hoursText, timeOfDay, usd } from '$lib/format';
 import { prefs } from '$lib/prefs';
 import { href } from '$lib/router';
+import Badge from '$lib/ui/Badge';
 import Panel from '$lib/ui/Panel';
 import Progress from '$lib/ui/Progress';
+import type { SpotRecovery } from './cloudRecovery';
 
 export interface CloudPanelProps {
   cloud: RunCloud;
@@ -29,6 +32,8 @@ export interface CloudPanelProps {
   run?: PhaseRun;
   /** The provider launches an instance per run (RunPod); a remote server does not (no provisioning, no release). */
   provisions?: boolean;
+  /** Spot preemption auto-resume status derived from the run's logs and outcome (optional). */
+  recovery?: SpotRecovery | null;
 }
 
 /** How often an instance whose termination is not confirmed is read again. */
@@ -78,9 +83,45 @@ export default function CloudPanel(props: CloudPanelProps) {
     const c = props.cloud;
     return !released.get() && c.deadline ? `${hoursText(c.max_hours)} · stops by ${timeOfDay(c.deadline)}` : hoursText(c.max_hours);
   });
+  const recovery = () => props.recovery ?? null;
+  const isFailureRecovery = (kind: SpotRecovery['kind']) => kind === 'exhausted' || kind === 'no_checkpoint' || kind === 'failed';
+  const recoveryTone = computed(() => {
+    const rec = recovery();
+    if (!rec) return null;
+    if (isFailureRecovery(rec.kind)) return 'danger' as const;
+    if (rec.kind === 'recovering' || rec.kind === 'stopped') return 'warning' as const;
+    return 'neutral' as const;
+  });
+  const recoveryFact = computed(() => {
+    const rec = recovery();
+    if (!rec || rec.attempts <= 0) return null;
+    const count = rec.maxAttempts !== null ? `${rec.attempts} of ${rec.maxAttempts}` : `${rec.attempts}`;
+    if (rec.kind === 'exhausted') return `${count} · exhausted`;
+    if (rec.kind === 'failed') return `${count} · failed`;
+    if (rec.resumeEpoch !== null) return `${count} · epoch ${rec.resumeEpoch}`;
+    return count;
+  });
 
   return (
-    <Panel title="Cloud" meta={props.provider} id="cloud">
+    <Panel
+      title="Cloud"
+      meta={props.provider}
+      id="cloud"
+      actions={
+        recovery() ? (
+          <span data-spot-recovery-badge={recovery()!.kind}>
+            <Badge tone={recoveryTone.get() ?? 'neutral'}>
+              {isFailureRecovery(recovery()!.kind) ? (
+                <TriangleAlert size={12} aria-hidden="true" />
+              ) : (
+                <RotateCcw size={12} aria-hidden="true" />
+              )}
+              {recovery()!.badge}
+            </Badge>
+          </span>
+        ) : undefined
+      }
+    >
       <div class="body">
         <div class="wrap">
           <ol class="phases" aria-label="Hand-over">
@@ -120,6 +161,22 @@ export default function CloudPanel(props: CloudPanelProps) {
           </ol>
           {/* One row per fact, each its own line: a long label never narrows another row's value. */}
           <dl class="facts">
+            {recovery() ? (
+              <p
+                class="recovery-line"
+                class:danger={isFailureRecovery(recovery()!.kind)}
+                class:recovering={recovery()!.kind === 'recovering'}
+                role={isFailureRecovery(recovery()!.kind) ? 'alert' : 'status'}
+                data-spot-recovery={recovery()!.kind}
+              >
+                {isFailureRecovery(recovery()!.kind) ? (
+                  <TriangleAlert size={14} strokeWidth={2} aria-hidden="true" />
+                ) : (
+                  <RotateCcw size={14} strokeWidth={2} aria-hidden="true" />
+                )}
+                <span>{recovery()!.summary}</span>
+              </p>
+            ) : null}
             {props.cloud.unanswered_since ? (
               <p class="warn-line" role="status">
                 <WifiOff size={14} strokeWidth={2} aria-hidden="true" />
@@ -174,6 +231,12 @@ export default function CloudPanel(props: CloudPanelProps) {
               <dt>Last checkpoint copy</dt>
               <dd class="num">{props.cloud.synced ? ago(props.cloud.synced, now.get()) : released.get() ? 'none' : 'none yet'}</dd>
             </div>
+            {recoveryFact.get() ? (
+              <div>
+                <dt>Spot recoveries</dt>
+                <dd class="num">{recoveryFact.get()}</dd>
+              </div>
+            ) : null}
           </dl>
         </div>
       </div>
@@ -259,7 +322,8 @@ css`
   }
   /* A worker that does not answer, a termination not confirmed, a ledger not read: the mark in its hue, the words
      secondary. */
-  .warn-line {
+  .warn-line,
+  .recovery-line {
     display: flex;
     align-items: flex-start;
     gap: var(--space-2);
@@ -267,10 +331,23 @@ css`
     border-bottom: 1px solid var(--line-subtle);
     color: var(--text-secondary);
   }
-  .warn-line :global(svg) {
+  .warn-line :global(svg),
+  .recovery-line :global(svg) {
     flex: none;
     margin-top: 2px;
     color: var(--warning-solid);
+  }
+  .recovery-line :global(svg) {
+    color: var(--text-secondary);
+  }
+  .recovery-line.recovering :global(svg) {
+    color: var(--warning-solid);
+  }
+  .recovery-line.danger {
+    color: var(--text-primary);
+  }
+  .recovery-line.danger :global(svg) {
+    color: var(--danger-solid);
   }
   .xfer {
     color: var(--text-secondary);
