@@ -26,7 +26,7 @@ import Skeleton from '$lib/ui/Skeleton';
 import { dominantAspect } from '$lib/ui/TileGrid';
 import { tooltip } from '$lib/ui/tooltip';
 import { filterAndSortImages, summarizeGalleryErrors, type ErrorFilter, type ErrorSort, type ImageDiagnostics } from './errorAnalysis';
-import { collectBenchErrorRows, exportBenchErrorsCsv, exportBenchErrorsJson } from './errorExport';
+import { exportBenchErrorsCsv, exportBenchErrorsJson, hasBenchErrorRows } from './errorExport';
 import MatchView from './MatchView';
 import { bestF1Conf, imagesShownText, imagesText } from '../words';
 
@@ -126,9 +126,7 @@ export default function ImagesSection(props: ImagesSectionProps) {
 
   const summary = computed(() => summarizeGalleryErrors(images.get()));
   const visible = computed(() => filterAndSortImages(images.get(), errorFilter.get(), errorSort.get(), props.bench.classes));
-  const exportErrorCount = computed(
-    () => collectBenchErrorRows(visible.get(), errorFilter.get(), props.bench.classes, props.entry.scored).length,
-  );
+  const hasExportErrors = computed(() => hasBenchErrorRows(visible.get(), errorFilter.get()));
   const exportInput = () => ({
     bench: props.bench,
     entry: props.entry,
@@ -346,12 +344,12 @@ export default function ImagesSection(props: ImagesSectionProps) {
             <div class="explorer-right">
               {layerToggles()}
               <div class="export-acts" role="group" aria-label="Export error analysis">
-                <span use:tooltip={exportErrorCount.get() === 0 ? 'No failure cases in the current filter' : undefined}>
+                <span use:tooltip={!hasExportErrors.get() ? 'No failure cases in the current filter' : undefined}>
                   <Button
                     size="sm"
                     variant="ghost"
                     icon={Download}
-                    disabled={exportErrorCount.get() === 0}
+                    disabled={!hasExportErrors.get()}
                     data-bench-error-export="csv"
                     aria-label="Export errors CSV"
                     onclick={() => exportBenchErrorsCsv(exportInput())}
@@ -359,12 +357,12 @@ export default function ImagesSection(props: ImagesSectionProps) {
                     Export errors CSV
                   </Button>
                 </span>
-                <span use:tooltip={exportErrorCount.get() === 0 ? 'No failure cases in the current filter' : undefined}>
+                <span use:tooltip={!hasExportErrors.get() ? 'No failure cases in the current filter' : undefined}>
                   <Button
                     size="sm"
                     variant="ghost"
                     icon={FileJson}
-                    disabled={exportErrorCount.get() === 0}
+                    disabled={!hasExportErrors.get()}
                     data-bench-error-export="json"
                     aria-label="Export errors JSON"
                     onclick={() => exportBenchErrorsJson(exportInput())}

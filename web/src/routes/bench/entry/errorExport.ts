@@ -73,6 +73,20 @@ function classNameOf(classes: readonly string[], cls: number): string {
   return classes[cls] ?? `class ${cls}`;
 }
 
+/** Fast short-circuit check for whether the active filtered gallery contains at least one exportable error box. */
+export function hasBenchErrorRows(analyzed: readonly AnalyzedImage[], filter: ErrorFilter): boolean {
+  for (const { diag } of analyzed) {
+    if (filter === 'fn') {
+      if (diag.fn > 0) return true;
+    } else if (filter === 'fp') {
+      if (diag.fp > 0) return true;
+    } else if (diag.errors > 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /** Collects FP / FN / localization failure rows matching the active gallery filter in the active sorted image order. */
 export function collectBenchErrorRows(
   analyzed: readonly AnalyzedImage[],

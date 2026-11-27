@@ -10,13 +10,11 @@ import {
   createFrameThrottle,
   DEFAULT_FRAME_STEP_SEC,
   describeCameraError,
-  frameIndexAt,
   LIVE_LOOP_FLOOR_MS,
   resetCaptureCanvas,
   SCRUB_THROTTLE_MS,
   stepFrameTime,
   stopMediaStream,
-  totalFramesFor,
   videoFrameName,
 } from './media';
 import { isValidFrameStep, probeVideoFrameStep, summarizeFrameDeltas } from './videoMeta';
@@ -105,6 +103,7 @@ export function useMediaSession(input: UseMediaSessionInput) {
   let videoSeq = 0;
   let camStartMs = 0;
   let camFrameCount = 0;
+  let videoFrameCount = 0;
   let pendingForwardStep = false;
   let lastEmittedVideoTime: number | null = null;
   let containerStepKnown = false;
@@ -223,12 +222,10 @@ export function useMediaSession(input: UseMediaSessionInput) {
         frameSynced.set(true);
         if (lastEmittedVideoTime === null || Math.abs(capturedTime - lastEmittedVideoTime) > 0.0005) {
           lastEmittedVideoTime = capturedTime;
-          const nextSeq = frameSeq.peek() + 1;
-          frameSeq.set(nextSeq);
-          const step = frameStep.peek();
-          const total = totalFramesFor(duration.peek(), step);
-          const frameIdx = total > 0 ? frameIndexAt(capturedTime, step, total) : nextSeq;
-          lastFrameMeta.set({ frame: frameIdx, timestampMs: Math.max(0, Math.round(capturedTime * 1000)) });
+          frameSeq.set((n) => n + 1);
+          videoFrameCount++;
+          // Monotonic capture index stays strictly increasing even if container/rVFC frame-rate estimates refine mid-playback.
+          lastFrameMeta.set({ frame: videoFrameCount, timestampMs: Math.max(0, Math.round(capturedTime * 1000)) });
         }
       } else {
         camDims.set({ width: frame.width, height: frame.height });
@@ -416,6 +413,7 @@ export function useMediaSession(input: UseMediaSessionInput) {
     lastFrameMeta.set(null);
     camStartMs = 0;
     camFrameCount = 0;
+    videoFrameCount = 0;
     sessionSeq.set((n) => n + 1);
     input.onTrackReset?.();
     if (notify && wasActive) input.onStopped?.();
@@ -435,6 +433,7 @@ export function useMediaSession(input: UseMediaSessionInput) {
     videoUrl.set(URL.createObjectURL(file));
     mode.set('video');
     lastFrameMeta.set(null);
+    videoFrameCount = 0;
     sessionSeq.set((n) => n + 1);
     input.onTrackReset?.();
     void probeVideoFrameStep(file).then((step) => {
@@ -577,6 +576,7 @@ export function useMediaSession(input: UseMediaSessionInput) {
       pendingForwardStep = preserveTracks;
       if (!preserveTracks) {
         lastEmittedVideoTime = null;
+        videoFrameCount = 0;
         input.onTrackReset?.();
       }
       if (!autoDetect.peek()) frameSynced.set(false);
@@ -604,6 +604,8 @@ export function useMediaSession(input: UseMediaSessionInput) {
     if (el.paused) {
       if (duration.peek() > 0 && el.currentTime >= duration.peek() - 0.01) {
         pendingForwardStep = false;
+        lastEmittedVideoTime = null;
+        videoFrameCount = 0;
         input.onTrackReset?.();
         el.currentTime = 0;
         currentTime.set(0);
@@ -675,6 +677,7 @@ export function useMediaSession(input: UseMediaSessionInput) {
       pendingForwardStep = false;
       if (!wasForwardStep) {
         lastEmittedVideoTime = null;
+        videoFrameCount = 0;
         input.onTrackReset?.();
       }
       seeking.set(false);

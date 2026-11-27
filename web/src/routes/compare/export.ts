@@ -35,6 +35,10 @@ export interface RunCompareExportInput {
 
 // Escapes dynamic text as literal GitHub-Flavored Markdown table/inline text.
 const escMd = (s: string) => s.replace(/[\r\n]+/g, ' ').replace(/[\\|`*_~[\]<>&]/g, '\\$&');
+const boldMd = (s: string) => {
+  const trimmed = s.trim();
+  return trimmed ? `**${escMd(trimmed)}**` : escMd(s);
+};
 
 /** Canonical side-by-side configuration rows shared between `CompareTable` and CSV/Markdown exports. */
 export function buildCompareSettingRows(
@@ -184,7 +188,7 @@ export function buildRunCompareMarkdown(input: RunCompareExportInput): string {
   const lines: string[] = [
     '# Run comparison',
     '',
-    `${ordered.length} ${ordered.length === 1 ? 'run' : 'runs'} · baseline: **${escMd(baselineLabel)}**`,
+    `${ordered.length} ${ordered.length === 1 ? 'run' : 'runs'} · baseline: ${boldMd(baselineLabel)}`,
   ];
   if (!input.sameData && ordered.length > 1) {
     lines.push('', `> ${escMd(DATA_CAVEAT)}`);
@@ -216,7 +220,7 @@ export function buildRunCompareMarkdown(input: RunCompareExportInput): string {
     lines.push('', '## Configuration differences', '', ...tableHead('Setting'));
     for (const row of diffRows) {
       const baseText = row.values[0]!;
-      const cells = row.values.map((v, i) => (i > 0 && v !== baseText ? `**${escMd(v)}**` : escMd(v)));
+      const cells = row.values.map((v, i) => (i > 0 && v !== baseText ? boldMd(v) : escMd(v)));
       lines.push(`| ${escMd(row.label)} | ${cells.join(' | ')} |`);
     }
   }
