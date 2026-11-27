@@ -206,22 +206,6 @@ pub fn predict_uses_iou(m: &Model, state: &ModelCliState) -> bool {
     m.head != Head::O2o || state.predict_tta
 }
 
-/// True when `path` already names an INT8-calibrated `.folo` checkpoint (`-int8.folo` or
-/// `-int8-<method>.folo`), checked on raw ASCII bytes so multi-byte UTF-8 paths never panic.
-pub fn is_int8_model_path(path: &str) -> bool {
-    let bytes = path.as_bytes();
-    const SUFFIXES: [&[u8]; 4] =
-        [b"-int8.folo", b"-int8-percentile.folo", b"-int8-minmax.folo", b"-int8-mse.folo"];
-    SUFFIXES
-        .iter()
-        .any(|sfx| bytes.len() >= sfx.len() && bytes[bytes.len() - sfx.len()..].eq_ignore_ascii_case(sfx))
-}
-
-/// True when `m` already points to a calibrated INT8 `.folo` file on disk.
-pub fn model_is_int8_file(m: &Model) -> bool {
-    m.path.as_deref().map(str::trim).is_some_and(is_int8_model_path)
-}
-
 /// Strips a trailing ASCII suffix case-insensitively on raw bytes (safe for arbitrary UTF-8).
 fn strip_ascii_suffix_ignore_case<'a>(s: &'a str, suffix: &[u8]) -> Option<&'a str> {
     let bytes = s.as_bytes();
@@ -232,18 +216,58 @@ fn strip_ascii_suffix_ignore_case<'a>(s: &'a str, suffix: &[u8]) -> Option<&'a s
     }
 }
 
+/// Strips a recognized INT8 stem suffix (`-int8`, `-int8-<digits>`, or `-int8-<method>`, with an
+/// optional `-recal` tag) using pure ASCII byte checks so multi-byte UTF-8 paths never panic.
+fn strip_int8_stem_suffix(stem: &str) -> Option<&str> {
+    let s = strip_ascii_suffix_ignore_case(stem, b"-recal").unwrap_or(stem);
+    if let Some(base) = strip_ascii_suffix_ignore_case(s, b"-int8-percentile")
+        .or_else(|| strip_ascii_suffix_ignore_case(s, b"-int8-minmax"))
+        .or_else(|| strip_ascii_suffix_ignore_case(s, b"-int8-mse"))
+        .or_else(|| strip_ascii_suffix_ignore_case(s, b"-int8"))
+    {
+        return Some(base);
+    }
+    // Recognize auto-numbered `folo quantize` outputs like `best-int8-2`.
+    let bytes = s.as_bytes();
+    let mut end = bytes.len();
+    while end > 0 && bytes[end - 1].is_ascii_digit() {
+        end -= 1;
+    }
+    if end < bytes.len() {
+        return strip_ascii_suffix_ignore_case(&s[..end], b"-int8-");
+    }
+    None
+}
+
+/// True when `path` already names an INT8-calibrated `.folo` checkpoint (`-int8.folo`,
+/// `-int8-<n>.folo`, or `-int8-<method>[-recal].folo`), checked on raw ASCII bytes.
+pub fn is_int8_model_path(path: &str) -> bool {
+    strip_ascii_suffix_ignore_case(path, b".folo").and_then(strip_int8_stem_suffix).is_some()
+}
+
+/// True when `m` already points to a calibrated INT8 `.folo` file on disk.
+pub fn model_is_int8_file(m: &Model) -> bool {
+    m.path.as_deref().filter(|p| !p.trim().is_empty()).is_some_and(is_int8_model_path)
+}
+
 /// Derives an explicit per-method INT8 output path (`<stem>-int8-<method>.folo`) shared by
 /// `folo quantize --output` and `folo predict --precision int8`, preventing `folo quantize`'s
-/// auto-numbered `-2.folo` fallback from silently diverging from `folo predict`.
+/// auto-numbered `-2.folo` fallback from silently diverging from `folo predict`. Guarantees the
+/// derived output differs from `path` (case-insensitively) so `folo quantize` never fails with
+/// `--output must differ from --model`.
 fn derive_quant_output_path(path: &str, method: QuantMethod) -> String {
     let stem = strip_ascii_suffix_ignore_case(path, b".folo").unwrap_or(path);
-    let base = strip_ascii_suffix_ignore_case(stem, b"-int8-percentile")
-        .or_else(|| strip_ascii_suffix_ignore_case(stem, b"-int8-minmax"))
-        .or_else(|| strip_ascii_suffix_ignore_case(stem, b"-int8-mse"))
-        .or_else(|| strip_ascii_suffix_ignore_case(stem, b"-int8"))
-        .filter(|b| !b.is_empty())
-        .unwrap_or(if stem.is_empty() { "model" } else { stem });
-    format!("{base}-int8-{}.folo", method.label())
+    let base = strip_int8_stem_suffix(stem).filter(|b| !b.is_empty()).unwrap_or(if stem.is_empty() {
+        "model"
+    } else {
+        stem
+    });
+    let derived = format!("{base}-int8-{}.folo", method.label());
+    if derived.eq_ignore_ascii_case(path) {
+        format!("{base}-int8-{}-recal.folo", method.label())
+    } else {
+        derived
+    }
 }
 
 /// Derives the INT8 checkpoint path for `folo predict --precision int8`: preserves an already
@@ -272,7 +296,7 @@ fn resolve_model_arg(m: &Model, int8_target: bool, method: QuantMethod) -> (Stri
                 return (quoted, None);
             }
         }
-        return ("<model-int8.folo>".to_string(), None);
+        return (format!("<model-int8-{}.folo>", method.label()), None);
     }
     if m.source == Some(ModelSource::Published)
         && let Some(quoted) = folo_api::json::quote_path(&m.id)
@@ -298,7 +322,7 @@ fn resolve_quant_output_arg(m: &Model, method: QuantMethod) -> (Option<String>, 
             return (Some(quoted), None);
         }
     }
-    (None, None)
+    (Some(format!("<model-int8-{}.folo>", method.label())), None)
 }
 
 /// Formats a threshold rounded to 2 decimal places (`0.25`, `0.70`).
@@ -747,12 +771,43 @@ mod tests {
         pub_no_path.source = Some(ModelSource::Published);
         let b_int8_pub = build_model_cli(&pub_no_path, None, &st);
         assert!(b_int8_pub.command.contains("--model m_44c0-int8-percentile.folo"), "{}", b_int8_pub.command);
-        // Unknown non-published model without a file path uses `<model-int8.folo>` placeholder.
+        // Unknown non-published model without a file path keeps Quantize `--output` and Predict
+        // `--model` in lockstep with the selected calibration method.
         let mut no_path = m.clone();
         no_path.path = None;
         no_path.source = None;
+        st.quant_method = QuantMethod::MinMax;
         let b_int8_ph = build_model_cli(&no_path, None, &st);
-        assert!(b_int8_ph.command.contains("--model <model-int8.folo>"), "{}", b_int8_ph.command);
+        assert!(b_int8_ph.command.contains("--model <model-int8-minmax.folo>"), "{}", b_int8_ph.command);
+        let q_no_path = ModelCliState {
+            mode: ModelCliMode::Export,
+            export_format: CliExportFormat::Int8Quantize,
+            quant_method: QuantMethod::MinMax,
+            ..Default::default()
+        };
+        let b_q_ph = build_model_cli(&no_path, None, &q_no_path);
+        assert!(b_q_ph.command.ends_with("--output <model-int8-minmax.folo>"), "{}", b_q_ph.command);
+
+        // Auto-numbered `folo quantize` outputs (`-int8-2.folo`) are preserved as-is for Predict
+        // and stripped cleanly when re-quantizing; same-method re-quantize never emits `--output == --model`.
+        assert!(is_int8_model_path("D:/models/best-int8-2.folo"));
+        assert!(is_int8_model_path("D:/models/best-int8-percentile-recal.folo"));
+        assert_eq!(
+            derive_int8_model_path("D:/models/best-int8-2.folo", QuantMethod::Percentile),
+            "D:/models/best-int8-2.folo"
+        );
+        assert_eq!(
+            derive_quant_output_path("D:/models/best-int8-2.folo", QuantMethod::MinMax),
+            "D:/models/best-int8-minmax.folo"
+        );
+        assert_eq!(
+            derive_quant_output_path("D:/models/best-int8-percentile.folo", QuantMethod::Percentile),
+            "D:/models/best-int8-percentile-recal.folo"
+        );
+        assert_eq!(
+            derive_quant_output_path("D:/models/best-INT8-PERCENTILE.FOLO", QuantMethod::Percentile),
+            "D:/models/best-int8-percentile-recal.folo"
+        );
 
         // Multi-byte UTF-8 paths whose byte length straddles suffix offsets must never panic.
         assert_eq!(
@@ -765,6 +820,10 @@ mod tests {
         assert_eq!(
             derive_quant_output_path("D:/模型-INT8.FOLO", QuantMethod::MinMax),
             "D:/模型-int8-minmax.folo"
+        );
+        assert_eq!(
+            derive_int8_model_path("D:/模型-int8-2.folo", QuantMethod::Percentile),
+            "D:/模型-int8-2.folo"
         );
         assert_eq!(derive_int8_model_path("best.FOLO", QuantMethod::Percentile), "best-int8-percentile.folo");
     }
