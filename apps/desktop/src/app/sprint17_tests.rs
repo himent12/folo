@@ -268,6 +268,13 @@ fn playtest_r17_fixes_short_run_clone_mock_v2_metadata_and_estimate_basis() {
         assert_eq!(f.close_mosaic.round() as u32, 0);
         assert_eq!(f.model_arch(), ModelArch::v2(Arch::N));
         assert!(f.e2e);
+    });
+    // Flush TextInput::set_text subscribers and verify close_invalid stays false before submit.
+    app.frame(window.into());
+    app.run_until_idle();
+    drive(&mut app, window, |this, w, cx| {
+        let f = this.new_run.as_ref().unwrap();
+        assert!(!f.close_invalid, "close_invalid stays false after input subscribers flush");
         this.submit_new_run(w, cx);
     });
     app.run_until_idle();

@@ -343,7 +343,9 @@ impl FoloApp {
                 }
             }))
             .children(rows);
-        let matrix = div()
+        // Keep the cell grid's width cap on the matrix itself so a 1-class model's legend and
+        // captions still get the full column width below it.
+        let matrix_table = div()
             .flex()
             .flex_col()
             .gap(px(2.))
@@ -353,11 +355,24 @@ impl FoloApp {
                 div()
                     .flex()
                     .items_center()
-                    .child(text(ty::SM, t.text_tertiary).w(px(LABEL_W)).pr(px(8.)).text_right().child("Actual ↓"))
+                    .child(
+                        text(ty::SM, t.text_tertiary)
+                            .w(px(LABEL_W))
+                            .pr(px(8.))
+                            .text_right()
+                            .child("Actual ↓"),
+                    )
                     .child(text(ty::SM, t.text_tertiary).flex_1().child("Predicted →")),
             )
             .child(header_row)
-            .child(grid)
+            .child(grid);
+        let matrix = div()
+            .flex()
+            .flex_col()
+            .gap(px(2.))
+            .w_full()
+            .min_w_0()
+            .child(matrix_table)
             // The key sits under the matrix, away from the column labels.
             .child(div().w_full().min_w_0().pt(px(10.)).child(key))
             // The selected cell in words, else what the rows mean.

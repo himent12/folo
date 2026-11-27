@@ -29,6 +29,13 @@ const STREAM_HANDSHAKE: Duration = Duration::from_secs(5);
 /// taken for dead: three keep-alives missed.
 const STREAM_SILENCE: Duration = Duration::from_secs(45);
 
+#[derive(Default)]
+struct ArchCache {
+    generation: u64,
+    runs: HashMap<String, String>,
+    models: HashMap<String, String>,
+}
+
 pub struct HttpBackend {
     base: String,
     agent: ureq::Agent,
@@ -39,9 +46,9 @@ pub struct HttpBackend {
     /// nothing is sent, and errors say so.
     not_an_address: Option<String>,
     /// Canonical architecture strings (`"folo2-*"`) learned from `create_run_with_arch`, `run_cli`,
-    /// or `GET /api/models/{id}`'s `x-folo-arch` header.
-    run_archs: Mutex<HashMap<String, String>>,
-    model_archs: Mutex<HashMap<String, String>>,
+    /// or `GET /api/models/{id}`'s `x-folo-arch` header, guarded by a clear generation so pre-clear
+    /// in-flight responses never repopulate stale entries.
+    arch_cache: Mutex<ArchCache>,
 }
 
 impl HttpBackend {
@@ -67,8 +74,7 @@ impl HttpBackend {
             agent: agent(Some(Duration::from_secs(30))),
             stream_agent: stream_agent(handshake, silence),
             not_an_address,
-            run_archs: Mutex::new(HashMap::new()),
-            model_archs: Mutex::new(HashMap::new()),
+            arch_cache: Mutex::new(ArchCache::default()),
         }
     }
 
@@ -223,16 +229,23 @@ impl Backend for HttpBackend {
     }
 
     fn model_arch(&self, id: &str) -> ApiResult<Option<String>> {
-        if let Some(cached) = self.model_archs.lock().unwrap().get(id).cloned() {
-            return Ok(Some(cached));
-        }
+        let cache_gen = {
+            let cache = self.arch_cache.lock().unwrap();
+            if let Some(cached) = cache.models.get(id).cloned() {
+                return Ok(Some(cached));
+            }
+            cache.generation
+        };
         let (model, header) =
             self.get_with_header::<Model>(&format!("/models/{}", seg(id)), "x-folo-arch")?;
         if let Some(arch) = header.as_deref().and_then(crate::arch::ModelArch::parse) {
             let s = arch.as_str().to_string();
-            self.model_archs.lock().unwrap().insert(id.to_string(), s.clone());
-            if let Some(run_id) = model.run_id {
-                self.run_archs.lock().unwrap().insert(run_id, s.clone());
+            let mut cache = self.arch_cache.lock().unwrap();
+            if cache.generation == cache_gen {
+                cache.models.insert(id.to_string(), s.clone());
+                if let Some(run_id) = model.run_id {
+                    cache.runs.insert(run_id, s.clone());
+                }
             }
             return Ok(Some(s));
         }
@@ -240,12 +253,15 @@ impl Backend for HttpBackend {
     }
 
     fn known_archs(&self) -> (HashMap<String, String>, HashMap<String, String>) {
-        (self.run_archs.lock().unwrap().clone(), self.model_archs.lock().unwrap().clone())
+        let cache = self.arch_cache.lock().unwrap();
+        (cache.runs.clone(), cache.models.clone())
     }
 
     fn clear_arch_cache(&self) {
-        self.run_archs.lock().unwrap().clear();
-        self.model_archs.lock().unwrap().clear();
+        let mut cache = self.arch_cache.lock().unwrap();
+        cache.generation = cache.generation.wrapping_add(1);
+        cache.runs.clear();
+        cache.models.clear();
     }
 
     fn create_run(&self, config: TrainConfig) -> ApiResult<Run> {
@@ -256,15 +272,19 @@ impl Backend for HttpBackend {
         let Some(arch) = arch_override else {
             return self.create_run(config);
         };
+        let cache_gen = self.arch_cache.lock().unwrap().generation;
         let mut body = serde_json::to_value(&config)
             .map_err(|e| ApiError::new("bad_request", format!("Could not encode run config: {e}")))?;
         if let Some(obj) = body.as_object_mut() {
             obj.insert("arch".into(), serde_json::Value::String(arch.into()));
         }
         let run: Run = self.post("/runs", &body)?;
-        self.run_archs.lock().unwrap().insert(run.id.clone(), arch.into());
-        if let Some(mid) = &run.model_id {
-            self.model_archs.lock().unwrap().insert(mid.clone(), arch.into());
+        let mut cache = self.arch_cache.lock().unwrap();
+        if cache.generation == cache_gen {
+            cache.runs.insert(run.id.clone(), arch.into());
+            if let Some(mid) = &run.model_id {
+                cache.models.insert(mid.clone(), arch.into());
+            }
         }
         Ok(run)
     }
@@ -282,9 +302,13 @@ impl Backend for HttpBackend {
     }
 
     fn run_cli(&self, id: &str) -> ApiResult<CliCommand> {
+        let cache_gen = self.arch_cache.lock().unwrap().generation;
         let cmd: CliCommand = self.get(&format!("/runs/{}/cli", seg(id)))?;
         if let Some(arch) = crate::arch::ModelArch::from_cli_argv(&cmd.argv) {
-            self.run_archs.lock().unwrap().insert(id.to_string(), arch.as_str().to_string());
+            let mut cache = self.arch_cache.lock().unwrap();
+            if cache.generation == cache_gen {
+                cache.runs.insert(id.to_string(), arch.as_str().to_string());
+            }
         }
         Ok(cmd)
     }

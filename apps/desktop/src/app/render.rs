@@ -278,6 +278,9 @@ impl Render for FoloApp {
                         return;
                     } else if this.route == Route::Playground {
                         &this.play_side_scroll
+                    } else if matches!(this.route, Route::Dataset(_)) && this.ds_tab == super::DsTab::Images {
+                        // Dataset Images scrolls via `grid_scroll`, not `page_scroll` (Statistics).
+                        return;
                     } else {
                         &this.page_scroll
                     };
