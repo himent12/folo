@@ -205,10 +205,13 @@ pub(crate) struct Plan {
     pub results: Vec<PlanOutput>,
     /// The external tensors and their storage versions when the call was recorded.
     pub state: Vec<(TensorId, u64)>,
-    /// Bytes of device memory the plan holds: intermediates, parameters, and the sizes of its input and results (the
-    /// last ones it was replayed with stay referenced). The listed tensors it binds are not counted: their owner
-    /// holds them.
+    /// Bytes of device memory the plan counts against `MAX_PLAN_BYTES`: intermediates, parameters, and the sizes of
+    /// its input and results (the last ones it was replayed with stay referenced). The listed tensors it binds are
+    /// not counted: their owner holds them.
     pub bytes: u64,
+    /// Bytes of device memory exclusively owned by this plan (intermediates adopted out of or allocated outside the
+    /// pool, plus the plan's own uniform buffer), strictly disjoint from `BufferPool`.
+    pub exclusive_bytes: u64,
     /// [`GpuContext::plan_epoch`] when the recording began.
     pub epoch: u64,
     last: std::sync::Mutex<LastBinds>,
@@ -315,6 +318,10 @@ impl PlanStore {
 
     pub(crate) fn bytes(&self) -> u64 {
         self.entries.iter().map(|e| e.plan.bytes).sum()
+    }
+
+    pub(crate) fn exclusive_bytes(&self) -> u64 {
+        self.entries.iter().map(|e| e.plan.exclusive_bytes).sum()
     }
 }
 
@@ -620,8 +627,10 @@ impl GpuContext {
         // its intermediates, a plan keeps the last input and results it was replayed with (in the bind groups of
         // its dynamic dispatches), so those count too, as does the uniform buffer it will make.
         let held = input.size() + outputs.iter().map(wgpu::Buffer::size).sum::<u64>();
-        let pinned: u64 =
-            internal.iter().map(wgpu::Buffer::size).sum::<u64>() + held + self.uniform_bytes(&rec.ops);
+        let internal_bytes: u64 = internal.iter().map(wgpu::Buffer::size).sum();
+        let uniform_bytes = self.uniform_bytes(&rec.ops);
+        let exclusive_bytes = internal_bytes + uniform_bytes;
+        let pinned: u64 = exclusive_bytes + held;
         if pinned > MAX_PLAN_BYTES_EACH {
             return Err(format!("the plan would hold {pinned} bytes, more than {MAX_PLAN_BYTES_EACH}"));
         }
@@ -657,6 +666,7 @@ impl GpuContext {
             results: Vec::new(),
             state: Vec::new(),
             bytes,
+            exclusive_bytes,
             epoch: rec.epoch,
             last,
             _internal: internal,

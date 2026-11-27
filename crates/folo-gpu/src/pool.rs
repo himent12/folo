@@ -96,6 +96,13 @@ pub struct PoolStats {
     pub need_bytes: u64,
 }
 
+impl PoolStats {
+    /// Total bytes currently held by the pool (`live_bytes + cached_bytes`).
+    pub const fn held_bytes(&self) -> u64 {
+        self.live_bytes.saturating_add(self.cached_bytes)
+    }
+}
+
 type Key = (u64, wgpu::BufferUsages);
 
 /// Free lists of buffers keyed by `(size class, usage)`.
@@ -228,7 +235,20 @@ impl BufferPool {
     /// the current live plus cached bytes.
     pub fn reset_peak(&mut self) {
         self.stats.peak_live_bytes = self.stats.live_bytes;
-        self.stats.peak_held_bytes = self.stats.live_bytes + self.stats.cached_bytes;
+        self.stats.peak_held_bytes = self.stats.held_bytes();
+    }
+
+    /// Snapshot current and peak memory counters without resetting them.
+    pub fn peak_memory(&self) -> crate::memory_budget::PeakMemory {
+        crate::memory_budget::PeakMemory::from_pool_stats(self.stats)
+    }
+
+    /// Snapshot current and peak memory counters, then reset the peak watermarks to the current live and held
+    /// bytes atomically.
+    pub fn take_peak(&mut self) -> crate::memory_budget::PeakMemory {
+        let peak = self.peak_memory();
+        self.reset_peak();
+        peak
     }
 
     /// Starts a new need window; `forget` drops the previous one too (after a clear).
