@@ -129,10 +129,10 @@ impl Benchmarks {
         }
     }
 
-    /// Whether this backend supports client-chosen `entry_id` and conditional `?only_if_open=true` stops.
+    /// Whether this backend supports client-chosen `entry_id` and conditional `?only_if_open=true[&delete=true]` stops.
     pub(super) fn supports_upload_safe(&self) -> bool {
         match self {
-            Benchmarks::Store(_) => true,
+            Benchmarks::Store(s) => s.benches().is_ok(),
             Benchmarks::Http(h) => h.has_feature(FEATURE_BENCH_UPLOAD_SAFE).unwrap_or(false),
         }
     }
@@ -203,19 +203,15 @@ impl Benchmarks {
         }
     }
 
-    /// `POST …/entries/{entry_id}/stop?only_if_open=true`: stops an external entry only while it is still open
-    /// and collecting parts (falling back to plain `/stop` on older servers without `bench_upload_safe`).
-    pub(super) fn stop_open_entry(&self, id: &str, entry_id: &str) -> Result<BenchEntry, Error> {
+    /// `POST …/entries/{entry_id}/stop?only_if_open=true&delete=true`: atomically stops and deletes an external
+    /// entry only while it is still open and collecting parts (requires `bench_upload_safe`).
+    pub(super) fn discard_open_entry(&self, id: &str, entry_id: &str) -> Result<BenchEntry, Error> {
         match self.via()? {
-            Via::Http(h) => {
-                let suffix = if h.has_feature(FEATURE_BENCH_UPLOAD_SAFE)? {
-                    "/stop?only_if_open=true"
-                } else {
-                    "/stop"
-                };
-                h.client().post_empty(&entry_path(id, entry_id, suffix)?).map_err(store_error)
-            }
-            Via::Here(b, _) => b.stop_open_entry(id, entry_id),
+            Via::Http(h) => h
+                .client()
+                .post_empty(&entry_path(id, entry_id, "/stop?only_if_open=true&delete=true")?)
+                .map_err(store_error),
+            Via::Here(b, _) => b.discard_open_entry(id, entry_id),
         }
     }
 

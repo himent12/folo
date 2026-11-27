@@ -576,6 +576,27 @@ mod tests {
         // Stopping again refuses with `bench_entry_not_open`.
         let again = benches.stop_open_entry(&bench.id, chosen).unwrap_err();
         assert_eq!(again.body.code, "bench_entry_not_open", "{again:?}");
+
+        // `discard_open_entry` atomically stops and deletes an open entry, refusing if already closing or ended.
+        let chosen2 = "be_a1b2c3d4e5f60719";
+        benches.start_entry_with_id(&store, &bench.id, mk("ext3"), Some(chosen2.into())).unwrap();
+        {
+            let state = slot.live().unwrap();
+            let fill = state.entry(chosen2).unwrap().open.clone().unwrap();
+            fill.lock().unwrap().closed = true;
+        }
+        assert_eq!(
+            benches.discard_open_entry(&bench.id, chosen2).unwrap_err().body.code,
+            "bench_entry_not_open"
+        );
+        {
+            let state = slot.live().unwrap();
+            let fill = state.entry(chosen2).unwrap().open.clone().unwrap();
+            fill.lock().unwrap().closed = false;
+        }
+        let discarded = benches.discard_open_entry(&bench.id, chosen2).unwrap();
+        assert_eq!(discarded.status, folo_api::BenchEntryStatus::Stopped);
+        assert_eq!(benches.entry(&bench.id, chosen2).unwrap_err().body.code, "bench_entry_not_found");
         crate::Store::shutdown(&store);
     }
 }

@@ -232,6 +232,8 @@ async fn entry_images(
 struct StopEntryParams {
     #[serde(default)]
     only_if_open: bool,
+    #[serde(default)]
+    delete: bool,
 }
 
 async fn stop_entry(
@@ -239,10 +241,15 @@ async fn stop_entry(
     ApiPath((id, entry_id)): ApiPath<(String, String)>,
     ApiQuery(p): ApiQuery<StopEntryParams>,
 ) -> Result<Json<BenchEntry>> {
+    if p.delete && !p.only_if_open {
+        return Err(bad_query("delete=true requires only_if_open=true"));
+    }
     Ok(Json(
         blocking(&st, move |s| {
             let benches = s.benches()?;
-            if p.only_if_open {
+            if p.only_if_open && p.delete {
+                benches.discard_open_entry(&id, &entry_id)
+            } else if p.only_if_open {
                 benches.stop_open_entry(&id, &entry_id)
             } else {
                 benches.stop_entry(&id, &entry_id)

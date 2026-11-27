@@ -141,16 +141,17 @@ pub(super) fn stop_entry_in(engine: &Engine, slot: &Slot, id: &str) -> Result<Be
 }
 
 /// Atomically stops entry `id` of `slot` ONLY if it is still an open external entry actively collecting parts
-/// (`e.open.is_some()` and `!fill.closed`). If another request already finished or began grading it, or if it is
-/// not an open external entry, returns `409 bench_entry_not_open` without canceling or modifying the entry.
-fn stop_open_entry_in(slot: &Slot, id: &str) -> Result<BenchEntry> {
+/// (`e.open.is_some()` and `!fill.closed`). When `delete` is true, removes the entry from disk and memory in the
+/// same critical section so no separate `DELETE` can race with another client. If another request already
+/// finished, began grading, or stopped it, returns `409 bench_entry_not_open` without modifying the entry.
+fn stop_open_entry_in(slot: &Slot, id: &str, delete: bool) -> Result<BenchEntry> {
     let mut state = slot.live()?;
     let e = state.entry(id)?;
     let Some(fill) = e.open.clone() else {
         return Err(external::not_open(id, &e.entry));
     };
-    // Hold `fill` across `save_entry` (benchmark lock first, filling lock second — matching `expire`) so no
-    // concurrent `add` or `finish` can observe `!closed` and start grading while we stop it.
+    // Hold `fill` across disk I/O (benchmark lock first, filling lock second — matching `expire`) so no
+    // concurrent `add` or `finish` can observe `!closed` and start grading while we stop or remove it.
     let mut f = fill.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     if f.closed {
         return Err(external::not_open(id, &e.entry));
@@ -158,6 +159,19 @@ fn stop_open_entry_in(slot: &Slot, id: &str) -> Result<BenchEntry> {
     let mut entry = e.entry.clone();
     entry.status = BenchEntryStatus::Stopped;
     entry.finished = Some(rfc3339(unix_now()));
+    if delete {
+        slot.remove_entry(id)?;
+        f.closed = true;
+        drop(f);
+        if let Some(e) = state.entry_mut(id) {
+            e.cancel.store(true, Ordering::SeqCst);
+            e.open = None;
+        }
+        state.entries.retain(|e| e.entry.id != id);
+        slot.emit(BenchEvent::Removed(BenchRemoved { id: id.to_string() }));
+        slot.emit_bench(&state);
+        return Ok(entry);
+    }
     slot.save_entry(&state, &entry, None)?;
     f.closed = true;
     drop(f);
@@ -500,7 +514,14 @@ impl Benches {
     /// `POST …/entries/{entry_id}/stop?only_if_open=true`: stops `entry_id` only if it is still an open external
     /// entry actively collecting parts, returning `409 bench_entry_not_open` if it is already being scored or ended.
     pub fn stop_open_entry(&self, id: &str, entry_id: &str) -> Result<BenchEntry> {
-        stop_open_entry_in(&*self.slot(id)?, entry_id)
+        stop_open_entry_in(&*self.slot(id)?, entry_id, false)
+    }
+
+    /// `POST …/entries/{entry_id}/stop?only_if_open=true&delete=true`: atomically stops and removes `entry_id`
+    /// only if it is still an open external entry actively collecting parts, returning `409 bench_entry_not_open`
+    /// otherwise without canceling a score or removing an entry stopped elsewhere.
+    pub fn discard_open_entry(&self, id: &str, entry_id: &str) -> Result<BenchEntry> {
+        stop_open_entry_in(&*self.slot(id)?, entry_id, true)
     }
 
     /// `DELETE …/entries/{entry_id}`.

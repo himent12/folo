@@ -94,7 +94,7 @@ CLI's exit code; a test keeps the sources in line with it). Messages that wrap a
   (`path` on `GET /api/label/jobs/{id}/images`; older servers ignore it), `uploads` (`/api/uploads`),
   `run_cursors` (`after_step` / `after_epoch` on `/metrics`, `after` and `total` on `/logs`, `Range` on `/weights`),
   `run_checkpoint` (`checkpoint` on `POST /api/runs`; these three are what a cloud worker needs, docs/CLOUD.md),
-  `cloud` (`/api/cloud`, `TrainConfig.compute`, `Run.cloud` and `cloud` events), `vision_bench` (the `/api/bench` endpoints, Vision benchmarks below), `bench_upload_safe` (client-chosen `?entry_id=` on `POST /api/bench/benchmarks/{id}/entries` and conditional `?only_if_open=true` on `POST .../stop`), `predict_options` (optional `tile` / `tta` fields on `POST /api/predict`), `val_diagnostics` (optional `diagnostics` / `worst` / `diag_*` fields on `POST /api/val`), and `export_dynamic_axes` (optional independent `dynamic_batch` / `dynamic_hw` fields on `POST /api/models/{id}/export`). `folo mcp --server` refuses the
+  `cloud` (`/api/cloud`, `TrainConfig.compute`, `Run.cloud` and `cloud` events), `vision_bench` (the `/api/bench` endpoints, Vision benchmarks below), `bench_upload_safe` (client-chosen `?entry_id=` on `POST /api/bench/benchmarks/{id}/entries` and atomic conditional `?only_if_open=true[&delete=true]` on `POST .../stop`), `predict_options` (optional `tile` / `tta` fields on `POST /api/predict`), `val_diagnostics` (optional `diagnostics` / `worst` / `diag_*` fields on `POST /api/val`), and `export_dynamic_axes` (optional independent `dynamic_batch` / `dynamic_hw` fields on `POST /api/models/{id}/export`). `folo mcp --server` refuses the
   export switches without `export_onnx_switches` (and split dynamic axes without `export_dynamic_axes`, validation diagnostics without `val_diagnostics`, and `tile`/`tta` without `predict_options`).) In real mode `gpus` comes from folo-gpu
   (wgpu): every physical adapter once, through its preferred backend (software adapters are left out), best first,
   so ordinal 0 is the adapter `gpu:0` and `device: auto` use. `memory_bytes` is the adapter's largest device-local
@@ -1342,12 +1342,13 @@ empty `conditions` runs the unchanged images only. Text is trimmed (empty become
   graded by an older FOLO took `best_conf` in either case (the `result` of its `entries/<id>.json` has no
   `images_conf`). `worst` puts the images with the most `missed + wrong` first (ties in the benchmark's order); any
   other `sort` is `400 invalid_query`. `409 bench_entry_not_done` as above.
-- `POST /api/bench/benchmarks/{id}/entries/{entry_id}/stop[?only_if_open=true]` → `BenchEntry`: a `queued` entry, and an open external
+- `POST /api/bench/benchmarks/{id}/entries/{entry_id}/stop[?only_if_open=true[&delete=true]]` → `BenchEntry`: a `queued` entry, and an open external
   one (what it received is dropped), is `stopped` at once; a `running` one is `stopping` until its work ends (checked between batches; agent calls in flight are killed),
   then `stopped`. `409 bench_entry_not_active` when it has ended. With `?only_if_open=true` (requires
   `bench_upload_safe`), stops the entry atomically **only** while it is still an open external entry collecting
   parts, returning `409 bench_entry_not_open` without canceling it if it is already being finished/scored or has
-  ended.
+  ended. Adding `&delete=true` (requires `only_if_open=true`, else `400 invalid_query`) stops and removes the open
+  entry in the same atomic step.
 - `DELETE /api/bench/benchmarks/{id}/entries/{entry_id}` → `204`. `409 bench_entry_active` while it is active,
   `409 bench_entry_in_loop` while a loop that is still running uses it.
 

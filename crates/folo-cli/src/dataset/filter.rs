@@ -4,7 +4,7 @@
 use std::collections::HashSet;
 use std::time::Instant;
 
-use folo_data::{ClassNormalize, DataError, FilterConfig, LoadedDataset, Split};
+use folo_data::{DataError, FilterConfig, LoadedDataset, Split};
 use serde_json::json;
 
 use crate::cli::{FilterArgs, bounds};
@@ -85,17 +85,11 @@ fn build_filter_config(args: &FilterArgs) -> Result<FilterConfig, CliError> {
 /// Class names requested in `--include-class` or `--exclude-class` that do not match any class in `ds_classes`
 /// under `normalize` (deduplicated, preserving input order).
 fn find_unmatched_classes(ds_classes: &[String], cfg: &FilterConfig) -> Vec<String> {
-    let norm = |s: &str| match cfg.normalize {
-        ClassNormalize::Exact => s.to_string(),
-        ClassNormalize::CaseAndWhitespace => {
-            s.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
-        }
-    };
-    let known: HashSet<String> = ds_classes.iter().map(|c| norm(c)).collect();
+    let known: HashSet<String> = ds_classes.iter().map(|c| cfg.normalize.key(c)).collect();
     let mut seen = HashSet::new();
     let mut unmatched = Vec::new();
     for name in cfg.include_classes.iter().flatten().chain(&cfg.exclude_classes) {
-        let key = norm(name);
+        let key = cfg.normalize.key(name);
         if !known.contains(&key) && seen.insert(key) {
             unmatched.push(name.clone());
         }
