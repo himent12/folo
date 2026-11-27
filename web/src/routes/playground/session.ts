@@ -8,6 +8,7 @@
 
 import { hub } from '$lib/api/index';
 import type { Dataset, DatasetImage as Img, Prediction, Split } from '$lib/api/types';
+import type { CompareViewMode } from './compare';
 import { DEFAULTS } from './predict';
 import type { Source } from './source';
 
@@ -87,6 +88,21 @@ export function fromUrl(q: URLSearchParams): FromUrl {
   };
 }
 
+/** Compare A/B URL parameters (absent in single-model URLs). */
+export interface CompareFromUrl {
+  compare: boolean;
+  modelB: string | null;
+  view: CompareViewMode | null;
+}
+
+export function compareFromUrl(q: URLSearchParams): CompareFromUrl {
+  const compare = q.get('compare') === '1' || q.get('compare') === 'true';
+  const modelB = q.get('modelB') || null;
+  const rawView = q.get('view');
+  const view: CompareViewMode | null = rawView === 'split' || rawView === 'side-by-side' ? rawView : null;
+  return { compare, modelB, view };
+}
+
 /** The Playground's URL for this state: the model, a dataset image, and the thresholds that differ from the defaults. */
 export function playgroundPath(s: {
   model: string | null;
@@ -95,9 +111,17 @@ export function playgroundPath(s: {
   conf: number;
   iou: number;
   maxDet: number;
+  compare?: boolean;
+  modelB?: string | null;
+  view?: CompareViewMode;
 }): string {
   const q = new URLSearchParams();
   if (s.model) q.set('model', s.model);
+  if (s.compare) {
+    q.set('compare', '1');
+    if (s.modelB) q.set('modelB', s.modelB);
+    if (s.view && s.view !== 'side-by-side') q.set('view', s.view);
+  }
   if (s.imageRef) {
     q.set('dataset', s.imageRef.dataset);
     q.set('image', s.imageRef.image);

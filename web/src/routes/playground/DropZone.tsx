@@ -1,5 +1,6 @@
 /** The Playground's empty state: a viewfinder to drop an image into, plus sample images to try. */
 import Images from '$icons/images';
+import Scan from '$icons/scan';
 import Upload from '$icons/upload';
 import { css, defaults, For, Index, MediaQuery } from 'fw';
 import type { Dataset, DatasetImage as Img } from '$lib/api/types';
@@ -18,6 +19,7 @@ export interface DropZoneProps {
   samples: { ds: Dataset; img: Img }[] | undefined;
   onbrowse: () => void;
   onpick: () => void;
+  oncapture?: () => void;
   onsample: (ds: Dataset, img: Img) => void;
 }
 
@@ -63,6 +65,11 @@ export default function DropZone(props: DropZoneProps) {
               <Button icon={Images} onclick={p.onpick}>
                 Pick from a dataset
               </Button>
+              {p.oncapture ? (
+                <Button icon={Scan} onclick={p.oncapture}>
+                  Video / camera
+                </Button>
+              ) : null}
             </>
           )}
         />

@@ -1,36 +1,33 @@
 // Playground (`#/playground`): a model's detections on an image, run on the server or in this browser through
 // folo-wasm, with the thresholds, the detections and their timing. The parts are in ./playground/.
 import Box from '$icons/box';
-import ImagePlus from '$icons/image-plus';
-import Plus from '$icons/plus';
 import RotateCcw from '$icons/rotate-ccw';
 import { computed, css, effect, MediaQuery, onCleanup, onWindow, signal, untrack, type Signal } from 'fw';
-import { ApiError } from '$lib/api/client';
-import { hub } from '$lib/api/index';
-import { modelsResource, refreshOnModelsChange } from '$lib/api/models';
-import { Resource } from '$lib/api/resource';
-import type { Dataset, Model, Prediction, Run } from '$lib/api/types';
-import { betterModel, modelChoices, scoreContext } from '$lib/scoreSummary';
+import type { Prediction } from '$lib/api/types';
 import { media } from '$lib/design/tokens';
 import { filterDetections } from '$lib/detect/nms';
-import { BrowserEngine, hasWebGpu, NO_WASM, probeWasm, servedBy, wasmFromFeatures, wasmFromSystem, type Backend } from '$lib/inference/browser';
+import { BrowserEngine, type Backend } from '$lib/inference/browser';
 import { sentence } from '$lib/format';
 import { isOom } from '$lib/oom';
-import { href, router } from '$lib/router';
+import { router } from '$lib/router';
 import Page from '$lib/shell/Page';
 import { setCrumbs } from '$lib/shell/crumbs';
-import { watched } from '$lib/shell/runList';
 import Button from '$lib/ui/Button';
 import EmptyState from '$lib/ui/EmptyState';
 import ErrorState from '$lib/ui/ErrorState';
 import Panel from '$lib/ui/Panel';
-import Skeleton from '$lib/ui/Skeleton';
-import { toast } from '$lib/ui/toast';
 
+import ComparePickers from './playground/ComparePickers';
+import CompareStage from './playground/CompareStage';
+import CompareSummaryPanel from './playground/CompareSummary';
 import DatasetPicker from './playground/DatasetPicker';
+import MediaCaptureDialog from './playground/MediaCaptureDialog';
+import PlaygroundActions from './playground/PlaygroundActions';
+import PlaygroundTiming from './playground/PlaygroundTiming';
+import { formatSignedDelta } from './playground/compare';
+import { runJsonExport, runPngExport } from './playground/exportActions';
 import { looksLikeFolo } from './playground/folo';
 import { holdNoticeFocus } from './playground/noticeFocus';
-import TimingBar from './playground/TimingBar';
 import ModelPickers from './playground/ModelPickers';
 import ImagePanel from './playground/ImagePanel';
 import ResultsPanel from './playground/ResultsPanel';
@@ -40,19 +37,20 @@ import SidePanels from './playground/SidePanels';
 import Rail from './playground/Rail';
 import DisplayToggles from './playground/DisplayToggles';
 import { MoreBody, RailThresholds, SecondarySliders } from './playground/Thresholds';
-import { ask, DEFAULTS, FETCH, noServerWeights, type RunOn } from './playground/predict';
-import { askAllWhenCut } from './playground/allCandidates';
-import { ACCEPT, droppedImages, takeImage } from './playground/intake';
+import { DEFAULTS, type RunOn } from './playground/predict';
+import { ACCEPT } from './playground/intake';
 import { keepSession } from './playground/keepSession';
 import { sampleImages } from './playground/samples';
 import { playgroundPath } from './playground/session';
-import type { Source } from './playground/source';
-import { followVanished } from './playground/vanished';
+import { createCompareController } from './playground/useCompare';
+import { useModelCatalog } from './playground/useModelCatalog';
+import { useSinglePredict } from './playground/useSinglePredict';
+import { usePlaygroundSource } from './playground/useSource';
+import { useWasmAvailability } from './playground/useWasmProbe';
 import {
   areDefaultThresholds,
   classCounts,
   detectionIndex,
-  deviceLabel,
   nextRowIndex,
   predictionJson,
   scrollRowIntoView,
@@ -65,51 +63,120 @@ import {
   whereLabel,
   type Det,
 } from './playground/viewState';
-import FirstStepAction, { noDatasetsYet, refreshOnDatasetChange } from "./firstStep";
-
-type Seg = 'file' | 'dataset' | 'webcam';
-
+import FirstStepAction from './firstStep';
 
 export default function Playground() {
   setCrumbs({ label: 'Playground' });
 
-  // Phones with an image loaded: no intro line, the image full-bleed with Confidence under it. IoU, max detections
-  // and the display toggles open in a non-modal bottom sheet, so the image stays in view (and live) while tuning;
-  // classes and timing fold into two disclosures under the detections. Bottom sheets are for phones only
-  // (DESIGN_DIRECTION 9): a tablet's "More settings" is a popover anchored under its button.
   const phone = new MediaQuery(media.phone, false);
-  // From 1024 px the page is one screen (design/UNIFIED.md §4 Playground): the image as tall as the window allows and
-  // a 320 px rail beside it (the model, the thresholds, the detections, the timing). Below, the model and Run on are a
-  // toolbar row under the title and the panels follow the image.
   const narrow = new MediaQuery(media.upToLaptop, false);
-  // Tablets with an image: the canvas capped at half the viewport, Confidence and Overlap in a strip right under it,
-  // Max detections and the display toggles in the same sheet, so the image and the controls that redraw it share
-  // the first screen.
   const tablet = computed(() => narrow.current && !phone.current);
   const moreOpen = signal(false);
   const sheetEl = signal<HTMLElement>();
   const moreBtn = signal<HTMLElement>();
-
-  // ---------- image source ----------
-  const source = signal<Source | null>(null);
-  const sheetShown = computed(() => moreOpen.get() && narrow.current && !!source.get());
-  // Phones' sheet holds every threshold; a tablet's, what its strip leaves out.
-  const sheetTitle = computed(() => (tablet.get() ? 'More settings' : 'Thresholds'));
-  const src = signal<string | null>(null);
-  const seg = signal<Seg>('file');
   const pickerOpen = signal(false);
+  const captureOpen = signal(false);
+  const captureVideo = signal<File | null>(null);
   let fileInput!: HTMLInputElement;
-  const dragging = signal(false);
 
-  // Focus moves into the sheet (or the tablet's popover) as it opens; explicit closes (Escape, Close, sheetDrag)
-  // restore focus via `closeSheet()`, while outside pointer clicks and Tab-out leave focus where the user put it.
+  const pred = signal<Prediction | null>(null);
+  const runOn = signal<RunOn>('server');
+  const engine = new BrowserEngine();
+  onCleanup(() => engine.dispose());
+  const { webgpu, browserOff, runOnNote } = useWasmAvailability(runOn);
+
+  const localWeights = signal(new Map<string, File>());
+  const weightsMissing = signal(false);
+  const weightsTarget = signal<'a' | 'b'>('a');
+  let weightsInput!: HTMLInputElement;
+  const where = computed(() => whereLabel(pred.get()));
+  const badFile = signal<{ name: string; why: string | null } | null>(null);
+  const badFileB = signal<{ name: string; why: string | null } | null>(null);
+
+  const predicting = signal(false);
+  const error = signal<unknown>(null);
+  const retryTick = signal(0);
+
+  const conf = signal(DEFAULTS.conf);
+  const iou = signal(DEFAULTS.iou);
+  const maxDet = signal(DEFAULTS.maxDet);
+  const labels = signal(true);
+  const scores = signal(true);
+  const truth = signal(false);
+  const hidden = signal<Set<number>>(new Set());
+  const hover = signal<Det | null>(null);
+  const picked = signal<Det | null>(null);
+  const tbody = signal<HTMLTableSectionElement>();
+  const tab = signal<'detections' | 'classes' | 'json'>('detections');
+  const exportingPng = signal(false);
+
+  let syncModelUrl: ((id: string) => void) | null = null;
+  let clearCompare: () => void = () => {};
+
+  const {
+    models,
+    noDatasets,
+    choices,
+    ranked,
+    queryModel,
+    pickedModel,
+    model,
+    modelId,
+    o2o,
+    pickedMeta,
+    chooseModel,
+  } = useModelCatalog((id) => {
+    if (syncModelUrl) syncModelUrl(id);
+    else router.go(playgroundPath({ model: id, source: source.peek(), conf: conf.peek(), iou: iou.peek(), maxDet: maxDet.peek() }), { replace: true });
+  });
+
+  const {
+    source,
+    src,
+    seg,
+    dragging,
+    imageError,
+    retryImage,
+    choose,
+    setSource,
+    setFile,
+    clear,
+    onSeg,
+    onpaste,
+    ondrop,
+    ondragover,
+    ondragleave,
+    isDestroyed,
+  } = usePlaygroundSource({
+    engine,
+    hasModels: () => ranked.peek().length > 0,
+    onResetState: () => {
+      pred.set(null);
+      error.set(null);
+      weightsMissing.set(false);
+      hover.set(null);
+      picked.set(null);
+      hidden.set(new Set());
+      clearCompare();
+    },
+    onClearExtra: () => moreOpen.set(false),
+    onDropVideo: (videoFile) => {
+      captureVideo.set(videoFile);
+      captureOpen.set(true);
+    },
+    openFilePicker: () => fileInput.click(),
+    pickerOpen,
+  });
+
+  const sheetShown = computed(() => moreOpen.get() && narrow.current && !!source.get());
+  const sheetTitle = computed(() => (tablet.get() ? 'More settings' : 'Thresholds'));
+
   effect(() => {
     if (sheetShown.get()) sheetEl.get()?.focus();
   });
   effect(() => {
     if (!narrow.current) untrack(() => moreOpen.set(false));
   });
-  // The tablet's popover is transient: a press outside it (and outside its button) closes it, focus staying put.
   effect(() => {
     if (!sheetShown.get() || !tablet.get()) return;
     const away = (e: PointerEvent) => {
@@ -123,281 +190,84 @@ export default function Playground() {
     moreOpen.set(false);
     moreBtn.peek()?.querySelector<HTMLElement>('button')?.focus({ preventScroll: true });
   }
-  // Dragging the sheet's header down closes it; a shorter pull springs back (ui/sheetDrag, as every sheet).
-
-  // ---------- model ----------
-  // Kept current (lib/api/models): a deleted model leaves the picker, a finished run's joins it.
-  const models = modelsResource();
-  // What each model's score is on (lib/scoreSummary): the picker groups models by dataset and split, best first within
-  // a group (on a tie the earlier checkpoint), and never ranks one group against another.
-  const runs = new Resource((s) => hub.api.runs(s), { startFrom: () => watched.source });
-  refreshOnModelsChange(runs);
-  const datasets = new Resource((s) => hub.api.datasets(s));
-  const noDatasets = computed(() => noDatasetsYet(datasets.data));
-  refreshOnDatasetChange(datasets);
-  const choices = computed(() => {
-    // Until the runs and datasets answer (or fail) the splits are unknown: wait, so the default never switches.
-    if (!models.data || (!runs.data && !runs.error) || (!datasets.data && !datasets.error)) return [];
-    const runById = new Map<string, Run>((runs.data ?? []).map((r) => [r.id, r]));
-    const dsById = new Map<string, Dataset>((datasets.data ?? []).map((d) => [d.id, d]));
-    return modelChoices(models.data, (m) => scoreContext(m, runById, dsById));
-  });
-  const ranked = computed(() => choices.get().map((c) => c.model));
-  /** What the page opens on: the best model (lib/scoreSummary `betterModel`, Desktop's rule), not the newest. */
-  const best = computed(() => [...ranked.get()].sort(betterModel)[0] ?? null);
-  const queryModel = computed(() => router.route.query.get('model'));
-  const pickedModel = signal<string | null>(null);
-  const wanted = computed(() => pickedModel.get() ?? queryModel.get());
-  const model = computed((): Model | null => ranked.get().find((m) => m.id === wanted.get()) ?? best.get());
-  const modelId = computed(() => model.get()?.id ?? null);
-  const o2o = computed(() => model.get()?.head === 'o2o');
-  /** The chosen model's score and what it is on, under the select: "mAP50-95 0.606 · shapes-hard, validation split". */
-  const pickedMeta = computed(() => choices.get().find((c) => c.model.id === modelId.get())?.meta ?? null);
-
-  let syncModelUrl: ((id: string) => void) | null = null;
-  function chooseModel(id: string) {
-    pickedModel.set(id);
-    if (syncModelUrl) syncModelUrl(id);
-    else router.go(playgroundPath({ model: id, source: source.peek(), conf: conf.peek(), iou: iou.peek(), maxDet: maxDet.peek() }), { replace: true });
-  }
-  followVanished(() => model.get(), () => ranked.get(), () => wanted.get(), chooseModel);
-
-  const imageError = signal(false);
-  const imageRetry = signal(0);
-  const retryImage = () => imageRetry.set((n) => n + 1);
-
-  effect(() => {
-    const s = source.get();
-    const retry = imageRetry.get();
-    untrack(() => imageError.set(false));
-    if (!s) {
-      src.set(null);
-      return;
-    }
-    if (s.kind === 'file') {
-      src.set(s.url);
-      return;
-    }
-    let live = true;
-    src.set(null);
-    hub.api.imageUrl(s.ds.id, s.img.id).then(
-      (u) => {
-        if (!live) return;
-        src.set(retry > 0 && !/^(blob|data):/.test(u) ? `${u}${u.includes('?') ? '&' : '?'}retry=${retry}` : u);
-      },
-      () => {
-        if (live) imageError.set(true);
-      },
-    );
-    return () => {
-      live = false;
-    };
-  });
-
-  // Decodes and linked images arrive later: only the latest choice may show, and nothing shows after destroy.
-  let decodeSeq = 0;
-  let destroyed = false;
-  function choose() {
-    const seq = ++decodeSeq;
-    return () => seq === decodeSeq && !destroyed;
-  }
-
-  function setSource(s: Source) {
-    decodeSeq++;
-    toast.clear('image');
-    const old = source.peek();
-    if (old?.kind === 'file') URL.revokeObjectURL(old.url);
-    engine.clearImageCache();
-    source.set(s);
-    imageRetry.set(0);
-    seg.set(s.kind);
-    pred.set(null);
-    error.set(null);
-    weightsMissing.set(false);
-    hover.set(null);
-    picked.set(null);
-    hidden.set(new Set());
-  }
-
-  async function setFile(file: File | Blob, name = file instanceof File ? file.name : 'pasted image') {
-    const live = choose();
-    // An image the server cannot read (GIF, AVIF...) comes back as a PNG (./playground/intake).
-    const t = await takeImage(file, name);
-    if (!live()) return;
-    if ('error' in t) {
-      // Until the next image is taken (setSource): it goes then, not 20 s later over the results.
-      toast.error(new Error(t.error), 'Unsupported image', { key: 'image' });
-      return;
-    }
-    setSource({ kind: 'file', file: t.file, name, url: URL.createObjectURL(t.file), width: t.width, height: t.height });
-  }
-
-  function clear() {
-    decodeSeq++;
-    toast.clear('image');
-    const old = source.peek();
-    if (old?.kind === 'file') URL.revokeObjectURL(old.url);
-    engine.clearImageCache();
-    source.set(null);
-    imageRetry.set(0);
-    pred.set(null);
-    error.set(null);
-    weightsMissing.set(false);
-    hover.set(null);
-    picked.set(null);
-    hidden.set(new Set());
-    moreOpen.set(false);
-    seg.set('file');
-  }
-
-  onCleanup(() => {
-    destroyed = true;
-    decodeSeq++;
-    const old = source.peek();
-    if (old?.kind === 'file') URL.revokeObjectURL(old.url);
-  });
-
-  function onSeg(v: Seg) {
-    if (v === 'file') fileInput.click();
-    else if (v === 'dataset') pickerOpen.set(true);
-    // The control reflects where the current image came from; it changes when a new image arrives.
-    seg.set(source.peek()?.kind ?? 'file');
-  }
-
-  function onpaste(e: ClipboardEvent) {
-    if (document.querySelector('dialog[open]') || !ranked.peek().length) return;
-    const item = [...(e.clipboardData?.items ?? [])].find((i) => i.kind === 'file' && i.type.startsWith('image/'));
-    const file = item?.getAsFile() ?? [...(e.clipboardData?.files ?? [])].find((f) => f.type.startsWith('image/'));
-    if (!file) return;
-    e.preventDefault();
-    void setFile(file, 'pasted image');
-  }
-
-  function ondrop(e: DragEvent) {
-    e.preventDefault();
-    dragging.set(false);
-    const [file, ...rest] = droppedImages(e.dataTransfer?.files);
-    if (!file) return;
-    void setFile(file);
-    // One image runs at a time: the others are not dropped without a word.
-    if (rest.length) toast.info(`Using ${file.name}`, `The Playground runs one image at a time, so the other ${rest.length === 1 ? 'image was' : `${rest.length} images were`} left out.`);
-  }
-
-  function ondragover(e: DragEvent) {
-    if (!e.dataTransfer?.types.includes('Files')) return;
-    e.preventDefault();
-    e.dataTransfer.dropEffect = 'copy';
-    dragging.set(true);
-  }
-
-  function ondragleave(e: DragEvent) {
-    const next = e.relatedTarget as Node | null;
-    if (!next || !(e.currentTarget as HTMLElement).contains(next)) dragging.set(false);
-  }
 
   const samples = sampleImages(model);
-
-  // ---------- where inference runs ----------
-  // On the server (POST /api/predict), or in this browser through folo-wasm on WebGPU or the CPU (docs/WASM.md).
-  // In the browser the model's .folo comes from the server (GET /api/models/{id}/weights); a server without that
-  // route gets the file from the user instead.
-  const pred = signal<Prediction | null>(null);
-  const runOn = signal<RunOn>('server');
-  const webgpu = hasWebGpu();
-  const engine = new BrowserEngine();
-  onCleanup(() => engine.dispose());
-  // Whether this build has the in-browser runtime (folo-wasm): what /api/system says, else one probe of its files.
-  // The demo simulates the browser path, so there only its server's answer counts. Unknown (null) leaves both on.
-  const system = new Resource((s) => hub.api.system(s));
-  // The probe is asked on each visit, again when the server reconnects (`system` is read again) and when the browser
-  // comes back online: an unknown answer (offline) is never kept (lib/inference `probeWasm`).
-  const probed = signal<boolean | null>(null);
-  /** The server's word on its own build counts for this page only when it served it (the demo's server always does). */
-  const servedHere = computed(() => hub.api.mock || servedBy(hub.serverUrl));
-  const fromServer = computed(
-    () =>
-      wasmFromSystem(system.data, servedHere.get()) ??
-      (hub.api.mock ? null : wasmFromFeatures(hub.features, servedHere.get())),
-  );
-  effect(() => {
-    if (hub.mode === 'connecting' || hub.api.mock || fromServer.get() !== null) return;
-    // Same-origin server whose `/api/health` lacked `features` (older server): wait for `/api/system` before probing.
-    if (servedHere.get() && system.loading) return;
-    let live = true;
-    const ask = () => void probeWasm().then((v) => live && probed.set(v));
-    ask();
-    window.addEventListener('online', ask);
-    return () => {
-      live = false;
-      window.removeEventListener('online', ask);
-    };
-  });
-  const wasm = computed(() => fromServer.get() ?? (hub.api.mock ? (system.data ? false : null) : probed.get()));
-  /** Why the browser backends are off, or null when they are offered. */
-  const browserOff = computed(() => (wasm.get() === false ? NO_WASM : null));
-  effect(() => {
-    if (browserOff.get() && untrack(() => runOn.get()) !== 'server') runOn.set('server');
-  });
-  // A build without the runtime offers the server alone, so there is no choice to explain (ModelPickers hides it).
-  const runOnNote = computed(() => (!browserOff.get() && !webgpu ? 'No WebGPU in this browser' : null));
-  /** .folo files the user picked, by model id. */
-  const localWeights = signal(new Map<string, File>());
-  /** The server cannot send this model's file: ask for it. */
-  const weightsMissing = signal(false);
-  let weightsInput!: HTMLInputElement;
-  const where = computed(() => whereLabel(pred.get()));
-  const deviceText = computed(() => deviceLabel(pred.get(), engine.info?.adapter));
-
-  /** A picked file that was refused as weights (not a .folo), or that the runtime could not load; cleared on a new pick. */
-  const badFile = signal<{ name: string; why: string | null } | null>(null);
-
   const weightPickSeq = new Map<string, number>();
 
   async function pickWeights(e: Event & { currentTarget: HTMLInputElement }) {
     const input = e.currentTarget;
     const f = input.files?.[0];
     input.value = '';
-    const id = modelId.peek();
+    const side = weightsTarget.peek();
+    const id = side === 'b' ? cmp.modelBId.peek() : modelId.peek();
     if (!f || !id) return;
     const seq = (weightPickSeq.get(id) ?? 0) + 1;
     weightPickSeq.set(id, seq);
-    // Refused before it becomes this model's weights: the server's (or the request for a file) stay in place.
     if (!(await looksLikeFolo(f))) {
-      if (!destroyed && weightPickSeq.get(id) === seq && modelId.peek() === id) badFile.set({ name: f.name, why: null });
+      if (!isDestroyed() && weightPickSeq.get(id) === seq) {
+        if (side === 'b' && cmp.modelBId.peek() === id) badFileB.set({ name: f.name, why: null });
+        else if (side === 'a' && modelId.peek() === id) badFile.set({ name: f.name, why: null });
+      }
       return;
     }
-    if (destroyed || weightPickSeq.get(id) !== seq) return;
-    if (modelId.peek() === id) badFile.set(null);
+    if (isDestroyed() || weightPickSeq.get(id) !== seq) return;
+    if (side === 'b' && cmp.modelBId.peek() === id) badFileB.set(null);
+    else if (side === 'a' && modelId.peek() === id) badFile.set(null);
     localWeights.set(new Map(localWeights.peek()).set(id, f));
   }
 
-  /** Drops a picked file that failed to load, so the model goes back to the server's weights. */
-  function dropLocal(id: string, f: File, e: unknown) {
-    const next = new Map(localWeights.peek());
-    next.delete(id);
-    localWeights.set(next);
-    badFile.set({ name: f.name, why: e instanceof Error ? sentence(e.message) : null });
+  function dropLocal(id: string, f: File, e: unknown, targetBad: Signal<{ name: string; why: string | null } | null> = badFile) {
+    const cur = localWeights.peek();
+    if (cur.get(id) === f) {
+      const next = new Map(cur);
+      next.delete(id);
+      localWeights.set(next);
+    }
+    targetBad.set({ name: f.name, why: e instanceof Error ? sentence(e.message) : null });
   }
 
-  // ---------- prediction ----------
-  const predicting = signal(false);
-  const error = signal<unknown>(null);
-  const retryTick = signal(0);
+  const result = computed(() => {
+    const p = pred.get();
+    if (!p) return null;
+    const t0 = performance.now();
+    // An end-to-end (o2o) model predicts without NMS (docs/MODEL.md §6.6): an IoU of 1 suppresses nothing, as the server.
+    const boxes = filterDetections(p.boxes, { conf: conf.get(), iou: o2o.get() ? 1 : iou.get(), maxDet: maxDet.get() });
+    return { boxes, ms: performance.now() - t0 };
+  });
+  const kept = computed(() => result.get()?.boxes ?? []);
+  const classes = computed(() => model.get()?.classes ?? []);
+  const only = computed(() => visibleClasses(classes.get(), hidden.get()));
+  const rows = computed(() => visibleRows(kept.get(), hidden.get()));
+  const counts = computed(() => classCounts(kept.get()));
+  const maxCount = computed(() => Math.max(1, ...counts.get().map((c) => c[1])));
 
-  // ---------- client-side filtering ----------
-  const conf = signal(DEFAULTS.conf);
-  const iou = signal(DEFAULTS.iou);
-  const maxDet = signal(DEFAULTS.maxDet);
-  const labels = signal(true);
-  const scores = signal(true);
-  const truth = signal(false);
-  const hidden = signal<Set<number>>(new Set());
-  // Inspection: hovering a box or row is transient; click, tap or keyboard focus picks one until Esc or a click
-  // elsewhere. Tracked by object, since filtering re-indexes the kept boxes.
-  const hover = signal<Det | null>(null);
-  const picked = signal<Det | null>(null);
-  const tbody = signal<HTMLTableSectionElement>();
-  const tab = signal<'detections' | 'classes' | 'json'>('detections');
+  // Compare A/B controller: strictly inert (zero network calls) while Compare mode is off.
+  const cmp = createCompareController({
+    ranked: () => ranked.get(),
+    choices: () => choices.get(),
+    modelA: () => model.get(),
+    modelAId: () => modelId.get(),
+    chooseModelA: chooseModel,
+    runOnA: runOn,
+    predA: pred,
+    hoverA: hover,
+    pickedA: picked,
+    resultA: () => result.get(),
+    rowsA: () => rows.get(),
+    o2oA: () => o2o.get(),
+    source,
+    conf,
+    iou,
+    maxDet,
+    hidden,
+    classesA: () => classes.get(),
+    browserOff: () => browserOff.get(),
+    localWeights,
+    dropLocalB: (id, f, e) => dropLocal(id, f, e, badFileB),
+    badFileB,
+    engine,
+  });
+  clearCompare = cmp.clearResults;
 
   // The image, its result and the thresholds outlive the page for the tab; a dataset image and the thresholds are in
   // the URL (./playground/session).
@@ -412,6 +282,10 @@ export default function Playground() {
     scores,
     truth,
     hidden,
+    compare: cmp.compare,
+    modelB: () => cmp.modelBId.get() ?? cmp.pickedModelB.get(),
+    pickModelB: (id) => cmp.pickedModelB.set(id),
+    compareView: cmp.compareView,
     setSource,
     choose,
     model: () => modelId.get() ?? queryModel.get() ?? null,
@@ -422,89 +296,33 @@ export default function Playground() {
   let lastModelId: string | null = null;
   effect(() => {
     const id = modelId.get();
-    if (id !== null && lastModelId !== null && id !== lastModelId) untrack(() => hidden.set(new Set()));
+    if (id !== null && lastModelId !== null && id !== lastModelId) {
+      untrack(() => {
+        hidden.set(new Set());
+        cmp.hiddenBNames.set(new Set());
+      });
+    }
     if (id !== null) lastModelId = id;
   });
 
-  effect(() => {
-    const id = modelId.get();
-    const s = source.get();
-    const on = runOn.get();
-    const file = localWeights.get().get(id ?? '');
-    void retryTick.get();
-    if (!id || !s || untrack(() => restored(id, s, on))) {
-      untrack(() => {
-        predicting.set(false);
-        error.set(null);
-        weightsMissing.set(false);
-      });
-      return;
-    }
-    const ctrl = new AbortController();
-    untrack(() => {
-      predicting.set(true);
-      error.set(null);
-      weightsMissing.set(false);
-      // Results belong to a model and backend: never show another model's or backend's boxes while (or if) this one fails.
-      const p = pred.get();
-      if (p && (p.model_id !== id || (p.backend ?? 'server') !== on)) {
-        pred.set(null);
-        if (p.model_id !== id) hidden.set(new Set());
-        hover.set(null);
-        picked.set(null);
-      }
-    });
-    const run = ask({ api: hub.api, engine, model: id, source: s, on, file: file ?? null, options: FETCH, signal: ctrl.signal });
-    run.then(
-      (p) => {
-        if (ctrl.signal.aborted) return;
-        pred.set(p);
-        hover.set(null);
-        picked.set(null);
-        predicting.set(false);
-      },
-      (e: unknown) => {
-        if (ctrl.signal.aborted) return;
-        predicting.set(false);
-        // A picked file the runtime could not load is not kept as this model's weights.
-        if (file && on !== 'server' && engine.phase !== 'ready') {
-          pred.set(null);
-          hover.set(null);
-          picked.set(null);
-          dropLocal(id, file, e);
-          return;
-        }
-        // A server without the weights route (or one that cannot read this model's file): ask for the file.
-        if (on !== 'server' && !file && noServerWeights(e)) {
-          pred.set(null);
-          hover.set(null);
-          picked.set(null);
-          weightsMissing.set(true);
-          return;
-        }
-        // Said once, in place above the image (with its ways out): no toast repeats it, and no earlier result stays on
-        // screen as if it were this run's.
-        pred.set(null);
-        hover.set(null);
-        picked.set(null);
-        error.set(e);
-      },
-    );
-    return () => ctrl.abort();
-  });
-
-  // A busy image's answer is cut at FETCH.max_det candidates: a confidence below the cut asks for all of them.
-  const cut = askAllWhenCut({
+  const cut = useSinglePredict({
+    modelId: () => modelId.get(),
+    source,
+    runOn,
+    localWeights,
+    retryTick,
+    restored,
+    consumeReuse: cmp.consumeReuseA,
     pred,
-    conf: () => conf.get(),
-    model: () => modelId.get(),
-    source: () => source.get(),
-    runOn: () => runOn.get(),
-    file: (id) => localWeights.get().get(id) ?? null,
-    busy: () => predicting.get(),
+    predicting,
+    error,
+    weightsMissing,
+    hidden,
+    hover,
+    picked,
+    conf,
     engine,
-    // A picked .folo is not kept with the session: a kept answer asks for it again, as a first one does.
-    weightsMissing: () => weightsMissing.set(true),
+    dropLocal: (id, f, e) => dropLocal(id, f, e, badFile),
   });
 
   // Out of GPU memory on the server (507): this browser has its own device, and a smaller model of the same classes
@@ -528,25 +346,16 @@ export default function Playground() {
     if (el) return holdNoticeFocus(el);
   });
 
-  const result = computed(() => {
-    const p = pred.get();
-    if (!p) return null;
-    const t0 = performance.now();
-    // An end-to-end (o2o) model predicts without NMS (docs/MODEL.md §6.6): an IoU of 1 suppresses nothing, as the server.
-    const boxes = filterDetections(p.boxes, { conf: conf.get(), iou: o2o.get() ? 1 : iou.get(), maxDet: maxDet.get() });
-    return { boxes, ms: performance.now() - t0 };
-  });
-  const kept = computed(() => result.get()?.boxes ?? []);
-  const classes = computed(() => model.get()?.classes ?? []);
-  const only = computed(() => visibleClasses(classes.get(), hidden.get()));
-  const rows = computed(() => visibleRows(kept.get(), hidden.get()));
-  const counts = computed(() => classCounts(kept.get()));
-  const maxCount = computed(() => Math.max(1, ...counts.get().map((c) => c[1])));
-
   const selectedIdx = computed(() => detectionIndex(picked.get(), kept.get(), hidden.get()));
   const activeIdx = computed(() => detectionIndex(hover.get(), kept.get(), hidden.get()) ?? selectedIdx.get());
+  /** In Compare mode, whether Model B is currently shown in the Detections table. */
+  const showingB = computed(() => cmp.compare.get() && cmp.inspectSide.get() === 'b');
+  const tableResult = computed(() => (showingB.get() ? cmp.resultB.get() : result.get()));
+  const tableRows = computed(() => (showingB.get() ? cmp.rowsB.get() : rows.get()));
+  const tableSelectedIdx = computed(() => (showingB.get() ? cmp.selectedIdxB.get() : selectedIdx.get()));
+  const tableActiveIdx = computed(() => (showingB.get() ? cmp.activeIdxB.get() : activeIdx.get()));
   /** The row that takes Tab focus (roving tabindex): the selected one, else the first. */
-  const tabRow = computed(() => selectedIdx.get() ?? rows.get()[0]?.i ?? null);
+  const tabRow = computed(() => tableSelectedIdx.get() ?? tableRows.get()[0]?.i ?? null);
 
   const rowEl = (i: number) => tbody.peek()?.querySelector<HTMLTableRowElement>(`tr[data-det="${i}"]`) ?? null;
 
@@ -554,13 +363,33 @@ export default function Playground() {
   function pickFromImage(i: number) {
     const b = kept.peek()[i];
     if (!b) return;
+    const switched = (cmp.compare.peek() && cmp.inspectSide.peek() !== 'a') || tab.peek() !== 'detections';
+    if (cmp.compare.peek() && cmp.inspectSide.peek() !== 'a') cmp.inspectSide.set('a');
     const next = picked.peek() === b ? null : b;
     picked.set(next);
-    if (next) scrollRowIntoView(rowEl(i), narrow.peek());
+    if (next) {
+      if (tab.peek() !== 'detections') tab.set('detections');
+      if (switched) queueMicrotask(() => scrollRowIntoView(rowEl(i), narrow.peek()));
+      else scrollRowIntoView(rowEl(i), narrow.peek());
+    }
+  }
+
+  function pickFromImageB(i: number) {
+    const b = cmp.keptB.peek()[i];
+    if (!b) return;
+    const switched = cmp.inspectSide.peek() !== 'b' || tab.peek() !== 'detections';
+    if (cmp.inspectSide.peek() !== 'b') cmp.inspectSide.set('b');
+    const next = cmp.pickedB.peek() === b ? null : b;
+    cmp.pickedB.set(next);
+    if (next) {
+      if (tab.peek() !== 'detections') tab.set('detections');
+      if (switched) queueMicrotask(() => scrollRowIntoView(rowEl(i), narrow.peek()));
+      else scrollRowIntoView(rowEl(i), narrow.peek());
+    }
   }
 
   function onrowkey(e: KeyboardEvent, k: number) {
-    const list = rows.peek();
+    const list = tableRows.peek();
     const to = nextRowIndex(e.key, k, list.length);
     if (to === null) return;
     e.preventDefault();
@@ -569,17 +398,23 @@ export default function Playground() {
   }
 
   function onwindowkey(e: KeyboardEvent) {
-    if (e.defaultPrevented || e.key !== 'Escape' || pickerOpen.peek()) return;
+    if (e.defaultPrevented || e.key !== 'Escape' || pickerOpen.peek() || captureOpen.peek()) return;
     if (document.querySelector('dialog[open]')) return;
     if (sheetShown.peek()) {
       e.preventDefault();
       e.stopPropagation();
       closeSheet();
-    } else if (picked.peek()) picked.set(null);
+    } else if (picked.peek() || cmp.pickedB.peek()) {
+      picked.set(null);
+      cmp.pickedB.set(null);
+    }
   }
 
   function onwindowdown(e: PointerEvent) {
-    if (picked.peek() && !(e.target as Element | null)?.closest?.('[data-det], [data-box], .zoom-hud')) picked.set(null);
+    if ((picked.peek() || cmp.pickedB.peek()) && !(e.target as Element | null)?.closest?.('[data-det], [data-box], .zoom-hud')) {
+      picked.set(null);
+      cmp.pickedB.set(null);
+    }
   }
 
   onWindow('paste', onpaste);
@@ -593,8 +428,18 @@ export default function Playground() {
     const s = source.get();
     return truth.get() && s?.kind === 'dataset' ? s.img.boxes : [];
   });
+  /** Dataset ground-truth visibility set resolved by class name against `source.ds.classes`. */
+  const truthOnly = computed(() => {
+    const s = source.get();
+    if (s?.kind !== 'dataset') return null;
+    const names = cmp.compare.get()
+      ? cmp.allHiddenNames.get()
+      : new Set([...hidden.get()].map((i) => classes.get()[i] ?? `class ${i}`));
+    if (!names.size) return null;
+    return new Set(s.ds.classes.map((name, idx) => (names.has(name) ? -1 : idx)).filter((idx) => idx >= 0));
+  });
 
-  const json = computed(() => {
+  const singleJson = computed(() => {
     const h = hidden.get();
     const cls = classes.get();
     const hiddenClasses = h.size ? [...h].sort((a, b) => a - b).map((c) => cls[c] ?? `class ${c}`) : undefined;
@@ -611,6 +456,55 @@ export default function Playground() {
       },
     );
   });
+  const activeJson = computed(() => (cmp.compare.get() ? cmp.compareJson.get() : singleJson.get()));
+  const canExport = computed(() => !!source.get() && !!dims.get() && (cmp.compare.get() ? !!result.get() || !!cmp.resultB.get() : !!result.get()));
+  const effectiveO2o = computed(() => (cmp.compare.get() ? o2o.get() && cmp.o2oB.get() : o2o.get()));
+
+  async function onExportPng() {
+    const s = source.peek();
+    const d = dims.peek();
+    if (!s || !d || exportingPng.peek()) return;
+    exportingPng.set(true);
+    try {
+      await runPngExport({
+        compare: cmp.compare.peek(),
+        compareView: cmp.compareView.peek(),
+        splitPct: cmp.splitPct.peek(),
+        viewportW: cmp.zoom.viewportW.peek(),
+        viewportH: cmp.zoom.viewportH.peek(),
+        zoomZ: cmp.zoom.z.peek(),
+        zoomNx: cmp.zoom.nx.peek(),
+        source: s,
+        src: src.peek(),
+        dims: d,
+        shortName: shortName.peek(),
+        modelA: model.peek(),
+        modelB: cmp.modelB.peek(),
+        predA: pred.peek(),
+        predB: cmp.predB.peek(),
+        boxesA: rows.peek().map((r) => r.b),
+        boxesB: cmp.rowsB.peek().map((r) => r.b),
+        classesA: classes.peek(),
+        classesB: cmp.classesB.peek(),
+        truthOnly: truthOnly.peek(),
+        truthBoxes: truthBoxes.peek(),
+        labels: labels.peek(),
+        scores: scores.peek(),
+      });
+    } finally {
+      exportingPng.set(false);
+    }
+  }
+
+  function onExportJson() {
+    runJsonExport({
+      shortName: shortName.peek(),
+      compare: cmp.compare.peek(),
+      modelAName: model.peek()?.name,
+      modelBName: cmp.modelB.peek()?.name,
+      payload: activeJson.peek(),
+    });
+  }
 
   function toggleClass(c: number) {
     const next = new Set(hidden.peek());
@@ -624,14 +518,14 @@ export default function Playground() {
     iou.set(DEFAULTS.iou);
     maxDet.set(DEFAULTS.maxDet);
   }
-  const isDefault = computed(() => areDefaultThresholds(conf.get(), iou.get(), maxDet.get(), o2o.get()));
+  const isDefault = computed(() => areDefaultThresholds(conf.get(), iou.get(), maxDet.get(), effectiveO2o.get()));
 
   // ---------- snippets ----------
   const displayToggles = () => <DisplayToggles bind:labels={labels} bind:scores={scores} bind:truth={truth} dataset={source.get()?.kind === 'dataset'} />;
 
-  const secondarySliders = (inline: boolean) => <SecondarySliders inline={inline} o2o={o2o.get()} bind:iou={iou} bind:maxDet={maxDet} />;
-  const railThresholds = () => <RailThresholds bind:conf={conf} bind:iou={iou} bind:maxDet={maxDet} o2o={o2o.get()} />;
-  const moreBody = () => <MoreBody tablet={tablet.get()} o2o={o2o.get()} bind:conf={conf} bind:iou={iou} bind:maxDet={maxDet} toggles={displayToggles} />;
+  const secondarySliders = (inline: boolean) => <SecondarySliders inline={inline} o2o={effectiveO2o.get()} bind:iou={iou} bind:maxDet={maxDet} />;
+  const railThresholds = () => <RailThresholds bind:conf={conf} bind:iou={iou} bind:maxDet={maxDet} o2o={effectiveO2o.get()} />;
+  const moreBody = () => <MoreBody tablet={tablet.get()} o2o={effectiveO2o.get()} bind:conf={conf} bind:iou={iou} bind:maxDet={maxDet} toggles={displayToggles} />;
 
   const resetButton = () => (
     <Button size="sm" variant="ghost" icon={RotateCcw} disabled={isDefault.get()} onclick={resetThresholds}>
@@ -639,67 +533,164 @@ export default function Playground() {
     </Button>
   );
 
+  function clearAllHidden() {
+    hidden.set(new Set());
+    cmp.hiddenBNames.set(new Set());
+  }
+
   const showAllButton = () => (
     <>
-      {hidden.get().size ? (
-        <Button size="sm" variant="ghost" onclick={() => hidden.set(new Set())}>
+      {hidden.get().size || (cmp.compare.get() && cmp.hiddenBNames.get().size) ? (
+        <Button size="sm" variant="ghost" onclick={clearAllHidden}>
           Show all
         </Button>
       ) : null}
     </>
   );
 
+  function toggleClassB(cB: number) {
+    const nameB = cmp.classesB.peek()[cB] ?? `class ${cB}`;
+    if (cmp.hiddenBNames.peek().has(nameB)) {
+      cmp.toggleHiddenBName(nameB);
+      return;
+    }
+    const idxA = classes.peek().indexOf(nameB);
+    if (idxA >= 0) toggleClass(idxA);
+    else cmp.toggleHiddenBName(nameB);
+  }
+
   const classList = () => (
     <ClassList
-      result={result.get()}
-      counts={counts.get()}
-      pred={pred.get()}
-      hidden={hidden.get()}
-      classes={classes.get()}
-      maxCount={maxCount.get()}
-      toggleClass={toggleClass}
+      result={showingB.get() ? cmp.resultB.get() : result.get()}
+      counts={showingB.get() ? cmp.countsB.get() : counts.get()}
+      pred={showingB.get() ? cmp.predB.get() : pred.get()}
+      hidden={showingB.get() ? cmp.hiddenB.get() : hidden.get()}
+      classes={showingB.get() ? cmp.classesB.get() : classes.get()}
+      maxCount={showingB.get() ? cmp.maxCountB.get() : maxCount.get()}
+      toggleClass={showingB.get() ? toggleClassB : toggleClass}
+    />
+  );
+
+  // Stable snippet reference so `<CompareStage>` never remounts when Model A's `pred` or `dims` object identity changes.
+  const compareStage = () => (
+    <CompareStage
+      source={source.get()!}
+      src={src.get()}
+      dims={dims.get()!}
+      sourceName={sourceName.get()}
+      onImageLoad={(ok) => imageError.set(!ok)}
+      view={cmp.compareView.get()}
+      bind:splitPct={cmp.splitPct}
+      zoom={cmp.zoom}
+      labels={labels.get()}
+      scores={scores.get()}
+      truthBoxes={truthBoxes.get()}
+      truthOnly={truthOnly.get()}
+      modelA={model.get()}
+      predA={pred.get()}
+      keptA={kept.get()}
+      visibleCountA={rows.get().length}
+      classesA={classes.get()}
+      onlyA={only.get()}
+      activeIdxA={activeIdx.get()}
+      selectedIdxA={selectedIdx.get()}
+      predictingA={predicting.get()}
+      errorA={error.get()}
+      onHoverA={(b) => hover.set(b)}
+      onSelectA={pickFromImage}
+      modelB={cmp.modelB.get()}
+      predB={cmp.predB.get()}
+      keptB={cmp.keptB.get()}
+      visibleCountB={cmp.rowsB.get().length}
+      classesB={cmp.classesB.get()}
+      onlyB={cmp.onlyB.get()}
+      activeIdxB={cmp.activeIdxB.get()}
+      selectedIdxB={cmp.selectedIdxB.get()}
+      predictingB={cmp.predictingB.get()}
+      errorB={cmp.errorB.get()}
+      weightsMissingB={cmp.weightsMissingB.get()}
+      badFileB={badFileB.get()}
+      runOnB={cmp.runOnB.get()}
+      onHoverB={(b) => cmp.hoverB.set(b)}
+      onSelectB={pickFromImageB}
+      onRetryB={() => cmp.retryTickB.set((t) => t + 1)}
+      onChooseWeightsB={() => {
+        weightsTarget.set('b');
+        weightsInput.click();
+      }}
+      onServerB={() => cmp.runOnB.set('server')}
+      engine={engine}
     />
   );
 
   const timingBody = () => (
-    <>
-      {pred.get() ? (
-        <>
-          <TimingBar timing={pred.get()!.timing} device={deviceText.get()} cold={pred.get()!.cold} />
-          {/* Beside the rail the image has no footer: the browser's re-filter time is here. */}
-          {!narrow.current && result.get() ? (
-            <p class="refilter num">Thresholds re-filtered in {result.get()!.ms < 0.01 ? '<0.01' : result.get()!.ms.toFixed(2)} ms</p>
-          ) : null}
-        </>
-      ) : predicting.get() ? (
-        <div class="t-sk">
-          <Skeleton h="28px" w="50%" />
-          <Skeleton h="8px" />
-          <Skeleton h="14px" />
-          <Skeleton h="14px" />
-        </div>
-      ) : (
-        <p class="hint">Timing appears after a run.</p>
-      )}
-    </>
+    <PlaygroundTiming
+      compare={cmp.compare.get()}
+      narrow={narrow.current}
+      modelA={model.get()}
+      modelB={cmp.modelB.get()}
+      predA={pred.get()}
+      predB={cmp.predB.get()}
+      predictingA={predicting.get()}
+      predictingB={cmp.predictingB.get()}
+      resultMsA={result.get()?.ms ?? null}
+      adapter={engine.info?.adapter}
+    />
   );
 
   const intro = () => <span>Run a model on any image. Thresholds re-filter instantly in the browser.</span>;
 
   // The model and where it runs: the rail's first section from 1024 px up, a toolbar row under the title below that.
-  const pickers = () => (
-    <ModelPickers
-      rail
-      ranked={ranked.get()}
-      modelId={modelId.get()}
-      choices={choices.get()}
-      chooseModel={chooseModel}
-      model={model.get()}
-      pickedMeta={pickedMeta.get()}
-      bind:runOn={runOn}
-      webgpu={webgpu}
-      browserOff={browserOff.get()}
-      runOnNote={runOnNote.get()}
+  const pickers = (inRail: boolean) =>
+    cmp.compare.get() ? (
+      <ComparePickers
+        rail={inRail}
+        toolbar={!inRail}
+        ranked={ranked.get()}
+        choices={choices.get()}
+        modelAId={modelId.get()}
+        modelBId={cmp.modelBId.get()}
+        modelA={model.get()}
+        modelB={cmp.modelB.get()}
+        metaA={pickedMeta.get()}
+        metaB={cmp.metaB.get()}
+        chooseModelA={chooseModel}
+        chooseModelB={(id) => cmp.pickedModelB.set(id)}
+        swapModels={cmp.swapModels}
+        bind:runOnA={runOn}
+        bind:runOnB={cmp.runOnB}
+        bind:compareView={cmp.compareView}
+        webgpu={webgpu}
+        browserOff={browserOff.get()}
+      />
+    ) : (
+      <ModelPickers
+        rail={inRail}
+        toolbar={!inRail}
+        ranked={ranked.get()}
+        modelId={modelId.get()}
+        choices={choices.get()}
+        chooseModel={chooseModel}
+        model={model.get()}
+        pickedMeta={pickedMeta.get()}
+        bind:runOn={runOn}
+        webgpu={webgpu}
+        browserOff={browserOff.get()}
+        runOnNote={runOnNote.get()}
+      />
+    );
+
+  const compareSummary = (inRail: boolean) => (
+    <CompareSummaryPanel
+      rail={inRail}
+      summary={cmp.summary.get()}
+      modelAName={model.get()?.name ?? 'Model A'}
+      modelBName={cmp.modelB.get()?.name ?? 'Model B'}
+      hasAnyResult={!!result.get() || !!cmp.resultB.get()}
+      predictingA={predicting.get()}
+      predictingB={cmp.predictingB.get()}
+      inspectSide={cmp.inspectSide.get()}
+      onInspectSide={(side) => cmp.inspectSide.set(side)}
     />
   );
 
@@ -707,26 +698,28 @@ export default function Playground() {
   const results = (rail: boolean) => (
     <ResultsPanel
       rail={rail}
-      classCount={counts.get().length}
+      classCount={showingB.get() ? cmp.countsB.get().length : counts.get().length}
       classList={classList}
       showAllButton={showAllButton}
-      onShowAll={() => hidden.set(new Set())}
-      result={result.get()}
+      onShowAll={clearAllHidden}
+      result={tableResult.get()}
       bind:tab={tab}
-      rows={rows.get()}
-      predicting={predicting.get()}
-      notice={notice.get()}
-      json={json.get()}
-      pred={pred.get()}
+      rows={tableRows.get()}
+      predicting={showingB.get() ? cmp.predictingB.get() : predicting.get()}
+      notice={showingB.get() ? (cmp.weightsMissingB.get() ? 'file' : cmp.errorB.get() && !cmp.predB.get() ? 'error' : null) : notice.get()}
+      json={activeJson.get()}
+      pred={showingB.get() ? cmp.predB.get() : pred.get()}
       bind:conf={conf}
       maxDet={maxDet.get()}
-      hidden={hidden.get()}
+      hidden={showingB.get() ? cmp.hiddenB.get() : hidden.get()}
       bind:tbody={tbody}
       tabRow={tabRow.get()}
-      activeIdx={activeIdx.get()}
-      selectedIdx={selectedIdx.get()}
-      bind:hover={hover}
-      bind:picked={picked}
+      activeIdx={tableActiveIdx.get()}
+      selectedIdx={tableSelectedIdx.get()}
+      hover={showingB.get() ? cmp.hoverB.get() : hover.get()}
+      picked={showingB.get() ? cmp.pickedB.get() : picked.get()}
+      onHover={(b) => (showingB.peek() ? cmp.hoverB.set(b) : hover.set(b))}
+      onPick={(b) => (showingB.peek() ? cmp.pickedB.set(b) : picked.set(b))}
       onrowkey={onrowkey}
     />
   );
@@ -762,30 +755,21 @@ export default function Playground() {
         wide
         sub={source.get() && phone.current ? undefined : intro}
         actions={() => (
-          <>
-            {ranked.get().length && !phone.current ? (
-              <Button icon={ImagePlus} onclick={() => fileInput.click()}>
-                Open image
-              </Button>
-            ) : null}
-          </>
+          <PlaygroundActions
+            hasModels={ranked.get().length > 0}
+            phone={phone.current}
+            narrow={narrow.current}
+            compare={cmp.compare.get()}
+            canExport={canExport.get()}
+            exportingPng={exportingPng.get()}
+            onToggleCompare={() => cmp.toggleCompare()}
+            onExportPng={() => void onExportPng()}
+            onExportJson={onExportJson}
+            onOpenImage={() => fileInput.click()}
+          />
         )}
       >
-        {narrow.current && ranked.get().length ? (
-          <ModelPickers
-            toolbar
-            ranked={ranked.get()}
-            modelId={modelId.get()}
-            choices={choices.get()}
-            chooseModel={chooseModel}
-            model={model.get()}
-            pickedMeta={pickedMeta.get()}
-            bind:runOn={runOn}
-            webgpu={webgpu}
-            browserOff={browserOff.get()}
-            runOnNote={runOnNote.get()}
-          />
-        ) : null}
+        {narrow.current && ranked.get().length ? pickers(false) : null}
 
         {models.error && !models.data ? (
           <Panel>
@@ -813,7 +797,10 @@ export default function Playground() {
                 bind:noticeEl={noticeEl}
                 badFile={badFile.get()}
                 model={model.get()}
-                chooseWeights={() => weightsInput.click()}
+                chooseWeights={() => {
+                  weightsTarget.set('a');
+                  weightsInput.click();
+                }}
                 browse={() => fileInput.click()}
                 bind:runOn={runOn}
                 error={error.get()}
@@ -846,6 +833,7 @@ export default function Playground() {
                 cut={cut()}
                 kept={kept.get()}
                 truthBoxes={truthBoxes.get()}
+                truthOnly={truthOnly.get()}
                 classes={classes.get()}
                 labels={labels.get()}
                 scores={scores.get()}
@@ -858,7 +846,7 @@ export default function Playground() {
                 engine={engine}
                 sheetShown={sheetShown.get()}
                 tablet={tablet.get()}
-                o2o={o2o.get()}
+                o2o={effectiveO2o.get()}
                 rail={!narrow.current}
                 bind:conf={conf}
                 bind:iou={iou}
@@ -874,17 +862,33 @@ export default function Playground() {
                 bind:sheetEl={sheetEl}
                 resetButton={resetButton}
                 moreBody={moreBody}
+                onCapture={() => {
+                  captureVideo.set(null);
+                  captureOpen.set(true);
+                }}
+                compareFacts={
+                  cmp.compare.get() && (result.get() || cmp.resultB.get())
+                    ? {
+                        countA: cmp.summary.get().countA,
+                        countB: cmp.summary.get().countB,
+                        deltaText: cmp.summary.get().countDelta !== null ? formatSignedDelta(cmp.summary.get().countDelta) : null,
+                      }
+                    : null
+                }
+                compareStage={cmp.compare.get() && !!source.get() && !!dims.get() ? compareStage : null}
               />
+
+              {narrow.current && cmp.compare.get() ? compareSummary(false) : null}
 
               {narrow.current ? results(false) : null}
 
               {source.get() && phone.current ? (
                 <PhoneDetails
-                  result={result.get()}
-                  counts={counts.get()}
-                  hidden={hidden.get()}
-                  pred={pred.get()}
-                  where={where.get()}
+                  result={showingB.get() ? cmp.resultB.get() : result.get()}
+                  counts={showingB.get() ? cmp.countsB.get() : counts.get()}
+                  hidden={showingB.get() ? cmp.hiddenB.get() : hidden.get()}
+                  pred={showingB.get() ? cmp.predB.get() : pred.get()}
+                  where={cmp.compare.get() ? whereLabel(showingB.get() ? cmp.predB.get() : pred.get()) : where.get()}
                   showAllButton={showAllButton}
                   classList={classList}
                   timingBody={timingBody}
@@ -895,10 +899,10 @@ export default function Playground() {
             {narrow.current ? (
               <SidePanels
                 source={source.get()}
-                result={result.get()}
-                counts={counts.get()}
-                pred={pred.get()}
-                where={where.get()}
+                result={showingB.get() ? cmp.resultB.get() : result.get()}
+                counts={showingB.get() ? cmp.countsB.get() : counts.get()}
+                pred={showingB.get() ? cmp.predB.get() : pred.get()}
+                where={cmp.compare.get() ? '' : where.get()}
                 bind:conf={conf}
                 resetButton={resetButton}
                 secondarySliders={secondarySliders}
@@ -909,13 +913,14 @@ export default function Playground() {
               />
             ) : (
               <Rail
-                pickers={pickers}
+                pickers={() => pickers(true)}
                 thresholds={railThresholds}
                 resetButton={resetButton}
                 toggles={source.get() ? displayToggles : null}
+                compareSummary={cmp.compare.get() ? () => compareSummary(true) : null}
                 detections={() => results(true)}
                 timing={timingBody}
-                where={pred.get() ? where.get() : null}
+                where={cmp.compare.get() ? null : pred.get() ? where.get() : null}
               />
             )}
           </div>
@@ -927,6 +932,13 @@ export default function Playground() {
         prefer={classes.get()}
         onpick={(ds, img, at) => setSource({ kind: 'dataset', ds, img, at })}
         onclose={() => seg.set(source.peek()?.kind ?? 'file')}
+      />
+
+      <MediaCaptureDialog
+        bind:open={captureOpen}
+        initialVideo={captureVideo.get()}
+        onCapture={(blob, name) => void setFile(blob, name)}
+        onClose={() => captureVideo.set(null)}
       />
     </>
   );
@@ -944,24 +956,11 @@ css`
     --fit-h: max(420px, calc(100dvh - var(--size-topbar) - 148px));
     --stage-h: calc(var(--fit-h) - 42px);
   }
-  .refilter {
-    margin-top: var(--space-3);
-    font-size: var(--type-sm-size);
-    color: var(--text-tertiary);
-  }
   .main {
     display: grid;
     grid-template-columns: minmax(0, 1fr);
     gap: var(--space-4);
     min-width: 0;
-  }
-  .hint {
-    color: var(--text-tertiary);
-    font-size: var(--type-sm-size);
-  }
-  .t-sk {
-    display: grid;
-    gap: var(--space-3);
   }
 
   @media (max-width: 1023px) {

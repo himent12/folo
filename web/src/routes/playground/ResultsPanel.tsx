@@ -45,6 +45,8 @@ export interface ResultsPanelProps {
   selectedIdx: number | null;
   hover?: Det | null;
   picked?: Det | null;
+  onHover?: (b: Det | null) => void;
+  onPick?: (b: Det | null) => void;
   onrowkey: (e: KeyboardEvent, k: number) => void;
 }
 
@@ -54,6 +56,14 @@ export default function ResultsPanel(props: ResultsPanelProps) {
   const tbody = bindable(props, 'tbody') as Signal<HTMLTableSectionElement | undefined>;
   const hover = bindable(props, 'hover');
   const picked = bindable(props, 'picked');
+  const setHover = (b: Det | null) => {
+    hover.set(b);
+    props.onHover?.(b);
+  };
+  const setPicked = (b: Det | null) => {
+    picked.set(b);
+    props.onPick?.(b);
+  };
   /** The view shown: Classes is the rail's tab only (a panel under the image has its own Classes panel). */
   const view = () => (!props.rail && tab.get() === 'classes' ? 'detections' : tab.get());
   // Leaving the rail (the window narrowed below 1024 px) on Classes selects Detections, so the tab list always has its
@@ -86,14 +96,19 @@ export default function ResultsPanel(props: ResultsPanelProps) {
     const payload = props.json;
     if (!payload) return;
     const seq = ++copySeq;
-    const boxes = (payload as { boxes?: unknown }).boxes;
-    const exportedCount = Array.isArray(boxes) ? boxes.length : (props.result?.boxes.length ?? 0);
+    const comparePayload = payload as { mode?: unknown; comparison?: { count_a?: number | null; count_b?: number | null }; boxes?: unknown };
+    const isCompare = comparePayload.mode === 'compare';
+    const exportedCount = Array.isArray(comparePayload.boxes) ? comparePayload.boxes.length : (props.result?.boxes.length ?? 0);
     copyStatus.set('');
     try {
       await navigator.clipboard.writeText(jsonText(payload));
       if (!alive || seq !== copySeq) return;
       copied.set(true);
-      copyStatus.set(`Copied ${exportedCount} ${exportedCount === 1 ? 'detection' : 'detections'} as JSON`);
+      copyStatus.set(
+        isCompare
+          ? 'Copied Model A/B comparison as JSON'
+          : `Copied ${exportedCount} ${exportedCount === 1 ? 'detection' : 'detections'} as JSON`,
+      );
       clearTimeout(copyReset);
       copyReset = setTimeout(() => {
         if (alive && seq === copySeq) {
@@ -138,7 +153,7 @@ export default function ResultsPanel(props: ResultsPanelProps) {
               { value: 'json', label: 'JSON' },
             ]}
           />
-          {props.result && props.json ? (
+          {props.json ? (
             <span class="copy-json" use:tooltip={copied.get() ? 'Copied detections JSON' : 'Copy detections JSON'}>
               {props.rail ? (
                 <Button
@@ -160,7 +175,11 @@ export default function ResultsPanel(props: ResultsPanelProps) {
           {copyStatus.get()}
         </span>
         <div id="pg-panel" role="tabpanel" aria-labelledby={`pg-${view()}`}>
-          {!props.result ? (
+          {view() === 'json' && props.json ? (
+            <div class="json-wrap">
+              <JsonView value={props.json} label="Prediction as JSON" />
+            </div>
+          ) : !props.result ? (
             <p class="placeholder">
               {props.predicting
                 ? 'Running inference…'
@@ -172,10 +191,6 @@ export default function ResultsPanel(props: ResultsPanelProps) {
             <div class="classes-tab">
               {props.showAllButton ? <div class="show-all">{props.showAllButton}</div> : null}
               {props.classList?.()}
-            </div>
-          ) : view() === 'json' ? (
-            <div class="json-wrap">
-              <JsonView value={props.json} label="Prediction as JSON" />
             </div>
           ) : !props.pred?.boxes.length ? (
             /* Candidates are fetched down to the lowest threshold (FETCH): none means no threshold would show more. */
@@ -291,11 +306,11 @@ export default function ResultsPanel(props: ResultsPanelProps) {
                           aria-label={`${b().name}, score ${score(b().score)}, ${px(b().x2 - b().x1)} by ${px(b().y2 - b().y1)} pixels`}
                           onpointerenter={(e) => {
                             // A tap is not a hover: on touch the selection alone marks the row.
-                            if (e.pointerType !== 'touch') hover.set(b());
+                            if (e.pointerType !== 'touch') setHover(b());
                           }}
-                          onpointerleave={() => hover.set(null)}
-                          onfocus={() => picked.set(b())}
-                          onclick={() => picked.set(b())}
+                          onpointerleave={() => setHover(null)}
+                          onfocus={() => setPicked(b())}
+                          onclick={() => setPicked(b())}
                           onkeydown={(e) => props.onrowkey(e, k())}
                         >
                           {props.rail ? null : <td class="r idx faint">{i() + 1}</td>}

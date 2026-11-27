@@ -148,6 +148,14 @@ export const PHASE_TEXT: Record<Phase, string> = {
 /** Detectors kept loaded at once (an older one is freed: models hold wasm memory and GPU buffers). */
 const KEEP = 2;
 
+/** Tracks errors rejected before a detector finished loading (runtime, weights download, or compile). */
+const detectorLoadErrors = new WeakSet<object>();
+
+/** True when `e` was thrown while loading a detector's runtime/weights rather than during inference. */
+export function isDetectorLoadError(e: unknown): boolean {
+  return typeof e === 'object' && e !== null && detectorLoadErrors.has(e);
+}
+
 export class BrowserEngine {
   #phase = signal<Phase>('idle');
   #info = signal<DetectorInfo | null>(null);
@@ -230,7 +238,13 @@ export class BrowserEngine {
       if (req.signal?.aborted) throw new DOMException('Superseded', 'AbortError');
     };
     try {
-      const det = await entry.detector;
+      let det: Detector;
+      try {
+        det = await entry.detector;
+      } catch (err) {
+        if (typeof err === 'object' && err !== null) detectorLoadErrors.add(err);
+        throw err;
+      }
       // Requests replaced while the detector loaded all wake here: only the latest advances phase, decodes and runs.
       superseded();
       this.#setPhase('ready', reqSeq, req.signal);
