@@ -5,7 +5,7 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use folo_server::api::*;
-use folo_server::{Options, RealStore, Server};
+use folo_server::{Options, RealStore, Server, Store};
 use folo_test_support::TestDir;
 use serde_json::json;
 
@@ -292,4 +292,155 @@ async fn model_routes_support_etag_and_not_modified() {
         .body(Body::empty())
         .unwrap();
     assert_eq!(send(&real, req_d).await.0, StatusCode::NOT_MODIFIED);
+}
+
+#[tokio::test]
+async fn real_store_val_thresholds_and_predict_non_leakage() {
+    let dir = TestDir::new("real-val-predict-thresholds");
+    let ds_dir = dir.join("ds");
+    folo_data::synthetic::write_yolo(
+        &folo_data::synthetic::SyntheticConfig {
+            images: 4,
+            classes: vec!["circle".into(), "square".into()],
+            imgsz: 64,
+            seed: 11,
+            vary_aspect: false,
+            val_fraction: 0.5,
+            ..folo_data::synthetic::SyntheticConfig::default()
+        },
+        &ds_dir,
+        folo_data::ImageFormat::Png,
+    )
+    .unwrap();
+
+    std::fs::create_dir_all(dir.join("models")).unwrap();
+    let mut m = folo_vision::FoloModel::with_rng(
+        folo_nn::io::ModelConfig::new("n", 2).unwrap(),
+        &mut folo_core::rng::Rng::seed(11),
+    )
+    .unwrap();
+    m.set_classes(vec!["circle".into(), "square".into()]).unwrap();
+    m.set_imgsz(64);
+    m.save(dir.join("models").join("demo.folo")).unwrap();
+
+    let store = Arc::new(RealStore::open(dir.to_path_buf()).device("cpu"));
+    let ds = store
+        .register_dataset(folo_server::api::RegisterDataset {
+            name: Some("shapes".into()),
+            path: ds_dir.to_string_lossy().into_owned(),
+            format: folo_server::api::DatasetFormat::Yolo,
+        })
+        .unwrap();
+    let model_id = store.list_models().unwrap()[0].id.clone();
+    let image_id = store
+        .list_images(&ds.id, &folo_server::store::ImageQuery { limit: 1, ..Default::default() })
+        .unwrap()
+        .images[0]
+        .id
+        .clone();
+    let app = Server::new(Arc::clone(&store) as Arc<dyn Store>, Options::default()).router();
+
+    // 1. `/api/health` advertises `threshold_calibration`, and `POST /api/val` returns `thresholds`.
+    let health: serde_json::Value = ok(&app, get("/api/health")).await;
+    assert!(health["features"].as_array().unwrap().iter().any(|f| f == "threshold_calibration"), "{health}");
+    let val: serde_json::Value = ok(
+        &app,
+        post_json(
+            "/api/val",
+            json!({ "model_id": model_id, "dataset_id": ds.id, "split": "val", "imgsz": 64 }),
+        ),
+    )
+    .await;
+    assert!(val["thresholds"]["global"]["best_conf"].is_f64(), "{val}");
+    assert!(val["thresholds"]["macro_f1"].is_f64(), "{val}");
+    assert!(!val["thresholds"]["per_class"].as_array().unwrap().is_empty(), "{val}");
+
+    // 2. `POST /api/predict` with `per_class_conf = 1.0` suppresses boxes; an immediate uncalibrated request on
+    //    the SAME cached predictor must NOT leak the previous per-class overrides!
+    let suppressed: serde_json::Value = ok(
+        &app,
+        post_json(
+            "/api/predict",
+            json!({
+                "model_id": model_id,
+                "dataset_id": ds.id,
+                "image_id": image_id,
+                "conf": 0.0,
+                "per_class_conf": { "0": 1.0, "1": 1.0 },
+                "conf_inclusive": true,
+            }),
+        ),
+    )
+    .await;
+    assert!(suppressed["boxes"].as_array().unwrap().is_empty(), "{suppressed}");
+
+    let uncalibrated: serde_json::Value = ok(
+        &app,
+        post_json(
+            "/api/predict",
+            json!({
+                "model_id": model_id,
+                "dataset_id": ds.id,
+                "image_id": image_id,
+                "conf": 0.0,
+            }),
+        ),
+    )
+    .await;
+    assert!(
+        !uncalibrated["boxes"].as_array().unwrap().is_empty(),
+        "cached predictor leaked per_class_conf into subsequent uncalibrated request: {uncalibrated}"
+    );
+
+    // 3. Multipart upload with `per_class_conf` + `conf_inclusive` also filters deterministically.
+    let img_bytes = std::fs::read(
+        std::fs::read_dir(ds_dir.join("images").join("val"))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .find(|p| p.is_file())
+            .unwrap(),
+    )
+    .unwrap();
+    let bnd = "folo-test-boundary";
+    let mut mp = Vec::new();
+    for (k, v) in [
+        ("model_id", model_id.as_str()),
+        ("conf", "0.0"),
+        ("per_class_conf", r#"{"0":1.0,"1":1.0}"#),
+        ("conf_inclusive", "true"),
+    ] {
+        mp.extend_from_slice(
+            format!("--{bnd}\r\nContent-Disposition: form-data; name=\"{k}\"\r\n\r\n{v}\r\n").as_bytes(),
+        );
+    }
+    mp.extend_from_slice(
+        format!("--{bnd}\r\nContent-Disposition: form-data; name=\"image\"; filename=\"a.png\"\r\nContent-Type: image/png\r\n\r\n").as_bytes(),
+    );
+    mp.extend_from_slice(&img_bytes);
+    mp.extend_from_slice(format!("\r\n--{bnd}--\r\n").as_bytes());
+    let mp_req = Request::post("/api/predict")
+        .header(header::CONTENT_TYPE, format!("multipart/form-data; boundary={bnd}"))
+        .body(Body::from(mp))
+        .unwrap();
+    let mp_res: serde_json::Value = ok(&app, mp_req).await;
+    assert!(mp_res["boxes"].as_array().unwrap().is_empty(), "{mp_res}");
+
+    // Out-of-range class id returns 400 invalid_config.
+    err(
+        &app,
+        post_json(
+            "/api/predict",
+            json!({
+                "model_id": model_id,
+                "dataset_id": ds.id,
+                "image_id": image_id,
+                "per_class_conf": { "9": 0.5 },
+            }),
+        ),
+        StatusCode::BAD_REQUEST,
+        "invalid_config",
+    )
+    .await;
+
+    store.shutdown();
 }

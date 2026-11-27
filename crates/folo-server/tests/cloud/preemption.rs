@@ -278,12 +278,13 @@ fn preemption_during_replacement_sync_auto_reprovisions_again() {
     let run = store.create_run(cloud_run(&ds, &conn.id, 3)).unwrap();
     until("first checkpoint synced", || run_of(&store, &run.id).cloud.and_then(|c| c.synced));
 
-    // Hold uploads on the replacement worker so we can deterministically preempt pod-2 mid-sync.
+    // Hold uploads on the replacement worker and wait until an upload request actually arrives at pod-2 before
+    // killing it, proving the worker died mid-upload.
+    cloud.gates.uploads_held.store(0, Ordering::SeqCst);
     cloud.gates.uploads.store(true, Ordering::SeqCst);
     cloud.kill(0);
-    until("replacement worker syncing", || {
-        (cloud.calls(Call::Launch) >= 2 && phase(&run_of(&store, &run.id)) == CloudPhase::Syncing)
-            .then_some(())
+    until("replacement worker upload held", || {
+        (cloud.calls(Call::Launch) >= 2 && cloud.gates.uploads_held.load(Ordering::SeqCst) > 0).then_some(())
     });
     cloud.kill(1);
     cloud.gates.uploads.store(false, Ordering::SeqCst);

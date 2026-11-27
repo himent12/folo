@@ -106,7 +106,8 @@ impl Exec {
             }
         };
         let stop = || self.interrupted().is_err();
-        let mut ctl = Control { progress: &mut progress, stop: &stop, backoff: transfer::FIRST_BACKOFF };
+        let backoff = transfer::FIRST_BACKOFF.min(self.core.tuning.poll);
+        let mut ctl = Control { progress: &mut progress, stop: &stop, backoff };
         let up = transfer::upload(client, req, write, &mut ctl);
         match up {
             Ok(u) => Ok((u, sent)),
@@ -115,15 +116,19 @@ impl Exec {
         }
     }
 
-    /// Classifies a sync/start failure: when a provisioned instance disappeared mid-sync, escalate to
-    /// [`Halt::Preempted`] (or manual termination / `cloud_instance_lost`) instead of a generic sync failure so
-    /// runs with a synced checkpoint auto-resume cleanly.
+    /// Classifies a sync/start failure: local shutdown, manual termination, user stop, and deadline expiry take
+    /// precedence independently of provider reachability; otherwise, when a provisioned instance disappeared
+    /// mid-sync, escalate to [`Halt::Preempted`] so runs with a synced checkpoint auto-resume cleanly.
     fn sync_or_preempted(&self, why: String) -> Halt {
-        if self.instance_state().is_some_and(|s| s.is_lost()) {
-            if self.instance_ended() {
-                return self.lost_by_hand();
-            }
-            if self.c.provider.info().provisions && !self.is_stopping() && !self.past_deadline() {
+        if let Err(halt) = self.interrupted() {
+            return halt;
+        }
+        let state = self.instance_state();
+        if let Err(halt) = self.interrupted() {
+            return halt;
+        }
+        if state.is_some_and(|s| s.is_lost()) {
+            if self.c.provider.info().provisions {
                 return Halt::Preempted(format!("{why}; its instance disappeared before training started"));
             }
             return failed(
@@ -159,21 +164,30 @@ impl Exec {
         // A `remote` server keeps the runs of the run's earlier attempts under the same name: those are not this
         // attempt's. After a request whose answer was lost, a run of the name that is not one of them is the one it
         // created, however it went since (it may have ended already).
+        self.interrupted()?;
         let earlier: Vec<String> = self.named(client, &name)?.into_iter().map(|r| r.id).collect();
         let mut attempt = 1;
         let created = loop {
+            // Check cancellation before issuing a fresh POST, never before reconciling an ambiguous POST whose
+            // response was lost (a remote worker may already have started training and needs `/stop` delivered).
+            self.interrupted()?;
             match client.post::<_, Run>("/runs", &body) {
                 Ok(r) => break r,
                 Err(e) if e.is_transient() && attempt < ATTEMPTS => {
-                    self.interrupted()?;
                     if let Some(r) = self.named(client, &name)?.into_iter().find(|r| !earlier.contains(&r.id))
                     {
                         break r;
                     }
+                    self.interrupted()?;
                     attempt += 1;
                     self.wait(self.core.tuning.poll)?;
                 }
                 Err(e) if e.is_transient() => {
+                    if let Ok(list) = self.named(client, &name)
+                        && let Some(r) = list.into_iter().find(|r| !earlier.contains(&r.id))
+                    {
+                        break r;
+                    }
                     return Err(self.sync_or_preempted(format!("starting the run on the worker: {e}")));
                 }
                 Err(e) => {
@@ -182,7 +196,6 @@ impl Exec {
             }
         };
         self.private.run_id = Some(created.id.clone());
-        self.private.recovering_preemption = false;
         (self.private.after_step, self.private.after_epoch, self.private.after_log) = (0, 0, 0);
         self.save();
         self.phase(CloudPhase::Training, format!("the worker took the run as {}", created.id));
@@ -197,7 +210,6 @@ impl Exec {
             match client.get::<RunList>("/runs") {
                 Ok(list) => return Ok(list.runs.into_iter().filter(|r| r.name == name).collect()),
                 Err(e) if e.is_transient() && attempt < ATTEMPTS => {
-                    self.interrupted()?;
                     attempt += 1;
                     self.wait(self.core.tuning.poll)?;
                 }

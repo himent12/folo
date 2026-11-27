@@ -271,6 +271,39 @@ fn thresholds_cli_errors_and_describe_schema() {
     assert_eq!(code, 2);
     assert_eq!(recs[0]["error"]["code"], "usage");
 
+    // Passing --model path or the same path as --save-json to --save-thresholds is refused upfront with exit 2
+    // without modifying the weights file.
+    let weights_before = std::fs::metadata(&weights).unwrap().len();
+    let (code, recs, _) = folo(&[
+        "val",
+        "--model",
+        s(&weights),
+        "--data",
+        s(&t.data),
+        "--save-thresholds",
+        s(&weights),
+        "--json",
+    ]);
+    assert_eq!(code, 2);
+    assert_eq!(recs[0]["error"]["code"], "usage");
+    assert_eq!(std::fs::metadata(&weights).unwrap().len(), weights_before);
+
+    let colliding = scratch.join("both.json");
+    let (code, recs, _) = folo(&[
+        "val",
+        "--model",
+        s(&weights),
+        "--data",
+        s(&t.data),
+        "--save-json",
+        s(&colliding),
+        "--save-thresholds",
+        s(&colliding),
+        "--json",
+    ]);
+    assert_eq!(code, 2);
+    assert_eq!(recs[0]["error"]["code"], "usage");
+
     // `folo describe` exposes `--save-thresholds` on `val` and `--thresholds` (conflicting with `--conf`) on `predict`.
     let (code, recs, err) = folo(&["describe", "val", "--json"]);
     assert_eq!(code, 0, "{err}");

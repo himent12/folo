@@ -209,10 +209,26 @@ pub fn val(args: ValArgs, out: Out) -> Result<(), CliError> {
         Some(args.batch),
     )?;
     let diag_settings = diag::check_diag_args(&args)?;
-    thresholds::check_save_thresholds_path(args.save_thresholds.as_deref())?;
+    thresholds::check_save_thresholds_path(
+        args.save_thresholds.as_deref(),
+        &args.model,
+        args.save_json.as_deref(),
+    )?;
+    let resolved_model = crate::weights::resolve(&args.model)?;
+    thresholds::check_save_thresholds_path(
+        args.save_thresholds.as_deref(),
+        &resolved_model,
+        args.save_json.as_deref(),
+    )?;
     let shape = format!("imgsz {:?} batch {} head {:?}", args.imgsz, args.batch, args.head);
-    let model =
-        open_model("val", &args.model, &args.device, (args.half, args.precision), args.tensor_cores, &shape)?;
+    let model = open_model(
+        "val",
+        &resolved_model,
+        &args.device,
+        (args.half, args.precision),
+        args.tensor_cores,
+        &shape,
+    )?;
     let split = match args.split {
         SplitArg::Train => Split::Train,
         SplitArg::Val => Split::Val,
@@ -284,7 +300,7 @@ pub fn val(args: ValArgs, out: Out) -> Result<(), CliError> {
         crate::coco::prepare_results(path)?;
     }
     if let Some(path) = &args.save_thresholds {
-        thresholds::prepare_save_thresholds(path)?;
+        thresholds::prepare_save_thresholds(path, &resolved_model, args.save_json.as_deref())?;
     }
     let r = validate_detector(&model, Arc::new(part.clone()), &cfg).map_err(|e| engine_error("val", e))?;
     let m = val_metrics(&r.report);

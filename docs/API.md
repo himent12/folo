@@ -1627,8 +1627,9 @@ mostly shown) for the others.
   `{ "model_id", "dataset_id", "dataset_name", "split", "imgsz", "images", "val": Epoch.val, "timing": { "total_s", "per_image_ms" }, "diagnostics"?: ValDiagnostics, "thresholds"?: ThresholdCalibration }`.
   `split` is the requested one (no fallback); `dataset_name` is the dataset's name (`null`, or missing, from older
   servers). `thresholds` (when the server advertises `threshold_calibration`) carries calibrated global and per-class F1
-  confidence thresholds (`global`, `macro_f1`, `per_class`) that can be fed directly into `POST /api/predict` via
-  `per_class_conf` and `conf_inclusive: true`. Passing `diagnostics: true` or `worst` (`1..=50`, implies `diagnostics: true`; requires `val_diagnostics`
+  confidence thresholds (`global`, `macro_f1`, `per_class`). To apply them on `POST /api/predict`, set `conf` to
+  `thresholds.global.best_conf` (fallback for classes absent from `per_class`), build `per_class_conf` mapping each
+  entry's `class` to `best_conf`, and set `conf_inclusive: true`. Passing `diagnostics: true` or `worst` (`1..=50`, implies `diagnostics: true`; requires `val_diagnostics`
   in `features`) includes per-image detection error diagnostics (`conf`, `tp_iou`, `bg_iou`, `images_diagnosed`,
   `failing_images`, `summary`, and `worst_images` ranked by total errors descending); passing `diag_*` without
   `diagnostics: true` or `worst`, or `diag_bg_iou > diag_tp_iou`, is `400 invalid_body`.

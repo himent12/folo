@@ -127,16 +127,12 @@ impl Inner {
             diagnostics: diagnostics.map(val_diagnostics_out),
             thresholds: thresholds.map(threshold_calibration_out),
         };
-        while json_len(&result) > MAX_RESULT_BYTES {
-            if result.diagnostics.as_mut().and_then(|d| d.worst_images.pop()).is_some() {
-                continue;
-            }
-            if result.thresholds.as_mut().and_then(|t| t.per_class.pop()).is_some() {
-                continue;
-            }
-            break;
-        }
-        if let Some(t) = &result.thresholds
+        let thresholds_omitted = fit_val_result(&mut result);
+        if thresholds_omitted {
+            summary.push_str(
+                "; calibrated thresholds omitted to stay under 32 KB (use `folo val --save-thresholds` to export full per-class thresholds)",
+            );
+        } else if let Some(t) = &result.thresholds
             && !t.per_class.is_empty()
         {
             summary.push_str(&format!(
@@ -169,9 +165,12 @@ impl Inner {
                     return Err(invalid_arguments("thresholds_path must not be empty"));
                 }
                 let paths = self.paths.clone();
-                let cal = tokio::task::spawn_blocking(move || read_thresholds(&paths.resolve(&p)?))
-                    .await
-                    .map_err(join)??;
+                let cal = tokio::task::spawn_blocking(move || match paths.resolve_for_batch(&p)? {
+                    BatchPath::Ready(resolved) => read_thresholds(&resolved),
+                    BatchPath::Missing(err) => Err(err),
+                })
+                .await
+                .map_err(join)??;
                 if cal.is_empty() {
                     Ok((default_conf, None, false))
                 } else {
@@ -180,7 +179,11 @@ impl Inner {
             }
             (None, Some(map)) => {
                 check_per_class_conf(&map, None).map_err(|e| invalid_arguments(e.body.message))?;
-                Ok((default_conf, Some(map), true))
+                if map.is_empty() {
+                    Ok((default_conf, None, false))
+                } else {
+                    Ok((default_conf, Some(map), true))
+                }
             }
             (None, None) => Ok((default_conf, None, false)),
         }
@@ -497,11 +500,30 @@ fn threshold_calibration_out(c: ThresholdCalibration) -> ThresholdCalibrationOut
     }
 }
 
+/// Fits `result` within [`MAX_RESULT_BYTES`] by trimming `diagnostics.worst_images` first, and if still too
+/// large, omitting `thresholds` whole (never returning a silently truncated partial calibration). Returns `true`
+/// when `thresholds` was omitted.
+fn fit_val_result(result: &mut ValToolResult) -> bool {
+    while json_len(result) > MAX_RESULT_BYTES {
+        if result.diagnostics.as_mut().and_then(|d| d.worst_images.pop()).is_some() {
+            continue;
+        }
+        if result.thresholds.take().is_some() {
+            return true;
+        }
+        break;
+    }
+    false
+}
+
 /// Reads and validates a `ThresholdCalibration` JSON file saved by `folo val --save-thresholds`.
 fn read_thresholds(path: &Path) -> Result<ThresholdCalibration, Error> {
     let shown = folo_api::json::path(path);
-    let meta = std::fs::metadata(path).map_err(|_| {
-        Error::new(http::StatusCode::NOT_FOUND, "path_not_found", format!("{shown} does not exist"))
+    let meta = std::fs::metadata(path).map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => {
+            Error::new(http::StatusCode::NOT_FOUND, "path_not_found", format!("{shown} does not exist"))
+        }
+        _ => Error::internal(format!("reading {shown}: {e}")),
     })?;
     if !meta.is_file() {
         return Err(invalid_arguments(format!("{shown} is not a file")));
@@ -661,3 +683,6 @@ pub(super) fn decode_image_base64(b64: &str, max: u64) -> Result<Vec<u8>, Error>
 #[cfg(test)]
 #[path = "models_tests.rs"]
 mod tests;
+#[cfg(test)]
+#[path = "models_thresholds_tests.rs"]
+mod thresholds_tests;

@@ -13,8 +13,34 @@ use crate::output::{CliError, ExitCode};
 /// Maximum JSON file size accepted by `--thresholds` (prevents accidentally reading weights or images).
 const MAX_THRESHOLDS_BYTES: u64 = 4 * 1024 * 1024;
 
-/// Checks `--save-thresholds <FILE>` upfront before opening the model or running validation.
-pub(super) fn check_save_thresholds_path(path: Option<&Path>) -> Result<(), CliError> {
+/// Normalizes a path for destination-collision checks (resolving symlinks on the longest existing ancestor and
+/// folding `.` / `..`, case-insensitively on Windows).
+fn path_identity(path: &Path) -> String {
+    let mut abs = PathBuf::new();
+    for c in std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf()).components() {
+        match c {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                abs.pop();
+            }
+            c => abs.push(c),
+        }
+    }
+    let resolved = abs
+        .ancestors()
+        .find_map(|a| Some(std::fs::canonicalize(a).ok()?.join(abs.strip_prefix(a).ok()?)))
+        .unwrap_or(abs);
+    let s = resolved.to_string_lossy().into_owned();
+    if cfg!(windows) { s.to_lowercase() } else { s }
+}
+
+/// Checks `--save-thresholds <FILE>` upfront before opening the model or running validation, rejecting collisions
+/// with `--model` (the resolved weights file) or `--save-json`.
+pub(super) fn check_save_thresholds_path(
+    path: Option<&Path>,
+    model: &Path,
+    save_json: Option<&Path>,
+) -> Result<(), CliError> {
     let Some(path) = path else { return Ok(()) };
     if path.as_os_str().is_empty() {
         return Err(CliError::new(ExitCode::Usage, "usage", "--save-thresholds file path must not be empty")
@@ -27,6 +53,21 @@ pub(super) fn check_save_thresholds_path(path: Option<&Path>) -> Result<(), CliE
             format!("--save-thresholds {} is a folder, not a file", folo_api::json::path(path)),
         )
         .hint("pass a JSON file path, e.g. --save-thresholds thresholds.json"));
+    }
+    if path_identity(path) == path_identity(model) {
+        return Err(CliError::new(ExitCode::Usage, "usage", "--save-thresholds must differ from --model")
+            .hint("pass a separate JSON path, e.g. --save-thresholds thresholds.json"));
+    }
+    if let Some(json_out) = save_json
+        && !json_out.as_os_str().is_empty()
+        && path_identity(path) == path_identity(json_out)
+    {
+        return Err(CliError::new(
+            ExitCode::Usage,
+            "usage",
+            "--save-thresholds and --save-json must point to different files",
+        )
+        .hint("pass distinct paths, e.g. --save-json detections.json --save-thresholds thresholds.json"));
     }
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty())
         && std::fs::metadata(parent).is_ok_and(|m| !m.is_dir())
@@ -45,8 +86,12 @@ pub(super) fn check_save_thresholds_path(path: Option<&Path>) -> Result<(), CliE
 }
 
 /// Ensures the parent folder for `--save-thresholds <FILE>` exists (called after config validation, before eval).
-pub(super) fn prepare_save_thresholds(path: &Path) -> Result<(), CliError> {
-    check_save_thresholds_path(Some(path))?;
+pub(super) fn prepare_save_thresholds(
+    path: &Path,
+    model: &Path,
+    save_json: Option<&Path>,
+) -> Result<(), CliError> {
+    check_save_thresholds_path(Some(path), model, save_json)?;
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent).map_err(|e| {
             CliError::new(
@@ -91,7 +136,15 @@ pub(super) fn save_thresholds(
     classes: &[String],
 ) -> Result<(), CliError> {
     static NEXT: AtomicU64 = AtomicU64::new(0);
-    prepare_save_thresholds(path)?;
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            CliError::new(
+                ExitCode::Runtime,
+                "io_error",
+                format!("cannot create {}: {e}", folo_api::json::path(parent)),
+            )
+        })?;
+    }
     let mut bytes = serde_json::to_vec_pretty(&thresholds_json(cal, classes)).map_err(|e| {
         CliError::new(ExitCode::Runtime, "internal", format!("serializing thresholds JSON: {e}"))
     })?;
@@ -322,8 +375,25 @@ mod tests {
         // Empty path and directory path -> ExitCode::Usage / usage
         assert_eq!(load_thresholds(Path::new("")).unwrap_err().code, "usage");
         assert_eq!(load_thresholds(dir.path()).unwrap_err().code, "usage");
-        assert_eq!(check_save_thresholds_path(Some(Path::new(""))).unwrap_err().code, "usage");
-        assert_eq!(check_save_thresholds_path(Some(dir.path())).unwrap_err().code, "usage");
+        let model_file = dir.join("best.folo");
+        std::fs::write(&model_file, b"weights").unwrap();
+        assert_eq!(
+            check_save_thresholds_path(Some(Path::new("")), &model_file, None).unwrap_err().code,
+            "usage"
+        );
+        assert_eq!(
+            check_save_thresholds_path(Some(dir.path()), &model_file, None).unwrap_err().code,
+            "usage"
+        );
+        assert_eq!(
+            check_save_thresholds_path(Some(&model_file), &model_file, None).unwrap_err().code,
+            "usage"
+        );
+        let shared = dir.join("same.json");
+        assert_eq!(
+            check_save_thresholds_path(Some(&shared), &model_file, Some(&shared)).unwrap_err().code,
+            "usage"
+        );
 
         // Malformed JSON -> invalid_config
         let bad_json = dir.join("bad.json");
