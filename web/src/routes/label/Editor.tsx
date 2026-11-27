@@ -47,6 +47,7 @@ import Select from '$lib/ui/Select';
 import { tooltip } from '$lib/ui/tooltip';
 import type { AgentChoice } from './agentChoice';
 import { keyStep, newBox, nudge, sameBoxes, stretch, tidy } from './boxEdit';
+import { boxDimensions, historyTooltip, nextToReview, nextUnlabeled } from './editorNav';
 import { History } from './history';
 import EditCanvas from './EditCanvas';
 import EditorHints from './EditorHints';
@@ -205,16 +206,8 @@ export default function Editor(props: EditorProps) {
   });
 
   const locked = computed(() => (img.get()?.status === 'labeling' ? 'The agent is labeling this image. You can edit it once it is done.' : null));
-  const undoTip = computed(() => {
-    if (locked.get()) return { text: 'Undo unavailable while the agent is labeling' };
-    const n = undoCount.get();
-    return n > 0 ? { text: `Undo (${n} ${n === 1 ? 'step' : 'steps'})`, keys: 'Mod+Z' } : { text: 'Nothing to undo', keys: 'Mod+Z' };
-  });
-  const redoTip = computed(() => {
-    if (locked.get()) return { text: 'Redo unavailable while the agent is labeling' };
-    const n = redoCount.get();
-    return n > 0 ? { text: `Redo (${n} ${n === 1 ? 'step' : 'steps'})`, keys: 'Mod+Shift+Z' } : { text: 'Nothing to redo', keys: 'Mod+Shift+Z' };
-  });
+  const undoTip = computed(() => historyTooltip('undo', undoCount.get(), !!locked.get()));
+  const redoTip = computed(() => historyTooltip('redo', redoCount.get(), !!locked.get()));
 
   // ---------- editing ----------
   /** Every edit of the draft goes through here, so it can be undone; `kind` joins a run of like edits into one step. */
@@ -356,20 +349,13 @@ export default function Editor(props: EditorProps) {
   const reviewing = signal(false);
   /** No keyboard to name a key for. */
   const touch = new MediaQuery(TOUCH_ONLY, false);
-  /** The next image of the filter whose labels nobody has checked: after this one, then from the start. */
-  function nextToReview(fromId: string): string | null {
-    const list = props.images;
-    const i = list.findIndex((x) => x.id === fromId);
-    const order = i < 0 ? list : [...list.slice(i + 1), ...list.slice(0, i)];
-    return order.find((x) => x.id !== fromId && x.status === 'labeled' && !x.reviewed)?.id ?? null;
-  }
   /** Marks the labels reviewed (and opens the next image to review) or not. */
   async function review(reviewed: boolean) {
     const cur = img.peek();
     if (!cur || reviewing.peek() || saving.peek()) return;
     const jobId = props.job.id, epoch = hub.epoch;
     // Read before the answer: under "To review" the image leaves the filter once it is reviewed.
-    const next = reviewed ? nextToReview(cur.id) : null;
+    const next = reviewed ? nextToReview(props.images, cur.id) : null;
     // The mark is for the labels on screen (the newest image's, as in `save`): once the image has others, the server
     // refuses it.
     const expect = boxRevision(cur.boxes);
@@ -408,7 +394,7 @@ export default function Editor(props: EditorProps) {
     const cur = img.peek();
     if (!cur) return;
     const jobId = props.job.id;
-    const next = nextToReview(cur.id);
+    const next = nextToReview(props.images, cur.id);
     if ((await save()) && !disposed && shownId === cur.id && next && atImage(jobId, cur.id)) props.onnavigate(next);
   }
 
@@ -462,6 +448,18 @@ export default function Editor(props: EditorProps) {
     const next = props.images[idx.peek() + d];
     if (next) go(next.id);
   };
+  /** Jumps to the next unlabeled image (`pending` or `failed`) in the current filter (`U` shortcut). */
+  function jumpUnlabeled() {
+    const cur = img.peek();
+    if (!cur) return;
+    const next = nextUnlabeled(props.images, cur.id);
+    if (next) {
+      go(next);
+    } else {
+      const busy = props.images.some((x) => x.id !== cur.id && x.status === 'labeling');
+      status.info('No more unlabeled images', busy ? 'Remaining unlabeled images are being labeled by the agent.' : 'Every other image in this filter is labeled.');
+    }
+  }
 
   const body = signal<HTMLElement>();
   function onkeydown(e: KeyboardEvent) {
@@ -496,6 +494,7 @@ export default function Editor(props: EditorProps) {
     } else if (e.altKey) return;
     else if (k === 'j' || k === 'J') step(1);
     else if (k === 'k' || k === 'K') step(-1);
+    else if (k === 'u' || k === 'U') jumpUnlabeled();
     else if (/^[1-9]$/.test(k)) setClass(Number(k) - 1);
     // Enter on a control is that control's; anywhere else in the editor it is "Looks right", or with changes, Save and
     // on to the next image to review.
@@ -595,7 +594,6 @@ export default function Editor(props: EditorProps) {
     }
   }
 
-  const size = (b: Box) => `${Math.round(b.x2 - b.x1)}×${Math.round(b.y2 - b.y1)}`;
   const name = (c: number) => props.job.classes[c] ?? `class ${c + 1}`;
 
   return (
@@ -732,7 +730,7 @@ export default function Editor(props: EditorProps) {
                           >
                             <span class="sw" style:background={classColor(b().class)}></span>
                             <span class="cn truncate">{name(b().class)}</span>
-                            <span class="sz num">{size(b())}</span>
+                            <span class="sz num">{boxDimensions(b())}</span>
                           </button>
                         </li>
                       )}

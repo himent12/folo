@@ -112,6 +112,7 @@ export function SummaryRail(props: SummaryProps) {
               cliParts={s.cli.parts.get()}
               cli={s.cli.line.get()}
               cliPlaceholder={s.cli.placeholder.get()}
+              onCpu={s.onCpu.get()}
               pending={!s.prefilled.get() ? 'Loading run settings…' : s.pendingWeights.get() ? 'Waiting for linked weights to load…' : null}
               seedMissing={!!s.errors.get().seed}
             />

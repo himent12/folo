@@ -118,6 +118,13 @@ describe('trainCommand (DOGFOOD-3 S1)', () => {
     expect(serverCommand({})).toBeNull();
     expect(serverCommand(null)).toBeNull();
   });
+
+  it('appends --set auto_batch=true when autoBatch option is enabled without altering TrainConfig', () => {
+    const c = trainCommand(base, 'D:/fasteners', undefined, { autoBatch: true });
+    expect(c.argv.slice(-2)).toEqual(['--set', 'auto_batch=true']);
+    expect(c.parts.at(-1)).toBe('--set auto_batch=true');
+    expect(split(c.line).slice(1)).toEqual(c.argv);
+  });
 });
 
 // The commands crates/folo-cli/tests/studio_cli.rs parses with the real clap parser (the CLI's `Cli`): representative

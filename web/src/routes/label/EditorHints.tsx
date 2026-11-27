@@ -115,6 +115,10 @@ export default function EditorHints(props: EditorHintsProps) {
             <span>Next / Prev</span>
           </span>
           <span class="kh">
+            <Kbd keys="U" subtle />
+            <span>Next unlabeled</span>
+          </span>
+          <span class="kh">
             <Kbd keys="Del" subtle />
             <span>Delete</span>
           </span>

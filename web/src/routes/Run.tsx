@@ -76,6 +76,7 @@ import WaitingPanels from './run/WaitingPanels';
 import { exactTime } from './runs/when';
 import DeleteRun from './run/DeleteRun';
 import { goneEvalOn } from './run/goneEvalOn';
+import { buildCheckpointCli, runExportMenuItems, runExportPageCommands } from './run/runExport';
 import { stopDescription, stoppedToast } from './run/StopRun';
 
 type Section = 'pr' | 'lr' | 'samples' | 'classes' | 'logs' | 'cloud' | 'config';
@@ -257,6 +258,13 @@ export default function Run() {
   });
   /** A completed run's model: the header's primary (Open model), Try in Playground beside it. */
   const headerModel = computed(() => (status.get() === 'completed' ? (run.get()?.model_id ?? null) : null));
+  const runModel = computed(() => { const mid = run.get()?.model_id; return mid ? models.data?.find((m) => m.id === mid) : undefined; });
+  const checkpointCli = computed(() => { const r = run.get(); return r ? buildCheckpointCli(r, runModel.get(), dataset.get(), evalOn.get()) : null; });
+  const hasPerClass = computed(() => (void live.version, (live.epochs[live.epochs.length - 1]?.val.per_class.length ?? 0) > 0));
+  const exportItems = computed<MenuItem[]>(
+    () => (run.get() && epochsDone.get() > 0 ? runExportMenuItems(() => run.peek(), () => live.epochs, () => classes.get(), () => datasetName.get(), hasPerClass.get()) : []),
+    { equals: sameItems },
+  );
   const stopOpen = signal(false);
   const deleteOpen = signal(false);
   const busy = signal(false);
@@ -336,6 +344,7 @@ export default function Run() {
       if (!headerModel.get() || !wide || r.best?.map50_95 === 0) out.push({ label: 'Try in Playground', icon: ScanSearch, href: href(`/playground?model=${r.model_id}`) });
     }
     out.push({ label: 'New run like this', icon: Copy, href: href(`/runs/new?from=${r.id}`) });
+    out.push(...exportItems.get());
     // The queue's one action set (`queueItems`), whole, as on the Runs list: the open menu covers the callout's Start
     // next, so the menu never relies on it. Remove from queue last.
     const removeQueued = () => stopOpen.set(true);
@@ -379,6 +388,7 @@ export default function Run() {
     out.push({ id: 'run-copy-id', label: 'Copy run id', match: [r.id], icon: Copy, run: () => void copyText(r.id, 'run id') });
     const line = runCli.get();
     if (line) out.push({ id: 'run-copy-cli', label: 'Copy CLI command', match: ['folo train', 'PowerShell'], icon: Copy, run: () => void copyText(line, 'CLI command') });
+    out.push(...runExportPageCommands(() => run.peek(), () => live.epochs, () => classes.get(), () => datasetName.get(), checkpointCli.get(), epochsDone.get() > 0, hasPerClass.get()));
     return out;
   });
 
@@ -719,6 +729,7 @@ export default function Run() {
                           compact
                           unavailable={historyError.get() !== undefined}
                           ended={model.unvalidated.get()}
+                          exportItems={exportItems.get()}
                         />
                       </div>
                     </>
@@ -742,6 +753,7 @@ export default function Run() {
                       weights={lineage.get()}
                       compact={!stacked.current || phone.current}
                       cli={runCli.get()}
+                      checkpointCli={checkpointCli.get()}
                       runId={R().id}
                     />
                   </div>

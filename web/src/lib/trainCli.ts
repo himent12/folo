@@ -96,11 +96,55 @@ export interface TrainCommand {
   placeholder: string | null;
 }
 
+/** CLI override flag enabling the GPU VRAM-budget auto-batch prober (`TrainConfig.auto_batch`, docs/VISION.md). */
+export const AUTO_BATCH_FLAG = '--set auto_batch=true';
+
+/**
+ * Splits a PowerShell CLI command line into top-level flag segments (`folo train`, `--data ...`, `--set ...`),
+ * ignoring ` --` inside PowerShell single-quoted strings (`'...'`, including typographic single quotes).
+ */
+export function splitCliFlags(line: string): string[] {
+  const parts: string[] = [];
+  let start = 0;
+  let inQuote = false;
+  const isSingleQuote = (c: string) => c === "'" || c === '\u2018' || c === '\u2019' || c === '\u201A' || c === '\u201B';
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i]!;
+    if (isSingleQuote(ch)) {
+      if (inQuote && i + 1 < line.length && isSingleQuote(line[i + 1]!)) {
+        i++;
+      } else {
+        inQuote = !inQuote;
+      }
+      continue;
+    }
+    if (!inQuote && ch === ' ' && line.startsWith('--', i + 1)) {
+      parts.push(line.slice(start, i));
+      start = i + 1;
+    }
+  }
+  parts.push(line.slice(start));
+  return parts;
+}
+
+/** Appends `--set auto_batch=true` to a structured CLI preview (`parts` and `line`) without mutating inputs. */
+export function withAutoBatch(parts: readonly string[], line: string): { parts: string[]; line: string } {
+  const hasAutoBatch = parts.some((p) => {
+    const t = p.trim();
+    return t === AUTO_BATCH_FLAG || t === '--set=auto_batch=true';
+  });
+  if (hasAutoBatch) {
+    return { parts: [...parts], line };
+  }
+  return { parts: [...parts, AUTO_BATCH_FLAG], line: `${line} ${AUTO_BATCH_FLAG}` };
+}
+
 /**
  * `folo train` for `config`. `data` is the dataset's path on the server; `model` the model `config.weights` names,
- * where known (its `path` is the file to fine-tune from).
+ * where known (its `path` is the file to fine-tune from). Pass `{ autoBatch: true }` to preview CLI-only GPU
+ * VRAM-budget auto-batching (`--set auto_batch=true`) without changing `TrainConfig`.
  */
-export function trainCommand(config: TrainConfig, data: string, model?: Model): TrainCommand {
+export function trainCommand(config: TrainConfig, data: string, model?: Model, opts?: { autoBatch?: boolean }): TrainCommand {
   const weights = config.weights ? weightsRef(config.weights, model) : null;
   const ctx: Context = { data, weights };
   const argv = ['train'];
@@ -127,6 +171,10 @@ export function trainCommand(config: TrainConfig, data: string, model?: Model): 
     // A placeholder stays readable (`<path to x.folo>`): it is there to be replaced, not run.
     const shown = f.flag === '--weights' && weights?.kind === 'placeholder' ? words : words.map(quote);
     parts.push(`${f.flag} ${shown.join(' ')}`);
+  }
+  if (opts?.autoBatch) {
+    argv.push('--set', 'auto_batch=true');
+    parts.push(AUTO_BATCH_FLAG);
   }
   return { argv, parts, line: parts.join(' '), placeholder: weights?.kind === 'placeholder' ? weights.file : null };
 }
