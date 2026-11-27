@@ -124,6 +124,8 @@ export interface ImagePanelProps {
   liveStage?: (() => JSX.Element) | null;
   /** Inline video scrubber or live webcam status bar rendered directly beneath the stage. */
   mediaBar?: (() => JSX.Element) | null;
+  /** Compact multi-image batch filmstrip bar rendered directly beneath the stage when 2+ images are loaded. */
+  batchBar?: (() => JSX.Element) | null;
   /** Optional stable zoom reset key so video frame stepping preserves zoom/pan. */
   zoomResetKey?: string;
   /** Keep previous frame opaque across local video/webcam frame swaps (avoids blank flicker). */
@@ -358,6 +360,7 @@ export default function ImagePanel(props: ImagePanelProps) {
           ) : null}
         </div>
         {props.mediaBar ? props.mediaBar() : null}
+        {props.batchBar ? props.batchBar() : null}
         {/* Phones: the threshold tuned most sits right under the image; the rest is one tap away below it. Tablets:
             Confidence and Overlap side by side (Confidence alone for end-to-end o2o models), the less-used settings one tap away. */}
         {props.source ? (
