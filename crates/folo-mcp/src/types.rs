@@ -336,6 +336,12 @@ pub struct PredictArgs {
     /// Include horizontally flipped views with TTA (requires `tta: true`; default true).
     #[serde(default)]
     pub tta_hflip: Option<bool>,
+    /// Path to a `ThresholdCalibration` JSON file from `folo val --save-thresholds`. Mutually exclusive with `per_class_conf`.
+    #[serde(default)]
+    pub thresholds_path: Option<String>,
+    /// Per-class confidence thresholds (`class_id -> conf` in `0..=1`). Mutually exclusive with `thresholds_path`.
+    #[serde(default)]
+    pub per_class_conf: Option<BTreeMap<u32, f32>>,
 }
 
 /// `predict_batch`. Give `paths` or `glob`; at most 256 images after glob expansion.
@@ -376,6 +382,12 @@ pub struct PredictBatchArgs {
     /// Include horizontally flipped views with TTA (requires `tta: true`; default true).
     #[serde(default)]
     pub tta_hflip: Option<bool>,
+    /// Path to a `ThresholdCalibration` JSON file from `folo val --save-thresholds`. Mutually exclusive with `per_class_conf`.
+    #[serde(default)]
+    pub thresholds_path: Option<String>,
+    /// Per-class confidence thresholds (`class_id -> conf` in `0..=1`). Mutually exclusive with `thresholds_path`.
+    #[serde(default)]
+    pub per_class_conf: Option<BTreeMap<u32, f32>>,
 }
 
 /// One image `predict_batch` could not process.

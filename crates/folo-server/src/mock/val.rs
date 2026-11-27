@@ -8,13 +8,14 @@ use super::runs::{arch_spec, r3, r4};
 use super::{MockStore, quality_of};
 use crate::error::{Error, Result};
 use crate::store::{
-    ImageDiagnostics, Store, ValDiagConfig, ValDiagnostics, ValDiagnosticsSummary, check_val_diag_config,
+    ClassThreshold, ImageDiagnostics, OperatingPoint, Store, ThresholdCalibration, ValDiagConfig,
+    ValDiagnostics, ValDiagnosticsSummary, ValExtended, check_val_diag_config,
 };
 use crate::util::{fnv1a, noise};
 
 /// See the module docs.
 pub(super) fn val(store: &MockStore, req: ValRequest) -> Result<ValReport> {
-    val_with_diagnostics(store, req, None).map(|(r, _)| r)
+    val_extended(store, req, None).map(|v| v.report)
 }
 
 /// [`val`] with deterministic synthetic per-image error diagnostics when `diag` is `Some`.
@@ -23,6 +24,15 @@ pub(super) fn val_with_diagnostics(
     req: ValRequest,
     diag: Option<ValDiagConfig>,
 ) -> Result<(ValReport, Option<ValDiagnostics>)> {
+    val_extended(store, req, diag).map(|v| (v.report, v.diagnostics))
+}
+
+/// [`val`] returning report, optional diagnostics, and calibrated per-class F1 thresholds.
+pub(super) fn val_extended(
+    store: &MockStore,
+    req: ValRequest,
+    diag: Option<ValDiagConfig>,
+) -> Result<ValExtended> {
     if let Some(d) = &diag {
         check_val_diag_config(d)?;
     }
@@ -105,7 +115,50 @@ pub(super) fn val_with_diagnostics(
         timing: ValTiming { total_s, per_image_ms },
     };
     let diagnostics = diag.map(|cfg| mock_diagnostics(&report, seed, cfg));
-    Ok((report, diagnostics))
+    let thresholds = Some(mock_thresholds(&report, seed, req.conf));
+    Ok(ValExtended { report, diagnostics, thresholds })
+}
+
+fn mock_thresholds(report: &ValReport, seed: u64, min_conf: f32) -> ThresholdCalibration {
+    let f1_of = |p: f32, r: f32| if p + r > 0.0 { r4(2.0 * p * r / (p + r)) } else { 0.0 };
+    let floor = min_conf.clamp(0.0, 1.0);
+    let global_conf = report.val.best_f1_conf.unwrap_or(0.0).clamp(floor, 1.0);
+    let per_class: Vec<ClassThreshold> = report
+        .val
+        .per_class
+        .iter()
+        .map(|c| {
+            let jitter = 0.08 * noise(&[seed, u64::from(c.class) ^ 0x9e37]);
+            let best_conf = r3((global_conf + jitter).clamp(floor, 1.0));
+            let precision = c.precision.clamp(0.0, 1.0);
+            let recall = c.recall.clamp(0.0, 1.0);
+            let truths = (report.images.max(1) * 2) / report.val.per_class.len().max(1) as u64;
+            let truths = truths.max(1);
+            let preds = ((truths as f32) * (recall / precision.max(0.05))).round().max(0.0) as u64;
+            ClassThreshold {
+                class: c.class,
+                best_conf,
+                best_f1: f1_of(precision, recall),
+                precision,
+                recall,
+                truths,
+                preds,
+            }
+        })
+        .collect();
+    let macro_f1 = if per_class.is_empty() {
+        0.0
+    } else {
+        r4(per_class.iter().map(|c| c.best_f1).sum::<f32>() / per_class.len() as f32)
+    };
+    let global = if per_class.is_empty() {
+        OperatingPoint::default()
+    } else {
+        let p = report.val.precision.clamp(0.0, 1.0);
+        let r = report.val.recall.clamp(0.0, 1.0);
+        OperatingPoint { best_conf: global_conf, best_f1: f1_of(p, r), precision: p, recall: r }
+    };
+    ThresholdCalibration { global, per_class, macro_f1 }
 }
 
 fn mock_diagnostics(report: &ValReport, seed: u64, cfg: ValDiagConfig) -> ValDiagnostics {

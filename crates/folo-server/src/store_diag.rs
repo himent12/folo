@@ -1,14 +1,26 @@
-//! Validation error diagnostics and independent ONNX dynamic-axis helpers shared across [`Store`](crate::Store)
-//! implementations, HTTP routes, and MCP proxy forwarding.
+//! Validation error diagnostics, calibrated threshold helpers, prediction workload guards, and independent ONNX
+//! dynamic-axis helpers shared across [`Store`](crate::Store) implementations, HTTP routes, and MCP proxy forwarding.
+
+use std::collections::BTreeMap;
 
 use axum::http::StatusCode;
-use folo_api::{ExportFormat, ExportSpec};
+use folo_api::{ExportFormat, ExportSpec, ValReport};
 
 use crate::error::{Error, Result};
 
-pub use folo_vision::eval::ImageDiagnostics;
+pub use folo_vision::eval::{
+    ClassThreshold, ImageDiagnostics, OperatingPoint, ThresholdCalibration, validate_per_class_conf,
+};
 pub use folo_vision::export::onnx::DynamicAxes;
+pub use folo_vision::tta::DEFAULT_TTA_SCALES;
+pub use folo_vision::{PredictOptions, TileConfig, TileMergeMetric, TtaConfig};
 
+/// Server capability flag advertised on `/api/health` and `/api/system` when `POST /api/predict` honours optional
+/// `tile` (SAHI) and `tta` (Test-Time Augmentation) fields.
+pub const FEATURE_PREDICT_OPTIONS: &str = "predict_options";
+/// Server capability flag advertised on `/api/health` and `/api/system` when `/api/bench` honours client-chosen
+/// `?entry_id=<id>` on `POST .../entries` and conditional `?only_if_open=true` on `POST .../entries/{id}/stop`.
+pub const FEATURE_BENCH_UPLOAD_SAFE: &str = "bench_upload_safe";
 /// Server capability flag advertised on `/api/health` and `/api/system` when `POST /api/val` honours optional
 /// per-image error diagnostics (`diagnostics`, `worst`, `diag_conf`, `diag_tp_iou`, `diag_bg_iou`).
 pub const FEATURE_VAL_DIAGNOSTICS: &str = "val_diagnostics";
@@ -24,6 +36,153 @@ pub const FEATURE_BENCH_GENERATED_SOURCE: &str = "bench_generated_source";
 /// Server capability flag advertised on `/api/health` and `/api/system` when `POST /api/runs` and
 /// `POST /api/runs/estimate` accept FOLO v2-Iso architectures (`folo2-n`, `folo2-s`, `folo2-m`, `folo2-l`, `folo2-x`).
 pub const FEATURE_FOLO2_ARCH: &str = "folo2_arch";
+/// Server capability flag advertised on `/api/health` and `/api/system` when `POST /api/val` returns calibrated
+/// per-class F1 thresholds (`thresholds`) and `POST /api/predict` honours `per_class_conf` / `conf_inclusive`.
+pub const FEATURE_THRESHOLD_CALIBRATION: &str = "threshold_calibration";
+
+/// Maximum SAHI tiles permitted in a single server/MCP `predict` call (prevents resource exhaustion on tiny tiles).
+pub const MAX_PREDICT_TILES: usize = 256;
+/// Maximum cropped tiles predicted in a single batch in server/MCP `predict`.
+pub const MAX_PREDICT_TILE_BATCH: usize = 32;
+/// Maximum peak RGB crop bytes allocated per tiled batch chunk in server/MCP `predict` (256 MiB).
+pub const MAX_PREDICT_CROP_BYTES: u64 = 256 * 1024 * 1024;
+/// Maximum TTA views permitted in a single server/MCP `predict` call (`unique_scales * (hflip ? 2 : 1)`).
+pub const MAX_PREDICT_TTA_VIEWS: usize = 16;
+
+/// Validates `options` independent of a specific model `imgsz` or image dimensions (`400 invalid_body` on invalid
+/// ranges, exceeding per-request batch/scale caps, or combining `tile` with `tta`).
+pub fn check_predict_options(options: &PredictOptions) -> Result<()> {
+    fn bad(field: &str, msg: impl std::fmt::Display) -> Error {
+        Error::new(StatusCode::BAD_REQUEST, "invalid_body", format!("field `{field}`: {msg}"))
+    }
+    if options.tile.is_some() && options.tta.is_some() {
+        return Err(bad("tile", "cannot be combined with tta"));
+    }
+    if let Some(tile) = &options.tile {
+        tile.validate().map_err(|e| bad("tile", e))?;
+        if tile.tile_batch > MAX_PREDICT_TILE_BATCH {
+            return Err(bad(
+                "tile",
+                format!("tile_batch must be at most {MAX_PREDICT_TILE_BATCH}, got {}", tile.tile_batch),
+            ));
+        }
+    }
+    if let Some(tta) = &options.tta {
+        tta.validate().map_err(|e| bad("tta", e))?;
+        if tta.scales.len() > MAX_PREDICT_TTA_VIEWS {
+            return Err(bad(
+                "tta",
+                format!("at most {MAX_PREDICT_TTA_VIEWS} scales are allowed, got {}", tta.scales.len()),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Tile count along one image axis matching `folo_vision::tile::compute_tiles` without allocating tile rects.
+fn axis_tile_count(img_len: u32, tile_len: u32, overlap: f32) -> usize {
+    let tw = tile_len.min(img_len);
+    if tw == img_len || tw == 0 {
+        return 1;
+    }
+    let overlap_px = ((tw as f64) * (overlap as f64)).round() as u32;
+    let stride = tw.saturating_sub(overlap_px.min(tw - 1)).max(1);
+    let span = img_len - tw;
+    (span as usize).div_ceil(stride as usize) + 1
+}
+
+/// Validates `options` against `model_imgsz` and (when known) image `(width, height)`, enforcing server-side SAHI
+/// tile-count and TTA view-count budgets before locking the predictor or allocating tile grids.
+pub fn check_predict_workload(
+    options: &PredictOptions,
+    model_imgsz: u32,
+    image_size: Option<(u32, u32)>,
+) -> Result<()> {
+    let bad = |msg: String, hint: &'static str| {
+        Error::new(StatusCode::BAD_REQUEST, "invalid_config", msg).hint(hint)
+    };
+    options.validate(model_imgsz).map_err(|e| {
+        bad(e.to_string(), "check `tile` / `tta` settings against the model's input size (32..=8192)")
+    })?;
+    if let (Some(tile), Some((w, h))) = (&options.tile, image_size) {
+        let nx = axis_tile_count(w, tile.tile_width, tile.overlap_x);
+        let ny = axis_tile_count(h, tile.tile_height, tile.overlap_y);
+        let tiles = nx.saturating_mul(ny);
+        if tiles > MAX_PREDICT_TILES {
+            return Err(bad(
+                format!(
+                    "tiled prediction on {w}x{h} with {}x{} tiles produces {tiles} tiles, exceeding the server limit of {MAX_PREDICT_TILES}",
+                    tile.tile_width, tile.tile_height
+                ),
+                "use a larger tile size or lower overlap",
+            ));
+        }
+        let crop_w = tile.tile_width.min(w) as u64;
+        let crop_h = tile.tile_height.min(h) as u64;
+        let chunk = tiles.min(tile.tile_batch) as u64;
+        let crop_bytes = chunk.saturating_mul(crop_w).saturating_mul(crop_h).saturating_mul(3);
+        if crop_bytes > MAX_PREDICT_CROP_BYTES {
+            return Err(bad(
+                format!(
+                    "tiled prediction on {w}x{h} with {}x{} tiles and tile_batch {} needs {:.1} MiB of crop buffers per batch chunk, exceeding the server limit of {} MiB",
+                    tile.tile_width,
+                    tile.tile_height,
+                    tile.tile_batch,
+                    crop_bytes as f64 / (1024.0 * 1024.0),
+                    MAX_PREDICT_CROP_BYTES / (1024 * 1024),
+                ),
+                "reduce `tile_batch` or use a smaller tile size",
+            ));
+        }
+    }
+    if let Some(tta) = &options.tta {
+        let sizes = tta.resolve_imgszs(model_imgsz).map_err(|e| {
+            bad(e.to_string(), "check `tta.scales` against the model's input size (32..=8192)")
+        })?;
+        let views = sizes.len().saturating_mul(if tta.hflip { 2 } else { 1 });
+        if views > MAX_PREDICT_TTA_VIEWS {
+            return Err(bad(
+                format!("TTA produces {views} views, exceeding the server limit of {MAX_PREDICT_TTA_VIEWS}"),
+                "pass fewer scales or set `hflip: false`",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Validates optional per-class confidence thresholds (`400 invalid_body` on non-finite or out-of-range values;
+/// `400 invalid_config` when `num_classes` is supplied and a class id is `>= num_classes`).
+pub fn check_per_class_conf(map: &BTreeMap<u32, f32>, num_classes: Option<usize>) -> Result<()> {
+    validate_per_class_conf(map).map_err(|e| {
+        Error::new(StatusCode::BAD_REQUEST, "invalid_body", format!("field `per_class_conf`: {e}"))
+    })?;
+    if let Some(nc) = num_classes {
+        for &class in map.keys() {
+            if (class as usize) >= nc {
+                return Err(Error::new(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_config",
+                    format!(
+                        "per_class_conf: class {class} is out of range for model with {nc} classes (0..{nc})"
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Extended validation output returned by [`crate::Store::val_extended`]: the core [`ValReport`], optional
+/// per-image error diagnostics, and calibrated per-class F1 thresholds.
+#[derive(Clone, Debug)]
+pub struct ValExtended {
+    /// Core validation report.
+    pub report: ValReport,
+    /// Optional per-image error diagnostics when requested.
+    pub diagnostics: Option<ValDiagnostics>,
+    /// Optional calibrated global and per-class F1 thresholds.
+    pub thresholds: Option<ThresholdCalibration>,
+}
 
 /// Extra run options carried alongside [`folo_api::TrainConfig`] on `POST /api/runs`, `POST /api/runs/estimate`,
 /// and the MCP `train` tool without altering `folo-api` wire types.

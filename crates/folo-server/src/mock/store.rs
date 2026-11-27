@@ -609,7 +609,13 @@ impl Store for MockStore {
 
     fn predict(&self, input: PredictInput) -> Result<PredictResponse> {
         crate::store::check_predict_options(&input.options)?;
+        if let Some(map) = &input.per_class_conf {
+            crate::store::check_per_class_conf(map, None)?;
+        }
         let model = self.get_model(&input.model_id)?;
+        if let Some(map) = &input.per_class_conf {
+            crate::store::check_per_class_conf(map, Some(model.classes.len()))?;
+        }
         crate::store::check_predict_workload(&input.options, model.imgsz, None)?;
         let (w, h, truth, seed) = match &input.source {
             PredictSource::Dataset { dataset_id, image_id } => {
@@ -655,7 +661,18 @@ impl Store for MockStore {
         let mut boxes: Vec<ScoredBox> =
             fake_detections(&truth, w, h, &model.classes, quality_of(&model), seed)
                 .into_iter()
-                .filter(|b| b.score >= input.conf)
+                .filter(|b| {
+                    let thr = input
+                        .per_class_conf
+                        .as_ref()
+                        .and_then(|m| m.get(&b.class).copied())
+                        .unwrap_or(input.conf);
+                    if input.per_class_conf.is_none() || input.conf_inclusive {
+                        b.score >= thr
+                    } else {
+                        b.score > thr
+                    }
+                })
                 .collect();
         boxes.truncate(input.max_det as usize);
         let mut r = Rng::new(seed ^ 0x7131);
@@ -762,6 +779,14 @@ impl Store for MockStore {
         diag: Option<crate::store::ValDiagConfig>,
     ) -> Result<(folo_api::ValReport, Option<crate::store::ValDiagnostics>)> {
         val::val_with_diagnostics(self, req, diag)
+    }
+
+    fn val_extended(
+        &self,
+        req: folo_api::ValRequest,
+        diag: Option<crate::store::ValDiagConfig>,
+    ) -> Result<crate::store::ValExtended> {
+        val::val_extended(self, req, diag)
     }
 
     fn dataset_root(&self, id: &str) -> Result<Option<std::path::PathBuf>> {

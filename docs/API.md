@@ -96,8 +96,8 @@ CLI's exit code; a test keeps the sources in line with it). Messages that wrap a
   (`path` on `GET /api/label/jobs/{id}/images`; older servers ignore it), `uploads` (`/api/uploads`),
   `run_cursors` (`after_step` / `after_epoch` on `/metrics`, `after` and `total` on `/logs`, `Range` on `/weights`),
   `run_checkpoint` (`checkpoint` on `POST /api/runs`; these three are what a cloud worker needs, docs/CLOUD.md),
-  `cloud` (`/api/cloud`, `TrainConfig.compute`, `Run.cloud` and `cloud` events), `vision_bench` (the `/api/bench` endpoints, Vision benchmarks below), `bench_upload_safe` (client-chosen `?entry_id=` on `POST /api/bench/benchmarks/{id}/entries` and atomic conditional `?only_if_open=true[&delete=true]` on `POST .../stop`), `bench_generated_source` (`source: { "kind": "generated", ... }` on `POST /api/bench/benchmarks`), `train_auto_batch` (`batch: "auto"`, `auto_batch`, and `auto_batch_target` on `POST /api/runs`), `predict_options` (optional `tile` / `tta` fields on `POST /api/predict`), `val_diagnostics` (optional `diagnostics` / `worst` / `diag_*` fields on `POST /api/val`), and `export_dynamic_axes` (optional independent `dynamic_batch` / `dynamic_hw` fields on `POST /api/models/{id}/export`). `folo mcp --server` refuses the
-  export switches without `export_onnx_switches` (and split dynamic axes without `export_dynamic_axes`, validation diagnostics without `val_diagnostics`, `tile`/`tta` without `predict_options`, auto-batch training without `train_auto_batch`, and generated benchmarks without `bench_generated_source`).) In real mode `gpus` comes from folo-gpu
+  `cloud` (`/api/cloud`, `TrainConfig.compute`, `Run.cloud` and `cloud` events), `vision_bench` (the `/api/bench` endpoints, Vision benchmarks below), `bench_upload_safe` (client-chosen `?entry_id=` on `POST /api/bench/benchmarks/{id}/entries` and atomic conditional `?only_if_open=true[&delete=true]` on `POST .../stop`), `bench_generated_source` (`source: { "kind": "generated", ... }` on `POST /api/bench/benchmarks`), `train_auto_batch` (`batch: "auto"`, `auto_batch`, and `auto_batch_target` on `POST /api/runs`), `predict_options` (optional `tile` / `tta` fields on `POST /api/predict`), `val_diagnostics` (optional `diagnostics` / `worst` / `diag_*` fields on `POST /api/val`), `export_dynamic_axes` (optional independent `dynamic_batch` / `dynamic_hw` fields on `POST /api/models/{id}/export`), `folo2_arch` (`folo2-n..folo2-x` architectures on `POST /api/runs` and `POST /api/runs/estimate`), and `threshold_calibration` (calibrated `thresholds` on `POST /api/val` and optional `per_class_conf` / `conf_inclusive` fields on `POST /api/predict`). `folo mcp --server` refuses the
+  export switches without `export_onnx_switches` (and split dynamic axes without `export_dynamic_axes`, validation diagnostics without `val_diagnostics`, `tile`/`tta` without `predict_options`, calibrated thresholds without `threshold_calibration`, auto-batch training without `train_auto_batch`, `folo2-*` architectures without `folo2_arch`, and generated benchmarks without `bench_generated_source`).) In real mode `gpus` comes from folo-gpu
   (wgpu): every physical adapter once, through its preferred backend (software adapters are left out), best first,
   so ordinal 0 is the adapter `gpu:0` and `device: auto` use. `memory_bytes` is the adapter's largest device-local
   memory heap on Vulkan (an RTX 4080 SUPER reports 15.7 GiB), and `0` through DX12 or Metal, where wgpu cannot say; wgpu
@@ -699,8 +699,9 @@ CLI's exit code; a test keeps the sources in line with it). Messages that wrap a
 
 ## Inference
 - `POST /api/predict` — `multipart/form-data` with `image` (file), `model_id`, optional `conf` (0.25), `iou` (0.7),
-  `max_det` (300) (instead of `image`, the form may name `dataset_id` + `image_id`); or JSON
-  `{ "model_id", "dataset_id", "image_id", "conf"?, "iou"?, "max_det"? }` →
+  `max_det` (300), `tile` / `tta` (JSON strings), `per_class_conf` (JSON object mapping class id to threshold in
+  `0..=1`), and `conf_inclusive` (`true` / `false`) (instead of `image`, the form may name `dataset_id` + `image_id`);
+  or JSON `{ "model_id", "dataset_id", "image_id", "conf"?, "iou"?, "max_det"?, "tile"?, "tta"?, "per_class_conf"?, "conf_inclusive"? }` →
   ```jsonc
   { "model_id": "m_31aa", "image": { "width": 1280, "height": 720 },
     "boxes": [ScoredBox],                       // highest score first
@@ -1623,9 +1624,11 @@ mostly shown) for the others.
 ## Validation
 - `POST /api/val` body `{ "model_id", "dataset_id", "split": "val", "imgsz": null, "conf": 0.001, "iou": 0.7,
   "diagnostics"?: false, "worst"?: 10, "diag_conf"?: 0.25, "diag_tp_iou"?: 0.50, "diag_bg_iou"?: 0.10 }` →
-  `{ "model_id", "dataset_id", "dataset_name", "split", "imgsz", "images", "val": Epoch.val, "timing": { "total_s", "per_image_ms" }, "diagnostics"?: ValDiagnostics }`.
+  `{ "model_id", "dataset_id", "dataset_name", "split", "imgsz", "images", "val": Epoch.val, "timing": { "total_s", "per_image_ms" }, "diagnostics"?: ValDiagnostics, "thresholds"?: ThresholdCalibration }`.
   `split` is the requested one (no fallback); `dataset_name` is the dataset's name (`null`, or missing, from older
-  servers). Passing `diagnostics: true` or `worst` (`1..=50`, implies `diagnostics: true`; requires `val_diagnostics`
+  servers). `thresholds` (when the server advertises `threshold_calibration`) carries calibrated global and per-class F1
+  confidence thresholds (`global`, `macro_f1`, `per_class`) that can be fed directly into `POST /api/predict` via
+  `per_class_conf` and `conf_inclusive: true`. Passing `diagnostics: true` or `worst` (`1..=50`, implies `diagnostics: true`; requires `val_diagnostics`
   in `features`) includes per-image detection error diagnostics (`conf`, `tp_iou`, `bg_iou`, `images_diagnosed`,
   `failing_images`, `summary`, and `worst_images` ranked by total errors descending); passing `diag_*` without
   `diagnostics: true` or `worst`, or `diag_bg_iou > diag_tp_iou`, is `400 invalid_body`.

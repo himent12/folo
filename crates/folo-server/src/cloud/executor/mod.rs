@@ -716,20 +716,25 @@ impl Exec {
             c.phase = CloudPhase::Provisioning;
             c.cost_usd = total_cost.or(c.cost_usd);
         });
+        let backoff = preemption_backoff_for(self.core.tuning.preemption_backoff, attempt);
+        let delay_note = if backoff.is_zero() {
+            String::new()
+        } else {
+            format!(" after {:.1}s backoff", backoff.as_secs_f64())
+        };
         self.entry.log(
             LogLevel::Warn,
             format!(
                 "worker preempted or lost ({why}); auto-resuming from synced checkpoint weights/last.folo \
-                 (epoch {resume_epoch}, attempt {attempt}/{max_retries})"
+                 (epoch {resume_epoch}, attempt {attempt}/{max_retries}{delay_note})"
             ),
         );
-        self.wait_preemption_backoff()
+        self.wait_preemption_backoff(backoff)
     }
 
-    /// Waits [`super::Tuning::preemption_backoff`] in [`super::Tuning::poll`] slices, cancelling immediately on
-    /// server shutdown, user stop request, or run deadline expiry.
-    fn wait_preemption_backoff(&self) -> std::result::Result<(), Halt> {
-        let backoff = self.core.tuning.preemption_backoff;
+    /// Waits `backoff` in [`super::Tuning::poll`] slices, cancelling immediately on server shutdown, user stop
+    /// request, or run deadline expiry.
+    fn wait_preemption_backoff(&self, backoff: Duration) -> std::result::Result<(), Halt> {
         let t0 = Instant::now();
         loop {
             if self.core.halt.is_on() {
@@ -753,6 +758,12 @@ impl Exec {
             self.wait(self.core.tuning.poll.min(remaining))?;
         }
     }
+}
+
+/// Bounded exponential preemption retry delay: `base * 2^(attempt - 1)` capped at `4 * base`
+/// (`1x, 2x, 4x, 4x, ...`), avoiding rapid spot-reclaim thrashing while keeping retry wait bounded.
+fn preemption_backoff_for(base: Duration, attempt: u32) -> Duration {
+    base.saturating_mul(1u32 << attempt.saturating_sub(1).min(2))
 }
 
 #[cfg(test)]
@@ -835,5 +846,15 @@ mod tests {
         std::fs::write(&staged, b"x").unwrap();
         transfer::remove_partial(&dir);
         assert!(!staged.exists() && !newer.exists());
+    }
+
+    #[test]
+    fn preemption_backoff_doubles_and_caps_at_4x() {
+        let base = Duration::from_secs(10);
+        assert_eq!(preemption_backoff_for(base, 1), Duration::from_secs(10));
+        assert_eq!(preemption_backoff_for(base, 2), Duration::from_secs(20));
+        assert_eq!(preemption_backoff_for(base, 3), Duration::from_secs(40));
+        assert_eq!(preemption_backoff_for(base, 4), Duration::from_secs(40));
+        assert_eq!(preemption_backoff_for(Duration::ZERO, 2), Duration::ZERO);
     }
 }

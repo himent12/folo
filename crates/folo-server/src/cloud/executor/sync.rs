@@ -111,8 +111,27 @@ impl Exec {
         match up {
             Ok(u) => Ok((u, sent)),
             Err(TransferError::Stopped) => Err(self.interrupted().err().unwrap_or(Halt::LetGo)),
-            Err(e) => Err(failed("cloud_sync_failed", format!("uploading {what}: {e}"))),
+            Err(e) => Err(self.sync_or_preempted(format!("uploading {what}: {e}"))),
         }
+    }
+
+    /// Classifies a sync/start failure: when a provisioned instance disappeared mid-sync, escalate to
+    /// [`Halt::Preempted`] (or manual termination / `cloud_instance_lost`) instead of a generic sync failure so
+    /// runs with a synced checkpoint auto-resume cleanly.
+    fn sync_or_preempted(&self, why: String) -> Halt {
+        if self.instance_state().is_some_and(|s| s.is_lost()) {
+            if self.instance_ended() {
+                return self.lost_by_hand();
+            }
+            if self.c.provider.info().provisions && !self.is_stopping() && !self.past_deadline() {
+                return Halt::Preempted(format!("{why}; its instance disappeared before training started"));
+            }
+            return failed(
+                "cloud_instance_lost",
+                format!("{why}; its instance is gone before training started"),
+            );
+        }
+        failed("cloud_sync_failed", why)
     }
 
     /// Starts the run on the worker: the run's config without `compute`, on the worker's device and with the ids the
@@ -146,6 +165,7 @@ impl Exec {
             match client.post::<_, Run>("/runs", &body) {
                 Ok(r) => break r,
                 Err(e) if e.is_transient() && attempt < ATTEMPTS => {
+                    self.interrupted()?;
                     if let Some(r) = self.named(client, &name)?.into_iter().find(|r| !earlier.contains(&r.id))
                     {
                         break r;
@@ -153,13 +173,16 @@ impl Exec {
                     attempt += 1;
                     self.wait(self.core.tuning.poll)?;
                 }
+                Err(e) if e.is_transient() => {
+                    return Err(self.sync_or_preempted(format!("starting the run on the worker: {e}")));
+                }
                 Err(e) => {
-                    let code = if e.is_transient() { "cloud_sync_failed" } else { e.code() };
-                    return Err(failed(code, format!("starting the run on the worker: {e}")));
+                    return Err(failed(e.code(), format!("starting the run on the worker: {e}")));
                 }
             }
         };
         self.private.run_id = Some(created.id.clone());
+        self.private.recovering_preemption = false;
         (self.private.after_step, self.private.after_epoch, self.private.after_log) = (0, 0, 0);
         self.save();
         self.phase(CloudPhase::Training, format!("the worker took the run as {}", created.id));
@@ -174,12 +197,15 @@ impl Exec {
             match client.get::<RunList>("/runs") {
                 Ok(list) => return Ok(list.runs.into_iter().filter(|r| r.name == name).collect()),
                 Err(e) if e.is_transient() && attempt < ATTEMPTS => {
+                    self.interrupted()?;
                     attempt += 1;
                     self.wait(self.core.tuning.poll)?;
                 }
+                Err(e) if e.is_transient() => {
+                    return Err(self.sync_or_preempted(format!("listing the worker's runs: {e}")));
+                }
                 Err(e) => {
-                    let code = if e.is_transient() { "cloud_sync_failed" } else { e.code() };
-                    return Err(failed(code, format!("listing the worker's runs: {e}")));
+                    return Err(failed(e.code(), format!("listing the worker's runs: {e}")));
                 }
             }
         }

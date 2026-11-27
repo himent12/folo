@@ -264,3 +264,111 @@ fn reaper_terminates_superseded_preempted_instance_while_replacement_trains() {
     assert_eq!(done.status, RunStatus::Completed, "{:?}", log_of(&store, &run.id));
     assert_eq!(cloud.live(), 0);
 }
+
+#[test]
+fn preemption_during_replacement_sync_auto_reprovisions_again() {
+    no_gpu();
+    let t = TestDir::new("cloud-spot-sync-preempt");
+    let cloud = TestCloud::new(&t.join("workers"));
+    let store = plane(&t.join("home"), &cloud, fast());
+    let ds = dataset(&store);
+    let conn = connect(&store);
+
+    cloud.hold_epochs(true);
+    let run = store.create_run(cloud_run(&ds, &conn.id, 3)).unwrap();
+    until("first checkpoint synced", || run_of(&store, &run.id).cloud.and_then(|c| c.synced));
+
+    // Hold uploads on the replacement worker so we can deterministically preempt pod-2 mid-sync.
+    cloud.gates.uploads.store(true, Ordering::SeqCst);
+    cloud.kill(0);
+    until("replacement worker syncing", || {
+        (cloud.calls(Call::Launch) >= 2 && phase(&run_of(&store, &run.id)) == CloudPhase::Syncing)
+            .then_some(())
+    });
+    cloud.kill(1);
+    cloud.gates.uploads.store(false, Ordering::SeqCst);
+
+    // Sync failure on a lost instance must escalate to Preempted -> launch pod-3 -> complete cleanly.
+    until("third worker launched", || (cloud.calls(Call::Launch) >= 3).then_some(()));
+    cloud.hold_epochs(false);
+    let done = finished(&store, &run.id);
+    assert_eq!(done.status, RunStatus::Completed, "{:?}", log_of(&store, &run.id));
+    assert_eq!(done.epoch, 3);
+    assert_eq!(cloud.calls(Call::Launch), 3, "pod-1 + preempted-in-sync pod-2 + pod-3");
+    assert_eq!(cloud.live(), 0);
+    assert!(logged(&store, &run.id, "attempt 2/3"), "{:?}", log_of(&store, &run.id));
+}
+
+#[test]
+fn restart_during_preemption_recovery_continues_auto_resume() {
+    no_gpu();
+    let t = TestDir::new("cloud-spot-restart-backoff");
+    let cloud = TestCloud::new(&t.join("workers"));
+    let home1 = t.join("home1");
+    let store1 = plane(
+        &home1,
+        &cloud,
+        Tuning { max_preemption_retries: 3, preemption_backoff: Duration::from_secs(60), ..fast() },
+    );
+    let ds = dataset(&store1);
+    let conn = connect(&store1);
+
+    cloud.hold_epochs(true);
+    let run = store1.create_run(cloud_run(&ds, &conn.id, 3)).unwrap();
+    until("first checkpoint synced", || run_of(&store1, &run.id).cloud.and_then(|c| c.synced));
+    cloud.kill(0);
+
+    // Wait until preemption recovery persisted `recovering_preemption: true` and entered backoff.
+    let cloud_json = home1.join("runs").join(&run.id).join("cloud.json");
+    until("recovering_preemption persisted", || {
+        let ok_log = logged(&store1, &run.id, "auto-resuming from synced checkpoint");
+        let ok_json = std::fs::read_to_string(&cloud_json)
+            .ok()
+            .is_some_and(|s| s.contains("\"recovering_preemption\": true"));
+        (ok_log && ok_json).then_some(())
+    });
+
+    // Snapshot home1 into home2 (skipping advisory lock files) to simulate an abrupt process crash mid-backoff,
+    // then stop & shut down store1 cleanly so only store2 drives recovery.
+    let home2 = t.join("home2");
+    copy_dir_without_locks(&home1, &home2);
+    store1.stop_run(&run.id).unwrap();
+    let _ = finished(&store1, &run.id);
+    store1.shutdown();
+    drop(store1);
+
+    // Reopen on home2 with fast tuning: `Mode::Recover` must detect `recovering_preemption: true`, launch the
+    // replacement worker, resume from weights/last.folo, and finish epochs 2..=3.
+    cloud.hold_epochs(false);
+    let store2 = plane(&home2, &cloud, fast());
+    let done = finished(&store2, &run.id);
+    assert_eq!(done.status, RunStatus::Completed, "{:?}", log_of(&store2, &run.id));
+    assert_eq!(done.epoch, 3);
+    assert_eq!(cloud.calls(Call::Launch), 2);
+    assert_eq!(cloud.live(), 0);
+    assert!(
+        logged(&store2, &run.id, "restarted during preemption recovery"),
+        "{:?}",
+        log_of(&store2, &run.id)
+    );
+    store2.shutdown();
+}
+
+fn copy_dir_without_locks(src: &std::path::Path, dst: &std::path::Path) {
+    std::fs::create_dir_all(dst).unwrap();
+    for entry in std::fs::read_dir(src).unwrap() {
+        let entry = entry.unwrap();
+        let name = entry.file_name();
+        let s = name.to_string_lossy();
+        if s == "cloud.lock" || s == ".lock" || s.ends_with(".lock") {
+            continue;
+        }
+        let from = entry.path();
+        let to = dst.join(&name);
+        if entry.file_type().unwrap().is_dir() {
+            copy_dir_without_locks(&from, &to);
+        } else {
+            std::fs::copy(&from, &to).unwrap();
+        }
+    }
+}

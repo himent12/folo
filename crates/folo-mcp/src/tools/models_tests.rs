@@ -145,6 +145,8 @@ async fn tools_validate_paging_and_args_before_proxy_access() {
                     tta: false,
                     tta_scales: None,
                     tta_hflip: None,
+                    thresholds_path: None,
+                    per_class_conf: None,
                 },
                 &mut Progress::none(),
             )
@@ -184,6 +186,8 @@ async fn tools_validate_paging_and_args_before_proxy_access() {
                 tta: false,
                 tta_scales: None,
                 tta_hflip: None,
+                thresholds_path: None,
+                per_class_conf: None,
             },
             PredictArgs {
                 model_id: "m_1".into(),
@@ -200,6 +204,8 @@ async fn tools_validate_paging_and_args_before_proxy_access() {
                 tta: false,
                 tta_scales: None,
                 tta_hflip: None,
+                thresholds_path: None,
+                per_class_conf: None,
             },
             PredictArgs {
                 model_id: "m_1".into(),
@@ -216,6 +222,8 @@ async fn tools_validate_paging_and_args_before_proxy_access() {
                 tta: false,
                 tta_scales: None,
                 tta_hflip: None,
+                thresholds_path: None,
+                per_class_conf: None,
             },
             PredictArgs {
                 model_id: "m_1".into(),
@@ -232,6 +240,8 @@ async fn tools_validate_paging_and_args_before_proxy_access() {
                 tta: true,
                 tta_scales: None,
                 tta_hflip: None,
+                thresholds_path: None,
+                per_class_conf: None,
             },
             PredictArgs {
                 model_id: "m_1".into(),
@@ -248,6 +258,8 @@ async fn tools_validate_paging_and_args_before_proxy_access() {
                 tta: false,
                 tta_scales: None,
                 tta_hflip: None,
+                thresholds_path: None,
+                per_class_conf: None,
             },
             PredictArgs {
                 model_id: "m_1".into(),
@@ -264,6 +276,8 @@ async fn tools_validate_paging_and_args_before_proxy_access() {
                 tta: false,
                 tta_scales: Some(vec![1.0]),
                 tta_hflip: None,
+                thresholds_path: None,
+                per_class_conf: None,
             },
         ] {
             let err = backend.inner.predict(args).await.err().unwrap();
@@ -314,6 +328,8 @@ async fn tools_validate_paging_and_args_before_proxy_access() {
                     tta: false,
                     tta_scales: None,
                     tta_hflip: None,
+                    thresholds_path: None,
+                    per_class_conf: None,
                 },
                 &mut Progress::none(),
             )
@@ -444,7 +460,7 @@ async fn proxied_blank_and_dot_resource_ids_match_embedded_not_found() {
 #[tokio::test]
 async fn proxied_predict_gates_and_forwards_tile_and_tta_options() {
     let home = folo_test_support::TestDir::new("mcp-proxy-predict-opts");
-    let mock_store = Arc::new(folo_server::MockStore::new());
+    let mock_store: Arc<dyn Store> = Arc::new(folo_server::MockStore::new());
     let model_id = mock_store.list_models().unwrap()[0].id.clone();
     let ds_id = mock_store.list_datasets().unwrap()[0].id.clone();
     let image_id = mock_store
@@ -488,6 +504,8 @@ async fn proxied_predict_gates_and_forwards_tile_and_tta_options() {
             tta: false,
             tta_scales: None,
             tta_hflip: None,
+            thresholds_path: None,
+            per_class_conf: None,
         })
         .await
         .err()
@@ -514,6 +532,8 @@ async fn proxied_predict_gates_and_forwards_tile_and_tta_options() {
             tta: false,
             tta_scales: None,
             tta_hflip: None,
+            thresholds_path: None,
+            per_class_conf: None,
         })
         .await
         .unwrap();
@@ -537,6 +557,8 @@ async fn proxied_predict_gates_and_forwards_tile_and_tta_options() {
             tta: true,
             tta_scales: Some(vec![200.0]),
             tta_hflip: Some(false),
+            thresholds_path: None,
+            per_class_conf: None,
         })
         .await
         .err()
@@ -563,6 +585,8 @@ async fn proxied_predict_gates_and_forwards_tile_and_tta_options() {
             tta: true,
             tta_scales: Some(vec![1.0]),
             tta_hflip: Some(true),
+            thresholds_path: None,
+            per_class_conf: None,
         })
         .await
         .unwrap();
@@ -586,6 +610,8 @@ async fn proxied_predict_gates_and_forwards_tile_and_tta_options() {
             tta: false,
             tta_scales: None,
             tta_hflip: None,
+            thresholds_path: None,
+            per_class_conf: None,
         })
         .await
         .err()
@@ -608,6 +634,8 @@ async fn proxied_predict_gates_and_forwards_tile_and_tta_options() {
                 tta: true,
                 tta_scales: Some(vec![200.0]),
                 tta_hflip: None,
+                thresholds_path: None,
+                per_class_conf: None,
             },
             &mut Progress::none(),
         )
@@ -648,6 +676,8 @@ async fn proxied_predict_gates_and_forwards_tile_and_tta_options() {
                 tta: false,
                 tta_scales: None,
                 tta_hflip: None,
+                thresholds_path: None,
+                per_class_conf: None,
             },
             &mut Progress::none(),
         )
@@ -663,6 +693,275 @@ async fn proxied_predict_gates_and_forwards_tile_and_tta_options() {
     assert_eq!(imgs.len(), 3);
     assert!(imgs[0]["error"].is_null() && imgs[2]["error"].is_null(), "{parsed}");
     assert_eq!(imgs[1]["error"]["code"], "invalid_config", "{parsed}");
+
+    let _ = stop_tx.send(());
+    let _ = task.await;
+}
+
+/// `val` returns calibrated per-class `thresholds` on both embedded and proxied servers; `predict` and
+/// `predict_batch` apply `thresholds_path` (enforcing `--confine`) and `per_class_conf`, gate older servers on
+/// `threshold_calibration`, and reject mutually exclusive or out-of-range arguments upfront.
+#[tokio::test]
+async fn val_and_predict_wire_calibrated_thresholds_embedded_and_proxied() {
+    let home = folo_test_support::TestDir::new("mcp-threshold-calibration");
+    let outside = folo_test_support::TestDir::new("mcp-threshold-outside");
+    let mock_store: Arc<dyn Store> = Arc::new(folo_server::MockStore::new());
+    let datasets = mock_store.list_datasets().unwrap();
+    let models = mock_store.list_models().unwrap();
+    let (model, ds_id) = models
+        .iter()
+        .find_map(|m| {
+            datasets
+                .iter()
+                .find(|d| d.classes.iter().any(|c| m.classes.contains(c)))
+                .map(|d| (m.clone(), d.id.clone()))
+        })
+        .expect("matching mock model and dataset");
+    let image_id = mock_store
+        .list_images(&ds_id, &folo_server::store::ImageQuery { limit: 1, ..Default::default() })
+        .unwrap()
+        .images[0]
+        .id
+        .clone();
+
+    let mock_server = folo_server::Server::new(Arc::clone(&mock_store), Default::default());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let task = tokio::spawn(mock_server.serve(listener, async move {
+        let _ = stop_rx.await;
+    }));
+    let opts = Options {
+        data_dir: home.to_path_buf(),
+        read_only: false,
+        confine: true,
+        device: "cpu".into(),
+        published_weights: None,
+    };
+    let embedded = FoloMcp::new(Arc::clone(&mock_store), None, opts.clone());
+    let live_http = Arc::new(HttpStore::new(&url, None));
+    let proxied = FoloMcp::new(live_http.clone(), Some(live_http), opts.clone());
+    let old_http = Arc::new(HttpStore::new(&url, None).assume_features(vec![]));
+    let old_mcp = FoloMcp::new(old_http.clone(), Some(old_http), opts);
+
+    // 1. `val` returns calibrated `thresholds` on both embedded and proxied servers.
+    for backend in [&embedded, &proxied] {
+        let v = backend
+            .inner
+            .val(
+                ValArgs {
+                    model_id: model.id.clone(),
+                    dataset_id: ds_id.clone(),
+                    split: folo_api::Split::Val,
+                    imgsz: None,
+                    conf: 0.001,
+                    iou: 0.7,
+                    diagnostics: false,
+                    worst: None,
+                    diag_conf: None,
+                    diag_tp_iou: None,
+                    diag_bg_iou: None,
+                },
+                &mut Progress::none(),
+            )
+            .await
+            .unwrap();
+        let thr = &v.value["thresholds"];
+        assert!(thr.is_object(), "val must include thresholds: {}", v.value);
+        assert!(thr["global"]["best_conf"].is_f64(), "{thr}");
+        assert!(thr["macro_f1"].is_f64(), "{thr}");
+        assert!(!thr["per_class"].as_array().unwrap().is_empty(), "{thr}");
+    }
+
+    // 2. Write a calibrated thresholds file inside `data_dir` that sets all classes to 1.0 (filters all boxes)
+    //    vs 0.0 (keeps detections), and verify deterministic filtering via both `thresholds_path` and
+    //    `per_class_conf` across embedded and proxied transports (JSON + multipart).
+    let suppress_path = home.join("suppress.json");
+    let keep_path = home.join("keep.json");
+    let per_class_one: Vec<_> = (0..model.classes.len())
+        .map(|c| serde_json::json!({"class": c, "best_conf": 1.0, "best_f1": 0.5, "precision": 0.5, "recall": 0.5, "truths": 4, "preds": 4}))
+        .collect();
+    let per_class_zero: Vec<_> = (0..model.classes.len())
+        .map(|c| serde_json::json!({"class": c, "best_conf": 0.0, "best_f1": 0.5, "precision": 0.5, "recall": 0.5, "truths": 4, "preds": 4}))
+        .collect();
+    std::fs::write(
+        &suppress_path,
+        serde_json::to_vec(&serde_json::json!({
+            "global": {"best_conf": 1.0, "best_f1": 0.5, "precision": 0.5, "recall": 0.5},
+            "per_class": per_class_one,
+            "macro_f1": 0.5,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        &keep_path,
+        serde_json::to_vec(&serde_json::json!({
+            "global": {"best_conf": 0.0, "best_f1": 0.5, "precision": 0.5, "recall": 0.5},
+            "per_class": per_class_zero,
+            "macro_f1": 0.5,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    for backend in [&embedded, &proxied] {
+        let kept = backend
+            .inner
+            .predict(PredictArgs {
+                model_id: model.id.clone(),
+                image_path: None,
+                image_base64: None,
+                dataset_id: Some(ds_id.clone()),
+                image_id: Some(image_id.clone()),
+                conf: 0.25,
+                iou: 0.7,
+                max_det: 50,
+                tile: None,
+                tile_overlap: None,
+                tile_full_image: None,
+                tta: false,
+                tta_scales: None,
+                tta_hflip: None,
+                thresholds_path: Some("keep.json".into()),
+                per_class_conf: None,
+            })
+            .await
+            .unwrap();
+        let suppressed = backend
+            .inner
+            .predict(PredictArgs {
+                model_id: model.id.clone(),
+                image_path: None,
+                image_base64: None,
+                dataset_id: Some(ds_id.clone()),
+                image_id: Some(image_id.clone()),
+                conf: 0.25,
+                iou: 0.7,
+                max_det: 50,
+                tile: None,
+                tile_overlap: None,
+                tile_full_image: None,
+                tta: false,
+                tta_scales: None,
+                tta_hflip: None,
+                thresholds_path: Some("suppress.json".into()),
+                per_class_conf: None,
+            })
+            .await
+            .unwrap();
+        assert!(!kept.value["boxes"].as_array().unwrap().is_empty(), "keep.json should keep boxes");
+        assert!(suppressed.value["boxes"].as_array().unwrap().is_empty(), "suppress.json should drop boxes");
+
+        // Direct `per_class_conf` map over multipart (upload) also filters deterministically.
+        let png =
+            folo_data::encode(&folo_data::Image::new(32, 32, [100, 100, 100]), folo_data::ImageFormat::Png)
+                .unwrap();
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&png);
+        let all_one: BTreeMap<u32, f32> = (0..model.classes.len() as u32).map(|c| (c, 1.0)).collect();
+        let mp = backend
+            .inner
+            .predict(PredictArgs {
+                model_id: model.id.clone(),
+                image_path: None,
+                image_base64: Some(b64),
+                dataset_id: None,
+                image_id: None,
+                conf: 0.0,
+                iou: 0.7,
+                max_det: 50,
+                tile: None,
+                tile_overlap: None,
+                tile_full_image: None,
+                tta: false,
+                tta_scales: None,
+                tta_hflip: None,
+                thresholds_path: None,
+                per_class_conf: Some(all_one),
+            })
+            .await
+            .unwrap();
+        assert!(mp.value["boxes"].as_array().unwrap().is_empty(), "per_class_conf=1.0 should drop boxes");
+    }
+
+    // 3. Mutual exclusion (`thresholds_path` + `per_class_conf`), `--confine` outside `data_dir`, out-of-range
+    //    class id, and proxy feature gate on older servers all fail with the expected codes.
+    let both = embedded
+        .inner
+        .predict(PredictArgs {
+            model_id: model.id.clone(),
+            image_path: None,
+            image_base64: None,
+            dataset_id: Some(ds_id.clone()),
+            image_id: Some(image_id.clone()),
+            conf: 0.25,
+            iou: 0.7,
+            max_det: 10,
+            tile: None,
+            tile_overlap: None,
+            tile_full_image: None,
+            tta: false,
+            tta_scales: None,
+            tta_hflip: None,
+            thresholds_path: Some("keep.json".into()),
+            per_class_conf: Some(BTreeMap::from([(0, 0.5)])),
+        })
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(both.body.code, "invalid_arguments");
+
+    let escaped_file = outside.join("outside.json");
+    std::fs::copy(&keep_path, &escaped_file).unwrap();
+    let confined = embedded
+        .inner
+        .predict(PredictArgs {
+            model_id: model.id.clone(),
+            image_path: None,
+            image_base64: None,
+            dataset_id: Some(ds_id.clone()),
+            image_id: Some(image_id.clone()),
+            conf: 0.25,
+            iou: 0.7,
+            max_det: 10,
+            tile: None,
+            tile_overlap: None,
+            tile_full_image: None,
+            tta: false,
+            tta_scales: None,
+            tta_hflip: None,
+            thresholds_path: Some(escaped_file.to_string_lossy().into_owned()),
+            per_class_conf: None,
+        })
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(confined.body.code, "path_outside_data_dir");
+
+    let old_err = old_mcp
+        .inner
+        .predict(PredictArgs {
+            model_id: model.id.clone(),
+            image_path: None,
+            image_base64: None,
+            dataset_id: Some(ds_id),
+            image_id: Some(image_id),
+            conf: 0.25,
+            iou: 0.7,
+            max_det: 10,
+            tile: None,
+            tile_overlap: None,
+            tile_full_image: None,
+            tta: false,
+            tta_scales: None,
+            tta_hflip: None,
+            thresholds_path: None,
+            per_class_conf: Some(BTreeMap::from([(0, 0.5)])),
+        })
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(old_err.body.code, "not_implemented");
 
     let _ = stop_tx.send(());
     let _ = task.await;

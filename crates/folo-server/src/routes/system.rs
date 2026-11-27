@@ -43,6 +43,7 @@ fn features(st: &AppState) -> Vec<String> {
         crate::store::FEATURE_EXPORT_DYNAMIC_AXES,
         crate::store::FEATURE_TRAIN_AUTO_BATCH,
         crate::store::FEATURE_FOLO2_ARCH,
+        crate::store::FEATURE_THRESHOLD_CALIBRATION,
     ];
     let labeling = st.store.labeler().is_ok();
     let optional = [

@@ -13,7 +13,7 @@ use crate::AppState;
 use crate::error::{ApiJson, ApiPath, ApiQuery, Error, Result};
 use crate::store::{
     DEFAULT_VAL_DIAG_BG_IOU, DEFAULT_VAL_DIAG_CONF, DEFAULT_VAL_DIAG_TP_IOU, DEFAULT_VAL_DIAG_WORST,
-    DynamicAxes, ValDiagConfig, ValDiagnostics, WeightsBody, WeightsFormat,
+    DynamicAxes, ThresholdCalibration, ValDiagConfig, ValDiagnostics, WeightsBody, WeightsFormat,
 };
 
 use super::{WEIGHTS_CHUNK, blocking};
@@ -312,6 +312,8 @@ pub(super) struct ValResponse {
     report: ValReport,
     #[serde(skip_serializing_if = "Option::is_none")]
     diagnostics: Option<ValDiagnostics>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thresholds: Option<ThresholdCalibration>,
 }
 
 pub(super) async fn val(
@@ -332,8 +334,8 @@ pub(super) async fn val(
         tp_iou: body.diag_tp_iou.unwrap_or(DEFAULT_VAL_DIAG_TP_IOU),
         bg_iou: body.diag_bg_iou.unwrap_or(DEFAULT_VAL_DIAG_BG_IOU),
     });
-    let (report, diagnostics) = blocking(&st, move |s| s.val_with_diagnostics(body.base, diag)).await?;
-    Ok(Json(ValResponse { report, diagnostics }))
+    let out = blocking(&st, move |s| s.val_extended(body.base, diag)).await?;
+    Ok(Json(ValResponse { report: out.report, diagnostics: out.diagnostics, thresholds: out.thresholds }))
 }
 
 #[cfg(test)]

@@ -17,7 +17,9 @@ use crate::engine::{self, FileKey, engine_error};
 use crate::error::{Error, Result};
 use crate::index::write_atomic;
 use crate::runs::{DatasetRef, data_format};
-use crate::store::{ValDiagConfig, ValDiagnostics, ValDiagnosticsSummary, check_val_diag_config};
+use crate::store::{
+    ValDiagConfig, ValDiagnostics, ValDiagnosticsSummary, ValExtended, check_val_diag_config,
+};
 use crate::util::Flight;
 
 use super::{BoundedCache, ModelRef, Models};
@@ -254,10 +256,11 @@ pub fn check_val_params(imgsz: Option<u32>, conf: f32, iou: f32) -> Result<()> {
 
 /// `POST /api/val`: validates the weights of `m` on `split` of `dataset` at `imgsz` (the model's own size when
 /// `None`) with NMS thresholds `conf` / `iou` (the rest of MODEL.md §8.7's validation settings), at `precision`
-/// (f16 only where the device computes in it), with optional per-image detection error diagnostics
-/// (`folo_vision::eval::{diagnose_image, worst_images}`).
+/// (f16 only where the device computes in it), returning optional per-image detection error diagnostics
+/// (`folo_vision::eval::{diagnose_image, worst_images}`) and calibrated global/per-class F1 thresholds
+/// (`folo_vision::ThresholdCalibration`).
 #[allow(clippy::too_many_arguments)]
-pub fn val_with_diagnostics(
+pub fn val_extended(
     m: &ModelRef,
     dataset: &DatasetRef,
     split: folo_api::Split,
@@ -267,7 +270,7 @@ pub fn val_with_diagnostics(
     device: Device,
     precision: folo_vision::Precision,
     diag: Option<ValDiagConfig>,
-) -> Result<(ValReport, Option<ValDiagnostics>)> {
+) -> Result<ValExtended> {
     check_val_params(imgsz, conf, iou)?;
     if let Some(d) = &diag {
         check_val_diag_config(d)?;
@@ -297,6 +300,7 @@ pub fn val_with_diagnostics(
     };
     let r = validate_detector(&model, Arc::new(part.clone()), &cfg).map_err(engine_error)?;
     let diagnostics = diag.map(|d| compute_diagnostics(part, &ds.root, &r.detections, d));
+    let thresholds = Some(r.thresholds().clone());
     let images = r.report.num_images;
     let total_s = t0.elapsed().as_secs_f64();
     let per_image_ms = if images == 0 { 0.0 } else { r.seconds * 1e3 / images as f64 };
@@ -313,7 +317,7 @@ pub fn val_with_diagnostics(
             per_image_ms: (per_image_ms * 100.0).round() / 100.0,
         },
     };
-    Ok((report, diagnostics))
+    Ok(ValExtended { report, diagnostics, thresholds })
 }
 
 fn compute_diagnostics(

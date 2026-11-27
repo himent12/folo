@@ -16,16 +16,21 @@ use folo_api::{
 };
 use folo_client::{Client, encode};
 use folo_server::store::{
-    AutoBatchOptions, DynamicAxes, FEATURE_EXPORT_DYNAMIC_AXES, FEATURE_FOLO2_ARCH, FEATURE_TRAIN_AUTO_BATCH,
-    FEATURE_VAL_DIAGNOSTICS, ImageData, ImageQuery, IssueQuery, LogsQuery, MetricsQuery, PredictInput,
-    PredictSource, QueueMove, RunOptions, Store, Subscription, ValDiagConfig, ValDiagnostics,
-    check_arch_override, check_auto_batch_options, check_export_axes, check_val_diag_config,
+    AutoBatchOptions, DynamicAxes, FEATURE_EXPORT_DYNAMIC_AXES, FEATURE_FOLO2_ARCH,
+    FEATURE_THRESHOLD_CALIBRATION, FEATURE_TRAIN_AUTO_BATCH, FEATURE_VAL_DIAGNOSTICS, ImageData, ImageQuery,
+    IssueQuery, LogsQuery, MetricsQuery, PredictInput, PredictSource, QueueMove, RunOptions, Store,
+    Subscription, ThresholdCalibration, ValDiagConfig, ValDiagnostics, ValExtended, check_arch_override,
+    check_auto_batch_options, check_export_axes, check_val_diag_config,
 };
 use http::StatusCode;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use crate::errors::{Error, not_implemented};
+
+#[path = "proxy_wire.rs"]
+mod wire;
+use wire::{multipart, static_content_type};
 
 /// Cached remote capability probe shared across an [`HttpStore`] and its [`HttpStore::until`] clones.
 #[derive(Default)]
@@ -271,129 +276,9 @@ impl HttpStore {
         self.client.delete(path).map_err(store_error)
     }
 
-    /// Reads the canonical detector architecture (`folo-*` or `folo2-*`) from the safetensors header of
-    /// `GET /api/models/{id}/weights` via bounded `Range` requests. Used only against older real servers that do
-    /// not advertise `folo2_arch` or emit `x-folo-arch`, so a weights-only fine-tune of a `folo2-*` file never
-    /// silently runs as v1.
     fn probe_weights_arch(&self, id: &str) -> Result<String, Error> {
-        const INITIAL_BYTES: u64 = 64 * 1024;
-        const MAX_HEADER_BYTES: u64 = 4 * 1024 * 1024;
-        let path = format!("/models/{}/weights", encode(id));
-        let fail_unverified = |detail: &str| {
-            Error::new(
-                StatusCode::NOT_IMPLEMENTED,
-                "not_implemented",
-                format!(
-                    "the folo serve at {} is too old to report `x-folo-arch` for weights '{id}' ({detail})",
-                    self.base()
-                ),
-            )
-            .hint("update folo serve so it advertises `folo2_arch` and `x-folo-arch`")
-        };
-        let first = self
-            .client
-            .get_range(&path, 0..INITIAL_BYTES, None)
-            .map_err(|e| fail_unverified(&e.error.message))?;
-        let mut buf = first.bytes;
-        if buf.len() < 8 {
-            return Err(fail_unverified("weights header truncated"));
-        }
-        let header_len = u64::from_le_bytes(buf[..8].try_into().unwrap());
-        if header_len == 0 || header_len > MAX_HEADER_BYTES {
-            return Err(fail_unverified("invalid weights header length"));
-        }
-        let need = 8u64.saturating_add(header_len);
-        if (buf.len() as u64) < need {
-            let rest = self
-                .client
-                .get_range(&path, (buf.len() as u64)..need, (!first.etag.is_empty()).then_some(&first.etag))
-                .map_err(|e| fail_unverified(&e.error.message))?;
-            buf.extend_from_slice(&rest.bytes);
-            if (buf.len() as u64) < need {
-                return Err(fail_unverified("weights header truncated"));
-            }
-        }
-        let header: serde_json::Value = serde_json::from_slice(&buf[8..(need as usize)])
-            .map_err(|_| fail_unverified("unreadable weights header"))?;
-        let cfg_str = header
-            .get("__metadata__")
-            .and_then(|m| m.get("folo.config"))
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| fail_unverified("missing folo.config metadata"))?;
-        let cfg: serde_json::Value =
-            serde_json::from_str(cfg_str).map_err(|_| fail_unverified("invalid folo.config metadata"))?;
-        let family = cfg
-            .get("family")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| fail_unverified("missing family in folo.config"))?;
-        let scale = cfg
-            .get("scale")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| fail_unverified("missing scale in folo.config"))?;
-        let canonical = match family {
-            "folo2" => format!("folo2-{scale}"),
-            "folo" => format!("folo-{scale}"),
-            _ => return Err(fail_unverified("unknown model family in folo.config")),
-        };
-        check_arch_override(Some(&canonical))?;
-        Ok(canonical)
+        wire::probe_weights_arch(&self.client, self.base(), id)
     }
-}
-
-fn static_content_type(ct: &str) -> &'static str {
-    match ct.split(';').next().unwrap_or("").trim() {
-        "image/png" => "image/png",
-        "image/bmp" => "image/bmp",
-        "image/webp" => "image/webp",
-        "image/jpeg" => "image/jpeg",
-        _ => "application/octet-stream",
-    }
-}
-
-/// Picks a multipart boundary that does not appear anywhere in `fields` or `image`.
-fn choose_boundary(fields: &[(&str, String)], image: &[u8]) -> String {
-    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-    let nanos =
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0u128, |d| d.as_nanos());
-    loop {
-        let seq = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let candidate = format!("folo-mcp-{nanos:x}-{seq:x}");
-        let needle = candidate.as_bytes();
-        let clashes = image.windows(needle.len()).any(|w| w == needle)
-            || fields.iter().any(|(_, v)| v.contains(&candidate));
-        if !clashes {
-            return candidate;
-        }
-    }
-}
-
-/// A `multipart/form-data` body for `POST /api/predict`.
-fn multipart(fields: &[(&str, String)], image: &[u8]) -> Result<(String, Vec<u8>), Error> {
-    for (name, value) in fields {
-        if value.contains(['\r', '\n', '\0']) {
-            return Err(crate::errors::invalid_arguments(format!(
-                "{name} must not contain line breaks or NUL bytes"
-            )));
-        }
-    }
-    let boundary = choose_boundary(fields, image);
-    let mut body = Vec::with_capacity(image.len() + 512);
-    for (name, value) in fields {
-        body.extend_from_slice(
-            format!("--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n")
-                .as_bytes(),
-        );
-    }
-    body.extend_from_slice(
-        format!(
-            "--{boundary}\r\nContent-Disposition: form-data; name=\"image\"; filename=\"image\"\r\nContent-Type: \
-             application/octet-stream\r\n\r\n"
-        )
-        .as_bytes(),
-    );
-    body.extend_from_slice(image);
-    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
-    Ok((format!("multipart/form-data; boundary={boundary}"), body))
 }
 
 /// Rejects an empty or dot-only (`"."` / `".."`) URL path segment with the same `<kind>_not_found` error that
@@ -782,6 +667,18 @@ impl Store for HttpStore {
             )
             .hint("update folo serve, or run without `tile` / `tta`"));
         }
+        let has_cal = input.per_class_conf.is_some() || input.conf_inclusive;
+        if has_cal && !self.has_feature(FEATURE_THRESHOLD_CALIBRATION)? {
+            return Err(Error::new(
+                StatusCode::NOT_IMPLEMENTED,
+                "not_implemented",
+                format!(
+                    "the folo serve at {} is too old for per-class threshold calibration (`per_class_conf` / `thresholds_path`)",
+                    self.base()
+                ),
+            )
+            .hint("update folo serve, or run without `thresholds_path` / `per_class_conf`"));
+        }
         match input.source {
             PredictSource::Dataset { dataset_id, image_id } => {
                 let mut body = serde_json::to_value(&PredictRequest {
@@ -798,6 +695,13 @@ impl Store for HttpStore {
                 }
                 if let Some(tta) = &input.options.tta {
                     body["tta"] = serde_json::to_value(tta).map_err(|e| Error::internal(e.to_string()))?;
+                }
+                if let Some(map) = &input.per_class_conf {
+                    body["per_class_conf"] =
+                        serde_json::to_value(map).map_err(|e| Error::internal(e.to_string()))?;
+                }
+                if input.conf_inclusive {
+                    body["conf_inclusive"] = serde_json::json!(true);
                 }
                 self.post("/predict", &body)
             }
@@ -820,6 +724,15 @@ impl Store for HttpStore {
                         serde_json::to_string(tta).map_err(|e| Error::internal(e.to_string()))?,
                     ));
                 }
+                if let Some(map) = &input.per_class_conf {
+                    fields.push((
+                        "per_class_conf",
+                        serde_json::to_string(map).map_err(|e| Error::internal(e.to_string()))?,
+                    ));
+                }
+                if input.conf_inclusive {
+                    fields.push(("conf_inclusive", "true".into()));
+                }
                 let (ct, body) = multipart(&fields, &bytes)?;
                 self.client.send("/predict", &ct, &body).map_err(store_error)
             }
@@ -835,36 +748,41 @@ impl Store for HttpStore {
         req: ValRequest,
         diag: Option<ValDiagConfig>,
     ) -> Result<(ValReport, Option<ValDiagnostics>), Error> {
-        let Some(cfg) = diag else {
-            return self.val(req).map(|r| (r, None));
-        };
-        check_val_diag_config(&cfg)?;
-        if !self.has_feature(FEATURE_VAL_DIAGNOSTICS)? {
-            return Err(Error::new(
-                StatusCode::NOT_IMPLEMENTED,
-                "not_implemented",
-                format!(
-                    "the folo serve at {} is too old for validation error diagnostics (`diagnostics` / `worst`)",
-                    self.base()
-                ),
-            )
-            .hint("update folo serve, or run `val` without `diagnostics` / `worst`"));
-        }
+        self.val_extended(req, diag).map(|v| (v.report, v.diagnostics))
+    }
+
+    fn val_extended(&self, req: ValRequest, diag: Option<ValDiagConfig>) -> Result<ValExtended, Error> {
         let mut body = serde_json::to_value(req).map_err(|e| Error::internal(e.to_string()))?;
-        body["diagnostics"] = serde_json::json!(true);
-        body["worst"] = serde_json::json!(cfg.worst);
-        body["diag_conf"] = serde_json::json!(cfg.conf);
-        body["diag_tp_iou"] = serde_json::json!(cfg.tp_iou);
-        body["diag_bg_iou"] = serde_json::json!(cfg.bg_iou);
+        if let Some(cfg) = diag {
+            check_val_diag_config(&cfg)?;
+            if !self.has_feature(FEATURE_VAL_DIAGNOSTICS)? {
+                return Err(Error::new(
+                    StatusCode::NOT_IMPLEMENTED,
+                    "not_implemented",
+                    format!(
+                        "the folo serve at {} is too old for validation error diagnostics (`diagnostics` / `worst`)",
+                        self.base()
+                    ),
+                )
+                .hint("update folo serve, or run `val` without `diagnostics` / `worst`"));
+            }
+            body["diagnostics"] = serde_json::json!(true);
+            body["worst"] = serde_json::json!(cfg.worst);
+            body["diag_conf"] = serde_json::json!(cfg.conf);
+            body["diag_tp_iou"] = serde_json::json!(cfg.tp_iou);
+            body["diag_bg_iou"] = serde_json::json!(cfg.bg_iou);
+        }
         #[derive(serde::Deserialize)]
         struct WireVal {
             #[serde(flatten)]
             report: ValReport,
             #[serde(default)]
             diagnostics: Option<ValDiagnostics>,
+            #[serde(default)]
+            thresholds: Option<ThresholdCalibration>,
         }
         let wire: WireVal = self.post("/val", &body)?;
-        Ok((wire.report, wire.diagnostics))
+        Ok(ValExtended { report: wire.report, diagnostics: wire.diagnostics, thresholds: wire.thresholds })
     }
 
     fn throughput(&self) -> Result<ThroughputTable, Error> {
