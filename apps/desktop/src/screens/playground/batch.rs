@@ -54,6 +54,17 @@ pub enum PlayBatchSource {
     Dataset { dataset_id: String, image_id: String },
 }
 
+/// Fast 64-bit FNV-1a fingerprint of raw file bytes so in-place file replacements invalidate
+/// cached batch predictions instead of painting detections onto replaced pixels.
+pub fn bytes_fingerprint(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for &b in bytes {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
 /// Completed inference result for one batch item, tagged with its exact request parameters so stale
 /// results under another model, device, IoU, or lower confidence floor are never reused or exported.
 #[derive(Clone, Debug)]
@@ -65,6 +76,8 @@ pub struct BatchItemResult {
     pub iou_bits: u32,
     pub target: Option<crate::local::Target>,
     pub floor: f32,
+    /// Content hash of file bytes used for inference (`None` for server dataset images).
+    pub content_hash: Option<u64>,
 }
 
 impl BatchItemResult {
@@ -142,31 +155,50 @@ impl Default for PlayBatchState {
     }
 }
 
-/// Builds display/export names for local file paths, disambiguating duplicate basenames across
-/// different directories by prepending the parent directory name(s).
+/// Builds display/export names for local file paths, extending ancestor directory components until
+/// every duplicate path suffix is uniquely disambiguated.
 pub fn disambiguate_file_labels(paths: &[PathBuf]) -> Vec<SharedString> {
-    let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    let bases: Vec<String> = paths
+    let parts: Vec<Vec<String>> = paths
         .iter()
-        .map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default())
-        .collect();
-    for b in &bases {
-        *counts.entry(b.clone()).or_default() += 1;
-    }
-    paths
-        .iter()
-        .zip(bases)
-        .map(|(p, base)| {
-            if counts.get(&base).copied().unwrap_or(0) <= 1 {
-                return base.into();
-            }
-            if let Some(parent) = p.parent().and_then(|d| d.file_name()).map(|n| n.to_string_lossy()) {
-                format!("{parent}/{base}").into()
-            } else {
-                p.to_string_lossy().to_string().into()
-            }
+        .map(|p| {
+            p.components()
+                .filter_map(|c| match c {
+                    std::path::Component::Normal(s) => Some(s.to_string_lossy().to_string()),
+                    _ => None,
+                })
+                .collect()
         })
-        .collect()
+        .collect();
+    let mut depths: Vec<usize> = vec![1; paths.len()];
+    let make_label = |i: usize, depth: usize| -> String {
+        let comps = &parts[i];
+        if comps.is_empty() {
+            return paths[i].to_string_lossy().to_string();
+        }
+        let take = depth.min(comps.len());
+        comps[comps.len() - take..].join("/")
+    };
+    loop {
+        let mut counts: std::collections::HashMap<String, Vec<usize>> = std::collections::HashMap::new();
+        for (i, &depth) in depths.iter().enumerate() {
+            counts.entry(make_label(i, depth)).or_default().push(i);
+        }
+        let mut expanded = false;
+        for idxs in counts.values() {
+            if idxs.len() > 1 {
+                for &i in idxs {
+                    if depths[i] < parts[i].len() {
+                        depths[i] += 1;
+                        expanded = true;
+                    }
+                }
+            }
+        }
+        if !expanded {
+            break;
+        }
+    }
+    (0..paths.len()).map(|i| make_label(i, depths[i]).into()).collect()
 }
 
 impl PlayBatchState {
@@ -288,6 +320,72 @@ pub fn batch_tile_label(name: &str) -> &str {
 }
 
 impl FoloApp {
+    /// Persistent failure banner shown whenever the active batch item failed to load or decode,
+    /// regardless of whether Playground's stage is empty or still showing a prior image.
+    pub(super) fn play_batch_failed_banner(
+        &self,
+        t: &Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if !self.play_batch.is_active() {
+            return None;
+        }
+        let idx = self.play_batch.active;
+        let item = self.play_batch.items.get(idx)?;
+        let BatchItemStatus::Failed(msg) = &item.status else {
+            return None;
+        };
+        if self.play_image.as_ref().and_then(|i| i.batch_ref) == Some((self.play_batch.batch_id, idx)) {
+            return None;
+        }
+        let fname = item.name.clone();
+        let msg = msg.clone();
+        let retry = self.button(
+            "play-batch-retry-active",
+            "Retry",
+            Btn::Secondary,
+            Some("icons/refresh-cw.svg"),
+            window,
+            cx,
+            act(move |this, _, cx| this.select_play_batch_item(idx, cx)),
+        );
+        let next = self.button(
+            "play-batch-skip-next",
+            "Next image",
+            Btn::Secondary,
+            Some("icons/chevron-right.svg"),
+            window,
+            cx,
+            act(|this, _, cx| this.step_play_batch(1, cx)),
+        );
+        Some(
+            div()
+                .px(px(12.))
+                .py(px(8.))
+                .rounded(px(radius::MD))
+                .bg(t.danger_muted)
+                .border_1()
+                .border_color(alpha(t.danger_fill, 0.35))
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap(px(10.))
+                .child(
+                    div()
+                        .min_w_0()
+                        .flex_1()
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.))
+                        .child(text(ty::SM, t.danger_text).child(format!("Could not load {fname}")))
+                        .child(text(ty::XS, t.text_secondary).whitespace_normal().child(msg)),
+                )
+                .child(div().flex().items_center().gap(px(6.)).flex_none().child(retry).child(next))
+                .into_any_element(),
+        )
+    }
+
     /// Compact batch filmstrip rendered below the Playground stage when 2+ images are loaded.
     pub(super) fn play_batch_filmstrip(
         &mut self,
@@ -583,7 +681,22 @@ mod tests {
             iou_bits: iou.to_bits(),
             target: None,
             floor,
+            content_hash: None,
         }
+    }
+
+    #[test]
+    fn disambiguate_file_labels_expands_multi_level_collisions() {
+        let paths = vec![
+            PathBuf::from("lot-a/images/frame.png"),
+            PathBuf::from("lot-b/images/frame.png"),
+            PathBuf::from("lot-a/other/unique.png"),
+        ];
+        let labels = disambiguate_file_labels(&paths);
+        assert_eq!(
+            labels.iter().map(|s| s.as_ref()).collect::<Vec<_>>(),
+            vec!["lot-a/images/frame.png", "lot-b/images/frame.png", "unique.png"]
+        );
     }
 
     #[test]

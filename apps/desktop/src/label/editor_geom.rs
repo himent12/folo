@@ -129,14 +129,31 @@ pub fn apply_box_move(orig: BBox, dx: f32, dy: f32, img_w: f32, img_h: f32) -> B
     let oy2 = to_tenths(orig.y2).clamp(oy1, max_h);
     let bw = (ox2 - ox1).clamp(0, max_w);
     let bh = (oy2 - oy1).clamp(0, max_h);
-    let x1 = (ox1 + to_tenths(dx)).clamp(0, max_w - bw);
-    let y1 = (oy1 + to_tenths(dy)).clamp(0, max_h - bh);
+    let mut x1 = ox1.saturating_add(to_tenths(dx)).clamp(0, max_w - bw);
+    let mut y1 = oy1.saturating_add(to_tenths(dy)).clamp(0, max_h - bh);
+    let mut x2 = x1 + bw;
+    let mut y2 = y1 + bh;
+    // Preserve server-valid >= 1.0 px span after f32 conversion (e.g. 2.1_f32 - 1.1_f32 == 0.9999999).
+    if (orig.x2 - orig.x1) >= 1.0 && (from_tenths(x2) - from_tenths(x1)) < 1.0 {
+        if x2 < max_w {
+            x2 += 1;
+        } else if x1 > 0 {
+            x1 -= 1;
+        }
+    }
+    if (orig.y2 - orig.y1) >= 1.0 && (from_tenths(y2) - from_tenths(y1)) < 1.0 {
+        if y2 < max_h {
+            y2 += 1;
+        } else if y1 > 0 {
+            y1 -= 1;
+        }
+    }
     BBox {
         class: orig.class,
         x1: from_tenths(x1),
         y1: from_tenths(y1),
-        x2: from_tenths(x1 + bw),
-        y2: from_tenths(y1 + bh),
+        x2: from_tenths(x2),
+        y2: from_tenths(y2),
     }
 }
 
@@ -172,17 +189,17 @@ pub fn apply_box_resize(orig: BBox, handle: ResizeHandle, delta: (f32, f32), img
 
     if moves_w {
         let hi = (x2 - min_x).max(0);
-        x1 = (x1 + dx).clamp(0, hi);
+        x1 = x1.saturating_add(dx).clamp(0, hi);
     } else if moves_e {
         let lo = (x1 + min_x).min(max_w);
-        x2 = (x2 + dx).clamp(lo, max_w);
+        x2 = x2.saturating_add(dx).clamp(lo, max_w);
     }
     if moves_n {
         let hi = (y2 - min_y).max(0);
-        y1 = (y1 + dy).clamp(0, hi);
+        y1 = y1.saturating_add(dy).clamp(0, hi);
     } else if moves_s {
         let lo = (y1 + min_y).min(max_h);
-        y2 = (y2 + dy).clamp(lo, max_h);
+        y2 = y2.saturating_add(dy).clamp(lo, max_h);
     }
 
     if x2 <= x1 || y2 <= y1 {
@@ -281,6 +298,16 @@ mod tests {
             apply_box_move(tiny, 5.0, 3.0, 640.0, 480.0),
             BBox { class: 0, x1: 15.0, y1: 15.0, x2: 17.0, y2: 17.5 }
         );
+
+        // Moving a 1.0px box by 1.1px must keep a server-valid >= 1.0 f32 span (never 0.9999999).
+        let one_px = BBox { class: 0, x1: 0.0, y1: 0.0, x2: 1.0, y2: 1.0 };
+        let moved_one = apply_box_move(one_px, 1.1, 1.1, 640.0, 480.0);
+        assert!(moved_one.x2 - moved_one.x1 >= 1.0, "moved 1px box width must stay >= 1.0: {moved_one:?}");
+        assert!(moved_one.y2 - moved_one.y1 >= 1.0, "moved 1px box height must stay >= 1.0: {moved_one:?}");
+
+        // Extreme finite deltas saturate safely without overflowing i64 in debug builds.
+        let extreme = apply_box_move(b, 1e30, -1e30, 640.0, 480.0);
+        assert_eq!(extreme, BBox { class: 1, x1: 540.0, y1: 0.0, x2: 640.0, y2: 80.0 });
 
         // Non-finite delta is a safe no-op.
         assert_eq!(apply_box_move(b, f32::NAN, 10.0, 640.0, 480.0), b);

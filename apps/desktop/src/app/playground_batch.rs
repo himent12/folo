@@ -8,9 +8,8 @@ use folo_ui::{Context, Window};
 
 use crate::api::*;
 use crate::screens::playground::{
-    BatchImageExport, BatchItemResult, BatchItemStatus, MAX_BATCH_FILES, PlayBatchItem, PlayBatchSource,
-    PlayPredMeta, batch_detections_csv, batch_detections_json, batch_export_filename, batch_tile_label,
-    disambiguate_file_labels, filter_detections, is_supported_image_ext, pick_val_samples, scan_image_folder,
+    BatchItemResult, BatchItemStatus, MAX_BATCH_FILES, PlayBatchItem, PlayBatchSource, PlayPredMeta,
+    bytes_fingerprint, disambiguate_file_labels, is_supported_image_ext, pick_val_samples, scan_image_folder,
     write_export_bytes,
 };
 use crate::store::{ImgKey, ImgKind, Load, decode_upright, to_render_image};
@@ -269,6 +268,16 @@ impl FoloApp {
             self.open_play_file(supported.into_iter().next().unwrap(), req, window, cx);
             return;
         }
+        if supported.len() > MAX_BATCH_FILES {
+            let extra = supported.len() - MAX_BATCH_FILES;
+            supported.truncate(MAX_BATCH_FILES);
+            self.toast(
+                Tone::Info,
+                format!("Loaded first {MAX_BATCH_FILES} images"),
+                Some(format!("{} additional images were skipped.", int(extra as u64)).into()),
+                cx,
+            );
+        }
         if let Some((id, name)) = &req.model
             && self.store.models.ready().is_some_and(|m| !m.iter().any(|m| m.id == *id))
         {
@@ -433,7 +442,6 @@ impl FoloApp {
         self.play_load_seq += 1;
         let seq = self.play_load_seq;
         let batch_id = self.play_batch.batch_id;
-        let load_gen = self.play_batch.load_gen;
         let name = item.name.clone();
         match item.source.clone() {
             PlayBatchSource::Dataset { dataset_id, image_id } => {
@@ -457,10 +465,7 @@ impl FoloApp {
                         }
                     },
                     move |this, r, cx| {
-                        if seq != this.play_load_seq
-                            || batch_id != this.play_batch.batch_id
-                            || load_gen != this.play_batch.load_gen
-                        {
+                        if seq != this.play_load_seq || batch_id != this.play_batch.batch_id {
                             return;
                         }
                         this.play_loading = None;
@@ -522,10 +527,7 @@ impl FoloApp {
                 cx.spawn(async move |this, cx| {
                     let r = read.await;
                     this.update(cx, |this, cx| {
-                        if seq != this.play_load_seq
-                            || batch_id != this.play_batch.batch_id
-                            || load_gen != this.play_batch.load_gen
-                        {
+                        if seq != this.play_load_seq || batch_id != this.play_batch.batch_id {
                             return;
                         }
                         this.play_loading = None;
@@ -555,15 +557,20 @@ impl FoloApp {
             cx.drop_image(img.image, None);
             return;
         }
+        let img_hash = img.content_hash();
         let e2e = self.play_shown_model().is_some_and(|m| self.model_e2e(m));
         let cached = self.play_model.as_deref().and_then(|m| {
             self.play_batch
                 .fresh_result(idx, m, self.play_iou, self.play_target, self.play_conf, e2e)
+                .filter(|res| res.content_hash == img_hash)
                 .cloned()
         });
         if let Some(res) = cached {
             self.set_play_image_with_cached_pred(img, res, cx);
         } else {
+            if matches!(self.play_batch.items[idx].status, BatchItemStatus::Failed(_)) {
+                self.play_batch.items[idx].status = BatchItemStatus::Pending;
+            }
             self.set_play_image(img, cx);
         }
     }
@@ -584,17 +591,20 @@ impl FoloApp {
         if bid != self.play_batch.batch_id {
             return;
         }
+        let content_hash = img.content_hash();
+        let (width, height) = (img.width, img.height);
         let Some(item) = self.play_batch.items.get_mut(idx) else { return };
         match (r, meta) {
             (Ok(pred), Some(meta)) => {
                 item.status = BatchItemStatus::Done(BatchItemResult {
                     pred: pred.clone(),
-                    width: img.width,
-                    height: img.height,
+                    width,
+                    height,
                     model_id: meta.model_id.clone(),
                     iou_bits: meta.iou_bits,
                     target: meta.target,
                     floor: meta.floor,
+                    content_hash,
                 });
             }
             (Err(e), _) => {
@@ -665,30 +675,41 @@ impl FoloApp {
         self.fetch(
             cx,
             move |api| {
-                let (input, dims) = match source {
+                let (input, dims, content_hash) = match source {
                     PlayBatchSource::File(path) => {
                         let bytes = std::fs::read(&path).map_err(|e| {
                             ApiError::new("read_failed", format!("Could not read {name}: {e}"))
                         })?;
+                        let hash = bytes_fingerprint(&bytes);
                         let img = decode_upright(&bytes).ok_or_else(|| {
                             ApiError::new("decode_failed", format!("{name} could not be decoded"))
                         })?;
                         let dims = img.dimensions();
-                        (PredictInput::File { name: name.clone(), bytes: Arc::new(bytes) }, Some(dims))
+                        (
+                            PredictInput::File { name: name.clone(), bytes: Arc::new(bytes) },
+                            Some(dims),
+                            Some(hash),
+                        )
                     }
                     PlayBatchSource::Dataset { dataset_id, image_id } => {
                         if target.is_some() {
                             match api.image(&dataset_id, &image_id, None)? {
                                 ImageData::Encoded(bytes) => {
                                     let dims = decode_upright(&bytes).map(|im| im.dimensions());
-                                    (PredictInput::File { name: name.clone(), bytes: Arc::new(bytes) }, dims)
+                                    (
+                                        PredictInput::File { name: name.clone(), bytes: Arc::new(bytes) },
+                                        dims,
+                                        None,
+                                    )
                                 }
-                                ImageData::Rgba { width, height, .. } => {
-                                    (PredictInput::Dataset { dataset_id, image_id }, Some((width, height)))
-                                }
+                                ImageData::Rgba { width, height, .. } => (
+                                    PredictInput::Dataset { dataset_id, image_id },
+                                    Some((width, height)),
+                                    None,
+                                ),
                             }
                         } else {
-                            (PredictInput::Dataset { dataset_id, image_id }, None)
+                            (PredictInput::Dataset { dataset_id, image_id }, None, None)
                         }
                     }
                 };
@@ -704,7 +725,16 @@ impl FoloApp {
                     }
                 }
                 let (width, height) = dims.unwrap_or((pred.image.width, pred.image.height));
-                Ok(BatchItemResult { pred, width, height, model_id: model_req, iou_bits, target, floor })
+                Ok(BatchItemResult {
+                    pred,
+                    width,
+                    height,
+                    model_id: model_req,
+                    iou_bits,
+                    target,
+                    floor,
+                    content_hash,
+                })
             },
             move |this, r, cx| {
                 this.play_batch_step_answered(run_gen, idx, &model_id, r, cx);
@@ -730,8 +760,10 @@ impl FoloApp {
         }
         match r {
             Ok(res) => {
-                let stage_matches = self.play_image.as_ref().and_then(|i| i.batch_ref)
-                    == Some((self.play_batch.batch_id, idx));
+                let stage_matches = self.play_image.as_ref().is_some_and(|i| {
+                    i.batch_ref == Some((self.play_batch.batch_id, idx))
+                        && i.content_hash() == res.content_hash
+                });
                 if idx == self.play_batch.active
                     && stage_matches
                     && self.play_loading.is_none()
@@ -748,6 +780,7 @@ impl FoloApp {
                     self.play_pred = Load::Ready(res.pred.clone());
                     self.play_pred_for = Some((self.play_image_gen, res.model_id.clone()));
                     self.play_fetched_floor = res.floor;
+                    self.clear_play_hover();
                 }
                 self.play_batch.items[idx].status = BatchItemStatus::Done(res);
             }
@@ -787,123 +820,6 @@ impl FoloApp {
                 cx,
             );
         }
-    }
-
-    /// True when at least one fresh completed batch image is ready for Batch JSON / Batch CSV export.
-    pub(crate) fn has_play_batch_export(&self) -> bool {
-        if !self.play_batch.is_active() {
-            return false;
-        }
-        let Some(model_id) = self.play_model.as_deref() else { return false };
-        let e2e = self.play_shown_model().is_some_and(|m| self.model_e2e(m));
-        (0..self.play_batch.items.len()).any(|i| {
-            self.play_batch
-                .fresh_result(i, model_id, self.play_iou, self.play_target, self.play_conf, e2e)
-                .is_some()
-        })
-    }
-
-    /// Builds the Batch JSON payload, suggested filename, and summary string from fresh batch results.
-    pub(crate) fn build_play_batch_export_json(&self) -> Option<anyhow::Result<(String, String, String)>> {
-        if !self.play_batch.is_active() {
-            return None;
-        }
-        let model_id = self.play_model.as_deref()?;
-        let shown = self.play_shown_model();
-        let model_name = shown.map(|m| m.name.as_str()).unwrap_or(model_id);
-        let e2e = shown.is_some_and(|m| self.model_e2e(m));
-        let mut owned: Vec<(String, &BatchItemResult, Vec<&ScoredBox>)> = Vec::new();
-        for (i, item) in self.play_batch.items.iter().enumerate() {
-            if let Some(res) = self.play_batch.fresh_result(
-                i,
-                model_id,
-                self.play_iou,
-                self.play_target,
-                self.play_conf,
-                e2e,
-            ) {
-                let boxes = filter_detections(&res.pred.boxes, self.play_conf, self.play_class);
-                owned.push((batch_tile_label(item.name.as_ref()).to_string(), res, boxes));
-            }
-        }
-        if owned.is_empty() {
-            return None;
-        }
-        let entries: Vec<BatchImageExport<'_>> = owned
-            .iter()
-            .map(|(fname, res, boxes)| BatchImageExport {
-                filename: fname.as_str(),
-                width: res.width,
-                height: res.height,
-                pred: &res.pred,
-                boxes: boxes.as_slice(),
-            })
-            .collect();
-        let total_dets: usize = entries.iter().map(|e| e.boxes.len()).sum();
-        let iou = (!e2e).then_some(self.play_iou);
-        let json = batch_detections_json(
-            model_name,
-            model_id,
-            self.play_conf,
-            iou,
-            self.play_class,
-            self.play_batch.items.len(),
-            &entries,
-        );
-        let fname = batch_export_filename(model_name, entries.len(), "json");
-        let summary = format!(
-            "{} · {}",
-            counted(entries.len() as u64, "image", "images"),
-            plural(total_dets, "detection")
-        );
-        Some(json.map(|s| (s, fname, summary)))
-    }
-
-    /// Builds the Batch CSV payload, suggested filename, and summary string from fresh batch results.
-    pub(crate) fn build_play_batch_export_csv(&self) -> Option<(String, String, String)> {
-        if !self.play_batch.is_active() {
-            return None;
-        }
-        let model_id = self.play_model.as_deref()?;
-        let shown = self.play_shown_model();
-        let model_name = shown.map(|m| m.name.as_str()).unwrap_or(model_id);
-        let e2e = shown.is_some_and(|m| self.model_e2e(m));
-        let mut owned: Vec<(String, &BatchItemResult, Vec<&ScoredBox>)> = Vec::new();
-        for (i, item) in self.play_batch.items.iter().enumerate() {
-            if let Some(res) = self.play_batch.fresh_result(
-                i,
-                model_id,
-                self.play_iou,
-                self.play_target,
-                self.play_conf,
-                e2e,
-            ) {
-                let boxes = filter_detections(&res.pred.boxes, self.play_conf, self.play_class);
-                owned.push((batch_tile_label(item.name.as_ref()).to_string(), res, boxes));
-            }
-        }
-        if owned.is_empty() {
-            return None;
-        }
-        let entries: Vec<BatchImageExport<'_>> = owned
-            .iter()
-            .map(|(fname, res, boxes)| BatchImageExport {
-                filename: fname.as_str(),
-                width: res.width,
-                height: res.height,
-                pred: &res.pred,
-                boxes: boxes.as_slice(),
-            })
-            .collect();
-        let total_dets: usize = entries.iter().map(|e| e.boxes.len()).sum();
-        let csv = batch_detections_csv(&entries);
-        let fname = batch_export_filename(model_name, entries.len(), "csv");
-        let summary = format!(
-            "{} · {}",
-            counted(entries.len() as u64, "image", "images"),
-            plural(total_dets, "detection")
-        );
-        Some((csv, fname, summary))
     }
 
     /// Prompts for a save path and writes the Playground Batch JSON file off the UI thread.

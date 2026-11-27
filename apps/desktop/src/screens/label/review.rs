@@ -511,6 +511,9 @@ impl FoloApp {
             cx,
             act(|this, _, cx| {
                 this.label.show_boxes = !this.label.show_boxes;
+                if !this.label.show_boxes {
+                    this.label.editor.cancel_transform();
+                }
                 cx.notify();
             }),
         );

@@ -62,6 +62,7 @@ fn fake_batch_result(model_id: &str, iou: f32, floor: f32, n: usize) -> BatchIte
         iou_bits: iou.to_bits(),
         target: None,
         floor,
+        content_hash: None,
     }
 }
 
@@ -420,6 +421,7 @@ fn playground_batch_same_basename_corrupt_first_iou_and_dataset_refresh_guards()
         this.set_play_target(Some(crate::local::Target::Cpu), cx);
         assert!(!this.play_batch.running);
         assert!(matches!(this.play_batch.items[0].status, BatchItemStatus::Pending));
+        this.set_play_target(None, cx);
     });
 
     // 5. Dataset refresh clears affected dataset batch so shifted positional IDs never export stale names.
@@ -433,5 +435,55 @@ fn playground_batch_same_basename_corrupt_first_iou_and_dataset_refresh_guards()
         };
         let _ = this.forget_play_dataset(&ds_id, cx);
         assert!(!this.play_batch.is_active(), "dataset edit clears affected dataset batch");
+    });
+
+    // 6. Replacing a batch PNG in place invalidates cached result reuse (content_hash mismatch),
+    //    and switching models while a batch item is loading still settles play_loading cleanly.
+    let repl_a = dir.path().join("repl_a.png");
+    let repl_b = dir.path().join("repl_b.png");
+    write_test_png(&repl_a, 200, 20, 20);
+    write_test_png(&repl_b, 20, 20, 200);
+    app.platform().answer_prompts(Some(vec![repl_a.clone(), repl_b.clone()]));
+    drive(&mut app, window, |this, w, cx| this.pick_image(w, cx));
+    settle(&mut app, window);
+
+    let old_hash = drive(&mut app, window, |this, _, _| {
+        assert_eq!(this.play_batch.items.len(), 2);
+        match &this.play_batch.items[0].status {
+            BatchItemStatus::Done(r) => r.content_hash.expect("file result carries content_hash"),
+            other => panic!("expected Done for item 0, got {other:?}"),
+        }
+    });
+    // Step to item 1, replace repl_a.png in place with different pixels, then step back to item 0.
+    drive(&mut app, window, |this, _, cx| this.select_play_batch_item(1, cx));
+    settle(&mut app, window);
+    write_test_png(&repl_a, 10, 240, 10);
+    drive(&mut app, window, |this, _, cx| this.select_play_batch_item(0, cx));
+    settle(&mut app, window);
+    let new_hash = drive(&mut app, window, |this, _, _| match &this.play_batch.items[0].status {
+        BatchItemStatus::Done(r) => r.content_hash.expect("updated content_hash"),
+        other => panic!("expected fresh Done after replacement, got {other:?}"),
+    });
+    assert_ne!(old_hash, new_hash, "in-place file replacement must recompute instead of reusing stale cache");
+
+    // Step to item 1 and immediately switch models while item 1 is loading -> settles cleanly.
+    drive(&mut app, window, |this, _, cx| {
+        let cur = this.play_model.clone().unwrap();
+        let other = this.store.models.ready().unwrap().iter().find(|m| m.id != cur).unwrap().id.clone();
+        this.select_play_batch_item(1, cx);
+        this.pick_play_model(other, cx);
+    });
+    settle(&mut app, window);
+    drive(&mut app, window, |this, _, _| {
+        assert!(
+            this.play_loading.is_none(),
+            "switching models during batch load must not leave play_loading stuck"
+        );
+        let bid = this.play_batch.batch_id;
+        assert_eq!(
+            this.play_image.as_ref().and_then(|i| i.batch_ref),
+            Some((bid, 1)),
+            "selected item 1 still stages cleanly after mid-load model switch"
+        );
     });
 }

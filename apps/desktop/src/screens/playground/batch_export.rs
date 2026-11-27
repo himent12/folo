@@ -1,7 +1,13 @@
 //! Playground batch export serializers: structured Batch JSON and RFC 4180 Batch CSV
 //! (`filename,class,confidence,x1,y1,x2,y2,width,height`).
 
+use super::batch::{BatchItemResult, batch_tile_label};
+use super::page::filter_detections;
 use crate::api::{PredictResponse, ScoredBox, Timing};
+use crate::app::FoloApp;
+use crate::ui::{counted, plural};
+
+type BatchExportRows<'a> = (&'a str, &'a str, bool, Vec<(String, &'a BatchItemResult, Vec<&'a ScoredBox>)>);
 
 /// One completed image entry included in a Playground batch export.
 pub struct BatchImageExport<'a> {
@@ -138,6 +144,105 @@ fn push_csv_field(out: &mut String, field: &str) {
         out.push('"');
     } else {
         out.push_str(field);
+    }
+}
+
+impl FoloApp {
+    /// True when at least one fresh completed batch image is ready for Batch JSON / Batch CSV export.
+    pub(crate) fn has_play_batch_export(&self) -> bool {
+        if !self.play_batch.is_active() {
+            return false;
+        }
+        let Some(model_id) = self.play_model.as_deref() else { return false };
+        let e2e = self.play_shown_model().is_some_and(|m| self.model_e2e(m));
+        (0..self.play_batch.items.len()).any(|i| {
+            self.play_batch
+                .fresh_result(i, model_id, self.play_iou, self.play_target, self.play_conf, e2e)
+                .is_some()
+        })
+    }
+
+    /// Collects fresh batch entries for export, returning `(model_name, model_id, e2e, rows)`.
+    fn collect_batch_export_rows(&self) -> Option<BatchExportRows<'_>> {
+        if !self.play_batch.is_active() {
+            return None;
+        }
+        let model_id = self.play_model.as_deref()?;
+        let shown = self.play_shown_model();
+        let model_name = shown.map(|m| m.name.as_str()).unwrap_or(model_id);
+        let e2e = shown.is_some_and(|m| self.model_e2e(m));
+        let mut owned = Vec::new();
+        for (i, item) in self.play_batch.items.iter().enumerate() {
+            if let Some(res) = self.play_batch.fresh_result(
+                i,
+                model_id,
+                self.play_iou,
+                self.play_target,
+                self.play_conf,
+                e2e,
+            ) {
+                let boxes = filter_detections(&res.pred.boxes, self.play_conf, self.play_class);
+                owned.push((batch_tile_label(item.name.as_ref()).to_string(), res, boxes));
+            }
+        }
+        (!owned.is_empty()).then_some((model_name, model_id, e2e, owned))
+    }
+
+    /// Builds the Batch JSON payload, suggested filename, and summary string from fresh batch results.
+    pub(crate) fn build_play_batch_export_json(&self) -> Option<anyhow::Result<(String, String, String)>> {
+        let (model_name, model_id, e2e, owned) = self.collect_batch_export_rows()?;
+        let entries: Vec<BatchImageExport<'_>> = owned
+            .iter()
+            .map(|(fname, res, boxes)| BatchImageExport {
+                filename: fname.as_str(),
+                width: res.width,
+                height: res.height,
+                pred: &res.pred,
+                boxes: boxes.as_slice(),
+            })
+            .collect();
+        let total_dets: usize = entries.iter().map(|e| e.boxes.len()).sum();
+        let iou = (!e2e).then_some(self.play_iou);
+        let json = batch_detections_json(
+            model_name,
+            model_id,
+            self.play_conf,
+            iou,
+            self.play_class,
+            self.play_batch.items.len(),
+            &entries,
+        );
+        let fname = batch_export_filename(model_name, entries.len(), "json");
+        let summary = format!(
+            "{} · {}",
+            counted(entries.len() as u64, "image", "images"),
+            plural(total_dets, "detection")
+        );
+        Some(json.map(|s| (s, fname, summary)))
+    }
+
+    /// Builds the Batch CSV payload, suggested filename, and summary string from fresh batch results.
+    pub(crate) fn build_play_batch_export_csv(&self) -> Option<(String, String, String)> {
+        let (model_name, _, _, owned) = self.collect_batch_export_rows()?;
+        let entries: Vec<BatchImageExport<'_>> = owned
+            .iter()
+            .map(|(fname, res, boxes)| BatchImageExport {
+                filename: fname.as_str(),
+                width: res.width,
+                height: res.height,
+                pred: &res.pred,
+                boxes: boxes.as_slice(),
+            })
+            .collect();
+        let total_dets: usize = entries.iter().map(|e| e.boxes.len()).sum();
+        let csv = batch_detections_csv(&entries);
+        let fname = batch_export_filename(model_name, entries.len(), "csv");
+        let summary = format!(
+            "{} · {}",
+            counted(entries.len() as u64, "image", "images"),
+            plural(total_dets, "detection")
+        );
+        Some((csv, fname, summary))
     }
 }
 

@@ -55,6 +55,14 @@ impl PlayImage {
             _ => self.input.clone(),
         }
     }
+
+    /// Content fingerprint of file bytes when staged from a local file (`None` for dataset images).
+    pub fn content_hash(&self) -> Option<u64> {
+        match &self.input {
+            PredictInput::File { bytes, .. } => Some(crate::screens::playground::bytes_fingerprint(bytes)),
+            PredictInput::Dataset { .. } => None,
+        }
+    }
 }
 
 impl FoloApp {
@@ -200,6 +208,8 @@ impl FoloApp {
         dataset: &str,
         cx: &mut Context<Self>,
     ) -> Option<Arc<folo_ui::RenderImage>> {
+        // Also invalidate any in-flight validation batch fetch that may have read pre-refresh ids.
+        self.play_batch.load_gen += 1;
         if self.play_batch.items.iter().any(|it| {
             matches!(&it.source, crate::screens::playground::PlayBatchSource::Dataset { dataset_id, .. } if dataset_id == dataset)
         }) {
