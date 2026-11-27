@@ -148,10 +148,29 @@ describe('Playground video container frame-step probing', () => {
     expect(parseWebmFrameStep(buf)).toBeCloseTo(1 / 30, 4);
   });
 
-  it('extracts frame duration from MP4 mdhd + stts (front moov, v1 mdhd, dominant delta, and trailing moov)', async () => {
+  it('continues past an unknown-size WebM Cluster to read sibling clusters', () => {
+    const ebml = ebmlElem(0x1a45dfa3, ebmlElem(0x4286, new Uint8Array([1])));
+    const info = ebmlElem(0x1549a966, ebmlElem(0x2ad7b1, ebmlUint(1_000_000, 4)));
+    const videoEntry = ebmlElem(0xae, concat(ebmlElem(0xd7, new Uint8Array([1])), ebmlElem(0x83, new Uint8Array([1]))));
+    const tracks = ebmlElem(0x1654ae6b, videoEntry);
+    const cluster1 = ebmlElem(0x1f43b675, concat(ebmlElem(0xe7, ebmlUint(0, 2)), simpleBlock(1, 0)), true);
+    const cluster2 = ebmlElem(
+      0x1f43b675,
+      concat(ebmlElem(0xe7, ebmlUint(100, 2)), simpleBlock(1, 0), simpleBlock(1, 100), simpleBlock(1, 200)),
+      true,
+    );
+    const segment = ebmlElem(0x18538067, concat(info, tracks, cluster1, cluster2), true);
+    expect(parseWebmFrameStep(concat(ebml, segment))).toBeCloseTo(0.1, 6);
+  });
+
+  it('extracts frame duration from MP4 mdhd + stts (front moov, v1 mdhd, rounded 33/34 ms 1 kHz, odd final frame, and trailing moov)', async () => {
     // 10 fps MP4 with an odd final frame delta.
     const mp4Front = makeMp4({ timescale: 10_000, stts: [[10, 1000], [1, 1500]] });
     expect(parseMp4FrameStep(mp4Front)).toBeCloseTo(0.1, 6);
+
+    // 1 kHz MP4 with repeating 33/34/33 ms sample durations (180 frames = 6.000 s exact 30 fps).
+    const mp4Rounded30 = makeMp4({ timescale: 1000, stts: [[120, 33], [60, 34]] });
+    expect(parseMp4FrameStep(mp4Rounded30)).toBeCloseTo(1 / 30, 5);
 
     // 29.97 fps MP4 with version-1 mdhd box.
     const mp4V1 = makeMp4({ timescale: 30_000, stts: [[120, 1001]], mdhdV1: true });

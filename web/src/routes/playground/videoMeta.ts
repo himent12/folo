@@ -51,6 +51,20 @@ const ID_SIMPLE_BLOCK = 0xa3;
 const ID_BLOCK_GROUP = 0xa0;
 const ID_BLOCK = 0xa1;
 
+/** Level-1 Segment children and top-level IDs that terminate an unknown-size Cluster per RFC 8794 §6.2. */
+const EBML_CLUSTER_TERMINATORS = new Set([
+  ID_EBML,
+  ID_SEGMENT,
+  ID_INFO,
+  ID_TRACKS,
+  ID_CLUSTER,
+  0x114d9b74, // SeekHead
+  0x1c53bb6b, // Cues
+  0x1043a770, // Chapters
+  0x1254c367, // Tags
+  0x1941a469, // Attachments
+]);
+
 function readEbmlId(buf: Uint8Array, pos: number, end: number): { id: number; next: number } | null {
   if (pos >= end) return null;
   const b0 = buf[pos]!;
@@ -132,11 +146,16 @@ export function parseWebmFrameStep(buf: Uint8Array): number | null {
         const cStart = sSz.next;
         const cEnd = sSz.size === null ? dataEnd : Math.min(dataEnd, cStart + sSz.size);
 
+        let nextSp = cEnd;
         if (sId.id === ID_INFO) {
           let ip = cStart;
           while (ip < cEnd) {
             const iId = readEbmlId(buf, ip, cEnd);
             if (!iId) break;
+            if (sSz.size === null && EBML_CLUSTER_TERMINATORS.has(iId.id)) {
+              nextSp = ip;
+              break;
+            }
             const iSz = readEbmlSize(buf, iId.next, cEnd);
             if (!iSz || iSz.size === null) break;
             const iEnd = Math.min(cEnd, iSz.next + iSz.size);
@@ -152,6 +171,10 @@ export function parseWebmFrameStep(buf: Uint8Array): number | null {
           while (tp < cEnd) {
             const tId = readEbmlId(buf, tp, cEnd);
             if (!tId) break;
+            if (sSz.size === null && EBML_CLUSTER_TERMINATORS.has(tId.id)) {
+              nextSp = tp;
+              break;
+            }
             const tSz = readEbmlSize(buf, tId.next, cEnd);
             if (!tSz) break;
             const tEnd = tSz.size === null ? cEnd : Math.min(cEnd, tSz.next + tSz.size);
@@ -189,6 +212,10 @@ export function parseWebmFrameStep(buf: Uint8Array): number | null {
           while (cp < cEnd && timestamps.length < 48) {
             const clId = readEbmlId(buf, cp, cEnd);
             if (!clId) break;
+            if (sSz.size === null && EBML_CLUSTER_TERMINATORS.has(clId.id)) {
+              nextSp = cp;
+              break;
+            }
             const clSz = readEbmlSize(buf, clId.next, cEnd);
             if (!clSz) break;
             const clStart = clSz.next;
@@ -223,13 +250,12 @@ export function parseWebmFrameStep(buf: Uint8Array): number | null {
           }
         }
 
-        if (cEnd <= sp) break;
-        sp = cEnd;
+        if (nextSp <= sp) break;
+        sp = nextSp;
       }
       break;
     }
 
-    if (idR.id !== ID_EBML && dataEnd <= pos) break;
     if (dataEnd <= pos) break;
     pos = dataEnd;
   }
@@ -295,23 +321,41 @@ function parseSttsDelta(buf: Uint8Array, start: number, end: number): number | n
   const entryCount = readU32(buf, start + 4);
   const maxEntries = Math.min(entryCount, 512);
   const counts = new Map<number, number>();
+  let totalSamples = 0;
   let p = start + 8;
   for (let i = 0; i < maxEntries && p + 8 <= end; i++, p += 8) {
     const sampleCount = readU32(buf, p);
     const sampleDelta = readU32(buf, p + 4);
     if (sampleCount > 0 && sampleDelta > 0) {
       counts.set(sampleDelta, (counts.get(sampleDelta) ?? 0) + sampleCount);
+      totalSamples += sampleCount;
     }
   }
-  let bestDelta: number | null = null;
-  let bestCount = 0;
-  for (const [delta, count] of counts) {
-    if (count > bestCount) {
-      bestCount = count;
-      bestDelta = delta;
+  if (totalSamples === 0) return null;
+  const sorted = [...counts.entries()].sort((a, b) => a[0] - b[0]);
+  // Find weighted median sample_delta, then average inliers within ±max(1 tick, 10%) so repeating rounded
+  // durations (e.g. 33/34/33 ms at 1 kHz for 30 fps) resolve to 33.333 ms without drifting, while odd final
+  // or dropped-frame entries are excluded.
+  const half = totalSamples / 2;
+  let seen = 0;
+  let median = sorted[0]![0];
+  for (const [delta, count] of sorted) {
+    seen += count;
+    if (seen >= half) {
+      median = delta;
+      break;
     }
   }
-  return bestDelta;
+  const tol = Math.max(1, median * 0.1);
+  let weightedSum = 0;
+  let weightedCount = 0;
+  for (const [delta, count] of sorted) {
+    if (Math.abs(delta - median) <= tol) {
+      weightedSum += delta * count;
+      weightedCount += count;
+    }
+  }
+  return weightedCount > 0 ? weightedSum / weightedCount : median;
 }
 
 function parseMoovFrameStep(buf: Uint8Array, start: number, end: number): number | null {

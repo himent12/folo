@@ -27,6 +27,11 @@ export function clampMediaTime(sec: number, duration: number): number {
   return Math.min(max, sec);
 }
 
+/** Rounding tolerance for mapping integer-millisecond container timestamps (e.g. 33 ms at 30 fps) to frame indices. */
+function frameBoundaryTolerance(step: number): number {
+  return Math.min(0.00075, step * 0.15);
+}
+
 /**
  * Steps forward or backward by `deltaFrames` (e.g. -1 or +1) snapped to decoded frame boundaries.
  * Adds a small sub-frame nudge past the frame start so 1 ms container PTS rounding never decodes
@@ -38,7 +43,7 @@ export function stepFrameTime(current: number, deltaFrames: number, duration: nu
   if (!Number.isFinite(deltaFrames) || deltaFrames === 0) return Math.round(cur * 10000) / 10000;
   const total = totalFramesFor(duration, step);
   const maxIdx = total > 0 ? total - 1 : 0;
-  const curIdx = Math.min(maxIdx, Math.max(0, Math.floor(cur / step + 1e-4)));
+  const curIdx = Math.min(maxIdx, Math.max(0, Math.floor((cur + frameBoundaryTolerance(step)) / step)));
   const targetIdx = Math.min(maxIdx, Math.max(0, curIdx + deltaFrames));
   if (targetIdx === 0) return 0;
   if (targetIdx === curIdx && deltaFrames > 0) return Math.round(cur * 10000) / 10000;
@@ -59,7 +64,7 @@ export function formatMediaTime(sec: number): string {
 export function frameIndexAt(sec: number, frameStep = DEFAULT_FRAME_STEP_SEC, totalFrames?: number): number {
   if (!Number.isFinite(sec) || sec <= 0) return 1;
   const step = Number.isFinite(frameStep) && frameStep > 0 ? frameStep : DEFAULT_FRAME_STEP_SEC;
-  const idx = Math.floor(sec / step + 1e-4) + 1;
+  const idx = Math.floor((sec + frameBoundaryTolerance(step)) / step) + 1;
   return totalFrames && totalFrames > 0 ? Math.min(totalFrames, idx) : idx;
 }
 

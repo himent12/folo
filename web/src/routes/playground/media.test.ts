@@ -34,6 +34,12 @@ describe('Playground media helpers', () => {
     expect(next).toBeGreaterThan(1.033);
     expect(next).toBeLessThan(1.04);
     expect(stepFrameTime(0.01, -1, 10, DEFAULT_FRAME_STEP_SEC)).toBe(0);
+    // Rounded 1 ms WebM timestamp at 30 fps (0.033 s is frame 2): +1f advances to frame 3 (~0.0687 s), never repeats frame 2.
+    expect(frameIndexAt(0.033, DEFAULT_FRAME_STEP_SEC, 300)).toBe(2);
+    const from33ms = stepFrameTime(0.033, 1, 10, DEFAULT_FRAME_STEP_SEC);
+    expect(from33ms).toBeGreaterThan(0.067);
+    expect(from33ms).toBeLessThan(0.075);
+    expect(stepFrameTime(0.033, -1, 10, DEFAULT_FRAME_STEP_SEC)).toBe(0);
     // Already inside the last frame: +1f never moves backward.
     expect(stepFrameTime(9.99, 1, 10, DEFAULT_FRAME_STEP_SEC)).toBe(9.99);
 

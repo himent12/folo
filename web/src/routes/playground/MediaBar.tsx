@@ -119,7 +119,7 @@ export default function MediaBar(props: MediaBarProps) {
                 value={m.currentTime.get()}
                 min={0}
                 max={m.duration.get()}
-                step={Math.max(0.01, Math.round(m.frameStep.get() * 1000) / 1000)}
+                step={Math.max(0.001, Math.round(m.frameStep.get() * 10000) / 10000)}
                 format={formatMediaTime}
                 oninput={(v) => m.seekTo(v, false)}
               />
