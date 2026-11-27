@@ -89,6 +89,7 @@ pub use audit::{
 };
 pub use augment::{AugmentConfig, Fetched, TrainTransform, Transformed};
 pub use bbox::BBox;
+pub use convert::{CocoExportOptions, CocoExportReport, CocoImageMode, CocoSplitReport, export_coco};
 pub use curate::{
     ClassNormalize, CollisionPolicy, FilterConfig, MergeConfig, MergeReport, MergeSplitPolicy, RemapConfig,
     filter_dataset, merge_datasets, merge_paths, remap_classes, write_filtered, write_merged,

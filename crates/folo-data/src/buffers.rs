@@ -45,10 +45,14 @@ struct TlsPool {
     bytes: usize,
 }
 
+/// Maximum capacity of the per-thread reusable file-read buffer (keeps typical JPEGs warm with zero allocs).
+const TLS_FILE_BUF_MAX_BYTES: usize = 4 << 20;
+
 #[derive(Default)]
 struct TlsScratch {
     u8s: Vec<Vec<u8>>,
     u32s: Vec<Vec<u32>>,
+    file_buf: Vec<u8>,
 }
 
 static POOL: Mutex<Pool> = Mutex::new(Pool { free: Vec::new(), bytes: 0, users: 0 });
@@ -77,7 +81,7 @@ fn release_pooled(cap: usize) {
 thread_local! {
     static POOLED: Cell<bool> = const { Cell::new(false) };
     static TLS_POOL: RefCell<TlsPool> = const { RefCell::new(TlsPool { free: Vec::new(), bytes: 0 }) };
-    static TLS_SCRATCH: RefCell<TlsScratch> = const { RefCell::new(TlsScratch { u8s: Vec::new(), u32s: Vec::new() }) };
+    static TLS_SCRATCH: RefCell<TlsScratch> = const { RefCell::new(TlsScratch { u8s: Vec::new(), u32s: Vec::new(), file_buf: Vec::new() }) };
 }
 
 fn lock() -> std::sync::MutexGuard<'static, Pool> {
@@ -116,6 +120,7 @@ pub(crate) fn pooled<R>(f: impl FnOnce() -> R) -> R {
                     let mut ts = ts.borrow_mut();
                     ts.u8s = Vec::new();
                     ts.u32s = Vec::new();
+                    ts.file_buf = Vec::new();
                 });
                 let mut pool = lock();
                 pool.users -= 1;
@@ -410,6 +415,42 @@ pub(crate) fn scratch_u32(len: usize) -> ScratchU32 {
     ScratchU32::new(len)
 }
 
+/// Reads `path` into a reusable per-thread byte buffer and passes the bytes to `f`, avoiding a fresh heap
+/// allocation per image file on worker threads.
+pub(crate) fn read_file_bytes<R>(
+    path: &std::path::Path,
+    f: impl FnOnce(&[u8]) -> crate::error::Result<R>,
+) -> crate::error::Result<R> {
+    use std::io::Read;
+    let mut file = crate::guard::check(path)
+        .and_then(|_| std::fs::File::open(path))
+        .map_err(|e| crate::error::DataError::io(path, e))?;
+    let mut buf =
+        TLS_SCRATCH.try_with(|ts| std::mem::take(&mut ts.borrow_mut().file_buf)).unwrap_or_default();
+    buf.clear();
+    if let Ok(meta) = file.metadata() {
+        let len = meta.len() as usize;
+        if buf.capacity() < len {
+            buf.reserve(len.saturating_sub(buf.len()));
+        }
+    }
+    let read_res = file.read_to_end(&mut buf).map_err(|e| crate::error::DataError::io(path, e));
+    let out = match read_res {
+        Ok(_) => f(&buf),
+        Err(e) => Err(e),
+    };
+    if buf.capacity() <= TLS_FILE_BUF_MAX_BYTES {
+        buf.clear();
+        let _ = TLS_SCRATCH.try_with(|ts| {
+            let mut ts = ts.borrow_mut();
+            if ts.file_buf.capacity() < buf.capacity() {
+                ts.file_buf = buf;
+            }
+        });
+    }
+    out
+}
+
 #[cfg(test)]
 pub(crate) static TEST_POOL_LOCK: Mutex<()> = Mutex::new(());
 
@@ -489,5 +530,43 @@ mod tests {
             assert_eq!(s.as_ptr(), p_u32);
             assert!(s.iter().all(|&v| v == 0xCAFE_BABE));
         }
+    }
+
+    #[test]
+    fn read_file_bytes_reuses_tls_buffer_and_clears_on_leave_pooled() {
+        let dir = folo_test_support::TestDir::new("folo-data-read-file-bytes");
+        let big = dir.path().join("big.bin");
+        let small = dir.path().join("small.bin");
+        let big_data: Vec<u8> = (0..12_000usize).map(|i| (i.wrapping_mul(31) & 0xFF) as u8).collect();
+        let small_data: Vec<u8> = (0..1_024usize).map(|i| (i.wrapping_mul(17) & 0xFF) as u8).collect();
+        std::fs::write(&big, &big_data).unwrap();
+        std::fs::write(&small, &small_data).unwrap();
+
+        let _guard = TEST_POOL_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        pooled(|| {
+            let first_ptr = read_file_bytes(&big, |bytes| {
+                assert_eq!(bytes, big_data.as_slice());
+                Ok(bytes.as_ptr())
+            })
+            .unwrap();
+            let second_ptr = read_file_bytes(&small, |bytes| {
+                assert_eq!(bytes, small_data.as_slice());
+                Ok(bytes.as_ptr())
+            })
+            .unwrap();
+            assert_eq!(second_ptr, first_ptr, "smaller file read reuses TLS file_buf without reallocating");
+            let third_ptr = read_file_bytes(&big, |bytes| {
+                assert_eq!(bytes, big_data.as_slice());
+                Ok(bytes.as_ptr())
+            })
+            .unwrap();
+            assert_eq!(
+                third_ptr, first_ptr,
+                "equal-sized file read reuses TLS file_buf without reallocating"
+            );
+        });
+        // Leaving `pooled` frees the thread-local file buffer.
+        let cap_after = TLS_SCRATCH.with(|ts| ts.borrow().file_buf.capacity());
+        assert_eq!(cap_after, 0);
     }
 }

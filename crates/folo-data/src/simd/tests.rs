@@ -668,3 +668,150 @@ fn mixup_copy_flip_rgba_and_luma_match_scalar_bit_exact() {
         assert_eq!(d1, d0, "mixup exhaustive wa={wa}");
     }
 }
+
+#[test]
+fn hsv_avx2_fma_and_warp_u8_16px_match_scalar_bit_exact() {
+    use super::hsv::{
+        hsv_row_inplace, hsv_row_inplace_scalar, rgb_row_hsv_to_planar_scalar, rgb_row_to_planar_fused,
+    };
+
+    // 1. Exhaustive verification of FMA Newton-Raphson reciprocals for every `d in 1..=255`.
+    #[cfg(target_arch = "x86_64")]
+    if super::has_avx2_fma() {
+        use std::arch::x86_64::*;
+        // SAFETY: `has_avx2_fma()` checked above.
+        unsafe {
+            let v1 = _mm256_set1_ps(1.0);
+            let v65536 = _mm256_set1_ps(65536.0);
+            for chunk in (1u32..=255).collect::<Vec<_>>().chunks(8) {
+                let mut lanes = [1i32; 8];
+                for (i, &d) in chunk.iter().enumerate() {
+                    lanes[i] = d as i32;
+                }
+                let vx = _mm256_cvtepi32_ps(_mm256_loadu_si256(lanes.as_ptr() as *const __m256i));
+                let got = super::hsv::rcp65536_8_avx2_fma(vx, v1, v65536);
+                let mut out = [0i32; 8];
+                _mm256_storeu_si256(out.as_mut_ptr() as *mut __m256i, got);
+                for (i, &d) in chunk.iter().enumerate() {
+                    assert_eq!(out[i] as u32, super::hsv::RECIP[d as usize], "rcp65536 mismatch at d={d}");
+                }
+            }
+        }
+    }
+
+    // 2. Bit-exact `hsv_row_inplace` and `rgb_row_to_planar_fused` across tricky gains & odd widths.
+    let hsv_cases = [
+        HsvTables::new(0.015, 1.7, 0.6).unwrap(),
+        HsvTables::new(-0.014, 0.35, 1.38).unwrap(),
+        HsvTables::new(0.25, 0.499_999_97, 1.499_999_9).unwrap(),
+        HsvTables::new(0.0, 0.0, 1.25).unwrap(),
+        HsvTables::new(0.5, 2.3, 0.85).unwrap(),
+    ];
+    for (ci, hsv) in hsv_cases.iter().enumerate() {
+        for &w in &[0usize, 1, 7, 8, 15, 16, 17, 23, 24, 25, 31, 32, 33, 48, 63, 64, 65] {
+            let src = noisy_bytes(2000 + ci as u64 * 100 + w as u64, w * 3);
+            let (mut s0, mut s1) = (src.clone(), src.clone());
+            hsv_row_inplace_scalar(&mut s0, hsv);
+            hsv_row_inplace(&mut s1, hsv);
+            assert_eq!(s1, s0, "hsv_row_inplace case={ci} w={w}");
+
+            #[cfg(target_arch = "x86_64")]
+            if super::has_avx2() {
+                let mut s_avx2 = src.clone();
+                // SAFETY: `has_avx2()` checked above.
+                unsafe { super::hsv::hsv_row_inplace_avx2(&mut s_avx2, hsv) };
+                assert_eq!(s_avx2, s0, "hsv_row_inplace_avx2 case={ci} w={w}");
+            }
+
+            for flip in [false, true] {
+                let (mut r0, mut g0, mut b0) = (vec![0u8; w], vec![0u8; w], vec![0u8; w]);
+                let (mut r1, mut g1, mut b1) = (vec![0u8; w], vec![0u8; w], vec![0u8; w]);
+                rgb_row_hsv_to_planar_scalar(
+                    &src,
+                    hsv,
+                    flip,
+                    &mut PlanarRow::U8 { r: &mut r0, g: &mut g0, b: &mut b0 },
+                );
+                rgb_row_to_planar_fused(
+                    &src,
+                    Some(hsv),
+                    flip,
+                    &mut PlanarRow::U8 { r: &mut r1, g: &mut g1, b: &mut b1 },
+                );
+                assert_eq!((&r1, &g1, &b1), (&r0, &g0, &b0), "rgb_row_fused_u8 case={ci} w={w} flip={flip}");
+
+                let (mut fr0, mut fg0, mut fb0) = (vec![0f32; w], vec![0f32; w], vec![0f32; w]);
+                let (mut fr1, mut fg1, mut fb1) = (vec![0f32; w], vec![0f32; w], vec![0f32; w]);
+                rgb_row_hsv_to_planar_scalar(
+                    &src,
+                    hsv,
+                    flip,
+                    &mut PlanarRow::F32Div255 { r: &mut fr0, g: &mut fg0, b: &mut fb0 },
+                );
+                rgb_row_to_planar_fused(
+                    &src,
+                    Some(hsv),
+                    flip,
+                    &mut PlanarRow::F32Div255 { r: &mut fr1, g: &mut fg1, b: &mut fb1 },
+                );
+                assert!(
+                    fr1.iter().zip(&fr0).all(|(a, b)| a.to_bits() == b.to_bits())
+                        && fg1.iter().zip(&fg0).all(|(a, b)| a.to_bits() == b.to_bits())
+                        && fb1.iter().zip(&fb0).all(|(a, b)| a.to_bits() == b.to_bits()),
+                    "rgb_row_fused_f32 case={ci} w={w} flip={flip}"
+                );
+            }
+        }
+    }
+
+    // 3. Bit-exact 16-pixel unrolled `warp_interior_to_planar_fused` across every boundary width (0..=65).
+    let cols = 160usize;
+    let top = noisy_bytes(310, cols * 3);
+    let bot = noisy_bytes(311, cols * 3);
+    let mut v = vec![0u32; cols * 4];
+    vblend_rgb_to_rgba32(&top, &bot, 1234, &mut v);
+    let hsv = &hsv_cases[0];
+    for &count in &[0usize, 1, 7, 8, 9, 15, 16, 17, 23, 24, 25, 31, 32, 33, 47, 48, 49, 63, 64, 65] {
+        let width = count + 9;
+        let x_start = 4;
+        let x_end = x_start + count;
+        for &(rel_fu0, du) in &[(100_000i64, 90_000i64), (8_000_000, -100_000)] {
+            for hsv_opt in [None, Some(hsv)] {
+                for flip_lr in [false, true] {
+                    let (mut r0, mut g0, mut b0) =
+                        (vec![0x5Au8; width], vec![0x5Au8; width], vec![0x5Au8; width]);
+                    let (mut r1, mut g1, mut b1) =
+                        (vec![0x5Au8; width], vec![0x5Au8; width], vec![0x5Au8; width]);
+                    warp_interior_to_planar_fused_scalar(
+                        &v,
+                        rel_fu0,
+                        du,
+                        width,
+                        x_start,
+                        x_end,
+                        hsv_opt,
+                        flip_lr,
+                        &mut PlanarRow::U8 { r: &mut r0, g: &mut g0, b: &mut b0 },
+                    );
+                    warp_interior_to_planar_fused(
+                        &v,
+                        rel_fu0,
+                        du,
+                        width,
+                        x_start,
+                        x_end,
+                        hsv_opt,
+                        flip_lr,
+                        &mut PlanarRow::U8 { r: &mut r1, g: &mut g1, b: &mut b1 },
+                    );
+                    assert_eq!(
+                        (&r1, &g1, &b1),
+                        (&r0, &g0, &b0),
+                        "warp_16px_u8 count={count} du={du} hsv={} flip={flip_lr}",
+                        hsv_opt.is_some()
+                    );
+                }
+            }
+        }
+    }
+}

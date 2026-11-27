@@ -199,6 +199,12 @@ rebuilds its dataset indexes then). Nothing installs one by default; `folo mcp
   1-pixel box at `floor(midpoint) + 1`, and requires single-line trimmed non-empty class names; note `folo dataset
   convert --to` in the CLI currently targets `yolo | coco`, while `Format::Voc` export is exposed through the
   `folo-data` library API).
+- `convert::export_coco(&loaded, out, &CocoExportOptions)` (`src/convert/coco.rs`, also backing `convert(..., Format::Coco)`)
+  exports any loaded dataset to spec-compliant COCO instances JSON (`annotations/instances_<split>.json`) with
+  selectable splits (deduplicated into canonical `[train, val, test]` order), `CocoImageMode::Copy`, `Link` (hard-link
+  with transparent copy fallback), or `Reference` (forward-slash relative paths from `out`, no image copies),
+  deterministic sorted entry ordering, 1-based image/annotation/category IDs, `area = w * h`, `iscrowd = 0`, optional
+  pretty-printing, and typed streaming atomic JSON writes (sibling `.tmp` + rename).
 - `detect_format(path, format)` finds the format without reading labels; a path with nothing recognisable fails with
   a `DataError::Format` whose message starts with `UNDETECTED`. A folder a writer has not finished (below) is refused
   as unfinished first, whatever it holds.
@@ -275,12 +281,12 @@ visible tile on the `2s x 2s` canvas) or letterbox to `s x s` → random affine 
 translate) to `s x s` → mixup → HSV (integer hexcone HSV) → flips. The mosaic and its affine run as one step
 (`mosaic_affine`, bit for bit `random_affine` of `mosaic4`): the warp reads the four tiles where they lie on the
 `2s x 2s` canvas instead of painting the canvas first (with rotation or shear the canvas is painted and warped as
-before). HSV uses gather-free 256-bit AVX2 kernels on CPUs with AVX2 (exact IEEE-754 reciprocals, linear gain scaling,
-byte-packed sector dispatch, and exact division-free `/ 255` and `/ 65280` integer arithmetic), matching the scalar
-per-pixel kernel on all 2^24 colours. Inside `DataLoader`, workers write straight into their disjoint planar batch
-slots, fusing warp (or
-letterbox), HSV, flips and planar `u8`/`f32` conversion in a single L1-resident row pass without allocating an
-intermediate warp output HWC buffer or a separate collator copy pass (when mixup triggers, it blends two
+before). HSV uses gather-free 256-bit AVX2/FMA kernels on CPUs with AVX2/FMA (division-free `vrcpps` + 1-step FMA
+Newton-Raphson reciprocals on FMA CPUs, exact IEEE-754 reciprocals on non-FMA AVX2, linear gain scaling, byte-packed
+sector dispatch, and exact division-free `/ 255` and `/ 65280` integer arithmetic), matching the scalar per-pixel
+kernel on all 2^24 colours. Inside `DataLoader`, workers write straight into their disjoint planar batch slots, fusing
+warp (16-pixel unrolled on AVX2+FMA for `u8_images`) or letterbox, HSV, flips and planar `u8`/`f32` conversion in a
+single L1-resident row pass without allocating an intermediate warp output HWC buffer or a separate collator copy pass (when mixup triggers, it blends two
 materialised `imgsz x imgsz` interleaved images before running the fused HSV, flips and planar pass; every path stays
 bit for bit identical, pinned by `tests/golden.rs`). With `augment: None` (validation) it only letterboxes straight into the planar slot and records
 the geometry.
@@ -321,9 +327,9 @@ the geometry.
   - Image-sized `Vec<u8>` buffers (`≥ 64 KiB`, used for decoded/resized/warped images and PNG decode) pass through a
     per-thread TLS pool (up to 32 MiB per thread) in front of the process-wide pool, bounded together at `MAX_BYTES`
     (512 MiB) via `TOTAL_POOLED_BYTES` and emptied when the last pooled thread leaves `pooled()`.
-  - Small per-thread scratch slots (`TLS_SCRATCH`: up to 4 × 256 KiB `u8` and 8 × 32 Ki `u32` slots per thread, kept
-    separate from `TOTAL_POOLED_BYTES` and cleared on leaving `pooled()`) back mosaic, mixup, resize, and letterbox
-    row/plan scratch with zero mutex contention.
+  - Small per-thread scratch slots (`TLS_SCRATCH`: up to 4 × 256 KiB `u8` and 8 × 32 Ki `u32` slots plus a reusable
+    file-read buffer up to 4 MiB per thread for `read_image`, kept separate from `TOTAL_POOLED_BYTES` and cleared on
+    leaving `pooled()`) back file reads, mosaic, mixup, resize, and letterbox row/plan scratch with zero mutex contention.
   A fresh buffer of a megabyte faults its pages in on first write, which with 8-16 loader threads at once cost
   0.5-1 ms per buffer on our test machine against 0.05-0.1 ms reused; buffers are zeroed where `vec![0; n]` was and
   otherwise overwritten whole, so the bytes do not depend on reuse.
