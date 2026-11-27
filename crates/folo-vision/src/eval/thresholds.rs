@@ -4,7 +4,7 @@
 //! steps) with zero extra inference passes, and ready to feed straight into [`crate::NmsConfig::per_class_conf`]
 //! or [`crate::Predictor::with_calibrated_thresholds`].
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -50,10 +50,10 @@ pub struct ClassThreshold {
 /// ([`crate::Evaluator::compute`] / [`crate::val::ValResult::thresholds`]) from the existing IoU 0.5 confidence
 /// sweep with zero extra inference passes.
 ///
-/// Note on boundary semantics: [`crate::Evaluator`] evaluates thresholds with `score >= best_conf`, whereas
-/// [`crate::NmsConfig`] and [`crate::Predictor`] retain detections with strict `score > conf`. On continuous model
-/// probabilities the difference is a measure-zero boundary event, while on discrete quantized scores callers may
-/// keep or nudge thresholds as needed.
+/// Applying this calibration via [`crate::Predictor::apply_calibrated_thresholds`] or
+/// [`crate::Predictor::with_calibrated_thresholds`] automatically enables inclusive (`score >= conf`) final-score
+/// thresholding ([`crate::NmsConfig::conf_inclusive`]) so detections right on a grid boundary (`0.0`, interior
+/// points, or `1.0`) match the evaluator's operating point exactly.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ThresholdCalibration {
     /// Global operating point maximising class-mean F1 across all evaluated classes.
@@ -85,7 +85,8 @@ impl ThresholdCalibration {
         self.per_class.iter().find(|c| c.class == class).map_or(self.global.best_conf, |c| c.best_conf)
     }
 
-    /// Validate that the global threshold and every per-class threshold are finite and in `0.0..=1.0`.
+    /// Validate that the global threshold and every per-class threshold are finite, in `0.0..=1.0`, and have
+    /// unique class IDs.
     pub fn validate(&self) -> Result<()> {
         if !(0.0..=1.0).contains(&self.global.best_conf) {
             return Err(Error::Config(format!(
@@ -93,7 +94,14 @@ impl ThresholdCalibration {
                 self.global.best_conf
             )));
         }
+        let mut seen = BTreeSet::new();
         for c in &self.per_class {
+            if !seen.insert(c.class) {
+                return Err(Error::Config(format!(
+                    "calibrated per_class contains duplicate entry for class {}",
+                    c.class
+                )));
+            }
             if !(0.0..=1.0).contains(&c.best_conf) {
                 return Err(Error::Config(format!(
                     "calibrated per-class best_conf for class {} must be finite and in 0..=1, got {}",
@@ -170,5 +178,8 @@ mod tests {
             bad_global.global.best_conf = bad;
             assert!(bad_global.validate().is_err(), "expected rejection for global conf {bad}");
         }
+        let mut dup_cal = cal.clone();
+        dup_cal.per_class.push(cal.per_class[0]);
+        assert!(dup_cal.validate().is_err(), "duplicate class IDs must be rejected");
     }
 }

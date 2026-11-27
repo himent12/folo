@@ -67,13 +67,14 @@ pub fn matrix_nms_sorted(
     sigma: Option<f32>,
     limit: usize,
 ) -> Vec<(usize, f32)> {
-    matrix_nms_sorted_inner(boxes, scores, |_| score_thr, sigma, limit)
+    matrix_nms_sorted_inner(boxes, scores, |_| score_thr, false, sigma, limit)
 }
 
 fn matrix_nms_sorted_inner(
     boxes: &[Xyxy],
     scores: &[f32],
     score_thr_of: impl Fn(usize) -> f32,
+    inclusive: bool,
     sigma: Option<f32>,
     limit: usize,
 ) -> Vec<(usize, f32)> {
@@ -85,8 +86,9 @@ fn matrix_nms_sorted_inner(
     if n == 0 || limit == 0 {
         return Vec::new();
     }
+    let passes = |s: f32, thr: f32| if inclusive { s >= thr } else { s > thr };
     let mut order: Vec<usize> =
-        (0..n).filter(|&i| scores[i].is_finite() && scores[i] > score_thr_of(i)).collect();
+        (0..n).filter(|&i| scores[i].is_finite() && passes(scores[i], score_thr_of(i))).collect();
     if order.is_empty() {
         return Vec::new();
     }
@@ -124,7 +126,7 @@ fn matrix_nms_sorted_inner(
     for (pos, &orig_idx) in order.iter().enumerate() {
         let s = scores[orig_idx];
         let decayed = if s > 0.0 { (s as f64 * min_decay[pos]) as f32 } else { s };
-        if decayed > score_thr_of(orig_idx) {
+        if passes(decayed, score_thr_of(orig_idx)) {
             kept.push((orig_idx, decayed));
         }
     }
@@ -144,7 +146,7 @@ pub(super) fn batched_matrix_nms(
     max_det: usize,
     agnostic: bool,
 ) -> Vec<(usize, f32)> {
-    batched_matrix_nms_with_thr(boxes, scores, classes, &|_| score_thr, sigma, max_det, agnostic)
+    batched_matrix_nms_with_thr(boxes, scores, classes, &|_| score_thr, false, sigma, max_det, agnostic)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -153,6 +155,7 @@ pub(super) fn batched_matrix_nms_with_thr(
     scores: &[f32],
     classes: &[u32],
     score_thr_for: &(dyn Fn(u32) -> f32 + Sync),
+    inclusive: bool,
     sigma: Option<f32>,
     max_det: usize,
     agnostic: bool,
@@ -168,7 +171,14 @@ pub(super) fn batched_matrix_nms_with_thr(
     }
     assert!(n <= u32::MAX as usize, "batched_matrix_nms: too many boxes");
     if agnostic {
-        return matrix_nms_sorted_inner(boxes, scores, |i| score_thr_for(classes[i]), sigma, max_det);
+        return matrix_nms_sorted_inner(
+            boxes,
+            scores,
+            |i| score_thr_for(classes[i]),
+            inclusive,
+            sigma,
+            max_det,
+        );
     }
     let order: Vec<u32> = (0..n as u32).collect();
     let (bucketed, ranges) = bucket_by_class(&order, classes);
@@ -178,7 +188,7 @@ pub(super) fn batched_matrix_nms_with_thr(
         let thr = score_thr_for(cls);
         let b: Vec<Xyxy> = ids.iter().map(|&i| boxes[i as usize]).collect();
         let s: Vec<f32> = ids.iter().map(|&i| scores[i as usize]).collect();
-        matrix_nms_sorted(&b, &s, thr, sigma, max_det)
+        matrix_nms_sorted_inner(&b, &s, |_| thr, inclusive, sigma, max_det)
             .into_iter()
             .map(|(k, sc)| (ids[k] as usize, sc))
             .collect()

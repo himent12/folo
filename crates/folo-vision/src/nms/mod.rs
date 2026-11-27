@@ -198,6 +198,7 @@ fn finish(
                 &classes,
                 cfg.iou,
                 &|c| cfg.conf_for_class(c),
+                cfg.conf_inclusive,
                 sigma,
                 cfg.max_det,
                 cfg.agnostic,
@@ -224,6 +225,7 @@ fn finish(
                 &scores,
                 &classes,
                 &|c| cfg.conf_for_class(c),
+                cfg.conf_inclusive,
                 sigma,
                 cfg.max_det,
                 cfg.agnostic,
@@ -310,9 +312,10 @@ fn finish(
         }
         // Stable: equal new scores stay in NMS's order.
         dets.sort_by(|a, b| b.score.total_cmp(&a.score));
-        if cfg.post_filter_calibrated() {
+        if cfg.post_filter_score() {
             dets.retain(|d| {
-                !cfg.post_filter_calibrated_for_class(d.class) || d.score > cfg.conf_for_class(d.class)
+                !cfg.post_filter_score_for_class(d.class)
+                    || cfg.score_passes(d.score, cfg.conf_for_class(d.class))
             });
         }
     }
@@ -332,7 +335,9 @@ pub fn nms_detections(dets: &[Detection], cfg: &NmsConfig) -> Vec<Detection> {
     let cands: Vec<Cand> = dets
         .iter()
         .enumerate()
-        .filter(|(_, d)| d.score > cfg.candidate_conf_for_class(d.class) && class_allowed(cfg, d.class))
+        .filter(|(_, d)| {
+            cfg.score_passes(d.score, cfg.candidate_conf_for_class(d.class)) && class_allowed(cfg, d.class)
+        })
         .map(|(i, d)| Cand { score: d.score, idx: i as u32, class: d.class })
         .collect();
     finish(cands, cfg, |i| dets[i as usize].bbox, DflInputs::default())
@@ -530,7 +535,7 @@ pub fn non_max_suppression_pairs_with_inputs(
     pairs.sort_unstable_by_key(|&(a, c, _)| (a, c));
     let cands = pairs
         .into_iter()
-        .filter(|&(_, c, s)| s > cfg.candidate_conf_for_class(c) && class_allowed(cfg, c))
+        .filter(|&(_, c, s)| cfg.score_passes(s, cfg.candidate_conf_for_class(c)) && class_allowed(cfg, c))
         .map(|(idx, class, score)| Cand { score, idx, class })
         .collect();
     finish(cands, cfg, bbox_of, dfl)
@@ -546,14 +551,23 @@ fn extract_candidates(
     offset: usize,
     cfg: &NmsConfig,
 ) -> Vec<Cand> {
-    let has_per_class = cfg.per_class_conf.is_some();
-    let scalar_conf = cfg.candidate_conf();
+    let class_thrs: Option<Vec<f32>> = cfg
+        .per_class_conf
+        .is_some()
+        .then(|| (0..num_classes).map(|c| cfg.candidate_conf_for_class(c as u32)).collect());
+    let scalar_conf = cfg.candidate_conf_for_class(0);
     let finite_only = cfg.nms_kind.is_soft();
-    let thr = |c: u32| if has_per_class { cfg.candidate_conf_for_class(c) } else { scalar_conf };
+    let passes = |s: f32, c: usize| {
+        let t = match &class_thrs {
+            Some(v) => v[c],
+            None => scalar_conf,
+        };
+        cfg.score_passes(s, t)
+    };
     let extract = |a: usize, row: &[f32], out: &mut Vec<Cand>| {
         if cfg.multi_label {
             for (c, &s) in row.iter().enumerate() {
-                if (!finite_only || s.is_finite()) && s > thr(c as u32) && class_allowed(cfg, c as u32) {
+                if (!finite_only || s.is_finite()) && passes(s, c) && class_allowed(cfg, c as u32) {
                     out.push(Cand { score: s, idx: a as u32, class: c as u32 });
                 }
             }
@@ -565,7 +579,7 @@ fn extract_candidates(
                 }
             }
             if let Some((best, bs)) = best
-                && bs > thr(best as u32)
+                && passes(bs, best)
                 && class_allowed(cfg, best as u32)
             {
                 out.push(Cand { score: bs, idx: a as u32, class: best as u32 });
@@ -578,7 +592,7 @@ fn extract_candidates(
                     bs = s;
                 }
             }
-            if bs > thr(best as u32) && class_allowed(cfg, best as u32) {
+            if passes(bs, best) && class_allowed(cfg, best as u32) {
                 out.push(Cand { score: bs, idx: a as u32, class: best as u32 });
             }
         }
@@ -668,7 +682,9 @@ pub fn nms_candidates_with_inputs(
     let list: Vec<Cand> = cands
         .iter()
         .enumerate()
-        .filter(|(_, c)| c.score > cfg.candidate_conf_for_class(c.class) && class_allowed(cfg, c.class))
+        .filter(|(_, c)| {
+            cfg.score_passes(c.score, cfg.candidate_conf_for_class(c.class)) && class_allowed(cfg, c.class)
+        })
         .map(|(i, c)| Cand { score: c.score, idx: i as u32, class: c.class })
         .collect();
     finish(list, cfg, |i| cands[i as usize].bbox, dfl)

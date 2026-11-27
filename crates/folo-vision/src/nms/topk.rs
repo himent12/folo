@@ -47,9 +47,11 @@ pub fn topk_detections(
         return Vec::new();
     }
     let k = cfg.max_det.min(boxes.len());
-    let has_per_class = cfg.per_class_conf.is_some();
     let min_conf = cfg.min_conf();
-    // (best score, (anchor, best class)): the class is a function of the anchor, so ties rank by anchor.
+    // MODEL.md §6.6: rank the top-`k` anchors by raw max-class score (and in multi-label mode, the top-`k`
+    // (anchor, class) pairs among those anchors) before applying per-class confidence thresholds and the class
+    // filter. Dropping scores that fail `min_conf` is an exact pre-filter because any score failing `min_conf`
+    // fails every class threshold and ranks strictly below every score passing `min_conf`.
     let mut anchors: Vec<(f32, (u32, u32))> = Vec::new();
     for (a, row) in scores.chunks_exact(num_classes).enumerate() {
         let (mut bc, mut bs) = (0usize, row[0]);
@@ -58,13 +60,7 @@ pub fn topk_detections(
                 (bc, bs) = (c, s);
             }
         }
-        let keep = if cfg.multi_label {
-            bs > min_conf
-                && (!has_per_class || row.iter().enumerate().any(|(c, &s)| s > cfg.conf_for_class(c as u32)))
-        } else {
-            bs > cfg.conf_for_class(bc as u32)
-        };
-        if keep {
+        if cfg.score_passes(bs, min_conf) {
             anchors.push((bs, (a as u32, bc as u32)));
         }
     }
@@ -74,7 +70,7 @@ pub fn topk_detections(
         for (rank, &(_, (a, _))) in anchors.iter().enumerate() {
             let row = &scores[a as usize * num_classes..(a as usize + 1) * num_classes];
             for (c, &s) in row.iter().enumerate() {
-                if s > cfg.conf_for_class(c as u32) {
+                if cfg.score_passes(s, min_conf) {
                     pairs.push((s, (rank as u32, c as u32)));
                 }
             }
@@ -91,18 +87,21 @@ pub fn topk_detections(
     } else {
         anchors.iter().map(|&(s, (a, c))| Detection { bbox: boxes[a as usize], score: s, class: c }).collect()
     };
-    dets.into_iter().filter(|d| class_allowed(cfg, d.class)).collect()
+    dets.into_iter()
+        .filter(|d| cfg.score_passes(d.score, cfg.conf_for_class(d.class)) && class_allowed(cfg, d.class))
+        .collect()
 }
 
-/// [`topk_detections`] single-label from the candidates already extracted (one per anchor whose best class scores
-/// `> conf`, any order; folo-core's `Tensor::detect_candidates`): the same detections.
+/// [`topk_detections`] single-label from the candidates already extracted (one per anchor whose best class passes
+/// `min_conf`, any order; folo-core's `Tensor::detect_candidates`): the same detections.
 pub fn topk_candidates(cands: &[Candidate], cfg: &NmsConfig) -> Vec<Detection> {
     assert!(cands.len() <= u32::MAX as usize, "topk_candidates: too many candidates");
+    let min_conf = cfg.min_conf();
     // (score, (anchor, position)): ties rank by anchor, as the full selection does.
     let mut ranked: Vec<(f32, (u32, u32))> = cands
         .iter()
         .enumerate()
-        .filter(|(_, c)| c.score > cfg.conf_for_class(c.class))
+        .filter(|(_, c)| cfg.score_passes(c.score, min_conf))
         .map(|(i, c)| (c.score, (c.anchor, i as u32)))
         .collect();
     top_sorted(&mut ranked, cfg.max_det);
@@ -110,6 +109,6 @@ pub fn topk_candidates(cands: &[Candidate], cfg: &NmsConfig) -> Vec<Detection> {
         .into_iter()
         .map(|(_, (_, i))| cands[i as usize])
         .map(|c| Detection { bbox: c.bbox, score: c.score, class: c.class })
-        .filter(|d| class_allowed(cfg, d.class))
+        .filter(|d| cfg.score_passes(d.score, cfg.conf_for_class(d.class)) && class_allowed(cfg, d.class))
         .collect()
 }

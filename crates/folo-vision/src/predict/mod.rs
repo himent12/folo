@@ -48,11 +48,20 @@ use crate::model::{Detector, DetectorOutput, FoloModel, HeadOutput};
 use crate::nms::{Detection, NmsConfig, postprocess};
 use crate::tile::{TileConfig, check_image, compute_tiles, crop_tile, merge_tiled_detections};
 
+/// Per-call confidence override passed internally by [`Predictor::predict_sequence`] so ByteTrack can lower
+/// fallback and per-class thresholds independently without mutating `Predictor`.
+pub(crate) struct ConfOverride {
+    pub conf: f32,
+    pub per_class_conf: Option<BTreeMap<u32, f32>>,
+    pub conf_inclusive: bool,
+}
+
 /// A fused, eval-mode detector ready for inference (`folo-*` or `folo2-*`). See the module docs.
 pub struct Predictor {
     model: Detector,
     cfg: PredictConfig,
     per_class_conf: Option<BTreeMap<u32, f32>>,
+    conf_inclusive: bool,
     fallback: Option<String>,
 }
 
@@ -110,7 +119,7 @@ impl Predictor {
         }
         model.fuse()?;
         model.set_forward_plans(true);
-        Ok(Predictor { model, cfg, per_class_conf: None, fallback: None })
+        Ok(Predictor { model, cfg, per_class_conf: None, conf_inclusive: false, fallback: None })
     }
 
     /// [`Predictor::new`] in half precision: the model is fused (in f32) and converted to f16 on its device. On
@@ -220,17 +229,33 @@ impl Predictor {
         Ok(self)
     }
 
+    /// Whether confidence thresholding uses inclusive (`score >= conf`) final-score semantics (enabled
+    /// automatically by [`Predictor::apply_calibrated_thresholds`] / [`Predictor::with_calibrated_thresholds`]).
+    pub fn conf_inclusive(&self) -> bool {
+        self.conf_inclusive
+    }
+
+    /// Explicitly enable or disable inclusive (`score >= conf`) final-score thresholding
+    /// ([`NmsConfig::conf_inclusive`]).
+    pub fn set_conf_inclusive(&mut self, inclusive: bool) {
+        self.conf_inclusive = inclusive;
+    }
+
     /// Apply a [`ThresholdCalibration`] (from [`crate::EvalReport::thresholds`] or [`crate::val::ValResult::thresholds`])
     /// to this predictor. When the calibration has at least one calibrated class, sets [`PredictConfig::conf`] to
-    /// `cal.global.best_conf` (as fallback for uncalibrated classes) and installs `cal.per_class_map()`. When `cal`
+    /// `cal.global.best_conf` (as fallback for uncalibrated classes), installs `cal.per_class_map()`, and enables
+    /// inclusive final-score thresholding ([`NmsConfig::conf_inclusive`]) so boundary detections (`score == best_conf`,
+    /// including `0.0` and `1.0`) and rescored detections match the evaluator's operating point exactly. When `cal`
     /// is empty (no class had ground truth), leaves [`PredictConfig::conf`] unchanged and clears per-class overrides.
     pub fn apply_calibrated_thresholds(&mut self, cal: &ThresholdCalibration) -> Result<()> {
         cal.validate()?;
         if cal.is_empty() {
             self.per_class_conf = None;
+            self.conf_inclusive = false;
         } else {
             self.cfg.conf = cal.global.best_conf;
             self.per_class_conf = Some(cal.per_class_map());
+            self.conf_inclusive = true;
         }
         Ok(())
     }
@@ -242,24 +267,18 @@ impl Predictor {
     }
 
     /// Build the effective [`NmsConfig`] for inference, attaching optional per-class thresholds and applying any
-    /// internal `conf_override` (e.g. ByteTrack stage-2 floor, clamping per-class entries to `<= conf_override`).
-    pub(crate) fn nms_config(&self, conf_override: Option<f32>) -> NmsConfig {
+    /// internal [`ConfOverride`] (e.g. ByteTrack independent per-class stage-2 floors).
+    pub(crate) fn nms_config(&self, conf_override: Option<&ConfOverride>) -> NmsConfig {
         let mut nms = self.cfg.nms();
-        nms.per_class_conf = self.per_class_conf.clone();
-        if let Some(c) = conf_override {
-            nms.conf = c;
-            if let Some(map) = &mut nms.per_class_conf {
-                for v in map.values_mut() {
-                    *v = v.min(c);
-                }
-            }
+        if let Some(ov) = conf_override {
+            nms.conf = ov.conf;
+            nms.per_class_conf = ov.per_class_conf.clone();
+            nms.conf_inclusive = ov.conf_inclusive;
+        } else {
+            nms.per_class_conf = self.per_class_conf.clone();
+            nms.conf_inclusive = self.conf_inclusive;
         }
         nms
-    }
-
-    /// Minimum effective confidence threshold across [`PredictConfig::conf`] and [`Predictor::per_class_conf`].
-    pub(crate) fn min_effective_conf(&self) -> f32 {
-        self.nms_config(None).min_conf()
     }
 
     /// The device the model runs on.
@@ -397,7 +416,7 @@ impl Predictor {
         imgs: &[&Image],
         rect: bool,
         imgsz: u32,
-        conf_override: Option<f32>,
+        conf_override: Option<&ConfOverride>,
     ) -> Result<Vec<Prediction>> {
         /// Images per forward when the CPU predicts a batch (see below). One, two and four measured within
         /// 5% of each other at batch 16 on 28 threads, and all about 20% faster than one batched forward.
@@ -429,7 +448,7 @@ impl Predictor {
         imgs: &[&Image],
         rect: bool,
         imgsz: u32,
-        conf_override: Option<f32>,
+        conf_override: Option<&ConfOverride>,
     ) -> Result<Vec<Prediction>> {
         if self.model.int8_u8_stem_active() {
             return self.run_here_rgb0_u8_with_imgsz(imgs, rect, imgsz, conf_override);
@@ -482,7 +501,7 @@ impl Predictor {
         imgs: &[&Image],
         rect: bool,
         s: u32,
-        conf_override: Option<f32>,
+        conf_override: Option<&ConfOverride>,
     ) -> Result<Vec<Prediction>> {
         if imgs.is_empty() {
             return Err(Error::Config("cannot predict an empty batch".into()));

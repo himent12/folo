@@ -131,6 +131,12 @@ pub struct NmsConfig {
     /// threshold instead of [`NmsConfig::conf`]; all other classes fall back to [`NmsConfig::conf`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub per_class_conf: Option<BTreeMap<u32, f32>>,
+    /// Use inclusive (`score >= conf`) thresholding and enforce thresholds on final post-rescoring scores under
+    /// every [`ScoreRule`], matching [`crate::Evaluator`]'s `score >= best_conf` operating point. Defaults to
+    /// `false` (Ultralytics / torchvision strict `>` semantics) and is enabled automatically by
+    /// [`crate::Predictor::apply_calibrated_thresholds`] / [`crate::Predictor::with_calibrated_thresholds`].
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub conf_inclusive: bool,
 }
 
 impl Default for NmsConfig {
@@ -148,6 +154,7 @@ impl Default for NmsConfig {
             score: ScoreRule::None,
             nms_kind: NmsKind::Standard,
             per_class_conf: None,
+            conf_inclusive: false,
         }
     }
 }
@@ -164,6 +171,26 @@ impl NmsConfig {
         self
     }
 
+    /// Whether `score` passes threshold `thr` under [`NmsConfig::conf_inclusive`] (`score >= thr` when `true`,
+    /// `score > thr` when `false`).
+    #[inline]
+    pub fn score_passes(&self, score: f32, thr: f32) -> bool {
+        if self.conf_inclusive { score >= thr } else { score > thr }
+    }
+
+    /// Strict lower bound `floor` such that `score > floor` retains every finite `f32` passing `thr` under
+    /// [`NmsConfig::score_passes`]. Used by scalar extraction kernels (CPU `single_label_block` and GPU
+    /// `detect_candidates`) that implement strict `score > floor`; host filtering then applies exact
+    /// [`NmsConfig::score_passes`]. When `thr <= f32::MIN_POSITIVE` under `conf_inclusive`, returns
+    /// `-f32::MIN_POSITIVE` (a normal negative float that GPUs never flush to zero, so `0.0 > floor` holds).
+    #[inline]
+    pub(crate) fn strict_floor(&self, thr: f32) -> f32 {
+        if !self.conf_inclusive || !thr.is_finite() {
+            return thr;
+        }
+        if thr <= f32::MIN_POSITIVE { -f32::MIN_POSITIVE } else { thr.next_down() }
+    }
+
     /// Effective confidence threshold for `class`: the entry in [`NmsConfig::per_class_conf`] when present,
     /// otherwise [`NmsConfig::conf`].
     #[inline]
@@ -172,49 +199,52 @@ impl NmsConfig {
     }
 
     /// Minimum effective confidence threshold across [`NmsConfig::conf`] and all entries of
-    /// [`NmsConfig::per_class_conf`] (O(1) when `per_class_conf` is `None`).
+    /// [`NmsConfig::per_class_conf`] (O(1) when `per_class_conf` is `None`). `f32::min` folds symmetrically so
+    /// finite entries are preserved even if another entry is `NaN`.
     #[inline]
     pub fn min_conf(&self) -> f32 {
         let Some(map) = &self.per_class_conf else {
             return self.conf;
         };
-        if self.conf.is_nan() {
-            return self.conf;
-        }
         map.values().copied().fold(self.conf, f32::min)
     }
 
-    /// Pre-NMS candidate threshold for `class`: `0.10` for single-label calibrated scoring (`Elc` /
-    /// `DflConsensus` / `DflRepulse` / `DflCgr`) under hard NMS when `conf_for_class(class) > 0.10`, else
-    /// `conf_for_class(class)`.
+    #[inline]
+    fn raw_candidate_conf_for_value(&self, c: f32) -> f32 {
+        let cap_for_rule = (self.calibrated_post_filter_enabled()
+            || (self.conf_inclusive && !self.nms_kind.is_soft() && self.score != ScoreRule::None))
+            && c > CALIBRATED_PRE_CONF;
+        if cap_for_rule { CALIBRATED_PRE_CONF } else { c }
+    }
+
+    /// Pre-NMS candidate threshold for `class`: `0.10` when single-label calibrated scoring (or evaluator-derived
+    /// [`NmsConfig::conf_inclusive`] with any [`ScoreRule`]) under hard NMS has `conf_for_class(class) > 0.10`,
+    /// else `conf_for_class(class)`.
     #[inline]
     pub fn candidate_conf_for_class(&self, class: u32) -> f32 {
-        let c = self.conf_for_class(class);
-        if self.calibrated_post_filter_enabled() && c > CALIBRATED_PRE_CONF { CALIBRATED_PRE_CONF } else { c }
+        self.raw_candidate_conf_for_value(self.conf_for_class(class))
     }
 
-    /// Scalar pre-NMS candidate extraction floor across all classes: `<= candidate_conf_for_class(c)` for every
-    /// class `c` (used by scalar class-map scanners and GPU candidate extraction kernels before per-class
-    /// filtering).
+    /// Scalar pre-NMS strict extraction floor across all classes: `score > candidate_conf()` captures every
+    /// candidate passing `candidate_conf_for_class(c)` for any class `c` (used by scalar class-map scanners and
+    /// GPU candidate extraction kernels before per-class filtering).
     #[inline]
     pub fn candidate_conf(&self) -> f32 {
-        let cal = self.calibrated_post_filter_enabled();
-        let cap = |c: f32| if cal && c > CALIBRATED_PRE_CONF { CALIBRATED_PRE_CONF } else { c };
-        let base = cap(self.conf);
-        let Some(map) = &self.per_class_conf else {
-            return base;
+        let base = self.raw_candidate_conf_for_value(self.conf);
+        let min_raw = match &self.per_class_conf {
+            Some(map) => {
+                map.values().copied().fold(base, |acc, v| acc.min(self.raw_candidate_conf_for_value(v)))
+            }
+            None => base,
         };
-        if base.is_nan() {
-            return base;
-        }
-        map.values().copied().fold(base, |acc, v| acc.min(cap(v)))
+        self.strict_floor(min_raw)
     }
 
-    /// Like [`NmsConfig::candidate_conf`], but returns [`NmsConfig::min_conf`] for [`HeadMode::O2o`]
+    /// Like [`NmsConfig::candidate_conf`], but returns `strict_floor(min_conf())` for [`HeadMode::O2o`]
     /// (which skips NMS and score rules).
     #[inline]
     pub fn candidate_conf_for(&self, mode: HeadMode) -> f32 {
-        if mode == HeadMode::O2m { self.candidate_conf() } else { self.min_conf() }
+        if mode == HeadMode::O2m { self.candidate_conf() } else { self.strict_floor(self.min_conf()) }
     }
 
     #[inline]
@@ -222,17 +252,30 @@ impl NmsConfig {
         !self.multi_label && !self.nms_kind.is_soft() && self.score.is_calibrated()
     }
 
-    /// Whether final detections of `class` are filtered by `score > conf_for_class(class)` after calibrated
-    /// re-scoring.
+    /// Whether final detections of `class` are filtered by `score_passes(score, conf_for_class(class))` after
+    /// [`ScoreRule`] re-scoring:
+    /// - Always `true` when [`NmsConfig::conf_inclusive`] is enabled with any non-`None` [`ScoreRule`] under hard
+    ///   NMS (evaluator-derived F1 thresholds apply to final scores).
+    /// - Otherwise `true` for single-label calibrated scoring under hard NMS when
+    ///   `conf_for_class(class) > CALIBRATED_PRE_CONF`.
     #[inline]
-    pub(crate) fn post_filter_calibrated_for_class(&self, class: u32) -> bool {
-        self.calibrated_post_filter_enabled() && self.conf_for_class(class) > CALIBRATED_PRE_CONF
+    pub(crate) fn post_filter_score_for_class(&self, class: u32) -> bool {
+        if self.nms_kind.is_soft() || self.score == ScoreRule::None {
+            return false;
+        }
+        self.conf_inclusive
+            || (self.calibrated_post_filter_enabled() && self.conf_for_class(class) > CALIBRATED_PRE_CONF)
     }
 
-    /// Whether any class requires final score filtering after calibrated re-scoring (active for single-label
-    /// calibrated scoring under hard NMS when `conf` or any `per_class_conf` entry is `> CALIBRATED_PRE_CONF`).
+    /// Whether any class requires final score filtering after [`ScoreRule`] re-scoring.
     #[inline]
-    pub(crate) fn post_filter_calibrated(&self) -> bool {
+    pub(crate) fn post_filter_score(&self) -> bool {
+        if self.nms_kind.is_soft() || self.score == ScoreRule::None {
+            return false;
+        }
+        if self.conf_inclusive {
+            return true;
+        }
         if !self.calibrated_post_filter_enabled() {
             return false;
         }

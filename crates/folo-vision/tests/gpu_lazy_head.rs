@@ -561,3 +561,48 @@ fn gpu_dfl_stats_matches_cpu_reference() {
     }
     assert!(ctx.kernels_without_registry().is_empty(), "{:?}", ctx.kernels_without_registry());
 }
+
+/// GPU candidate-first (`predict_candidates` + `finish_candidates`) matches dense GPU `HeadOutput::detections`
+/// bit for bit under `per_class_conf` (both strict `>` and evaluator-derived `conf_inclusive = true`), for both
+/// `o2m` and `o2o` heads.
+#[test]
+fn gpu_per_class_conf_and_inclusive_match_dense_bit_for_bit() {
+    use std::collections::BTreeMap;
+
+    let Some((dev, ctx, _lock)) = gpu() else { return };
+    let x = Tensor::rand_uniform([2, 3, 128, 128], 0.0, 1.0, &mut Rng::seed(77)).to_device(dev).unwrap();
+    let mut map = BTreeMap::new();
+    map.insert(0, 0.58);
+    map.insert(1, 0.42);
+    // Class 2 falls back to `conf = 0.50`.
+    for head in ["o2m", "o2o"] {
+        let m = model_with_bias(3, head, dev, DType::F32, 0.0);
+        m.set_forward_plans(true);
+        for inclusive in [false, true] {
+            let nms = NmsConfig {
+                conf: 0.50,
+                iou: 0.65,
+                max_det: 12,
+                per_class_conf: Some(map.clone()),
+                conf_inclusive: inclusive,
+                ..NmsConfig::default()
+            };
+            let _g = no_grad();
+            let dense = m.forward(&x).unwrap().detections(&nms).unwrap();
+            let lazy_cands = m.predict_candidates(&x, &nms).unwrap();
+            let lazy: Vec<Vec<Detection>> = lazy_cands.iter().map(|c| m.finish_candidates(c, &nms)).collect();
+            for (i, (d, l)) in dense.iter().zip(&lazy).enumerate() {
+                assert_eq!(
+                    bits(d),
+                    bits(l),
+                    "{head} inclusive={inclusive} img={i}: GPU dense vs lazy mismatch"
+                );
+                assert!(
+                    d.iter().all(|det| nms.score_passes(det.score, nms.conf_for_class(det.class))),
+                    "{head} inclusive={inclusive} img={i}: detection violated per-class threshold"
+                );
+            }
+        }
+    }
+    assert!(ctx.kernels_without_registry().is_empty(), "{:?}", ctx.kernels_without_registry());
+}

@@ -288,9 +288,13 @@ fn nms_and_topk_per_class_conf_all_modes_and_variants() {
     assert_eq!(ml_cls, vec![(0, 0.75), (2, 0.50), (1, 0.25), (1, 0.22)]);
 
     // 3. O2o topk_detections (single-label & multi-label) and topk_candidates.
+    // Under MODEL.md §6.6, multi-label top-k selects `k = min(max_det, A) = 5` raw (anchor, class) pairs first
+    // (0.75, 0.65, 0.50, 0.40, 0.25 — excluding the 6th pair 0.22) and then applies per-class thresholds.
     assert_eq!(topk_detections(&boxes, &scores, 3, &cfg), out);
     assert_eq!(topk_candidates(&single_cands, &cfg), out);
-    assert_eq!(topk_detections(&boxes, &scores, 3, &cfg_ml), out_ml);
+    let topk_ml: Vec<(u32, f32)> =
+        topk_detections(&boxes, &scores, 3, &cfg_ml).iter().map(|d| (d.class, d.score)).collect();
+    assert_eq!(topk_ml, vec![(0, 0.75), (2, 0.50), (1, 0.25)]);
 
     // 4. Soft-NMS (Linear/Gaussian) & Matrix-NMS (Linear/Gaussian): class-aware & agnostic decayed threshold.
     // Two heavily overlapping boxes (IoU = 9/11 ≈ 0.818) per class:
@@ -668,5 +672,251 @@ fn folo2_complete_inference_parity_f32_int8_o2m_o2o_iou_head_sahi_tta_bytetrack_
                 "{label}: predict_sequence must clamp high per-class thresholds to ByteTrack low_thresh floor"
             );
         }
+    }
+}
+
+#[test]
+fn calibrated_handoff_preserves_inclusive_boundaries_and_final_score_filtering() {
+    // 1. Inclusive boundary handoff at 0.0, interior grid point (0.25), and 1.0:
+    // Class 0 has a TP at exactly 0.0 -> best_conf = 0.0, best_f1 = 1.0.
+    // Class 1 has a TP at exactly 0.25 and FP at 0.15 -> best_conf = 0.25, best_f1 = 1.0.
+    // Class 2 has a TP at exactly 1.0 and FP at 0.80 -> best_conf = 1.0, best_f1 = 1.0.
+    let truths = vec![
+        truth(10.0, 10.0, 30.0, 30.0, 0),
+        truth(50.0, 10.0, 70.0, 30.0, 1),
+        truth(90.0, 10.0, 110.0, 30.0, 2),
+    ];
+    let preds = vec![
+        det(10.0, 10.0, 30.0, 30.0, 0.0, 0),
+        det(50.0, 10.0, 70.0, 30.0, 0.25, 1),
+        det(150.0, 10.0, 170.0, 30.0, 0.15, 1),
+        det(90.0, 10.0, 110.0, 30.0, 1.0, 2),
+        det(190.0, 10.0, 210.0, 30.0, 0.80, 2),
+    ];
+    let mut ev = Evaluator::new(3);
+    ev.add_image(&preds, &truths);
+    let report = ev.compute();
+    let cal = report.calibrated_thresholds();
+    assert_eq!(cal.per_class[0].best_conf, 0.0);
+    assert!((cal.per_class[1].best_conf - 0.25).abs() < 1e-6);
+    assert_eq!(cal.per_class[2].best_conf, 1.0);
+
+    // Apply calibration to a Predictor -> sets conf_inclusive = true and preserves all 3 boundary TPs!
+    let model = build_v2_model(707, 3, HeadMode::O2m, false);
+    let pred = Predictor::new_v2(model, PredictConfig { imgsz: 64, ..Default::default() })
+        .unwrap()
+        .with_calibrated_thresholds(cal)
+        .unwrap();
+    assert!(pred.conf_inclusive());
+    let img = pattern_image(64, 64, 1);
+    let batch = pred.prepare(std::slice::from_ref(&img), true).unwrap();
+    let boxes: Vec<Xyxy> = preds.iter().map(|d| d.bbox).collect();
+    let mut scores = vec![-1.0f32; preds.len() * 3];
+    for (i, d) in preds.iter().enumerate() {
+        scores[i * 3 + d.class as usize] = d.score;
+    }
+    let finished = pred.finish(&batch, vec![(boxes.clone(), scores.clone())], 3);
+    let kept_pairs: Vec<(u32, f32)> = finished[0].iter().map(|d| (d.class, d.score)).collect();
+    assert_eq!(
+        kept_pairs,
+        vec![(2, 1.0), (1, 0.25), (0, 0.0)],
+        "inclusive calibrated handoff must keep exact boundary detections at 0.0, 0.25, and 1.0 while dropping FPs"
+    );
+
+    // Same boundary preservation on Soft-NMS, Matrix-NMS, and O2o top-k with conf_inclusive = true.
+    let inc_cfg = NmsConfig {
+        conf: cal.global.best_conf,
+        per_class_conf: Some(cal.per_class_map()),
+        conf_inclusive: true,
+        ..NmsConfig::default()
+    };
+    assert_eq!(topk_detections(&boxes, &scores, 3, &inc_cfg).len(), 3);
+    for kind in [
+        NmsKind::SoftLinear,
+        NmsKind::SoftGaussian { sigma: 0.5 },
+        NmsKind::MatrixLinear,
+        NmsKind::MatrixGaussian { sigma: 0.5 },
+    ] {
+        let scfg = NmsConfig { nms_kind: kind, ..inc_cfg.clone() };
+        let out = nms_detections(&preds, &scfg);
+        let pairs: Vec<(u32, f32)> = out.iter().map(|d| (d.class, d.score)).collect();
+        assert_eq!(pairs, vec![(2, 1.0), (1, 0.25), (0, 0.0)], "{kind:?} inclusive boundaries");
+    }
+
+    // 2. Final post-rescoring score filter under ScoreRule::Elc (<= 0.10) and ScoreRule::Consensus when
+    //    conf_inclusive == true (evaluator-derived calibration): no detection below applied threshold leaks!
+    let mut elc_map = BTreeMap::new();
+    elc_map.insert(0, 0.05);
+    elc_map.insert(1, 0.50);
+    let elc_inc = NmsConfig {
+        conf: 0.25,
+        score: ScoreRule::Elc,
+        per_class_conf: Some(elc_map),
+        conf_inclusive: true,
+        ..NmsConfig::default()
+    };
+    let elc_dets = vec![
+        det(0.0, 0.0, 20.0, 20.0, 0.06, 0), // isolated raw 0.06 -> ELC rescored < 0.05 -> must be DROPPED!
+        det(40.0, 0.0, 60.0, 20.0, 0.40, 0), // raw 0.40 -> ELC rescored >= 0.05 -> kept
+        det(80.0, 0.0, 100.0, 20.0, 0.40, 1), // raw 0.40 -> ELC rescored < 0.50 -> dropped
+        det(120.0, 0.0, 140.0, 20.0, 0.90, 1), // raw 0.90 -> ELC rescored >= 0.50 -> kept
+    ];
+    let elc_out = nms_detections(&elc_dets, &elc_inc);
+    assert_eq!(
+        elc_out.len(),
+        2,
+        "ELC inclusive must filter final rescored detections <= 0.10 too: {elc_out:?}"
+    );
+    assert!(elc_out.iter().all(|d| d.score >= elc_inc.conf_for_class(d.class)));
+
+    let cons_inc =
+        NmsConfig { conf: 0.30, score: ScoreRule::Consensus, conf_inclusive: true, ..NmsConfig::default() };
+    // Isolated raw 0.80 under Consensus rescales to 0.80 / sqrt(10) ≈ 0.253 < 0.30 -> must be DROPPED!
+    // Cluster of 4 identical boxes at 0.80 rescales to 0.80 * sqrt(4/10) ≈ 0.506 >= 0.30 -> KEPT!
+    let cons_dets = vec![
+        det(0.0, 0.0, 20.0, 20.0, 0.80, 0),
+        det(60.0, 0.0, 80.0, 20.0, 0.80, 0),
+        det(60.0, 0.0, 80.0, 20.0, 0.80, 0),
+        det(60.0, 0.0, 80.0, 20.0, 0.80, 0),
+        det(60.0, 0.0, 80.0, 20.0, 0.80, 0),
+    ];
+    let cons_out = nms_detections(&cons_dets, &cons_inc);
+    assert_eq!(cons_out.len(), 1, "Consensus inclusive must drop isolated box whose final score < 0.30");
+    assert!(cons_out[0].score >= 0.30 && cons_out[0].bbox.x1 == 60.0);
+
+    // 3. Symmetric NaN folding in NmsConfig::min_conf / candidate_conf.
+    let mut nan_map = BTreeMap::new();
+    nan_map.insert(1, 0.20);
+    let nan_cfg = NmsConfig { conf: f32::NAN, per_class_conf: Some(nan_map), ..NmsConfig::default() };
+    assert_eq!(nan_cfg.min_conf(), 0.20);
+    assert_eq!(nan_cfg.candidate_conf(), 0.20);
+}
+
+#[test]
+fn o2o_topk_ranks_raw_anchors_before_per_class_filtering_and_is_monotone() {
+    // MODEL.md §6.6 regression:
+    // max_det = 1, per_class_conf = {0: 0.98, 1: 0.20}:
+    // Anchor 0 has [0.95, 0.05] (max 0.95, fails class-0 cutoff 0.98).
+    // Anchor 1 has [0.05, 0.85] (max 0.85, passes class-1 cutoff 0.20).
+    // Top-1 raw anchor is Anchor 0 -> filtered out by class 0's cutoff -> result MUST be empty!
+    let mut map = BTreeMap::new();
+    map.insert(0, 0.98);
+    map.insert(1, 0.20);
+    let boxes = vec![Xyxy::new(0.0, 0.0, 20.0, 20.0), Xyxy::new(30.0, 0.0, 50.0, 20.0)];
+    let scores = vec![0.95, 0.05, 0.05, 0.85];
+    let cfg = NmsConfig { conf: 0.50, max_det: 1, per_class_conf: Some(map.clone()), ..NmsConfig::default() };
+    assert!(topk_detections(&boxes, &scores, 2, &cfg).is_empty());
+    let cands = vec![
+        Candidate { anchor: 0, class: 0, score: 0.95, bbox: boxes[0] },
+        Candidate { anchor: 1, class: 1, score: 0.85, bbox: boxes[1] },
+    ];
+    assert!(topk_candidates(&cands, &cfg).is_empty());
+
+    // Multi-label monotonicity regression:
+    // Anchor 0 has [0.85, 0.25] vs [0.85, 0.15]; Anchor 1 has [0.10, 0.70]; per_class_conf = {0: 0.90, 1: 0.20}.
+    // At max_det = 1: Anchor 0 wins raw top-1 (0.85) AND raw top-1 pair (cls 0, 0.85) in BOTH cases ->
+    // filtered out by 0.90 -> empty in BOTH cases (never causes Anchor 1's 0.70 to pop in/out!).
+    // At max_det = 2: raw top-2 pairs are (a0, cls 0, 0.85) and (a1, cls 1, 0.70) -> filtering drops cls 0
+    // and keeps (a1, cls 1, 0.70) identically in BOTH cases!
+    let mut ml_map = BTreeMap::new();
+    ml_map.insert(0, 0.90);
+    ml_map.insert(1, 0.20);
+    let cfg_ml1 = NmsConfig {
+        conf: 0.50,
+        max_det: 1,
+        multi_label: true,
+        per_class_conf: Some(ml_map),
+        ..NmsConfig::default()
+    };
+    let cfg_ml2 = NmsConfig { max_det: 2, ..cfg_ml1.clone() };
+    let s_hi = vec![0.85, 0.25, 0.10, 0.70];
+    let s_lo = vec![0.85, 0.15, 0.10, 0.70];
+    assert!(topk_detections(&boxes, &s_hi, 2, &cfg_ml1).is_empty());
+    assert!(topk_detections(&boxes, &s_lo, 2, &cfg_ml1).is_empty());
+    let out_hi = topk_detections(&boxes, &s_hi, 2, &cfg_ml2);
+    let out_lo = topk_detections(&boxes, &s_lo, 2, &cfg_ml2);
+    assert_eq!(out_hi.len(), 1);
+    assert_eq!((out_hi[0].class, out_hi[0].score), (1, 0.70));
+    assert_eq!(out_hi, out_lo);
+
+    // Dense vs CPU candidate-first parity under tight max_det = 1 on O2o (FoloModel & FoloV2Model)!
+    let v2 = build_v2_model(808, 3, HeadMode::O2o, false);
+    // Level 0 (P3) gets highest class 0 score (~0.73), blocked by threshold 0.95; Level 1 (P4) gets class 1 (~0.50).
+    let x = Tensor::rand_uniform([1, 3, 64, 64], 0.0, 1.0, &mut Rng::seed(809));
+    {
+        let _g = no_grad();
+        let o2o = v2.head.o2o_cls.as_ref().unwrap();
+        o2o[0]
+            .cls_branch
+            .out
+            .bias
+            .as_ref()
+            .unwrap()
+            .copy_from(&Tensor::from_vec(vec![1.0, -2.0, -2.0], [3]).unwrap())
+            .unwrap();
+        o2o[1]
+            .cls_branch
+            .out
+            .bias
+            .as_ref()
+            .unwrap()
+            .copy_from(&Tensor::from_vec(vec![-2.0, 0.0, -2.0], [3]).unwrap())
+            .unwrap();
+        o2o[2]
+            .cls_branch
+            .out
+            .bias
+            .as_ref()
+            .unwrap()
+            .copy_from(&Tensor::from_vec(vec![-2.0, -2.0, -2.0], [3]).unwrap())
+            .unwrap();
+    }
+    let mut tight_map = BTreeMap::new();
+    tight_map.insert(0, 0.95);
+    tight_map.insert(1, 0.20);
+    let tight_nms =
+        NmsConfig { conf: 0.50, max_det: 1, per_class_conf: Some(tight_map), ..NmsConfig::default() };
+    let _g = no_grad();
+    let dense = v2.forward(&x).unwrap().detections(&tight_nms, DEFAULT_IOU_FUSION_ALPHA).unwrap();
+    let lazy_cands = v2.predict_candidates(&x, &tight_nms).unwrap();
+    let lazy: Vec<Vec<Detection>> = lazy_cands.iter().map(|c| v2.finish_candidates(c, &tight_nms)).collect();
+    assert!(dense[0].is_empty(), "P3 class-0 top-1 winner rejected by 0.95 must leave empty output");
+    assert_eq!(dense, lazy, "candidate-first O2o must match dense bit for bit under tight max_det");
+}
+
+#[test]
+fn bytetrack_sequence_preserves_independent_per_class_candidate_floors() {
+    use folo_vision::fusion::BoxFusion;
+
+    // Fallback conf = 0.40, class-0 override = 0.05, tracker low_thresh = 0.15, BoxFusion::Vote.
+    // Adding class-0 override = 0.05 must NOT lower class 1's pre-NMS floor below sequence_det_conf(0.40, 0.15)
+    // (so class-1 tracks and boxes under Vote fusion stay bit-identical to having no class-0 override).
+    let model = build_v2_model(909, 3, HeadMode::O2m, false);
+    let frames = vec![pattern_image(64, 64, 1), pattern_image(64, 64, 2)];
+    let cfg = PredictConfig {
+        imgsz: 64,
+        conf: 0.40,
+        iou: 0.65,
+        max_det: 50,
+        fusion: BoxFusion::Vote,
+        ..PredictConfig::default()
+    };
+    let trk_cfg =
+        TrackConfig { high_thresh: 0.45, low_thresh: 0.15, new_track_thresh: 0.45, ..Default::default() };
+
+    let pred_base = Predictor::new_v2(model.fused_eval_clone().unwrap(), cfg.clone()).unwrap();
+    let mut map = BTreeMap::new();
+    map.insert(0, 0.05);
+    let pred_c0_low = Predictor::new_v2(model, cfg).unwrap().with_per_class_conf(map).unwrap();
+
+    let seq_base = pred_base.predict_sequence(&frames, &trk_cfg).unwrap();
+    let seq_c0_low = pred_c0_low.predict_sequence(&frames, &trk_cfg).unwrap();
+    for (a, b) in seq_base.iter().zip(&seq_c0_low) {
+        let c1_a: Vec<_> = a.tracks.iter().filter(|t| t.class_id != 0).collect();
+        let c1_b: Vec<_> = b.tracks.iter().filter(|t| t.class_id != 0).collect();
+        assert_eq!(
+            c1_a, c1_b,
+            "lowering class 0 override to 0.05 must never alter other classes' tracks/boxes"
+        );
     }
 }
