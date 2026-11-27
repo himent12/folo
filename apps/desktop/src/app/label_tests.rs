@@ -570,6 +570,75 @@ fn labeling_focus_restoration_sse_cleanup_cross_job_reset_locked_guard_and_viewp
         "Esc on image remove confirmation restores focus to label-rm-img"
     );
 
+    // 2b. Empty-state CTA openers (`label-empty-new` / `label-imgs-empty-add`) preserve exact opener
+    //     focus, and an opener that becomes disabled while the form is open falls back to `root_focus`.
+    drive(&mut app, window, |this, w, cx| {
+        this.navigate(Route::LabelJobs, w, cx);
+        this.label.list_stale = false;
+        this.label.jobs = Load::Ready(Vec::new());
+        cx.notify();
+    });
+    app.frame(window.into());
+    drive(&mut app, window, |this, w, cx| {
+        this.focus_key("label-empty-new", w, cx);
+        this.open_new_label_job(w, cx);
+    });
+    app.frame(window.into());
+    press(&mut app, window, "escape");
+    assert!(
+        drive(&mut app, window, |this, w, cx| this.fh("label-empty-new", cx).is_focused(w)),
+        "Esc restores focus to the invoking empty-state CTA (`label-empty-new`), not the header button"
+    );
+
+    // Re-load seeded jobs, open an empty job's `label-imgs-empty-add`, and verify focus returns there.
+    drive(&mut app, window, |this, w, cx| {
+        this.label.jobs = this.store.api.label_jobs().into();
+        this.navigate(Route::LabelJob("lb_4f10".into()), w, cx);
+        this.label.images.insert("lb_4f10".into(), Load::Ready(Vec::new()));
+        cx.notify();
+    });
+    app.frame(window.into());
+    drive(&mut app, window, |this, w, cx| {
+        this.focus_key("label-imgs-empty-add", w, cx);
+        this.open_add_label_folder("lb_4f10", w, cx);
+    });
+    app.frame(window.into());
+    press(&mut app, window, "escape");
+    assert!(
+        drive(&mut app, window, |this, w, cx| this.fh("label-imgs-empty-add", cx).is_focused(w)),
+        "Esc restores focus to the invoking empty-job CTA (`label-imgs-empty-add`)"
+    );
+
+    // If an agent run starts while Export is open (`label-export-open` swaps to `label-export-open-disabled`),
+    // closing Export must fall back to `root_focus` instead of stranding focus on the unmounted handle.
+    drive(&mut app, window, |this, w, cx| {
+        this.focus_key("label-export-open", w, cx);
+        let job = this.label_job_by_id("lb_4f10").unwrap().clone();
+        this.open_export_label_dataset(&job, w, cx);
+        if let Some(j) = this.label.jobs.ready_mut().and_then(|l| l.iter_mut().find(|x| x.id == "lb_4f10")) {
+            j.status = crate::api::LabelJobStatus::Running;
+        }
+        cx.notify();
+    });
+    app.frame(window.into());
+    press(&mut app, window, "escape");
+    assert!(
+        drive(&mut app, window, |this, w, _| this.root_focus.is_focused(w)),
+        "disabled/unmounted opener falls back cleanly to root_focus after prepaint verification"
+    );
+    // Restore job status & images for the remaining checks.
+    drive(&mut app, window, |this, _, cx| {
+        if let Some(j) = this.label.jobs.ready_mut().and_then(|l| l.iter_mut().find(|x| x.id == "lb_4f10")) {
+            j.status = crate::api::LabelJobStatus::Idle;
+        }
+        this.label.images.insert(
+            "lb_4f10".into(),
+            this.store.api.label_images("lb_4f10", 0, 500).map(|p| p.images).into(),
+        );
+        cx.notify();
+    });
+    app.frame(window.into());
+
     // 3. Locked (`LabelImageStatus::Labeling`) image blocks Delete and 1-9 reclassification keys.
     let (locked_id, locked_boxes) = drive(&mut app, window, |this, _, cx| {
         let list = this.label.images.get_mut("lb_4f10").and_then(|l| l.ready_mut()).unwrap();

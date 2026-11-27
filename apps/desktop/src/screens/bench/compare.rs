@@ -802,7 +802,11 @@ impl FoloApp {
                     BenchReadiness::Partial => Tone::Warning,
                     BenchReadiness::NotReady => Tone::Neutral,
                 };
-                let thr = sl.threshold.map_or_else(|| "no t*".into(), |c| format!("t* {}", fmt_conf(c)));
+                let thr = if !e.scored {
+                    "no confidences".into()
+                } else {
+                    sl.threshold.map_or_else(|| "no t*".into(), |c| format!("t* {}", fmt_conf(c)))
+                };
                 sl_body = sl_body.child(
                     div()
                         .flex()
