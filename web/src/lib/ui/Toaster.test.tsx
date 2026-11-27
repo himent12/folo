@@ -241,4 +241,25 @@ describe('Toast timing and announcement', () => {
     vi.advanceTimersByTime(600);
     expect(toast.items.some((t) => t.id === id)).toBe(false);
   });
+
+  it('publishes --toast-h while a toast is visible and clears it on dismissal and unmount', () => {
+    setup();
+    const section = document.querySelector<HTMLElement>('.toaster')!;
+    Object.defineProperty(section, 'offsetHeight', { configurable: true, value: 70 });
+
+    const id = toast.success('JSON exported', 'Saved Model A/B comparison JSON.');
+    flushSync();
+    expect(document.documentElement.style.getPropertyValue('--toast-h')).toBe('86px');
+
+    toast.dismiss(id);
+    flushSync();
+    expect(document.documentElement.style.getPropertyValue('--toast-h')).toBe('');
+
+    toast.info('Still open');
+    flushSync();
+    expect(document.documentElement.style.getPropertyValue('--toast-h')).toBe('86px');
+    c!.unmount();
+    c = undefined;
+    expect(document.documentElement.style.getPropertyValue('--toast-h')).toBe('');
+  });
 });

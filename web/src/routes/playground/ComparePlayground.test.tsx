@@ -32,6 +32,7 @@ async function openPlayground(path = '#/playground?model=m_hard_s') {
   hub.mode = 'mock';
   target = document.createElement('div');
   document.body.appendChild(target);
+  history.replaceState(history.state, '', path);
   router.route = parse(path);
   handle = render(() => <Playground />, target);
   (await until(() => target.querySelector<HTMLButtonElement>('button.sample'), 'sample image')).click();
@@ -163,6 +164,7 @@ describe('Playground: Compare A/B and Export', () => {
     hub.mode = 'mock';
     target = document.createElement('div');
     document.body.appendChild(target);
+    history.replaceState(history.state, '', '#/playground?model=m_hard_s&compare=1&modelB=m_shapes_n');
     router.route = parse('#/playground?model=m_hard_s&compare=1&modelB=m_shapes_n');
     handle = render(() => <Playground />, target);
     (await until(() => target.querySelector<HTMLButtonElement>('button.sample'), 'sample image')).click();
@@ -201,6 +203,7 @@ describe('Playground: Compare A/B and Export', () => {
       hub.mode = 'mock';
       target = document.createElement('div');
       document.body.appendChild(target);
+      history.replaceState(history.state, '', '#/playground');
       router.route = parse('#/playground');
       handle = render(() => <Playground />, target);
 
@@ -266,18 +269,23 @@ describe('Playground: Compare A/B and Export', () => {
       return list.map((m) =>
         m.id === 'm_hard_s'
           ? { ...m, classes: ['circle', 'square'] }
-          : m.id === 'm_shapes_n'
-            ? { ...m, classes: ['car', 'truck'] }
-            : m,
+          : m.id === 'm_shapes_s'
+            ? { ...m, classes: ['circle', 'star'] }
+            : m.id === 'm_shapes_n'
+              ? { ...m, classes: ['car', 'truck'] }
+              : m,
       );
     };
     api.predict = async (_input, opts) => ({
       model_id: opts.model_id,
       image: { width: 640, height: 480 },
       boxes:
-        opts.model_id === 'm_hard_s'
-          ? [{ class: 0, name: 'circle', score: 0.9, x1: 10, y1: 10, x2: 50, y2: 50 }]
-          : [{ class: 0, name: 'car', score: 0.9, x1: 20, y1: 20, x2: 80, y2: 80 }],
+        opts.model_id === 'm_shapes_n'
+          ? [
+              { class: 0, name: 'car', score: 0.9, x1: 20, y1: 20, x2: 80, y2: 80 },
+              { class: 1, name: 'truck', score: 0.85, x1: 90, y1: 20, x2: 140, y2: 80 },
+            ]
+          : [{ class: 0, name: 'circle', score: 0.9, x1: 10, y1: 10, x2: 50, y2: 50 }],
       timing: { preprocess_ms: 1, inference_ms: 5, postprocess_ms: 1, total_ms: 7 },
       device: 'gpu:0',
     });
@@ -285,6 +293,7 @@ describe('Playground: Compare A/B and Export', () => {
     hub.mode = 'mock';
     target = document.createElement('div');
     document.body.appendChild(target);
+    history.replaceState(history.state, '', '#/playground?model=m_hard_s&compare=1&modelB=m_shapes_n');
     router.route = parse('#/playground?model=m_hard_s&compare=1&modelB=m_shapes_n');
     handle = render(() => <Playground />, target);
     (await until(() => target.querySelector<HTMLButtonElement>('button.sample'), 'sample image')).click();
@@ -305,18 +314,50 @@ describe('Playground: Compare A/B and Export', () => {
     carToggle.click();
     flushSync();
 
-    // Model B's 'car' is now hidden (countB === 0), while Model A's 'circle' (also index 0) stays visible (countA === 1).
+    // Model B's 'car' is now hidden (countB === 1, only 'truck' visible), while Model A's 'circle' stays visible (countA === 1).
     const detKpi = target.querySelector('.ab-sum .k-vals')!;
-    const parts = [...detKpi.querySelectorAll(':scope > span')].map((s) => s.textContent?.replace(/\s+/g, ' ').trim());
-    expect(parts).toEqual(['A 1', 'vs', 'B 0', 'Δ -1']);
+    const readKpi = () => [...detKpi.querySelectorAll(':scope > span')].map((s) => s.textContent?.replace(/\s+/g, ' ').trim());
+    expect(readKpi()).toEqual(['A 1', 'vs', 'B 1', 'Δ 0']);
 
-    // Switching Model A to a model that includes 'car' clears stale B-only hidden names so 'car' is never stuck hidden.
+    // Switching Model A to another model that still lacks 'car' preserves Model B's hidden 'car' filter AND keeps focus on the picker.
     const selectA = target.querySelectorAll<HTMLSelectElement>('aside.rail select')[0]!;
+    selectA.focus();
+    selectA.value = 'm_shapes_s';
+    selectA.dispatchEvent(new Event('change', { bubbles: true }));
+    flushSync();
+    expect(selectA.value).toBe('m_shapes_s');
+    expect(document.activeElement).toBe(selectA);
+    await until(() => readKpi()[2] === 'B 1', 'B car stays hidden after Model A switch to model without car');
+    expect(readKpi()).toEqual(['A 1', 'vs', 'B 1', 'Δ 0']);
+
+    // Switching Model A to a model that includes 'car' clears the now-shared B-only hidden name so 'car' is never stuck hidden.
     selectA.value = 'm_shapes_n';
     selectA.dispatchEvent(new Event('change', { bubbles: true }));
-    await until(() => {
-      const vals = [...target.querySelector('.ab-sum .k-vals')!.querySelectorAll(':scope > span')].map((s) => s.textContent?.replace(/\s+/g, ' ').trim());
-      return vals[2] === 'B 1';
-    }, 'B car unhidden after Model A switch');
+    flushSync();
+    expect(selectA.value).toBe('m_shapes_n');
+    expect(document.activeElement).toBe(selectA);
+    await until(() => readKpi()[2] === 'B 2', 'B car unhidden after Model A switch to model with car');
+  });
+
+  it('retains keyboard focus on both Compare model pickers when changing selections', async () => {
+    await openPlayground('#/playground?model=m_hard_s&compare=1');
+    await until(() => target.querySelectorAll('aside.rail select').length === 2, 'two compare model pickers');
+    const [selectA, selectB] = [...target.querySelectorAll<HTMLSelectElement>('aside.rail select')];
+    expect(selectA).toBeTruthy();
+    expect(selectB).toBeTruthy();
+
+    selectA!.focus();
+    const nextA = [...selectA!.options].find((o) => o.value !== selectA!.value)!.value;
+    selectA!.value = nextA;
+    selectA!.dispatchEvent(new Event('change', { bubbles: true }));
+    flushSync();
+    expect(document.activeElement).toBe(selectA);
+
+    selectB!.focus();
+    const nextB = [...selectB!.options].find((o) => o.value !== selectB!.value)!.value;
+    selectB!.value = nextB;
+    selectB!.dispatchEvent(new Event('change', { bubbles: true }));
+    flushSync();
+    expect(document.activeElement).toBe(selectB);
   });
 });

@@ -10,12 +10,23 @@ export interface PhoneDetailsProps {
   hidden: Set<number>;
   pred: Prediction | null;
   where: string;
+  /** Overrides the collapsed Timing header summary when provided (e.g. two-model timing in Compare mode). */
+  timingMeta?: string | null;
   showAllButton: () => JSX.Element;
   classList: () => JSX.Element;
   timingBody: () => JSX.Element;
 }
 
 export default function PhoneDetails(props: PhoneDetailsProps) {
+  const timingSummary = () =>
+    props.timingMeta !== undefined
+      ? props.timingMeta
+      : props.pred
+        ? props.where
+          ? `${ms(props.pred.timing.total_ms)} · ${props.where}`
+          : ms(props.pred.timing.total_ms)
+        : null;
+
   // Phones: classes and timing as two disclosures under the detections, folded until asked for.
   return (
     <div class="discs">
@@ -38,11 +49,7 @@ export default function PhoneDetails(props: PhoneDetailsProps) {
         <summary>
           <ChevronRight size={14} aria-hidden="true" />
           <span class="disc-title">Timing</span>
-          {props.pred ? (
-            <span class="disc-meta num">
-              {ms(props.pred.timing.total_ms)} · {props.where}
-            </span>
-          ) : null}
+          {timingSummary() ? <span class="disc-meta num">{timingSummary()}</span> : null}
         </summary>
         <div class="disc-body">{props.timingBody}</div>
       </details>

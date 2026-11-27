@@ -448,9 +448,10 @@ css`
     .app :global(.shell-rail) {
       display: none;
     }
-    /* Clear of the tab bar (56 px + 8), or of nothing but 8 px while a page's dock replaces it (shell/dock.ts). */
+    /* Clear of the tab bar (56 px + 8), or of nothing but 8 px while a page's dock replaces it (shell/dock.ts),
+       plus any visible toast stack (--toast-h) so the bottom-most control scrolls cleanly above it. */
     main {
-      padding-bottom: calc(var(--tabbar-h) + var(--space-2) + env(safe-area-inset-bottom));
+      padding-bottom: calc(var(--tabbar-h) + var(--space-2) + var(--toast-h) + env(safe-area-inset-bottom));
     }
   }
 `;

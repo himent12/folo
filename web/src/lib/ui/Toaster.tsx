@@ -39,7 +39,44 @@ export default function Toaster() {
     from = null;
   });
 
+  // Publish the active toast stack's height as --toast-h (same pattern as shell/dock.ts's --dock-h) so mobile `main`
+  // scroll clearance and `scroll-padding-bottom` keep the bottom-most control tappable above a visible toast.
+  let ro: ResizeObserver | null = null;
+  let mounted = true;
+  const syncToastHeight = () => {
+    if (typeof document === 'undefined') return;
+    if (!mounted || !toast.items.length || !el) {
+      document.documentElement.style.removeProperty('--toast-h');
+      return;
+    }
+    const h = el.offsetHeight;
+    if (h > 0) document.documentElement.style.setProperty('--toast-h', `${h + 16}px`);
+    else document.documentElement.style.removeProperty('--toast-h');
+  };
+
+  effect(() => {
+    const count = toast.items.length;
+    if (count === 0) {
+      document.documentElement.style.removeProperty('--toast-h');
+      return;
+    }
+    syncToastHeight();
+    queueMicrotask(syncToastHeight);
+  });
+
+  const bindHost = (node: HTMLElement) => {
+    el = node;
+    ro?.disconnect();
+    ro = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(syncToastHeight);
+    ro?.observe(node);
+    syncToastHeight();
+  };
+
   onCleanup(() => {
+    mounted = false;
+    ro?.disconnect();
+    ro = null;
+    if (typeof document !== 'undefined') document.documentElement.style.removeProperty('--toast-h');
     from = null;
     if (hovered || focused) {
       hovered = false;
@@ -79,7 +116,7 @@ export default function Toaster() {
     <section
       class="toaster"
       aria-label="Notifications"
-      ref={(e) => (el = e)}
+      ref={bindHost}
       onpointerenter={() => ((hovered = true), hold())}
       onpointerleave={() => ((hovered = false), hold())}
       onfocusin={onfocusin}

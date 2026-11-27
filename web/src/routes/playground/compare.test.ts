@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { Model, Prediction } from '$lib/api/types';
 import {
   comparePredictionJson,
+  formatCompareTimingMeta,
   formatLatencyComparison,
   formatSignedDelta,
   pickDefaultModelB,
@@ -184,5 +185,12 @@ describe('playground/compare', () => {
     // In Split mode, the exact same relative image landmark remains centered.
     expect(splitTx / (splitRect.rw * z)).toBeCloseTo(-0.15);
     expect(splitTy / (splitRect.rh * z)).toBeCloseTo(0.2);
+  });
+
+  it('formats collapsed mobile Timing header for both Compare sides without fabricating missing ones', () => {
+    expect(formatCompareTimingMeta(null, null)).toBeNull();
+    expect(formatCompareTimingMeta(predA, null)).toBe('A 21.0 ms');
+    expect(formatCompareTimingMeta(null, predB)).toBe('B 10.0 ms');
+    expect(formatCompareTimingMeta(predA, predB)).toBe('A 21.0 ms · B 10.0 ms');
   });
 });

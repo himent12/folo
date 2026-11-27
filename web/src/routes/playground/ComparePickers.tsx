@@ -5,13 +5,13 @@
  */
 import ArrowLeftRight from '$icons/arrow-left-right';
 import ArrowUpRight from '$icons/arrow-up-right';
-import { bindable, css, type Signal } from 'fw';
+import { bindable, computed, css, type Signal } from 'fw';
 import type { Model } from '$lib/api/types';
 import { href } from '$lib/router';
 import type { ModelChoice } from '$lib/scoreSummary';
 import Button from '$lib/ui/Button';
 import Segmented from '$lib/ui/Segmented';
-import Select from '$lib/ui/Select';
+import Select, { type SelectOption } from '$lib/ui/Select';
 import { tooltip } from '$lib/ui/tooltip';
 import type { CompareViewMode } from './compare';
 import type { RunOn } from './predict';
@@ -42,42 +42,39 @@ const VIEW_MODES: { value: CompareViewMode; label: string }[] = [
   { value: 'split', label: 'Split' },
 ];
 
-export default function ComparePickers(props: ComparePickersProps) {
-  const runOnA = bindable(props, 'runOnA', 'server');
-  const runOnB = bindable(props, 'runOnB', 'server');
-  const compareView = bindable(props, 'compareView', 'side-by-side');
+interface CompareSideProps {
+  badge: 'A' | 'B';
+  label: string;
+  id: string | null;
+  model: Model | null;
+  meta: string | null;
+  options: SelectOption<string>[];
+  backendOptions: { value: RunOn; label: string; disabled?: boolean; tip?: string }[];
+  choose: (v: string) => void;
+  runOn: Signal<RunOn>;
+  browserOff: string | null;
+  swapDisabled?: boolean;
+  swapModels?: () => void;
+}
 
-  const options = () => props.choices.map((c) => ({ value: c.model.id, label: c.label, group: c.group, short: c.short }));
-  const backendOptions = () => [
-    { value: 'server' as const, label: 'Server' },
-    { value: 'webgpu' as const, label: 'WebGPU', disabled: !props.webgpu, tip: 'No WebGPU in this browser' },
-    { value: 'cpu' as const, label: 'CPU' },
-  ];
-
-  const sideBlock = (
-    badge: 'A' | 'B',
-    label: string,
-    id: string | null,
-    model: Model | null,
-    meta: string | null,
-    choose: (v: string) => void,
-    runOn: Signal<RunOn>,
-  ) => (
+// Separate component so reactive model/meta props update the existing <Select> in place without dropping focus.
+function CompareSide(p: CompareSideProps) {
+  return (
     <div class="ab-side">
       <div class="ab-head">
-        <span class="ab-tag" class:b={badge === 'B'}>
-          {badge}
+        <span class="ab-tag" class:b={p.badge === 'B'}>
+          {p.badge}
         </span>
-        <span class="ab-label">{label}</span>
-        {badge === 'A' ? (
+        <span class="ab-label">{p.label}</span>
+        {p.badge === 'A' ? (
           <span class="ab-swap" use:tooltip={'Swap Model A and Model B'}>
             <Button
               size="sm"
               variant="ghost"
               icon={ArrowLeftRight}
               aria-label="Swap Model A and Model B"
-              disabled={props.modelAId === props.modelBId && runOnA.get() === runOnB.get()}
-              onclick={props.swapModels}
+              disabled={p.swapDisabled}
+              onclick={p.swapModels}
             >
               Swap
             </Button>
@@ -86,32 +83,69 @@ export default function ComparePickers(props: ComparePickersProps) {
       </div>
       <div class="ab-row">
         <Select
-          label={label}
-          value={id ?? ''}
-          options={options()}
-          onchange={choose}
-          describedby={model ? `compare-meta-${badge}` : undefined}
+          label={p.label}
+          value={p.id ?? ''}
+          options={p.options}
+          onchange={p.choose}
+          describedby={p.model ? `compare-meta-${p.badge}` : undefined}
         />
-        {model ? <Button icon={ArrowUpRight} href={href(`/models/${model.id}`)} aria-label={`Open ${model.name}`} /> : null}
+        {p.model ? <Button icon={ArrowUpRight} href={href(`/models/${p.model.id}`)} aria-label={`Open ${p.model.name}`} /> : null}
       </div>
-      {model ? (
-        <p class="pick-meta num" id={`compare-meta-${badge}`}>
-          {meta ?? 'Not evaluated'}
+      {p.model ? (
+        <p class="pick-meta num" id={`compare-meta-${p.badge}`}>
+          {p.meta ?? 'Not evaluated'}
         </p>
       ) : null}
-      {props.browserOff ? null : (
-        <div class="ab-runon" role="group" aria-label={`${label} run on`}>
-          <Segmented label={`Run ${label} on`} size="sm" bind:value={runOn} options={backendOptions()} />
+      {p.browserOff ? null : (
+        <div class="ab-runon" role="group" aria-label={`${p.label} run on`}>
+          <Segmented label={`Run ${p.label} on`} size="sm" bind:value={p.runOn} options={p.backendOptions} />
         </div>
       )}
     </div>
   );
+}
+
+export default function ComparePickers(props: ComparePickersProps) {
+  const runOnA = bindable(props, 'runOnA', 'server');
+  const runOnB = bindable(props, 'runOnB', 'server');
+  const compareView = bindable(props, 'compareView', 'side-by-side');
+
+  const options = computed(() => props.choices.map((c) => ({ value: c.model.id, label: c.label, group: c.group, short: c.short })));
+  const backendOptions = computed(() => [
+    { value: 'server' as const, label: 'Server' },
+    { value: 'webgpu' as const, label: 'WebGPU', disabled: !props.webgpu, tip: 'No WebGPU in this browser' },
+    { value: 'cpu' as const, label: 'CPU' },
+  ]);
 
   return (
     <div class={props.rail ? 'ab-rail' : 'ab-tools'}>
       <div class="ab-sides">
-        {sideBlock('A', 'Model A', props.modelAId, props.modelA, props.metaA, props.chooseModelA, runOnA)}
-        {sideBlock('B', 'Model B', props.modelBId, props.modelB, props.metaB, props.chooseModelB, runOnB)}
+        <CompareSide
+          badge="A"
+          label="Model A"
+          id={props.modelAId}
+          model={props.modelA}
+          meta={props.metaA}
+          options={options.get()}
+          backendOptions={backendOptions.get()}
+          choose={props.chooseModelA}
+          runOn={runOnA}
+          browserOff={props.browserOff}
+          swapDisabled={props.modelAId === props.modelBId && runOnA.get() === runOnB.get()}
+          swapModels={props.swapModels}
+        />
+        <CompareSide
+          badge="B"
+          label="Model B"
+          id={props.modelBId}
+          model={props.modelB}
+          meta={props.metaB}
+          options={options.get()}
+          backendOptions={backendOptions.get()}
+          choose={props.chooseModelB}
+          runOn={runOnB}
+          browserOff={props.browserOff}
+        />
       </div>
       <div class="ab-view" role="group" aria-label="Compare layout">
         <span class="ab-label">Layout</span>
