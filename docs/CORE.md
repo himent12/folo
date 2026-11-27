@@ -83,9 +83,11 @@ GEMM driver takes its operands as `&dyn Operand` for the same reason. Keep new k
   such as ReLU in a post-store pass — while the Wasm SIMD128 `f32x4 × 4` path for overwriting stride-1 convs with
   finite weights and padded scratch ≤ 16 MiB fuses bias, SiLU, and ReLU in registers before storing).
 - So do convs with at most 4 input channels (one group, not pointwise, `c·kh·kw <= 256`: the 3-channel stem,
-  `cpu/conv/small_c.rs`): per output row the `c·kh·kw` taps are gathered into L1 (with an AVX2 stride-2 de-interleave
-  fast path for `3×3 s2 p1`), and every output channel is that many FMAs per pixel in the GEMM's order with bias and
-  SiLU fused in registers before storing directly to the output, bit for bit the GEMM result, without the per-channel
+  `cpu/conv/small_c.rs`): each worker reuses a thread-local scratch buffer across row bands, gathering the `c·kh·kw`
+  taps into L1 — for `3×3 s2 p1`, three rotating `(even, odd)` AVX2 de-interleaved row slots reuse `ky = 2 -> ky = 0`
+  across consecutive rows and a 4-output-channel AVX2+FMA kernel (`small_c_s2k3p1_row4_avx2`) shares each loaded input
+  vector across 4 output channels — and computes every output channel's FMAs in the GEMM's order with bias and SiLU
+  fused in registers before storing directly to the output, bit for bit the GEMM result, without the per-channel
   phase copy.
 - Bias and activation run as an epilogue on each finished output (`Tensor::conv2d_act`, used by fused `ConvBnAct`
   blocks and by eval-mode blocks under `no_grad`): bias plus identity, SiLU, ReLU, LeakyReLU, or Hardswish on the
@@ -242,16 +244,15 @@ these kernels:
   also whether the input, padded copy and output each fit one allocation (`isize::MAX` bytes), on 32-bit
   targets too) and writes u8 C4 codes or `f32` NCHW. A micro-kernel computes 4 output channels × 24 output
   pixels in i32: AVX-VNNI `vpdpbusd` (u8 × s8, 4 products per lane, no saturation) when the CPU has
-  `avxvnni` (and AVX2, FMA), AVX-512 VNNI VL (`avx512vnni` + `avx512vl`) where supported, exact AVX2 `vpmaddwd`, Wasm SIMD128, detected at run time, else portable scalar code with the same sums. On x86-64 with AVX2 + FMA, `fused.rs` + `fused_epi.rs` execute each task's L1-blocked `(c_tile, g, chunk)` tile loop and epilogue inside a single `#[target_feature]` function (zero per-tile `vzeroupper`, zero indirect calls, direct strided 1×1 K-loop, and contiguous slice copies for non-contiguous cross-row chunks). 1×1 stride-1 convs read
-  the input planes in place; other convs read a padded, phase-split copy of each image's rows (`rows.rs`: `image_rows`, padding
+  `avxvnni` (and AVX2, FMA), AVX-512 VNNI VL (`avx512vnni` + `avx512vl`) where supported, exact AVX2 `vpmaddwd`, Wasm SIMD128, detected at run time, else portable scalar code with the same sums. On x86-64 with AVX2 + FMA, `fused.rs` + `fused_epi.rs` execute each task's L1-blocked `(c_tile, g, chunk)` tile loop and split-pair zero-spill epilogue inside a single `#[target_feature]` function (zero per-tile `vzeroupper`, zero indirect calls, direct strided single- and multi-part 1×1 K-loops that skip `image_rows` completely, and contiguous slice copies for non-contiguous cross-row chunks). Single-part `3×3, pad = 1` convs at stride 2 (except huge-weight / small-input shapes better served by channel-first splitting) and large-input stride 1 (`> 384 KiB`, `oh >= 8`) run through `fused_3x3.rs` in a single rayon pass over L1-resident 3-slot rotating row strips (reusing per-thread TLS scratch, avoiding global padded buffers and a second barrier). Remaining non-pointwise convs read a padded, phase-split copy of each image's rows (`rows.rs`: `image_rows`, padding
   with the zero point, parallelised across channel groups and row bands for few-group high-resolution layers, and rounding each channel group's phase block up to a 64-byte / 16-`u32` multiple to reduce
   cache-line false sharing across parallel `fill` workers) so each output pixel's taps are contiguous columns. The epilogue (`(acc − corr) · scale + bias` as one
   FMA, SiLU, the residual as one FMA, requantise) is the same `f32` operations in the scalar and AVX2 code, so
   results are bit-identical across kernels and thread counts; the AVX2 form runs on any CPU with AVX2 and FMA
   (`FOLO_Q8_SCALAR=1` turns off both vector paths). Its SiLU (`q8::silu_q8`) is a division-free, bit-exact scalar and
-  AVX2 `x / (1 + e^{−x})` using base-2 range reduction (`1.5·2^23 + 127` magic rounding, single-shift `2^n`), a
+  AVX2 `x / (1 + e^{−x})` using base-2 range reduction (clamping `x >= −85.0` so `−x·log₂(e) < 124` without an extra upper clamp, `1.5·2^23 + 127` magic rounding, single-shift `2^n`), a
   degree-5 Estrin-form minimax `2^f` polynomial evaluated in register-spill-free 2-vector pairs (`silu_q8_avx2_x2`), and a bit-hack seed + 4-FMA factored Householder-6 reciprocal (`< 2.5e-7` hybrid
-  error on `[-86, 86]`); the specialised AVX2 epilogue writes contiguous 24-pixel tiles directly to the C4 output
+  error on `[-85, 85]`); the specialised AVX2 epilogue writes contiguous 24-pixel tiles directly to the C4 output
   (for both 1×1 and within-row `k×k` chunks), packing four channels' codes with saturating `packs` / `packus` and
   one byte shuffle. Work is split into (image, pixel block, channel block) tasks: capped at `3 · threads`, none
   under `2¹⁸` multiply-adds (and small convs below the serial floor run without waking the pool), with a heuristic that rounds multi-task pixel blocks to even chunk counts (192-byte / 3-cache-line multiples on contiguous planes) to reduce output-plane false sharing. An image whose
@@ -259,7 +260,7 @@ these kernels:
   blocks of a few 24-column chunks would share cache lines with their neighbours on every plane. Bigger inputs
   are split by pixel blocks first, so each task reads its own part once. `q8::stem_u8` runs 3-channel `u8` `[R, G, B, 0]`
   stems directly in L1-resident rotating row strips with AVX2 even/odd de-interleaving and a fused per-row x86-64 tile pass.
-- **Others.** AVX2-vectorised `quantize` / `dequantize` (4 channels per C4 word read) between `f32` NCHW and C4
+- **Others.** 2× unrolled AVX2-vectorised `quantize` / `dequantize` (16 pixels / full 64-byte cache line per iteration, 4 channels per C4 word) between `f32` NCHW and C4
   codes, separable AVX2 max pooling on codes (`max` of bytes; exact since the grid is monotonic, reusing a thread-local
   scratch buffer for small serial planes below `MIN_POOLED`, a single pooled `ScratchWords` for larger serial planes,
   and per-worker pooled `ScratchWords` via `for_each_init` on the parallel path), and AVX2 nearest 2× upsampling, all

@@ -8,13 +8,19 @@ use std::arch::x86_64::*;
 use super::kernel::{MR, NR, Tile, TileF32, uses_avx_vnni, uses_avx2, uses_avx512_vnni};
 use super::silu::silu_q8_avx2_x2;
 
+/// Maximum number of concatenated input parts handled by [`BMode::Pointwise1x1Parts`] with zero heap
+/// allocations and zero pointer-table loads.
+pub(super) const MAX_INLINE_1X1_PARTS: usize = 8;
+
 /// Fast-path B addressing mode for a single-part conv K-loop.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum BMode {
+#[derive(Clone, Copy)]
+pub(super) enum BMode<'a> {
     /// General row pointer table (`rows[p] + col`).
     Rows,
     /// Single contiguous 1×1 stride-1 input (`b_base + p * hw + col`, zero pointer-table loads).
     Pointwise1x1 { base: *const u32, hw: usize },
+    /// Concatenated 1×1 stride-1 inputs (`(base, groups)` slice, zero `r.rows`).
+    Pointwise1x1Parts { parts: &'a [(*const u32, usize)], hw: usize },
 }
 
 /// Active fused x86-64 ISA tier (requires AVX2 + FMA for the fused epilogue).
@@ -48,7 +54,7 @@ pub(super) struct SinglePartTask<'a> {
     pub scale: &'a [f32],
     pub bias: &'a [f32],
     pub rows: &'a [*const u32],
-    pub b_mode: BMode,
+    pub b_mode: BMode<'a>,
     pub r_n: usize,
     pub wq: usize,
     pub oh: usize,
@@ -73,6 +79,8 @@ pub(super) struct PartSlice<'a> {
     pub a: &'a [i32],
     pub corr: &'a [i32],
     pub scale: &'a [f32],
+    /// Non-null base pointer for 1×1 stride-1 parts (skips `rows` pointer table when `pointwise_hw > 0`).
+    pub b_base: *const u32,
 }
 
 /// Read-only parameters for one decoupled multi-part fused task.
@@ -80,6 +88,8 @@ pub(super) struct MultiPartTask<'a> {
     pub parts: &'a [PartSlice<'a>],
     pub bias: &'a [f32],
     pub rows: &'a [*const u32],
+    /// Non-zero (`h * w`) when every part is a contiguous 1×1 stride-1 C4 slice.
+    pub pointwise_hw: usize,
     pub r_n: usize,
     pub wq: usize,
     pub oh: usize,
@@ -327,6 +337,10 @@ pub(super) unsafe fn finish_col8<const SILU: bool, const HAS_RES: bool, const OU
 /// Keeping `acc` as the handoff between the 16-YMM K-loop and the 12-YMM `silu_q8_avx2_x2` epilogue prevents
 /// LLVM's register allocator from hoisting epilogue YMM constants across the K-loop and spilling `vpdpbusd`
 /// accumulators on long-K `3×3` convs, while avoiding any `vzeroupper` or ABI save/restore.
+///
+/// Processing channels `(0, 1)` through SiLU + residual + requantization to a single `p01` vector (or store)
+/// *before* loading channels `(2, 3)` keeps peak live YMMs <= 13 across `silu_q8_avx2_x2`, avoiding stack spills
+/// of `y2/y3` during the first SiLU pair and of `y0/y1` during the second.
 #[target_feature(enable = "avx2,fma")]
 #[inline]
 #[allow(clippy::too_many_arguments)]
@@ -348,7 +362,7 @@ pub(super) unsafe fn apply_epi_aligned<const SILU: bool, const HAS_RES: bool, co
     unsafe {
         for k in 0..3usize {
             let off = 8 * k;
-            let y0 = _mm256_fmadd_ps(
+            let mut y0 = _mm256_fmadd_ps(
                 _mm256_cvtepi32_ps(_mm256_sub_epi32(
                     _mm256_load_si256(acc.0[0].as_ptr().add(off) as *const __m256i),
                     _mm256_set1_epi32(corr[0]),
@@ -356,7 +370,7 @@ pub(super) unsafe fn apply_epi_aligned<const SILU: bool, const HAS_RES: bool, co
                 _mm256_set1_ps(scale[0]),
                 _mm256_set1_ps(bias[0]),
             );
-            let y1 = _mm256_fmadd_ps(
+            let mut y1 = _mm256_fmadd_ps(
                 _mm256_cvtepi32_ps(_mm256_sub_epi32(
                     _mm256_load_si256(acc.0[1].as_ptr().add(off) as *const __m256i),
                     _mm256_set1_epi32(corr[1]),
@@ -364,7 +378,45 @@ pub(super) unsafe fn apply_epi_aligned<const SILU: bool, const HAS_RES: bool, co
                 _mm256_set1_ps(scale[1]),
                 _mm256_set1_ps(bias[1]),
             );
-            let y2 = _mm256_fmadd_ps(
+            if SILU {
+                [y0, y1] = silu_q8_avx2_x2([y0, y1]);
+            }
+            if HAS_RES {
+                let mask_ff = _mm256_set1_epi32(0xFF);
+                let w = _mm256_loadu_si256(res_ptr.add(off) as *const __m256i);
+                let b0 = _mm256_and_si256(w, mask_ff);
+                let b1 = _mm256_and_si256(_mm256_srli_epi32::<8>(w), mask_ff);
+                y0 = _mm256_fmadd_ps(
+                    _mm256_set1_ps(rs[0]),
+                    _mm256_cvtepi32_ps(_mm256_sub_epi32(b0, _mm256_set1_epi32(rz[0]))),
+                    y0,
+                );
+                y1 = _mm256_fmadd_ps(
+                    _mm256_set1_ps(rs[1]),
+                    _mm256_cvtepi32_ps(_mm256_sub_epi32(b1, _mm256_set1_epi32(rz[1]))),
+                    y1,
+                );
+            }
+            let p01 = if OUT_U8 {
+                let lo = _mm256_set1_ps(-512.0);
+                let hi = _mm256_set1_ps(512.0);
+                let v0 = _mm256_cvtps_epi32(_mm256_min_ps(
+                    _mm256_max_ps(_mm256_mul_ps(y0, _mm256_set1_ps(inv[0])), lo),
+                    hi,
+                ));
+                let v1 = _mm256_cvtps_epi32(_mm256_min_ps(
+                    _mm256_max_ps(_mm256_mul_ps(y1, _mm256_set1_ps(inv[1])), lo),
+                    hi,
+                ));
+                let z01 = _mm256_loadu_si256(z01_arr.as_ptr() as *const __m256i);
+                _mm256_adds_epi16(_mm256_packs_epi32(v0, v1), z01)
+            } else {
+                _mm256_storeu_ps(f_dst[0].as_mut_ptr().add(off), y0);
+                _mm256_storeu_ps(f_dst[1].as_mut_ptr().add(off), y1);
+                _mm256_setzero_si256()
+            };
+
+            let mut y2 = _mm256_fmadd_ps(
                 _mm256_cvtepi32_ps(_mm256_sub_epi32(
                     _mm256_load_si256(acc.0[2].as_ptr().add(off) as *const __m256i),
                     _mm256_set1_epi32(corr[2]),
@@ -372,7 +424,7 @@ pub(super) unsafe fn apply_epi_aligned<const SILU: bool, const HAS_RES: bool, co
                 _mm256_set1_ps(scale[2]),
                 _mm256_set1_ps(bias[2]),
             );
-            let y3 = _mm256_fmadd_ps(
+            let mut y3 = _mm256_fmadd_ps(
                 _mm256_cvtepi32_ps(_mm256_sub_epi32(
                     _mm256_load_si256(acc.0[3].as_ptr().add(off) as *const __m256i),
                     _mm256_set1_epi32(corr[3]),
@@ -380,21 +432,48 @@ pub(super) unsafe fn apply_epi_aligned<const SILU: bool, const HAS_RES: bool, co
                 _mm256_set1_ps(scale[3]),
                 _mm256_set1_ps(bias[3]),
             );
-            finish_col8::<SILU, HAS_RES, OUT_U8>(
-                y0,
-                y1,
-                y2,
-                y3,
-                if HAS_RES { res_ptr.add(off) } else { res_ptr },
-                rs,
-                rz,
-                inv,
-                z01_arr,
-                z23_arr,
-                if OUT_U8 { q_dst.add(off) } else { q_dst },
-                f_dst,
-                off,
-            );
+            if SILU {
+                [y2, y3] = silu_q8_avx2_x2([y2, y3]);
+            }
+            if HAS_RES {
+                let mask_ff = _mm256_set1_epi32(0xFF);
+                let w = _mm256_loadu_si256(res_ptr.add(off) as *const __m256i);
+                let b2 = _mm256_and_si256(_mm256_srli_epi32::<16>(w), mask_ff);
+                let b3 = _mm256_srli_epi32::<24>(w);
+                y2 = _mm256_fmadd_ps(
+                    _mm256_set1_ps(rs[2]),
+                    _mm256_cvtepi32_ps(_mm256_sub_epi32(b2, _mm256_set1_epi32(rz[2]))),
+                    y2,
+                );
+                y3 = _mm256_fmadd_ps(
+                    _mm256_set1_ps(rs[3]),
+                    _mm256_cvtepi32_ps(_mm256_sub_epi32(b3, _mm256_set1_epi32(rz[3]))),
+                    y3,
+                );
+            }
+            if OUT_U8 {
+                let lo = _mm256_set1_ps(-512.0);
+                let hi = _mm256_set1_ps(512.0);
+                let transpose = _mm256_setr_epi8(
+                    0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15, 0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10,
+                    14, 3, 7, 11, 15,
+                );
+                let v2 = _mm256_cvtps_epi32(_mm256_min_ps(
+                    _mm256_max_ps(_mm256_mul_ps(y2, _mm256_set1_ps(inv[2])), lo),
+                    hi,
+                ));
+                let v3 = _mm256_cvtps_epi32(_mm256_min_ps(
+                    _mm256_max_ps(_mm256_mul_ps(y3, _mm256_set1_ps(inv[3])), lo),
+                    hi,
+                ));
+                let z23 = _mm256_loadu_si256(z23_arr.as_ptr() as *const __m256i);
+                let p23 = _mm256_adds_epi16(_mm256_packs_epi32(v2, v3), z23);
+                let bytes = _mm256_shuffle_epi8(_mm256_packus_epi16(p01, p23), transpose);
+                _mm256_storeu_si256(q_dst.add(off) as *mut __m256i, bytes);
+            } else {
+                _mm256_storeu_ps(f_dst[2].as_mut_ptr().add(off), y2);
+                _mm256_storeu_ps(f_dst[3].as_mut_ptr().add(off), y3);
+            }
         }
     }
 }

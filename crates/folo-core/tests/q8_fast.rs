@@ -644,3 +644,273 @@ fn fused_conv_noncontiguous_and_rowband_fill_match_exact_reference() {
         );
     }
 }
+
+#[test]
+fn fused_3x3_strip_and_multipart_1x1_match_exact_reference() {
+    let mut rng = Rng::seed(7012);
+
+    // 1. `k=3, s=2, p=1` single-barrier rotating strip (tiny 1x1, multi-chunk `ow > NR`, odd 29x35, multi-part,
+    //    residual, F32/U8).
+    for &(n, c0, c1, o, h, w, silu, has_res) in &[
+        (1usize, 4usize, 0usize, 4usize, 1usize, 1usize, true, false),
+        (1, 4, 0, 4, 1, 49, true, false),
+        (2, 8, 0, 8, 2, 3, false, true),
+        (1, 8, 4, 12, 3, 55, false, true),
+        (2, 8, 4, 12, 29, 35, true, true),
+        (1, 16, 0, 16, 40, 41, false, true),
+    ] {
+        let c = c0 + c1;
+        let hw = h * w;
+        let (oh, ow) = q8::out_size(h, w, 3, 2, 1).unwrap();
+        let ohw = oh * ow;
+        let g0: Vec<Grid> = (0..c0).map(|i| Grid::from_range(-0.4, 2.0 + 0.1 * i as f32)).collect();
+        let g1: Vec<Grid> = (0..c1).map(|i| Grid::from_range(-0.3, 1.5 + 0.1 * i as f32)).collect();
+        let all_g: Vec<Grid> = g0.iter().chain(&g1).copied().collect();
+        let out_g: Vec<Grid> = (0..o).map(|i| Grid::from_range(-0.5, 3.0 + 0.1 * i as f32)).collect();
+        let res_g: Vec<Grid> = (0..o).map(|i| Grid::from_range(-0.6, 2.2 + 0.1 * i as f32)).collect();
+        let mut x0 = alloc(n, c0, hw);
+        let x0f: Vec<f32> = (0..n * c0 * hw).map(|_| rng.uniform(-0.4, 2.0)).collect();
+        quantize_per_channel(&x0f, n, c0, hw, &g0, &mut x0);
+        let mut x1 = if c1 > 0 { alloc(n, c1, hw) } else { Vec::new() };
+        if c1 > 0 {
+            let x1f: Vec<f32> = (0..n * c1 * hw).map(|_| rng.uniform(-0.3, 1.5)).collect();
+            quantize_per_channel(&x1f, n, c1, hw, &g1, &mut x1);
+        }
+        let mut rq = alloc(n, o, ohw);
+        let rf: Vec<f32> = (0..n * o * ohw).map(|_| rng.uniform(-0.6, 2.2)).collect();
+        quantize_per_channel(&rf, n, o, ohw, &res_g, &mut rq);
+        let wt: Vec<f32> = (0..o * c * 9).map(|_| rng.uniform(-0.35, 0.35)).collect();
+        let bias: Vec<f32> = (0..o).map(|_| rng.uniform(-0.4, 0.4)).collect();
+        let cv = QConv::new(&wt, &bias, (o, c, 3), 2, 1, silu, &all_g);
+        let z0: Vec<u8> = g0.iter().map(|g| g.zero).collect();
+        let z1: Vec<u8> = g1.iter().map(|g| g.zero).collect();
+        let ref_parts: Vec<(&[u32], &[Grid])> =
+            if c1 > 0 { vec![(&x0, &g0), (&x1, &g1)] } else { vec![(&x0, &g0)] };
+        let (want_q, want_f) = ref_conv_parts(
+            &ref_parts,
+            n,
+            h,
+            w,
+            &wt,
+            &bias,
+            (o, 3, 2, 1),
+            silu,
+            false,
+            has_res.then_some((&rq, &res_g)),
+            &out_g,
+        );
+        let v0 = C4 { data: &x0, offset: 0, img_stride: (c0 / 4) * hw, c: c0, zero: z0[0] };
+        let views: Vec<C4<'_>> = if c1 > 0 {
+            let v1 = C4 { data: &x1, offset: 0, img_stride: (c1 / 4) * hw, c: c1, zero: z1[0] };
+            vec![v0, v1]
+        } else {
+            vec![v0]
+        };
+        let zslices: Vec<&[u8]> = if c1 > 0 { vec![&z0, &z1] } else { vec![&z0] };
+        let vr = C4 { data: &rq, offset: 0, img_stride: (o / 4) * ohw, c: o, zero: res_g[0].zero };
+        let res_arg = has_res.then_some((vr, res_g.as_slice()));
+        for threads in [1usize, 4] {
+            let mut got_q = alloc(n, o, ohw);
+            let mut got_f = vec![f32::NAN; n * o * ohw];
+            pool(threads).install(|| {
+                conv_per_channel(
+                    &views,
+                    &zslices,
+                    n,
+                    h,
+                    w,
+                    &cv,
+                    res_arg,
+                    QOut::U8PerChannel { data: &mut got_q, grids: &out_g },
+                );
+                conv_per_channel(&views, &zslices, n, h, w, &cv, res_arg, QOut::F32 { data: &mut got_f });
+            });
+            assert_eq!(
+                &got_q[..want_q.len()],
+                want_q.as_slice(),
+                "s2 strip u8 mismatch ({n},{c0}+{c1}->{o},{h}x{w},silu={silu},res={has_res},thr={threads})"
+            );
+            assert!(
+                got_f.iter().zip(&want_f).all(|(a, b)| a.to_bits() == b.to_bits()),
+                "s2 strip f32 mismatch ({n},{c0}+{c1}->{o},{h}x{w},silu={silu},res={has_res},thr={threads})"
+            );
+        }
+    }
+
+    // 2. Large-input `k=3, s=1, p=1` (> 384 KiB triggers the single-barrier s1 row-strip path), odd width + residual.
+    {
+        let (n, c, o, h, w) = (1usize, 64usize, 8usize, 80usize, 81usize);
+        let hw = h * w;
+        let in_g: Vec<Grid> = (0..c).map(|i| Grid::from_range(-0.3, 1.8 + 0.02 * i as f32)).collect();
+        let in_z: Vec<u8> = in_g.iter().map(|g| g.zero).collect();
+        let out_g: Vec<Grid> = (0..o).map(|i| Grid::from_range(-0.5, 2.5 + 0.1 * i as f32)).collect();
+        let res_g: Vec<Grid> = (0..o).map(|i| Grid::from_range(-0.4, 2.0 + 0.1 * i as f32)).collect();
+        let mut xq = alloc(n, c, hw);
+        let xf: Vec<f32> = (0..c * hw).map(|i| ((i.wrapping_mul(37) % 251) as f32) * 0.008 - 0.3).collect();
+        quantize_per_channel(&xf, n, c, hw, &in_g, &mut xq);
+        let mut rq = alloc(n, o, hw);
+        let rf: Vec<f32> = (0..o * hw).map(|i| ((i.wrapping_mul(19) % 197) as f32) * 0.01 - 0.4).collect();
+        quantize_per_channel(&rf, n, o, hw, &res_g, &mut rq);
+        let wt: Vec<f32> = (0..o * c * 9).map(|_| rng.uniform(-0.2, 0.2)).collect();
+        let bias: Vec<f32> = (0..o).map(|_| rng.uniform(-0.3, 0.3)).collect();
+        let cv = QConv::new(&wt, &bias, (o, c, 3), 1, 1, true, &in_g);
+        let vx = C4 { data: &xq, offset: 0, img_stride: (c / 4) * hw, c, zero: in_z[0] };
+        let vr = C4 { data: &rq, offset: 0, img_stride: (o / 4) * hw, c: o, zero: res_g[0].zero };
+        let (want_q, want_f) = ref_conv_parts(
+            &[(&xq, &in_g)],
+            n,
+            h,
+            w,
+            &wt,
+            &bias,
+            (o, 3, 1, 1),
+            true,
+            false,
+            Some((&rq, &res_g)),
+            &out_g,
+        );
+        let mut q1 = alloc(n, o, hw);
+        let mut q4 = alloc(n, o, hw);
+        let mut f4 = vec![f32::NAN; o * hw];
+        pool(1).install(|| {
+            conv_per_channel(
+                &[vx],
+                &[&in_z],
+                n,
+                h,
+                w,
+                &cv,
+                Some((vr, res_g.as_slice())),
+                QOut::U8PerChannel { data: &mut q1, grids: &out_g },
+            );
+        });
+        pool(4).install(|| {
+            conv_per_channel(
+                &[vx],
+                &[&in_z],
+                n,
+                h,
+                w,
+                &cv,
+                Some((vr, res_g.as_slice())),
+                QOut::U8PerChannel { data: &mut q4, grids: &out_g },
+            );
+            conv_per_channel(
+                &[vx],
+                &[&in_z],
+                n,
+                h,
+                w,
+                &cv,
+                Some((vr, res_g.as_slice())),
+                QOut::F32 { data: &mut f4 },
+            );
+        });
+        assert_eq!(&q1[..want_q.len()], want_q.as_slice(), "large s1 strip u8 (1 thr) mismatch");
+        assert_eq!(&q4[..want_q.len()], want_q.as_slice(), "large s1 strip u8 (4 thr) mismatch");
+        assert!(
+            f4.iter().zip(&want_f).all(|(a, b)| a.to_bits() == b.to_bits()),
+            "large s1 strip f32 mismatch"
+        );
+    }
+
+    // 3. Multi-part 1×1 inline (`<= 8` parts) and fallback (`9` parts), plus decoupled 1×1 with mismatched `xs`.
+    for &part_count in &[2usize, 4, 8, 9] {
+        let (n, pc, o, h, w) = (2usize, 4usize, 8usize, 7usize, 13usize);
+        let c = pc * part_count;
+        let hw = h * w;
+        let part_grids: Vec<Vec<Grid>> = (0..part_count)
+            .map(|p| (0..pc).map(|i| Grid::from_range(-0.3, 1.5 + 0.1 * (p + i) as f32)).collect())
+            .collect();
+        let all_g: Vec<Grid> = part_grids.iter().flatten().copied().collect();
+        let out_g: Vec<Grid> = (0..o).map(|i| Grid::from_range(-0.4, 2.5 + 0.1 * i as f32)).collect();
+        let part_bufs: Vec<Vec<u32>> = part_grids
+            .iter()
+            .map(|gs| {
+                let mut q = alloc(n, pc, hw);
+                let xf: Vec<f32> = (0..n * pc * hw).map(|_| rng.uniform(-0.3, 1.5)).collect();
+                quantize_per_channel(&xf, n, pc, hw, gs, &mut q);
+                q
+            })
+            .collect();
+        let part_zs: Vec<Vec<u8>> = part_grids.iter().map(|gs| gs.iter().map(|g| g.zero).collect()).collect();
+        let wt: Vec<f32> = (0..o * c).map(|_| rng.uniform(-0.4, 0.4)).collect();
+        let bias: Vec<f32> = (0..o).map(|_| rng.uniform(-0.4, 0.4)).collect();
+        let cv = QConv::new(&wt, &bias, (o, c, 1), 1, 0, true, &all_g);
+        let ref_parts: Vec<(&[u32], &[Grid])> =
+            part_bufs.iter().zip(&part_grids).map(|(b, g)| (b.as_slice(), g.as_slice())).collect();
+        let (want_q, want_f) =
+            ref_conv_parts(&ref_parts, n, h, w, &wt, &bias, (o, 1, 1, 0), true, false, None, &out_g);
+        let views: Vec<C4<'_>> = part_bufs
+            .iter()
+            .zip(&part_zs)
+            .map(|(b, z)| C4 { data: b, offset: 0, img_stride: (pc / 4) * hw, c: pc, zero: z[0] })
+            .collect();
+        let zslices: Vec<&[u8]> = part_zs.iter().map(|z| z.as_slice()).collect();
+        let mut got_q = alloc(n, o, hw);
+        let mut got_f = vec![f32::NAN; n * o * hw];
+        pool(4).install(|| {
+            conv_per_channel(
+                &views,
+                &zslices,
+                n,
+                h,
+                w,
+                &cv,
+                None,
+                QOut::U8PerChannel { data: &mut got_q, grids: &out_g },
+            );
+            conv_per_channel(&views, &zslices, n, h, w, &cv, None, QOut::F32 { data: &mut got_f });
+        });
+        assert_eq!(&got_q[..want_q.len()], want_q.as_slice(), "1x1 {part_count}-part u8 mismatch");
+        assert!(
+            got_f.iter().zip(&want_f).all(|(a, b)| a.to_bits() == b.to_bits()),
+            "1x1 {part_count}-part f32 mismatch"
+        );
+    }
+
+    // 4. Decoupled 1×1 `QConv` (`[8, 8]`) invoked with mismatched `xs` partition (`[4, 12]`) falls back cleanly.
+    {
+        let (n, h, w, o) = (1usize, 7usize, 11usize, 8usize);
+        let hw = h * w;
+        let g0: Vec<Grid> = (0..8).map(|i| Grid { scale: 0.004 + 0.0002 * i as f32, zero: 20 }).collect();
+        let g1: Vec<Grid> = (0..8).map(|i| Grid { scale: 0.04 + 0.003 * i as f32, zero: 90 }).collect();
+        let all_g: Vec<Grid> = g0.iter().chain(&g1).copied().collect();
+        let out_g: Vec<Grid> = (0..o).map(|i| Grid::from_range(-0.4, 3.0 + 0.1 * i as f32)).collect();
+        let xf: Vec<f32> = (0..16 * hw).map(|_| rng.uniform(-0.2, 1.0)).collect();
+        let mut x_all = alloc(n, 16, hw);
+        quantize_per_channel(&xf, n, 16, hw, &all_g, &mut x_all);
+        let wt: Vec<f32> = (0..o * 16).map(|_| rng.uniform(-0.3, 0.3)).collect();
+        let bias: Vec<f32> = (0..o).map(|_| rng.uniform(-0.2, 0.2)).collect();
+        let cv = QConv::new_parts(&wt, &bias, (o, 16, 1), 1, 0, true, &[&g0, &g1], true);
+        let z_all: Vec<u8> = all_g.iter().map(|g| g.zero).collect();
+        // Split `[4, 12]` across two views into `x_all`, differing from `cv`'s `[8, 8]` decoupled parts.
+        let va = C4 { data: &x_all, offset: 0, img_stride: 4 * hw, c: 4, zero: z_all[0] };
+        let vb = C4 { data: &x_all, offset: hw, img_stride: 4 * hw, c: 12, zero: z_all[4] };
+        let v_m0 = C4 { data: &x_all, offset: 0, img_stride: 4 * hw, c: 8, zero: z_all[0] };
+        let v_m1 = C4 { data: &x_all, offset: 2 * hw, img_stride: 4 * hw, c: 8, zero: z_all[8] };
+        let mut q_match = alloc(n, o, hw);
+        let mut q_mismatch = alloc(n, o, hw);
+        conv_per_channel(
+            &[v_m0, v_m1],
+            &[&z_all[..8], &z_all[8..]],
+            n,
+            h,
+            w,
+            &cv,
+            None,
+            QOut::U8PerChannel { data: &mut q_match, grids: &out_g },
+        );
+        conv_per_channel(
+            &[va, vb],
+            &[&z_all[..4], &z_all[4..]],
+            n,
+            h,
+            w,
+            &cv,
+            None,
+            QOut::U8PerChannel { data: &mut q_mismatch, grids: &out_g },
+        );
+        assert_eq!(&q_match[..(o / 4) * hw], &q_mismatch[..(o / 4) * hw]);
+    }
+}

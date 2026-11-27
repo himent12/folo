@@ -12,6 +12,8 @@
 //!   accumulator, and per-channel epilogue (dequantise, bias, SiLU, residual, requantise), the same bits on all paths.
 //! - `fused.rs` + `fused_epi.rs`: fused x86-64 L1-blocked tile-block drivers and zero-spill epilogues for `conv`,
 //!   `conv_per_channel`, and `stem_u8`.
+//! - `fused_3x3.rs`: single-barrier L1-hot rotating row-strip x86-64 driver for single-part `3×3, pad = 1` convs
+//!   at stride 2 and large-input stride 1.
 //! - `rows.rs`: input row-pointer preparation and row-band parallelised padded phase copies (`image_rows`).
 //! - `stem.rs`: direct `u8` RGB0-to-C4 AVX-VNNI stem ([`QStem`], [`stem_u8`], [`pack_f32_to_rgb0_u8`]).
 //! - `conv.rs`: packed weights ([`QConv`]) and the conv drivers ([`conv`], [`conv_per_channel`]).
@@ -21,6 +23,8 @@
 mod conv;
 #[cfg(target_arch = "x86_64")]
 mod fused;
+#[cfg(target_arch = "x86_64")]
+mod fused_3x3;
 #[cfg(target_arch = "x86_64")]
 mod fused_epi;
 mod kernel;
@@ -199,8 +203,53 @@ unsafe fn quantize_group_avx2(
         11, 15,
     );
     let mut i = 0;
-    // SAFETY: `i + 8 <= len` and all five slices have length `len`.
+    // SAFETY: `i + 16 <= len` (and `i + 8 <= len`) and all five slices have length `>= len`.
     unsafe {
+        while i + 16 <= len {
+            let v0a = _mm256_cvtps_epi32(_mm256_min_ps(
+                _mm256_max_ps(_mm256_mul_ps(_mm256_loadu_ps(p0.as_ptr().add(i)), inv0), lo),
+                hi,
+            ));
+            let v1a = _mm256_cvtps_epi32(_mm256_min_ps(
+                _mm256_max_ps(_mm256_mul_ps(_mm256_loadu_ps(p1.as_ptr().add(i)), inv1), lo),
+                hi,
+            ));
+            let v2a = _mm256_cvtps_epi32(_mm256_min_ps(
+                _mm256_max_ps(_mm256_mul_ps(_mm256_loadu_ps(p2.as_ptr().add(i)), inv2), lo),
+                hi,
+            ));
+            let v3a = _mm256_cvtps_epi32(_mm256_min_ps(
+                _mm256_max_ps(_mm256_mul_ps(_mm256_loadu_ps(p3.as_ptr().add(i)), inv3), lo),
+                hi,
+            ));
+            let p01a = _mm256_adds_epi16(_mm256_packs_epi32(v0a, v1a), z01);
+            let p23a = _mm256_adds_epi16(_mm256_packs_epi32(v2a, v3a), z23);
+            let bytes_a = _mm256_shuffle_epi8(_mm256_packus_epi16(p01a, p23a), transpose);
+
+            let v0b = _mm256_cvtps_epi32(_mm256_min_ps(
+                _mm256_max_ps(_mm256_mul_ps(_mm256_loadu_ps(p0.as_ptr().add(i + 8)), inv0), lo),
+                hi,
+            ));
+            let v1b = _mm256_cvtps_epi32(_mm256_min_ps(
+                _mm256_max_ps(_mm256_mul_ps(_mm256_loadu_ps(p1.as_ptr().add(i + 8)), inv1), lo),
+                hi,
+            ));
+            let v2b = _mm256_cvtps_epi32(_mm256_min_ps(
+                _mm256_max_ps(_mm256_mul_ps(_mm256_loadu_ps(p2.as_ptr().add(i + 8)), inv2), lo),
+                hi,
+            ));
+            let v3b = _mm256_cvtps_epi32(_mm256_min_ps(
+                _mm256_max_ps(_mm256_mul_ps(_mm256_loadu_ps(p3.as_ptr().add(i + 8)), inv3), lo),
+                hi,
+            ));
+            let p01b = _mm256_adds_epi16(_mm256_packs_epi32(v0b, v1b), z01);
+            let p23b = _mm256_adds_epi16(_mm256_packs_epi32(v2b, v3b), z23);
+            let bytes_b = _mm256_shuffle_epi8(_mm256_packus_epi16(p01b, p23b), transpose);
+
+            _mm256_storeu_si256(out.as_mut_ptr().add(i) as *mut __m256i, bytes_a);
+            _mm256_storeu_si256(out.as_mut_ptr().add(i + 8) as *mut __m256i, bytes_b);
+            i += 16;
+        }
         while i + 8 <= len {
             let v0 = _mm256_cvtps_epi32(_mm256_min_ps(
                 _mm256_max_ps(_mm256_mul_ps(_mm256_loadu_ps(p0.as_ptr().add(i)), inv0), lo),
@@ -447,8 +496,53 @@ unsafe fn dequantize_group_avx2(
     let vs2 = _mm256_set1_ps(gs[2].scale);
     let vs3 = _mm256_set1_ps(gs[3].scale);
     let mut i = 0;
-    // SAFETY: `i + 8 <= len` and all five slices have length `len`.
+    // SAFETY: `i + 16 <= len` (and `i + 8 <= len`) and all five slices have length `>= len`.
     unsafe {
+        while i + 16 <= len {
+            let wa = _mm256_loadu_si256(src.as_ptr().add(i) as *const __m256i);
+            let wb = _mm256_loadu_si256(src.as_ptr().add(i + 8) as *const __m256i);
+            let q0a = _mm256_and_si256(wa, mask);
+            let q1a = _mm256_and_si256(_mm256_srli_epi32::<8>(wa), mask);
+            let q2a = _mm256_and_si256(_mm256_srli_epi32::<16>(wa), mask);
+            let q3a = _mm256_srli_epi32::<24>(wa);
+            let q0b = _mm256_and_si256(wb, mask);
+            let q1b = _mm256_and_si256(_mm256_srli_epi32::<8>(wb), mask);
+            let q2b = _mm256_and_si256(_mm256_srli_epi32::<16>(wb), mask);
+            let q3b = _mm256_srli_epi32::<24>(wb);
+            _mm256_storeu_ps(
+                p0.as_mut_ptr().add(i),
+                _mm256_mul_ps(vs0, _mm256_cvtepi32_ps(_mm256_sub_epi32(q0a, vz0))),
+            );
+            _mm256_storeu_ps(
+                p0.as_mut_ptr().add(i + 8),
+                _mm256_mul_ps(vs0, _mm256_cvtepi32_ps(_mm256_sub_epi32(q0b, vz0))),
+            );
+            _mm256_storeu_ps(
+                p1.as_mut_ptr().add(i),
+                _mm256_mul_ps(vs1, _mm256_cvtepi32_ps(_mm256_sub_epi32(q1a, vz1))),
+            );
+            _mm256_storeu_ps(
+                p1.as_mut_ptr().add(i + 8),
+                _mm256_mul_ps(vs1, _mm256_cvtepi32_ps(_mm256_sub_epi32(q1b, vz1))),
+            );
+            _mm256_storeu_ps(
+                p2.as_mut_ptr().add(i),
+                _mm256_mul_ps(vs2, _mm256_cvtepi32_ps(_mm256_sub_epi32(q2a, vz2))),
+            );
+            _mm256_storeu_ps(
+                p2.as_mut_ptr().add(i + 8),
+                _mm256_mul_ps(vs2, _mm256_cvtepi32_ps(_mm256_sub_epi32(q2b, vz2))),
+            );
+            _mm256_storeu_ps(
+                p3.as_mut_ptr().add(i),
+                _mm256_mul_ps(vs3, _mm256_cvtepi32_ps(_mm256_sub_epi32(q3a, vz3))),
+            );
+            _mm256_storeu_ps(
+                p3.as_mut_ptr().add(i + 8),
+                _mm256_mul_ps(vs3, _mm256_cvtepi32_ps(_mm256_sub_epi32(q3b, vz3))),
+            );
+            i += 16;
+        }
         while i + 8 <= len {
             let w = _mm256_loadu_si256(src.as_ptr().add(i) as *const __m256i);
             let q0 = _mm256_and_si256(w, mask);
