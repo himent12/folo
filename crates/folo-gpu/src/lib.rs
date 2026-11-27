@@ -21,7 +21,9 @@
 //!
 //! # Map
 //! - [`context`]: [`GpuContext`] (adapter, device, queue, command batch, forward plans, precompile, readback).
-//! - [`pool`]: the size-class buffer pool ([`GpuBuffer`]).
+//! - [`pool`]: the size-class buffer pool ([`GpuBuffer`], [`PoolStats`]).
+//! - [`memory_budget`]: live & peak memory watermarks ([`PeakMemory`]), hardware [`MemoryLimits`],
+//!   [`MemoryUsage`], [`MemoryBudget`], and [`HeadroomEstimate`].
 //! - `pipeline.rs` (crate-private): kernel definitions, specialisation constants, the parameter block and the WGSL
 //!   prelude every kernel is compiled with; [`pipeline_cache`]: compiled pipelines kept on disk.
 //! - `kernel_list.rs` (crate-private): the kernel lists [`GpuContext::precompile`] records and compiles.
@@ -50,6 +52,7 @@ pub mod dtype;
 pub mod error;
 mod kernel_list;
 pub mod kernels;
+pub mod memory_budget;
 pub(crate) mod pipeline;
 pub mod pipeline_cache;
 pub mod pool;
@@ -67,6 +70,9 @@ pub use context::{
 pub use dtype::DType;
 pub use error::{GpuError, Result};
 pub use kernels::elementwise::{BinaryOp, UnaryOp};
+pub use memory_budget::{
+    AllocationKind, HeadroomBlocker, HeadroomEstimate, MemoryBudget, MemoryLimits, MemoryUsage, PeakMemory,
+};
 pub use pipeline_cache::{pipeline_cache_dir, save_pipeline_caches, set_pipeline_cache_dir};
 pub use pool::{GpuBuffer, PoolStats};
 pub use tensor::GpuTensor;

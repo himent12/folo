@@ -256,3 +256,77 @@ fn a_window_rollover_on_a_hit_applies_the_lower_need() {
     assert!(s.live_bytes + s.cached_bytes <= 5 * MIB + small, "{s:?}");
     pool.give(b, small);
 }
+
+/// Live & peak watermark tracking, `MemoryBudget` headroom reporting, and rich limit diagnostics on a dedicated
+/// GPU context.
+#[test]
+fn memory_budget_tracks_peaks_headroom_and_limit_diagnostics() {
+    use crate::{AllocationKind, GpuError, HeadroomBlocker};
+
+    let _shared = gpu!();
+    let ctx = match crate::GpuContext::new() {
+        Ok(c) => c,
+        Err(e) => return eprintln!("note: skipping, no second context: {e}"),
+    };
+    ctx.reset_peak_memory();
+    let base_budget = ctx.memory_budget();
+    assert_eq!(base_budget.limits.max_buffer_size, ctx.caps().max_buffer_size);
+    assert_eq!(
+        base_budget.limits.max_storage_buffer_binding_size,
+        ctx.caps().max_storage_buffer_binding_size
+    );
+
+    let a = ctx.alloc(4 * MIB).unwrap();
+    let b = ctx.alloc(8 * MIB).unwrap();
+    let during = ctx.peak_memory();
+    assert_eq!(during.live_bytes, 12 * MIB);
+    assert_eq!(during.peak_live_bytes, 12 * MIB);
+    assert!(during.peak_held_bytes >= 12 * MIB);
+
+    // Dropping `b` lowers live bytes while `take_peak_memory` captures the 12 MiB peak and resets it atomically.
+    drop(b);
+    let taken = ctx.take_peak_memory();
+    assert_eq!(taken.live_bytes, 4 * MIB);
+    assert_eq!(taken.cached_bytes, 8 * MIB);
+    assert_eq!(taken.peak_live_bytes, 12 * MIB);
+    assert_eq!(taken.peak_delta_bytes(), 8 * MIB);
+
+    let after_reset = ctx.peak_memory();
+    assert_eq!(after_reset.peak_live_bytes, 4 * MIB);
+    assert_eq!(after_reset.peak_held_bytes, 12 * MIB);
+
+    // Budget reflects reclaimable cache and drops it after `release_memory`.
+    let before_release = ctx.memory_budget();
+    assert!(before_release.usage.reclaimable_bytes() >= 8 * MIB);
+    assert!(before_release.fits(16 * MIB, AllocationKind::Storage));
+    let _ = ctx.release_memory().unwrap();
+    let after_release = ctx.memory_budget();
+    assert_eq!(after_release.usage.pool.cached_bytes, 0);
+    assert_eq!(after_release.usage.pool.live_bytes, 4 * MIB);
+
+    // Oversized allocation returns a rich `GpuError::Limit` without touching the device or running `upload_with`'s fill.
+    let over = ctx.caps().max_buffer_size.saturating_add(4096);
+    let est = ctx.estimate_headroom(over, AllocationKind::Storage);
+    assert!(!est.fits);
+    assert!(matches!(
+        est.blocker,
+        Some(HeadroomBlocker::ExceedsMaxBufferSize | HeadroomBlocker::ExceedsStorageBindingLimit)
+    ));
+    let err = ctx.alloc(over).unwrap_err();
+    match err {
+        GpuError::Limit(msg) => {
+            assert!(msg.contains("pool live") && msg.contains("peak live"), "{msg}");
+        }
+        other => panic!("expected GpuError::Limit, got {other:?}"),
+    }
+    let mut fill_called = false;
+    let err = ctx
+        .upload_with(over, |_| {
+            fill_called = true;
+        })
+        .unwrap_err();
+    assert!(!fill_called, "upload_with must reject oversized requests before calling fill");
+    assert!(matches!(err, GpuError::Limit(_)), "{err:?}");
+
+    drop(a);
+}

@@ -33,10 +33,13 @@ use crate::context::GpuContext;
 use crate::error::{GpuError, Result, shape_err};
 use crate::pipeline::{Access, KernelDef, Params, Source, Spec};
 pub(crate) use fused::fused_fits;
-use fused::{FUSED_BWD, FUSED_BWD_BUFFERS, FUSED_FWD, FUSED_MAX_UNITS};
+use fused::{
+    FUSED_BWD, FUSED_BWD_BUFFERS, FUSED_FWD, FUSED_MAX_UNITS, FUSED_STREAM_MAX_UNITS,
+    FUSED_STREAM_MIN_CHANNELS,
+};
 
 pub(super) const COMMON: &str = include_str!("../../shaders/bn_common.wgsl");
-const WELFORD: &str = include_str!("../../shaders/bn_welford.wgsl");
+pub(super) const WELFORD: &str = include_str!("../../shaders/bn_welford.wgsl");
 
 const STATS_MAIN_SUBGROUPS: &str = r#"
 var<workgroup> wn: array<f32, 8>;
@@ -507,8 +510,14 @@ pub fn batch_norm_forward(
     let unbias = if m > 1 { m as f64 / (m as f64 - 1.0) } else { 1.0 };
     let (rm, rv) = running.as_ref().map_or((ctx.dummy(), ctx.dummy()), |r| (r.mean, r.var));
 
-    if m_u <= FUSED_MAX_UNITS && (chunks == 1 || d.c >= 32) {
-        let regs = if m_u <= 256 * 4 { 4u32 } else { 8u32 };
+    let fused_regs = if m_u <= FUSED_MAX_UNITS && (chunks == 1 || d.c >= 32) {
+        Some(if m_u <= 256 * 4 { 4u32 } else { 8u32 })
+    } else if m_u <= FUSED_STREAM_MAX_UNITS && d.c >= FUSED_STREAM_MIN_CHANNELS {
+        Some(0u32)
+    } else {
+        None
+    };
+    if let Some(regs) = fused_regs {
         let k = ctx.kernel(
             &FUSED_FWD,
             Spec::new()
@@ -590,11 +599,16 @@ pub fn batch_norm_backward(
     let sg = use_subgroups(ctx);
     let inv_m = (1.0 / m as f64) as f32;
 
-    if m_u <= FUSED_MAX_UNITS
-        && ctx.caps().max_storage_buffers >= FUSED_BWD_BUFFERS
-        && (chunks == 1 || d.c >= 32)
-    {
-        let regs = if m_u <= 256 * 4 { 4u32 } else { 8u32 };
+    let fused_regs = if ctx.caps().max_storage_buffers < FUSED_BWD_BUFFERS {
+        None
+    } else if m_u <= FUSED_MAX_UNITS && (chunks == 1 || d.c >= 32) {
+        Some(if m_u <= 256 * 4 { 4u32 } else { 8u32 })
+    } else if m_u <= FUSED_STREAM_MAX_UNITS && d.c >= FUSED_STREAM_MIN_CHANNELS {
+        Some(0u32)
+    } else {
+        None
+    };
+    if let Some(regs) = fused_regs {
         let k = ctx.kernel(
             &FUSED_BWD,
             Spec::new().u32("ACT", act).bool("VEC4", vec).u32("REGS", regs).f16(half).subgroups(sg),

@@ -6,12 +6,26 @@ use std::hash::Hasher as _;
 use super::binds::Fx;
 use super::{AnchorEntry, GpuContext, MAX_ANCHOR_CACHE, STAGING_KEEP, Staged};
 use crate::error::{GpuError, Result};
-use crate::pool::{GpuBuffer, PoolStats, size_class};
+use crate::memory_budget::{
+    AllocationKind, HeadroomEstimate, MemoryBudget, MemoryLimits, MemoryUsage, PeakMemory,
+    aligned_within_limit,
+};
+use crate::pool::{GpuBuffer, PoolStats};
 
 impl GpuContext {
     /// Buffer pool counters.
     pub fn pool_stats(&self) -> PoolStats {
         self.inner.pool.lock().expect("pool lock").stats()
+    }
+
+    /// Snapshot of live, cached, and peak pooled buffer bytes.
+    pub fn peak_memory(&self) -> PeakMemory {
+        self.inner.pool.lock().expect("pool lock").peak_memory()
+    }
+
+    /// Atomically reads [`PeakMemory`] and resets the pool's peak watermarks to the current live and held bytes.
+    pub fn take_peak_memory(&self) -> PeakMemory {
+        self.inner.pool.lock().expect("pool lock").take_peak()
     }
 
     /// Device memory wgpu's allocator holds for this context, `(allocated, reserved)` bytes: the sum of the live
@@ -28,6 +42,55 @@ impl GpuContext {
     /// [`PoolStats::peak_held_bytes`] from the live plus cached bytes).
     pub fn reset_peak_memory(&self) {
         self.inner.pool.lock().expect("pool lock").reset_peak();
+    }
+
+    /// Hardware per-buffer limits and dedicated VRAM total for this context.
+    pub fn memory_limits(&self) -> MemoryLimits {
+        MemoryLimits::from_capabilities(&self.inner.caps, self.inner.summary.memory_bytes)
+    }
+
+    /// Current GPU memory usage snapshot across the buffer pool, forward plans, anchor cache, upload staging,
+    /// uniform arena chunks, and wgpu's allocator report (when available).
+    pub fn memory_usage(&self) -> MemoryUsage {
+        let pool = self.pool_stats();
+        let (_, plan_bytes) = self.plan_stats();
+        let anchor_bytes: u64 = self
+            .inner
+            .anchors
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .entries
+            .iter()
+            .map(|e| e.buf.size())
+            .sum();
+        let staging_bytes: u64 =
+            self.inner.staging.lock().expect("staging lock").bufs.iter().map(|b| b.size()).sum();
+        let uniform_bytes: u64 =
+            self.inner.batch.lock().expect("batch lock").chunks.iter().map(|c| c.buf.size()).sum();
+        let (device_allocated_bytes, device_reserved_bytes) = match self.device_memory() {
+            Some((a, r)) => (Some(a), Some(r)),
+            None => (None, None),
+        };
+        MemoryUsage {
+            pool,
+            plan_bytes,
+            anchor_bytes,
+            staging_bytes,
+            uniform_bytes,
+            device_allocated_bytes,
+            device_reserved_bytes,
+        }
+    }
+
+    /// Live [`MemoryBudget`] backed by this device's `wgpu::Limits`, dedicated VRAM, and current pool/allocator
+    /// usage.
+    pub fn memory_budget(&self) -> MemoryBudget {
+        MemoryBudget::new(self.memory_limits(), self.memory_usage())
+    }
+
+    /// Estimates headroom for a single allocation of `bytes` against this context's live [`MemoryBudget`].
+    pub fn estimate_headroom(&self, bytes: u64, kind: AllocationKind) -> HeadroomEstimate {
+        self.memory_budget().estimate_headroom(bytes, kind)
     }
 
     /// Drops every cached (free) buffer in the pool and lowers its cap back to the live bytes (wgpu frees the memory
@@ -117,8 +180,8 @@ impl GpuContext {
             .max(wgpu::COPY_BUFFER_ALIGNMENT);
         if bytes > self.inner.caps.max_buffer_size {
             return Err(GpuError::Limit(format!(
-                "anchor table of {bytes} bytes exceeds the device limit ({} bytes)",
-                self.inner.caps.max_buffer_size
+                "cached_anchors: {}",
+                self.memory_budget().format_limit_diagnostic(bytes, AllocationKind::Buffer)
             )));
         }
         let mut hasher = Fx::default();
@@ -197,28 +260,12 @@ impl GpuContext {
     }
 
     pub(super) fn alloc_usage(&self, bytes: u64, usage: wgpu::BufferUsages) -> Result<GpuBuffer> {
-        let caps = &self.inner.caps;
         let storage = usage.contains(wgpu::BufferUsages::STORAGE);
-        let limit = if storage {
-            caps.max_buffer_size.min(caps.max_storage_buffer_binding_size)
-        } else {
-            caps.max_buffer_size
+        let kind = if storage { AllocationKind::Storage } else { AllocationKind::Buffer };
+        let limit = self.memory_limits().single_buffer_limit(kind);
+        let Some(class) = aligned_within_limit(bytes, limit) else {
+            return Err(GpuError::Limit(self.memory_budget().format_limit_diagnostic(bytes, kind)));
         };
-        if bytes > limit {
-            return Err(GpuError::Limit(format!(
-                "buffer of {bytes} bytes exceeds the device limit ({limit} bytes)"
-            )));
-        }
-        let mut class = size_class(bytes);
-        if class > limit {
-            // Near the limit, allocate the exact size instead of rounding past it.
-            class = bytes.max(4).next_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT);
-        }
-        if class > limit {
-            return Err(GpuError::Limit(format!(
-                "buffer of {bytes} bytes exceeds the device limit ({limit} bytes)"
-            )));
-        }
         let buf = self.inner.pool.lock().expect("pool lock").take(&self.inner.device, class, usage);
         self.record_taken(&buf);
         Ok(GpuBuffer::new(buf, class, self.inner.pool.clone()))
@@ -237,7 +284,19 @@ impl GpuContext {
     /// critical path, and the device copy is one transfer command in stream order.
     pub fn stage(&self, data: &[u8]) -> Result<Staged> {
         let len = data.len() as u64;
-        let size = len.next_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT).max(wgpu::COPY_BUFFER_ALIGNMENT);
+        let Some(size) = len
+            .checked_next_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT)
+            .map(|s| s.max(wgpu::COPY_BUFFER_ALIGNMENT))
+        else {
+            return Err(GpuError::Limit(
+                self.memory_budget().format_limit_diagnostic(len, AllocationKind::Buffer),
+            ));
+        };
+        if size > self.inner.caps.max_buffer_size {
+            return Err(GpuError::Limit(
+                self.memory_budget().format_limit_diagnostic(len, AllocationKind::Buffer),
+            ));
+        }
         let buf = self.inner.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("folo-gpu staging"),
             size,
@@ -269,9 +328,27 @@ impl GpuContext {
         len: u64,
         fill: impl FnOnce(wgpu::WriteOnly<'_, [u8]>) -> R,
     ) -> Result<(GpuBuffer, R)> {
+        let Ok(len_usize) = usize::try_from(len) else {
+            return Err(GpuError::Limit(
+                self.memory_budget().format_limit_diagnostic(len, AllocationKind::Storage),
+            ));
+        };
+        let Some(len4) = len
+            .checked_next_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT)
+            .map(|s| s.max(wgpu::COPY_BUFFER_ALIGNMENT))
+        else {
+            return Err(GpuError::Limit(
+                self.memory_budget().format_limit_diagnostic(len, AllocationKind::Storage),
+            ));
+        };
+        let storage_limit = self.memory_limits().single_buffer_limit(AllocationKind::Storage);
+        if aligned_within_limit(len4, storage_limit).is_none() {
+            return Err(GpuError::Limit(
+                self.memory_budget().format_limit_diagnostic(len, AllocationKind::Storage),
+            ));
+        }
+        let class = aligned_within_limit(len4, self.inner.caps.max_buffer_size).unwrap_or(len4);
         self.record_taint("an upload");
-        let len4 = len.next_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT).max(wgpu::COPY_BUFFER_ALIGNMENT);
-        let class = size_class(len4);
         let reused = {
             let mut free = self.inner.staging.lock().expect("staging lock");
             free.bufs.iter().position(|b| b.size() == class).map(|i| free.bufs.swap_remove(i))
@@ -287,7 +364,7 @@ impl GpuContext {
         let written = buf
             .slice(..len4)
             .get_mapped_range_mut()
-            .map(|mut view| fill(view.slice(..len as usize)))
+            .map(|mut view| fill(view.slice(..len_usize)))
             .map_err(|e| self.or_lost(GpuError::Map(e.to_string())));
         buf.unmap();
         let r = written?;

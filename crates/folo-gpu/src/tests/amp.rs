@@ -582,8 +582,9 @@ fn batch_norm_fused_single_dispatch_parity_and_trace() {
         );
     }
 
-    // Dispatch trace on a fresh context: fused single-dispatch for REGS=4/8 vs 3-pass multi-chunk above 2048 units.
-    // `bn_fused_bwd` requires 9 storage bindings; adapters capped at 8 fall back to the 3-dispatch backward path.
+    // Dispatch trace on a fresh context: register-cached fused single-dispatch (REGS=4/8 up to 2048 units),
+    // streaming fused single-dispatch (REGS=0 up to 6400 units with C >= 64), vs 3-pass multi-chunk above or with
+    // fewer channels. `bn_fused_bwd` requires 9 storage bindings; adapters capped at 8 fall back to 3-dispatch bwd.
     let fresh = crate::GpuContext::new().unwrap();
     let backend = crate::GpuBackend::new(fresh.clone(), dev);
     let fused_bwd_trace = if fresh.caps().max_storage_buffers >= 9 {
@@ -593,9 +594,15 @@ fn batch_norm_fused_single_dispatch_parity_and_trace() {
     };
     for (dims, expect_fwd, expect_bwd) in [
         ([4usize, 32, 8, 8], vec!["bn_fused_fwd"], fused_bwd_trace.clone()),
-        ([16, 32, 20, 20], vec!["bn_fused_fwd"], fused_bwd_trace),
+        ([16, 32, 20, 20], vec!["bn_fused_fwd"], fused_bwd_trace.clone()),
+        ([16, 64, 40, 40], vec!["bn_fused_fwd"], fused_bwd_trace),
         (
-            [16, 64, 40, 40],
+            [16, 32, 40, 40],
+            vec!["bn_stats", "bn_finalize", "bn_apply"],
+            vec!["bn_bwd_reduce", "bn_bwd_finalize", "bn_bwd_dx"],
+        ),
+        (
+            [16, 64, 80, 80],
             vec!["bn_stats", "bn_finalize", "bn_apply"],
             vec!["bn_bwd_reduce", "bn_bwd_finalize", "bn_bwd_dx"],
         ),
@@ -638,4 +645,185 @@ fn batch_norm_fused_single_dispatch_parity_and_trace() {
         assert_eq!(fresh.trace_end().iter().map(|o| o.name).collect::<Vec<_>>(), expect_bwd);
     }
     assert!(fresh.kernels_without_registry().is_empty());
+}
+
+/// Streaming single-dispatch BatchNorm (`REGS = 0`, above 2,048 units up to 6,400 units with `C >= 64`) matches
+/// the CPU reference in both `F32` and `F16`, on both 4-aligned and odd spatial sizes, across subgroup and
+/// portable fallback paths, and preserves exact variance on high-offset inputs.
+#[test]
+fn batch_norm_streaming_fused_matches_cpu_f32_and_f16() {
+    struct ResetSubgroups(bool);
+    impl Drop for ResetSubgroups {
+        fn drop(&mut self) {
+            crate::kernels::norm::FORCE_NO_SUBGROUPS.set(self.0);
+        }
+    }
+
+    let dev = dev!();
+    let has_f16 = folo_core::backend::computes_f16(dev);
+    let _g = no_grad();
+    let eps = 1e-3f64;
+
+    // 1. VEC4 [16, 64, 40, 40] (m_u = 6400, REGS=0) in F32 and F16, plus odd-hw [8, 64, 17, 17] (m_u = 2312, REGS=0).
+    let cases = [
+        ([16usize, 64, 40, 40], Some(UnaryOp::Silu), false),
+        ([8, 64, 17, 17], Some(UnaryOp::Relu), false),
+        ([16, 64, 40, 40], Some(UnaryOp::Silu), true),
+    ];
+    for (shape, act, portable) in cases {
+        let c = shape[1];
+        let x_cpu = randn(&shape, 71).mul_scalar(2.5).unwrap().add_scalar(-0.3).unwrap();
+        let g_cpu = randn(&shape, 72);
+        let w_cpu = randn(&[c], 73).add_scalar(1.0).unwrap();
+        let b_cpu = randn(&[c], 74);
+
+        let m_f = (shape[0] * shape[2] * shape[3]) as f64;
+        let x_v = x_cpu.to_vec::<f32>().unwrap();
+        let g_v = g_cpu.to_vec::<f32>().unwrap();
+        let w_v = w_cpu.to_vec::<f32>().unwrap();
+        let b_v = b_cpu.to_vec::<f32>().unwrap();
+        let hw = shape[2] * shape[3];
+        let mut ref_mean = vec![0.0f32; c];
+        let mut ref_inv = vec![0.0f32; c];
+        let mut ref_y = vec![0.0f32; x_v.len()];
+        let mut ref_dw = vec![0.0f32; c];
+        let mut ref_db = vec![0.0f32; c];
+        let mut ref_dx = vec![0.0f32; x_v.len()];
+        for ch in 0..c {
+            let mut sum = 0.0f64;
+            for n in 0..shape[0] {
+                let off = (n * c + ch) * hw;
+                for i in 0..hw {
+                    sum += x_v[off + i] as f64;
+                }
+            }
+            let mean = sum / m_f;
+            let mut sq = 0.0f64;
+            for n in 0..shape[0] {
+                let off = (n * c + ch) * hw;
+                for i in 0..hw {
+                    let d = x_v[off + i] as f64 - mean;
+                    sq += d * d;
+                }
+            }
+            let inv = 1.0 / (sq / m_f + eps).sqrt();
+            ref_mean[ch] = mean as f32;
+            ref_inv[ch] = inv as f32;
+            let (wc, bc) = (w_v[ch] as f64, b_v[ch] as f64);
+            let (mut db, mut dw) = (0.0f64, 0.0f64);
+            for n in 0..shape[0] {
+                let off = (n * c + ch) * hw;
+                for i in 0..hw {
+                    let xh = (x_v[off + i] as f64 - mean) * inv;
+                    let z = xh * wc + bc;
+                    let (y, da) = match act {
+                        Some(UnaryOp::Silu) => {
+                            let s = 1.0 / (1.0 + (-z).exp());
+                            (z * s, s * (1.0 + z * (1.0 - s)))
+                        }
+                        Some(UnaryOp::Relu) => (z.max(0.0), if z > 0.0 { 1.0 } else { 0.0 }),
+                        _ => (z, 1.0),
+                    };
+                    ref_y[off + i] = y as f32;
+                    let dz = g_v[off + i] as f64 * da;
+                    db += dz;
+                    dw += dz * xh;
+                }
+            }
+            ref_db[ch] = db as f32;
+            ref_dw[ch] = dw as f32;
+            let (db_n, dw_n, sc) = (db / m_f, dw / m_f, wc * inv);
+            for n in 0..shape[0] {
+                let off = (n * c + ch) * hw;
+                for i in 0..hw {
+                    let xh = (x_v[off + i] as f64 - mean) * inv;
+                    let z = xh * wc + bc;
+                    let da = match act {
+                        Some(UnaryOp::Silu) => {
+                            let s = 1.0 / (1.0 + (-z).exp());
+                            s * (1.0 + z * (1.0 - s))
+                        }
+                        Some(UnaryOp::Relu) => {
+                            if z > 0.0 {
+                                1.0
+                            } else {
+                                0.0
+                            }
+                        }
+                        _ => 1.0,
+                    };
+                    let dz = g_v[off + i] as f64 * da;
+                    ref_dx[off + i] = (sc * (dz - db_n - xh * dw_n)) as f32;
+                }
+            }
+        }
+
+        let _reset = ResetSubgroups(crate::kernels::norm::FORCE_NO_SUBGROUPS.replace(portable));
+        let x_g = x_cpu.to_device(dev).unwrap();
+        let g_g = g_cpu.to_device(dev).unwrap();
+        let w_g = w_cpu.to_device(dev).unwrap();
+        let b_g = b_cpu.to_device(dev).unwrap();
+        let out = x_g.batch_norm_act_train(&w_g, &b_g, eps, act, None).unwrap().unwrap();
+        let (dx, dw, db) = x_g
+            .batch_norm_act_train_backward(&g_g, &w_g, &b_g, &out.mean, &out.invstd, act)
+            .unwrap()
+            .unwrap();
+        drop(_reset);
+
+        let tag = format!("streaming {shape:?} {act:?} portable={portable}");
+        assert_close_t(
+            &out.mean,
+            &Tensor::from_vec(ref_mean, [c]).unwrap(),
+            1e-4,
+            1e-4,
+            &format!("{tag} mean"),
+        );
+        assert_close_t(
+            &out.invstd,
+            &Tensor::from_vec(ref_inv, [c]).unwrap(),
+            1e-4,
+            1e-4,
+            &format!("{tag} inv"),
+        );
+        assert_close_t(&out.y, &Tensor::from_vec(ref_y, shape).unwrap(), 1e-4, 1e-4, &format!("{tag} y"));
+        assert_close_t(&dw, &Tensor::from_vec(ref_dw, [c]).unwrap(), 2e-3, 2e-3, &format!("{tag} dw"));
+        assert_close_t(&db, &Tensor::from_vec(ref_db, [c]).unwrap(), 2e-3, 2e-3, &format!("{tag} db"));
+        assert_close_t(&dx, &Tensor::from_vec(ref_dx, shape).unwrap(), 2e-4, 2e-4, &format!("{tag} dx"));
+
+        if has_f16 && !portable && shape == [16, 64, 40, 40] {
+            let x16 = x_g.to_dtype(DType::F16).unwrap();
+            let g16 = g_g.to_dtype(DType::F16).unwrap();
+            let o16 = x16.batch_norm_act_train(&w_g, &b_g, eps, act, None).unwrap().unwrap();
+            let (dx16, dw16, db16) = x16
+                .batch_norm_act_train_backward(&g16, &w_g, &b_g, &o16.mean, &o16.invstd, act)
+                .unwrap()
+                .unwrap();
+            assert_close_t(&o16.mean, &out.mean, 2e-3, 2e-3, "streaming f16 mean");
+            assert_close_t(&o16.invstd, &out.invstd, 2e-3, 2e-3, "streaming f16 invstd");
+            assert_close_t(&o16.y.to_dtype(DType::F32).unwrap(), &out.y, 4e-3, 4e-3, "streaming f16 y");
+            assert_close_t(&dw16, &dw, 5e-2, 5e-3, "streaming f16 dw");
+            assert_close_t(&db16, &db, 5e-2, 5e-3, "streaming f16 db");
+            assert_close_t(&dx16.to_dtype(DType::F32).unwrap(), &dx, 4e-3, 4e-3, "streaming f16 dx");
+        }
+    }
+
+    // 2. High-offset stability on streaming REGS=0 (`[1, 64, 1, 10000]`, m_u = 2500 > 2048).
+    let c = 64usize;
+    let hw = 10_000usize;
+    let mut data = vec![0.0f32; c * hw];
+    for ch in 0..c {
+        let base = 1_000_000.0f32;
+        for i in 0..hw {
+            data[ch * hw + i] = base + if i % 2 == 0 { -1.0 } else { 1.0 };
+        }
+    }
+    let x = Tensor::from_vec(data, [1, c, 1, hw]).unwrap().to_device(dev).unwrap();
+    let w = Tensor::ones([c]).to_device(dev).unwrap();
+    let b = Tensor::zeros([c]).to_device(dev).unwrap();
+    let out = x.batch_norm_act_train(&w, &b, eps, None, None).unwrap().unwrap();
+    let mean_v = out.mean.to_vec::<f32>().unwrap();
+    let inv_v = out.invstd.to_vec::<f32>().unwrap();
+    let want_inv = 1.0f32 / (1.0f32 + eps as f32).sqrt();
+    assert!((mean_v[0] - 1_000_000.0).abs() < 1e-3, "streaming high-offset mean: {}", mean_v[0]);
+    assert!((inv_v[0] - want_inv).abs() < 1e-4, "streaming high-offset invstd: {} vs {want_inv}", inv_v[0]);
 }
