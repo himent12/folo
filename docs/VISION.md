@@ -22,6 +22,8 @@ train/             Trainer: config/, setup (new / resume), run (epochs), epoch, 
                    teacher (distillation), gauge (Floor Conv+BN Gauge Normalization), checkpoint, events, writer/
 val.rs             validate: a model on a dataset split
 predict.rs         Predictor
+tile.rs            SAHI tiled inference (TileConfig, compute_tiles, crop_tile, merge_tiled_detections)
+tta.rs             Test-Time Augmentation (TtaConfig, PredictOptions, unflip_xyxy_h, merge_tta_detections)
 export/onnx/       ONNX export: graph.rs, blocks.rs (mirrors forward), decode.rs, proto.rs
 precompile.rs      GPU pipeline precompile for a run's kernels
 ```
@@ -265,6 +267,24 @@ and `HeadOutput::detections`, which reads the head outputs in place and extracts
   `TileMergeMetric::Iou`, and refines agreeing boxes with `BoxFusion::Vote` (default), `BoxFusion::Sebf`, or
   `BoxFusion::None` without letting IoS-suppressed fragments shrink a full box.
 
+### Test-Time Augmentation (TTA)
+`folo_vision::tta` wires multi-scale and horizontal-flip Test-Time Augmentation into `Predictor::predict_tta`,
+`Predictor::predict_batch_tta`, `Predictor::predict_file_tta`, and the unified `PredictOptions` entry points
+(`Predictor::predict_with_options`, `predict_batch_with_options`, `predict_file_with_options`):
+- `TtaConfig` controls horizontal flipping (`hflip`, default `true`) and multi-scale multipliers (`scales`, default
+  `[0.83, 1.0, 1.17]`). Every scale is validated to be finite and positive, rounded to the nearest stride-32
+  inference size in `32..=8192` (`TtaConfig::resolve_imgszs`), and deduplicated in first-seen order.
+- At each resolved scale, original and horizontally flipped views (`Image::oriented(2)`) share identical dimensions
+  and letterbox canvas, so they execute together in a single batched `Predictor` pass (inheriting CPU, int8
+  `u8_stem`, GPU, `f16`, `o2o`, and candidate-first fast paths). A single unflipped view degrades directly to one
+  pass with exact parity to `Predictor::predict` at native `imgsz`.
+- Mirrored boxes map back to original pixels via exact horizontal un-flip (`unflip_xyxy_h`: `x1' = width - x2`,
+  `x2' = width - x1`, clamped cleanly to `[0, width]`), and `merge_tta_detections` merges cross-view candidates
+  deterministically through FOLO's shared class-aware IoU clustering and `BoxFusion` (`Vote`, `Sebf`, or `None`)
+  pipeline without duplicating NMS or fusion logic.
+- `PredictOptions` explicitly rejects combining `tta` and `tile` in one call (`Error::Config`) so callers choose
+  one inference strategy without compounding double-merge distortion.
+
 ## ONNX export
 - `folo_vision::export::onnx`: `FoloModel::to_onnx` turns a fused model into an opset-17 graph that mirrors `forward`
   op for op (raw head outputs, or the MODEL.md §6.4 decode in the graph, which for an `o2o` model ends in the §6.6
@@ -281,4 +301,4 @@ and `HeadOutput::detections`, which reads the head outputs in place and extracts
 The integration tests in `crates/folo-vision/tests/` are named for what they protect: `model.rs`, `model_v2.rs`,
 `loss_cases.rs`, `assign_cases.rs`, `distill.rs`, `wave7_train_algos.rs`, `nms_reference.rs`, `fusion_reference.rs`,
 `elc_postproc.rs`, `metrics_known.rs`, `coco_parity.rs`, `coco_full.rs`, `train/` (`main.rs`, `ema.rs`), `o2o.rs`, `lazy_head.rs`,
-`int8.rs`, `harden_pipelines.rs`, `tiled_predict.rs`, and the GPU ones (`gpu*.rs`).
+`int8.rs`, `harden_pipelines.rs`, `tiled_predict.rs`, `tta_predict.rs`, and the GPU ones (`gpu*.rs`).

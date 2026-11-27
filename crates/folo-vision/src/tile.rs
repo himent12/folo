@@ -184,7 +184,7 @@ pub fn compute_tiles(img_w: u32, img_h: u32, cfg: &TileConfig) -> Result<Vec<Til
 /// Verify that `img` has non-zero dimensions and a matching `width * height * 3` RGB byte buffer.
 pub(crate) fn check_image(img: &Image) -> Result<()> {
     if img.width == 0 || img.height == 0 {
-        return Err(Error::Config(format!("cannot tile an empty image ({}x{})", img.width, img.height)));
+        return Err(Error::Config(format!("cannot predict an empty image ({}x{})", img.width, img.height)));
     }
     let expected = (img.width as usize)
         .checked_mul(img.height as usize)
@@ -259,6 +259,16 @@ fn clip_box(b: Xyxy, fw: f32, fh: f32) -> Option<Xyxy> {
     (x2 > x1 && y2 > y1).then(|| Xyxy::new(x1, y1, x2, y2))
 }
 
+/// Shared clustering and box-fusion parameters for merging multi-view detections (SAHI tiles and TTA views).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct MergeOptions {
+    pub metric: TileMergeMetric,
+    pub threshold: f32,
+    pub fusion: BoxFusion,
+    pub class_agnostic: bool,
+    pub max_det: usize,
+}
+
 /// Merge detections gathered from overlapping tiles (and optional full-image pass) in original-image pixels.
 ///
 /// Detections are clamped to `[0, img_w] × [0, img_h]`, sorted deterministically by descending score (with
@@ -272,8 +282,39 @@ pub fn merge_tiled_detections(
     cfg: &TileConfig,
 ) -> Result<Vec<Detection>> {
     cfg.validate()?;
+    merge_detections(
+        dets,
+        img_w,
+        img_h,
+        MergeOptions {
+            metric: cfg.merge_metric,
+            threshold: cfg.merge_threshold,
+            fusion: cfg.merge_fusion,
+            class_agnostic: cfg.class_agnostic,
+            max_det: cfg.max_det,
+        },
+    )
+}
+
+/// Shared deterministic multi-view detection merge (clip, canonical sort, greedy exclusive clustering, optional
+/// `Vote`/`Sebf` box fusion, and `max_det` cap). Used by both SAHI tiled inference and TTA.
+pub(crate) fn merge_detections(
+    dets: Vec<Detection>,
+    img_w: u32,
+    img_h: u32,
+    opts: MergeOptions,
+) -> Result<Vec<Detection>> {
     if img_w == 0 || img_h == 0 {
         return Err(Error::Config(format!("cannot merge detections for empty image ({img_w}x{img_h})")));
+    }
+    if !opts.threshold.is_finite() || !(0.0..=1.0).contains(&opts.threshold) {
+        return Err(Error::Config(format!(
+            "merge threshold must be finite and in [0, 1], got {}",
+            opts.threshold
+        )));
+    }
+    if opts.max_det == 0 {
+        return Err(Error::Config("merge max_det must be at least 1".into()));
     }
     let (fw, fh) = (img_w as f32, img_h as f32);
     let mut clean: Vec<Detection> = dets
@@ -289,7 +330,7 @@ pub fn merge_tiled_detections(
     if clean.is_empty() {
         return Ok(Vec::new());
     }
-    // Canonical sort so cross-tile tie-breaking is independent of tile batching or thread scheduling.
+    // Canonical sort so cross-view tie-breaking is independent of view ordering, batching, or thread scheduling.
     clean.sort_unstable_by(|a, b| {
         b.score
             .total_cmp(&a.score)
@@ -309,10 +350,10 @@ pub fn merge_tiled_detections(
         let cand = &clean[i];
         let mut matched: Option<usize> = None;
         for (slot, &k) in kept.iter().enumerate() {
-            if !cfg.class_agnostic && clean[k].class != cand.class {
+            if !opts.class_agnostic && clean[k].class != cand.class {
                 continue;
             }
-            if box_overlap(&clean[k].bbox, &cand.bbox, cfg.merge_metric) > cfg.merge_threshold {
+            if box_overlap(&clean[k].bbox, &cand.bbox, opts.metric) > opts.threshold {
                 matched = Some(slot);
                 break;
             }
@@ -325,10 +366,10 @@ pub fn merge_tiled_detections(
         }
     }
 
-    let fused_boxes: Vec<Xyxy> = match cfg.merge_fusion {
+    let fused_boxes: Vec<Xyxy> = match opts.fusion {
         BoxFusion::None => kept.iter().map(|&k| clean[k].bbox).collect(),
         BoxFusion::Vote | BoxFusion::Dfl => {
-            // Group owned members per survivor; fuse only members whose IoU also meets `merge_threshold`
+            // Group owned members per survivor; fuse only members whose IoU also meets `threshold`
             // (plus the survivor itself) so IoS-suppressed truncated tile fragments never shrink a full box.
             let mut acc = vec![[0.0f64; 4]; kept.len()];
             let mut sum = vec![0.0f64; kept.len()];
@@ -337,7 +378,7 @@ pub fn merge_tiled_detections(
                 let owner = kept[slot];
                 if i != owner {
                     let iou = box_iou(&clean[owner].bbox, &d.bbox, IouKind::Iou);
-                    if iou <= 0.0 || iou < cfg.merge_threshold {
+                    if iou <= 0.0 || iou < opts.threshold {
                         continue;
                     }
                 }
@@ -378,10 +419,10 @@ pub fn merge_tiled_detections(
                 &boxes,
                 &scores,
                 &classes,
-                cfg.class_agnostic,
-                cfg.merge_threshold,
+                opts.class_agnostic,
+                opts.threshold,
                 Some(&owners),
-                cfg.merge_threshold,
+                opts.threshold,
                 None,
             )
             .into_iter()
@@ -396,7 +437,7 @@ pub fn merge_tiled_detections(
         .zip(fused_boxes)
         .map(|(k, bbox)| Detection { bbox, score: clean[k].score, class: clean[k].class })
         .collect();
-    out.truncate(cfg.max_det);
+    out.truncate(opts.max_det);
     Ok(out)
 }
 

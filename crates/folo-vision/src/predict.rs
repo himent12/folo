@@ -474,6 +474,10 @@ impl Predictor {
     }
 
     fn run(&self, imgs: &[Image], rect: bool) -> Result<Vec<Prediction>> {
+        self.run_with_imgsz(imgs, rect, self.cfg.imgsz)
+    }
+
+    pub(crate) fn run_with_imgsz(&self, imgs: &[Image], rect: bool, imgsz: u32) -> Result<Vec<Prediction>> {
         /// Images per forward when the CPU predicts a batch (see below). One, two and four measured within
         /// 5% of each other at batch 16 on 28 threads, and all about 20% faster than one batched forward.
         const CPU_BATCH_CHUNK: usize = 2;
@@ -486,23 +490,25 @@ impl Predictor {
             let chunk = CPU_BATCH_CHUNK;
             if imgs.len() > chunk {
                 return folo_core::cpu::in_pool(|| {
-                    let parts: Vec<Vec<Prediction>> =
-                        imgs.par_chunks(chunk).map(|c| self.run_here(c, rect)).collect::<Result<_>>()?;
+                    let parts: Vec<Vec<Prediction>> = imgs
+                        .par_chunks(chunk)
+                        .map(|c| self.run_here_with_imgsz(c, rect, imgsz))
+                        .collect::<Result<_>>()?;
                     Ok(parts.into_iter().flatten().collect())
                 });
             }
-            folo_core::cpu::in_pool(|| self.run_here(imgs, rect))
+            folo_core::cpu::in_pool(|| self.run_here_with_imgsz(imgs, rect, imgsz))
         } else {
-            self.run_here(imgs, rect)
+            self.run_here_with_imgsz(imgs, rect, imgsz)
         }
     }
 
-    fn run_here(&self, imgs: &[Image], rect: bool) -> Result<Vec<Prediction>> {
+    fn run_here_with_imgsz(&self, imgs: &[Image], rect: bool, imgsz: u32) -> Result<Vec<Prediction>> {
         if self.model.int8_u8_stem_active() {
-            return self.run_here_rgb0_u8(imgs, rect);
+            return self.run_here_rgb0_u8_with_imgsz(imgs, rect, imgsz);
         }
         let t0 = Instant::now();
-        let batch = self.prepare(imgs, rect)?;
+        let batch = self.prepare_with_imgsz(imgs, rect, imgsz)?;
         self.wait_for_device()?;
         let pre = ms(t0);
         let nms = self.cfg.nms();
@@ -532,12 +538,11 @@ impl Predictor {
 
     /// Direct `u8` RGB0 path for CPU int8 models: letterboxes directly into packed `[R, G, B, 0]` `u32` words
     /// (zero `f32` canvas materialisation, bit-exact with `apply_planar_f32` + `pack_f32_to_rgb0_u8`).
-    fn run_here_rgb0_u8(&self, imgs: &[Image], rect: bool) -> Result<Vec<Prediction>> {
+    fn run_here_rgb0_u8_with_imgsz(&self, imgs: &[Image], rect: bool, s: u32) -> Result<Vec<Prediction>> {
         if imgs.is_empty() {
             return Err(Error::Config("cannot predict an empty batch".into()));
         }
         let t0 = Instant::now();
-        let s = self.cfg.imgsz;
         let rect = rect && one_canvas(imgs, s);
         let opts = LetterboxOptions { stride: rect.then_some(32), ..LetterboxOptions::default() };
         for img in imgs {
@@ -611,10 +616,13 @@ impl Predictor {
     /// `prepare` → `forward` → [`HeadOutput::detections`] → [`Predictor::finish_detections`]; [`Predictor::finish`]
     /// takes decoded outputs instead.
     pub fn prepare(&self, imgs: &[Image], rect: bool) -> Result<PreparedBatch> {
+        self.prepare_with_imgsz(imgs, rect, self.cfg.imgsz)
+    }
+
+    fn prepare_with_imgsz(&self, imgs: &[Image], rect: bool, s: u32) -> Result<PreparedBatch> {
         if imgs.is_empty() {
             return Err(Error::Config("cannot predict an empty batch".into()));
         }
-        let s = self.cfg.imgsz;
         let rect = rect && one_canvas(imgs, s);
         let opts = LetterboxOptions { stride: rect.then_some(32), ..LetterboxOptions::default() };
         for img in imgs {
@@ -714,7 +722,7 @@ impl PreparedBatch {
 
 /// Whether every image of `imgs` gets the same `rect` letterbox canvas for target `s` (§9.2: the smallest multiple
 /// of 32 around the resized image), so they can share one `rect` batch. An empty image never shares one.
-fn one_canvas(imgs: &[Image], s: u32) -> bool {
+pub(crate) fn one_canvas(imgs: &[Image], s: u32) -> bool {
     let opts = LetterboxOptions { stride: Some(32), ..LetterboxOptions::default() };
     let canvas = |i: &Image| {
         (i.width > 0 && i.height > 0).then(|| Letterbox::compute(i.width, i.height, s, s, &opts).out)
@@ -890,6 +898,6 @@ fn check_letterbox(imgs: &[Image], boxes: &[Letterbox]) -> Result<[u32; 2]> {
     Ok(first.out)
 }
 
-fn ms(t: Instant) -> f64 {
+pub(crate) fn ms(t: Instant) -> f64 {
     t.elapsed().as_secs_f64() * 1e3
 }
