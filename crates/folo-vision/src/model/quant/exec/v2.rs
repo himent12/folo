@@ -5,15 +5,15 @@ use std::cell::{OnceCell, RefCell};
 use std::rc::Rc;
 
 use folo_core::Tensor;
-use folo_core::cpu::q8::QOut;
+use folo_core::cpu::q8::{self, C4, Grid, QOut};
 use folo_nn::{Error, Forward, Result};
 use rayon::prelude::*;
 
 use super::{GridOwner, Int8, Int8Plan, QAct, QActF32, QActRepr, QActU8};
 use crate::model::quant::cache::BoundaryGrids;
 use crate::model::quant::walk::{self, Exec};
-use crate::model::quant::{ConvView, int8_able_view, spd_stem_int8_able};
-use crate::model::v2::{FoloV2Model, StemV2, WsQARepConv3x3};
+use crate::model::quant::{ConvView, int8_able, int8_able_view, spd_stem_int8_able};
+use crate::model::v2::{FoloV2Model, FullPadGate, HyperContext, StemV2, WsQARepConv3x3};
 
 type Spd3Row<'a> = (usize, ((&'a mut [u32], &'a mut [u32]), &'a mut [u32]));
 type Spd4Group<'a> = (usize, (((&'a mut [u32], &'a mut [u32]), &'a mut [u32]), &'a mut [u32]));
@@ -381,6 +381,109 @@ impl<'a> Int8<'a> {
                 Ok([mk(0)?, mk(1)?, mk(2)?, mk(3)?])
             }
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn hyper_attend_and_scene_q_impl(
+        &mut self,
+        h_ctx: &HyperContext,
+        av: &Tensor,
+        res_dims: [usize; 4],
+        pin_name: &str,
+        out_f32: bool,
+    ) -> Result<(QAct<'a>, Tensor)> {
+        let [b, _, h, w] = res_dims;
+        let cg = h_ctx.c_g;
+        let proj_runs_int8 = !out_f32
+            && cg.is_multiple_of(4)
+            && int8_able(&h_ctx.out_proj, [b, cg, h, w], Some(res_dims)).is_some();
+        if proj_runs_int8 {
+            let (bg, _) = self.plan.boundary_for(pin_name, cg)?;
+            let mut out = self.pool.borrow_mut().take_buf(b, cg, h * w);
+            match h_ctx.attend_and_scene_into_c4(av, b, h, w, &bg.as_ref().grids, &mut out) {
+                Ok(Some(g_scene)) => return Ok((QAct::new(&self.pool, out, [b, cg, h, w], bg), g_scene)),
+                Ok(None) => {
+                    self.pool.borrow_mut().return_buf(out);
+                }
+                Err(e) => {
+                    self.pool.borrow_mut().return_buf(out);
+                    return Err(e);
+                }
+            }
+        }
+        let (y_ctx, g_scene) = self.hyper_attend_and_scene(h_ctx, av, b, h, w)?;
+        let pin = self.quantize(pin_name, &y_ctx)?;
+        Ok((pin, g_scene))
+    }
+
+    /// Fused `dequantize` + relocated `FullPadGate`: folds each channel's `1 + tanh(proj(g_scene))` multiplier
+    /// directly into the per-channel dequantisation scale (`scale * gate_val`), writing the modulated `f32` head
+    /// input in a single pass with zero intermediate un-modulated `f32` tensor allocation.
+    pub(super) fn dequantize_fullpad_gate_impl(
+        &mut self,
+        x: &QAct<'a>,
+        gate: &FullPadGate,
+        g_scene: &Tensor,
+    ) -> Result<Tensor> {
+        if let QActRepr::U8(u) = &x.repr {
+            let [n, c, h, w] = u.dims;
+            const STACK_GATES: usize = 512;
+            let mut stack_gates = [0.0f32; STACK_GATES];
+            let mut heap_gates = Vec::new();
+            let gates: &mut [f32] = if n * c <= STACK_GATES {
+                &mut stack_gates[..n * c]
+            } else {
+                heap_gates.resize(n * c, 0.0);
+                &mut heap_gates
+            };
+            if gate.gate_values_cpu(g_scene, n, c, gates)? {
+                let base_grids = u.grids();
+                // Guard against extreme `[0, f32::MAX]` grids or non-finite gates where folding `scale * gate`
+                // could alter `+Inf`/`NaN` boundary rounding vs separate dequantize + multiply.
+                let can_fold = base_grids.iter().all(|g| g.scale.is_finite() && g.scale.abs() <= 1e35)
+                    && gates.iter().all(|g| g.is_finite());
+                if can_fold {
+                    let hw = h * w;
+                    let mut out = folo_core::cpu::take_buffer(n * c * hw);
+                    let pool = self.pool.borrow();
+                    let view = u.view(&pool);
+                    const STACK_GRIDS: usize = 512;
+                    let mut stack_grids = [Grid { scale: 0.0, zero: 0 }; STACK_GRIDS];
+                    let mut heap_grids = Vec::new();
+                    let scaled: &mut [Grid] = if c <= STACK_GRIDS {
+                        &mut stack_grids[..c]
+                    } else {
+                        heap_grids.resize(c, Grid { scale: 0.0, zero: 0 });
+                        &mut heap_grids
+                    };
+                    for img in 0..n {
+                        let g_row = &gates[img * c..(img + 1) * c];
+                        for ch in 0..c {
+                            scaled[ch] =
+                                Grid { scale: base_grids[ch].scale * g_row[ch], zero: base_grids[ch].zero };
+                        }
+                        let img_view = C4 {
+                            data: view.data,
+                            offset: view.offset + img * view.img_stride,
+                            img_stride: view.img_stride,
+                            c,
+                            zero: view.zero,
+                        };
+                        q8::dequantize_per_channel(
+                            img_view,
+                            1,
+                            hw,
+                            scaled,
+                            &mut out[img * c * hw..(img + 1) * c * hw],
+                        );
+                    }
+                    drop(pool);
+                    return Ok(Tensor::from_vec(out, [n, c, h, w])?);
+                }
+            }
+        }
+        let raw = x.to_f32()?;
+        gate.forward(&raw, g_scene)
     }
 }
 

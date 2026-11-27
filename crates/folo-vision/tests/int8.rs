@@ -824,3 +824,79 @@ fn sensitivity_edge_cases_and_scratch_pool_error_recovery() {
         "expected buffer reuses on recovery forward: {after_err:?} -> {after_recovery:?}"
     );
 }
+
+#[test]
+fn fused_attention_c4_sppf_and_shared_f32_bottleneck_parity() {
+    let m = model(71);
+    // Rectangular multi-batch input exercises multi-tile `fused_attn_o_bnhd`, AVX2+tail `sppf_pools`,
+    // and direct `attend_and_pe_into_c4` quantization.
+    let x = input(2, 96, 128, 72);
+    let base_cal = Calibration { weights: None, ..calibrated(&m, &x) };
+
+    // 1. Pure int8 exercises `attend_and_pe_into_c4` + `sppf_pools_u8`.
+    // 2. Paired residual bottleneck in `f32_convs` exercises `materialize_f32` (single dequantize for cv1 + res).
+    let mut bottleneck_f32 = base_cal.clone();
+    bottleneck_f32.f32_convs = vec![
+        "backbone.stage2.block0.cv1".into(),
+        "backbone.stage2.block0.cv2".into(),
+        "neck.out4.block0.cv1".into(),
+        "neck.out4.block0.cv2".into(),
+        "neck.out5.cv2".into(),
+    ];
+
+    let _g = no_grad();
+    for (label, cal) in [("pure_int8", &base_cal), ("paired_f32_bottleneck", &bottleneck_f32)] {
+        let want = FakeQuant::new(cal).features(&m, &x).unwrap();
+        let plan = Int8Plan::new(cal.clone());
+        let got_1 = pool(1).install(|| {
+            let _g = no_grad();
+            quant::exec::features(&m, &plan, &x).unwrap()
+        });
+        let got_4 = pool(4).install(|| {
+            let _g = no_grad();
+            quant::exec::features(&m, &plan, &x).unwrap()
+        });
+        for (i, name) in ["neck.out3.cv2", "neck.out4.cv2", "neck.out5.cv2"].iter().enumerate() {
+            let s = cal.param(name).unwrap().scale;
+            let a = want[i].to_vec::<f32>().unwrap();
+            let b1 = got_1[i].to_vec::<f32>().unwrap();
+            let b4 = got_4[i].to_vec::<f32>().unwrap();
+            assert!(
+                b1.iter().zip(&b4).all(|(u, v)| u.to_bits() == v.to_bits()),
+                "{label} {name}: not bit-deterministic across 1 vs 4 threads"
+            );
+            let steps: Vec<f32> = a.iter().zip(&b4).map(|(p, q)| ((p - q) / s).abs().round()).collect();
+            let exact = steps.iter().filter(|&&d| d == 0.0).count() as f64 / steps.len() as f64;
+            let worst = steps.iter().copied().fold(0f32, f32::max);
+            assert!(exact > 0.99 && worst <= 2.0, "{label} {name}: {:.4} exact, worst {worst} steps", exact);
+        }
+    }
+
+    // Concurrent Rayon work-stealing re-entrancy on `ATTN_SCRATCH` at a size exceeding both
+    // `work >= 500_000` and `o_len >= 16_384` (would panic on `RefCell::borrow_mut` if a borrow were held
+    // across Rayon dispatches).
+    use folo_nn::Forward;
+    use rayon::prelude::*;
+    let attn = &m.backbone.psa.blocks.items()[0].attn;
+    let c_attn = attn.qkv.conv.config().in_channels;
+    let x_attn = Tensor::rand_uniform([1, c_attn, 16, 16], -1.0, 1.0, &mut Rng::seed(73));
+    let want_attn = {
+        let _g = no_grad();
+        attn.forward(&x_attn).unwrap().to_vec::<f32>().unwrap()
+    };
+    let par_outs: Vec<Vec<f32>> = pool(2).install(|| {
+        (0..16)
+            .into_par_iter()
+            .map(|_| {
+                let _g = no_grad();
+                attn.forward(&x_attn).unwrap().to_vec::<f32>().unwrap()
+            })
+            .collect()
+    });
+    for (idx, got) in par_outs.iter().enumerate() {
+        assert!(
+            got.iter().zip(&want_attn).all(|(a, b)| a.to_bits() == b.to_bits()),
+            "concurrent Attention forward {idx} diverged"
+        );
+    }
+}

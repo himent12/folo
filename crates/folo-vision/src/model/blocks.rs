@@ -4,13 +4,27 @@
 //! Every block reports its children in canonical order (MODEL.md §5) and draws its initial weights in that
 //! same order, so `named_parameters()` gives the documented `.folo` names and one seed gives one model.
 
-use folo_core::cpu::gemm::{Strided, gemm};
+use std::cell::RefCell;
+
+use folo_core::cpu::q8::Grid;
 use folo_core::rng::Rng;
 use folo_core::{DType, Tensor};
 use folo_nn::{
     Activation, BN_EPS, BN_MOMENTUM, Conv2dConfig, ConvBnAct, Error, Forward, Module, ModuleList, Result,
 };
 use rayon::prelude::*;
+
+use crate::model::attn_simd;
+
+thread_local! {
+    /// Reusable per-thread `[b * heads, n, hd]` scratch buffer for [`Attention::attend_and_pe_cpu_fast`] and
+    /// [`Attention::attend_and_pe_into_c4`], eliminating both the `O(n²)` `scores` buffer and per-call heap
+    /// allocations on hot CPU inference.
+    static ATTN_SCRATCH: RefCell<Vec<f32>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Cap retained TLS attention scratch vectors (4 MiB per thread) so oversized test shapes do not linger.
+const MAX_ATTN_TLS_ELEMS: usize = 1 << 20;
 
 /// Construction context: the model's RNG stream and the BatchNorm options of its config.
 pub struct Init<'a> {
@@ -377,18 +391,14 @@ impl Attention {
         Ok(o.add(&self.pe.forward(&v)?)?)
     }
 
-    fn attend_and_pe_cpu_fast(&self, qkv: &Tensor, b: usize, h: usize, w: usize) -> Result<Option<Tensor>> {
+    /// Check whether CPU fast path applies to `qkv` and `self.pe`.
+    fn cpu_fast_eligible(&self, qkv: &Tensor, b: usize, h: usize, w: usize) -> Option<(usize, usize)> {
         let (heads, kd, hd) = (self.heads, self.key_dim, self.head_dim);
-        let Some(c) = heads.checked_mul(hd) else { return Ok(None) };
-        let Some(n) = h.checked_mul(w) else { return Ok(None) };
-        let Some(qkv_c) =
-            kd.checked_mul(2).and_then(|v| v.checked_add(hd)).and_then(|v| v.checked_mul(heads))
-        else {
-            return Ok(None);
-        };
-        if n.checked_mul(n).is_none() || b.checked_mul(c).and_then(|v| v.checked_mul(n)).is_none() {
-            return Ok(None);
-        }
+        let c = heads.checked_mul(hd)?;
+        let n = h.checked_mul(w)?;
+        let qkv_c = kd.checked_mul(2)?.checked_add(hd)?.checked_mul(heads)?;
+        let _ = n.checked_mul(n)?;
+        let _ = b.checked_mul(c)?.checked_mul(n)?;
         let pe_cfg = self.pe.conv.config();
         let eligible = !folo_core::is_grad_enabled()
             && b > 0
@@ -415,10 +425,85 @@ impl Attention {
             && self.pe.conv.bias.as_ref().is_none_or(|bias| {
                 bias.device().is_cpu() && bias.dtype() == DType::F32 && bias.dims() == [c]
             });
-        if !eligible {
-            return Ok(None);
-        }
+        eligible.then_some((c, n))
+    }
 
+    /// Write `out_plane[p] = o_head[p * hd + d] + pe(v)[p]` for one `(bi, ch)` plane in a single pass.
+    #[allow(clippy::too_many_arguments)]
+    #[inline]
+    fn write_o_plus_pe_plane_f32(
+        o_head: &[f32],
+        hd: usize,
+        d: usize,
+        v_plane: &[f32],
+        w9: &[f32],
+        bias: f32,
+        h: usize,
+        w: usize,
+        out_plane: &mut [f32],
+    ) {
+        let (w00, w01, w02) = (w9[0], w9[1], w9[2]);
+        let (w10, w11, w12) = (w9[3], w9[4], w9[5]);
+        let (w20, w21, w22) = (w9[6], w9[7], w9[8]);
+
+        if h >= 3 && w >= 3 {
+            for y in 1..h - 1 {
+                let r0 = &v_plane[(y - 1) * w..y * w];
+                let r1 = &v_plane[y * w..(y + 1) * w];
+                let r2 = &v_plane[(y + 1) * w..(y + 2) * w];
+                let dst = &mut out_plane[y * w..(y + 1) * w];
+                let row_p = y * w;
+                for x in 1..w - 1 {
+                    let taps = w00 * r0[x - 1]
+                        + w01 * r0[x]
+                        + w02 * r0[x + 1]
+                        + w10 * r1[x - 1]
+                        + w11 * r1[x]
+                        + w12 * r1[x + 1]
+                        + w20 * r2[x - 1]
+                        + w21 * r2[x]
+                        + w22 * r2[x + 1];
+                    dst[x] = o_head[(row_p + x) * hd + d] + (taps + bias);
+                }
+            }
+        }
+        let border_pixel = |y: usize, x: usize| -> f32 {
+            let mut taps = 0.0f32;
+            for ky in 0..3usize {
+                let iy = y + ky;
+                if iy == 0 || iy > h {
+                    continue;
+                }
+                let row = &v_plane[(iy - 1) * w..iy * w];
+                for kx in 0..3usize {
+                    let ix = x + kx;
+                    if ix == 0 || ix > w {
+                        continue;
+                    }
+                    taps += w9[ky * 3 + kx] * row[ix - 1];
+                }
+            }
+            o_head[(y * w + x) * hd + d] + (taps + bias)
+        };
+        for x in 0..w {
+            out_plane[x] = border_pixel(0, x);
+            if h > 1 {
+                out_plane[(h - 1) * w + x] = border_pixel(h - 1, x);
+            }
+        }
+        for y in 1..h.saturating_sub(1) {
+            out_plane[y * w] = border_pixel(y, 0);
+            if w > 1 {
+                out_plane[y * w + (w - 1)] = border_pixel(y, w - 1);
+            }
+        }
+    }
+
+    fn with_qkv_and_pe<R>(
+        &self,
+        qkv: &Tensor,
+        mut f: impl FnMut(&[f32], &[f32], Option<&[f32]>) -> R,
+    ) -> Result<R> {
         // Borrow PE weight/bias zero-copy when distinct from `qkv` storage (snapshot only if aliased).
         let weight_aliased = self.pe.conv.weight.same_storage(qkv);
         let bias_aliased = self
@@ -433,178 +518,143 @@ impl Attention {
         } else {
             None
         };
+        let mut run_with_w = |qkv_s: &[f32], pe_w: &[f32]| -> folo_core::Result<R> {
+            match (&pe_b_owned, &self.pe.conv.bias) {
+                (Some(b_vec), _) => Ok(f(qkv_s, pe_w, Some(b_vec))),
+                (None, Some(b_t)) => b_t.with_f32_slice(|bs| f(qkv_s, pe_w, Some(bs))),
+                (None, None) => Ok(f(qkv_s, pe_w, None)),
+            }
+        };
+        Ok(qkv.with_f32_slice(|qkv_s| -> folo_core::Result<R> {
+            match &pe_w_owned {
+                Some(w_vec) => run_with_w(qkv_s, w_vec),
+                None => self.pe.conv.weight.with_f32_slice(|ws| run_with_w(qkv_s, ws))?,
+            }
+        })??)
+    }
+
+    fn attend_and_pe_cpu_fast(&self, qkv: &Tensor, b: usize, h: usize, w: usize) -> Result<Option<Tensor>> {
+        let Some((c, n)) = self.cpu_fast_eligible(qkv, b, h, w) else {
+            return Ok(None);
+        };
+        let (heads, kd, hd) = (self.heads, self.key_dim, self.head_dim);
         let scale = (kd as f64).powf(-0.5) as f32;
         let head_stride = (2 * kd + hd) * n;
         let batch_stride = heads * head_stride;
 
         let mut out = folo_core::cpu::take_buffer(b * c * n);
-        let mut scores = folo_core::cpu::take_buffer(n * n);
-
-        let mut run_body = |qkv_s: &[f32], pe_w: &[f32], pe_b: Option<&[f32]>| {
-            for bi in 0..b {
-                for hi in 0..heads {
-                    let base = bi * batch_stride + hi * head_stride;
-                    let q_off = base;
-                    let k_off = base + kd * n;
-                    let v_off = base + 2 * kd * n;
-
-                    // 1. scores[i, j] = Σ_d q[d, i] · k[d, j] (strided in place, zero copies).
-                    let qa = Strided::lhs(qkv_s, q_off, 1, n);
-                    let kb = Strided::rhs(qkv_s, k_off, n, 1);
-                    gemm(n, n, kd, &qa, &kb, &mut scores, n, false, true);
-
-                    // 2. In-place scaled softmax over rows of `scores[n, n]`.
-                    let softmax_row = |row: &mut [f32]| {
-                        let mut max = f32::NEG_INFINITY;
-                        let mut non_finite = false;
-                        for x in row.iter_mut() {
-                            let v = *x * scale;
-                            *x = v;
-                            if !v.is_finite() {
-                                non_finite = true;
-                            }
-                            if v > max {
-                                max = v;
-                            }
-                        }
-                        if non_finite {
-                            let mut sum = 0.0f32;
-                            let m = row.iter().copied().fold(f32::NEG_INFINITY, |a, b| {
-                                if a.is_nan() || b.is_nan() { f32::NAN } else { a.max(b) }
-                            });
-                            for x in row.iter_mut() {
-                                let e = (*x - m).exp();
-                                *x = e;
-                                sum += e;
-                            }
-                            for x in row.iter_mut() {
-                                *x /= sum;
-                            }
-                            return;
-                        }
-                        let mut sum = 0.0f32;
-                        for x in row.iter_mut() {
-                            let e = folo_core::cpu::fast_exp(*x - max);
-                            *x = e;
-                            sum += e;
-                        }
-                        let inv = 1.0 / sum;
-                        for x in row.iter_mut() {
-                            *x *= inv;
-                        }
-                    };
-                    if scores.len() >= 16_384 {
-                        scores.par_chunks_mut(n).for_each(softmax_row);
-                    } else {
-                        scores.chunks_mut(n).for_each(softmax_row);
-                    }
-
-                    // 3. o[d, i] = Σ_j v[d, j] · scores[i, j] (v read in place, scores^T strided).
-                    let va = Strided::lhs(qkv_s, v_off, n, 1);
-                    let ab = Strided::rhs(&scores, 0, 1, n);
-                    let out_head = &mut out[(bi * c + hi * hd) * n..(bi * c + (hi + 1) * hd) * n];
-                    gemm(hd, n, n, &va, &ab, out_head, n, false, true);
-                }
-            }
-
-            // 4. Fused depthwise 3×3 `pe(v)` accumulated directly into `out` (zero v-copy or pe-buffer alloc).
-            let add_pe_plane = |(idx, out_plane): (usize, &mut [f32])| {
-                let bi = idx / c;
-                let ch = idx % c;
-                let hi = ch / hd;
-                let d = ch % hd;
-                let v_off = bi * batch_stride + hi * head_stride + (2 * kd + d) * n;
-                let v_plane = &qkv_s[v_off..v_off + n];
-                let w9 = &pe_w[ch * 9..ch * 9 + 9];
-                let bias = pe_b.map_or(0.0, |bs| bs[ch]);
-                let (w00, w01, w02) = (w9[0], w9[1], w9[2]);
-                let (w10, w11, w12) = (w9[3], w9[4], w9[5]);
-                let (w20, w21, w22) = (w9[6], w9[7], w9[8]);
-
-                // Interior rows & columns (branchless, auto-vectorises with AVX2 FMA).
-                if h >= 3 && w >= 3 {
-                    for y in 1..h - 1 {
-                        let r0 = &v_plane[(y - 1) * w..y * w];
-                        let r1 = &v_plane[y * w..(y + 1) * w];
-                        let r2 = &v_plane[(y + 1) * w..(y + 2) * w];
-                        let dst = &mut out_plane[y * w..(y + 1) * w];
-                        for x in 1..w - 1 {
-                            let taps = w00 * r0[x - 1]
-                                + w01 * r0[x]
-                                + w02 * r0[x + 1]
-                                + w10 * r1[x - 1]
-                                + w11 * r1[x]
-                                + w12 * r1[x + 1]
-                                + w20 * r2[x - 1]
-                                + w21 * r2[x]
-                                + w22 * r2[x + 1];
-                            dst[x] += taps + bias;
-                        }
-                    }
-                }
-                // Border pixels (top row, bottom row, left/right edges of interior rows).
-                let border_pixel = |y: usize, x: usize| -> f32 {
-                    let mut taps = 0.0f32;
-                    for ky in 0..3usize {
-                        let iy = y + ky;
-                        if iy == 0 || iy > h {
-                            continue;
-                        }
-                        let row = &v_plane[(iy - 1) * w..iy * w];
-                        for kx in 0..3usize {
-                            let ix = x + kx;
-                            if ix == 0 || ix > w {
-                                continue;
-                            }
-                            taps += w9[ky * 3 + kx] * row[ix - 1];
-                        }
-                    }
-                    taps + bias
+        attn_simd::with_tls_f32_scratch(&ATTN_SCRATCH, b * c * n, MAX_ATTN_TLS_ELEMS, |o_bnhd| {
+            self.with_qkv_and_pe(qkv, |qkv_s, pe_w, pe_b| {
+                attn_simd::fused_attn_o_bnhd(qkv_s, b, heads, kd, hd, n, scale, o_bnhd);
+                let write_plane = |(idx, out_plane): (usize, &mut [f32])| {
+                    let bi = idx / c;
+                    let ch = idx % c;
+                    let hi = ch / hd;
+                    let d = ch % hd;
+                    let o_head = &o_bnhd[(bi * heads + hi) * n * hd..(bi * heads + hi + 1) * n * hd];
+                    let v_off = bi * batch_stride + hi * head_stride + (2 * kd + d) * n;
+                    let v_plane = &qkv_s[v_off..v_off + n];
+                    let w9 = &pe_w[ch * 9..ch * 9 + 9];
+                    let bias = pe_b.map_or(0.0, |bs| bs[ch]);
+                    Self::write_o_plus_pe_plane_f32(o_head, hd, d, v_plane, w9, bias, h, w, out_plane);
                 };
-                for x in 0..w {
-                    out_plane[x] += border_pixel(0, x);
-                    if h > 1 {
-                        out_plane[(h - 1) * w + x] += border_pixel(h - 1, x);
-                    }
+                if out.len() >= 16_384 {
+                    out.par_chunks_mut(n).enumerate().for_each(write_plane);
+                } else {
+                    out.chunks_mut(n).enumerate().for_each(write_plane);
                 }
-                for y in 1..h.saturating_sub(1) {
-                    out_plane[y * w] += border_pixel(y, 0);
-                    if w > 1 {
-                        out_plane[y * w + (w - 1)] += border_pixel(y, w - 1);
-                    }
-                }
-            };
-            if out.len() >= 16_384 {
-                out.par_chunks_mut(n).enumerate().for_each(add_pe_plane);
-            } else {
-                out.chunks_mut(n).enumerate().for_each(add_pe_plane);
-            }
-        };
-
-        let mut run_with_w = |qkv_s: &[f32], pe_w: &[f32]| -> folo_core::Result<()> {
-            match (&pe_b_owned, &self.pe.conv.bias) {
-                (Some(b_vec), _) => {
-                    run_body(qkv_s, pe_w, Some(b_vec));
-                    Ok(())
-                }
-                (None, Some(b_t)) => b_t.with_f32_slice(|bs| run_body(qkv_s, pe_w, Some(bs))),
-                (None, None) => {
-                    run_body(qkv_s, pe_w, None);
-                    Ok(())
-                }
-            }
-        };
-
-        qkv.with_f32_slice(|qkv_s| -> folo_core::Result<()> {
-            match &pe_w_owned {
-                Some(w_vec) => run_with_w(qkv_s, w_vec),
-                None => self.pe.conv.weight.with_f32_slice(|ws| run_with_w(qkv_s, ws))?,
-            }
-        })??;
-
-        // Return `scores` to folo-core's CPU buffer cache.
-        let _ = Tensor::from_vec(scores, [n * n]);
+            })
+        })?;
         Ok(Some(Tensor::from_vec(out, [b, c, h, w])?))
+    }
+
+    /// Fused `o + pe(v)` directly into C4 `u8` codes (`out_u32` of length `>= b * (c / 4) * h * w`) using
+    /// per-channel `grids`, skipping intermediate `f32` `Tensor` allocation and a separate quantisation pass.
+    /// Returns `Ok(true)` when executed on the fast CPU path, or `Ok(false)` to fall back to generic ops.
+    pub(crate) fn attend_and_pe_into_c4(
+        &self,
+        qkv: &Tensor,
+        b: usize,
+        h: usize,
+        w: usize,
+        grids: &[Grid],
+        out_u32: &mut [u32],
+    ) -> Result<bool> {
+        let Some((c, n)) = self.cpu_fast_eligible(qkv, b, h, w) else {
+            return Ok(false);
+        };
+        if !c.is_multiple_of(4) || grids.len() != c {
+            return Ok(false);
+        }
+        let groups = c / 4;
+        let total_words = b * groups * n;
+        if out_u32.len() < total_words {
+            return Ok(false);
+        }
+        let (heads, kd, hd) = (self.heads, self.key_dim, self.head_dim);
+        let scale = (kd as f64).powf(-0.5) as f32;
+        let head_stride = (2 * kd + hd) * n;
+        let batch_stride = heads * head_stride;
+        let o_len = b * c * n;
+
+        attn_simd::with_tls_f32_scratch(&ATTN_SCRATCH, o_len, MAX_ATTN_TLS_ELEMS, |o_bnhd| {
+            self.with_qkv_and_pe(qkv, |qkv_s, pe_w, pe_b| {
+                attn_simd::fused_attn_o_bnhd(qkv_s, b, heads, kd, hd, n, scale, o_bnhd);
+
+                // Fused per-C4-group: compute `o + pe(v)` for 4 channels into a tiny L1 buffer (`4*n` floats)
+                // and immediately pack all 4 channels into C4 `u32` words.
+                let fuse_group = |buf4: &mut Vec<f32>, (ig, dst_c4): (usize, &mut [u32])| {
+                    if buf4.len() < 4 * n {
+                        buf4.resize(4 * n, 0.0);
+                    }
+                    let bi = ig / groups;
+                    let g = ig % groups;
+                    let ch0 = 4 * g;
+                    let (p0, rest) = buf4[..4 * n].split_at_mut(n);
+                    let (p1, rest) = rest.split_at_mut(n);
+                    let (p2, p3) = rest.split_at_mut(n);
+                    for (t, plane) in [p0, p1, p2, p3].into_iter().enumerate() {
+                        let ch = ch0 + t;
+                        let hi = ch / hd;
+                        let d = ch % hd;
+                        let o_head = &o_bnhd[(bi * heads + hi) * n * hd..(bi * heads + hi + 1) * n * hd];
+                        let v_off = bi * batch_stride + hi * head_stride + (2 * kd + d) * n;
+                        let v_plane = &qkv_s[v_off..v_off + n];
+                        let w9 = &pe_w[ch * 9..ch * 9 + 9];
+                        let bias = pe_b.map_or(0.0, |bs| bs[ch]);
+                        Self::write_o_plus_pe_plane_f32(o_head, hd, d, v_plane, w9, bias, h, w, plane);
+                    }
+                    let (p0, rest) = buf4[..4 * n].split_at(n);
+                    let (p1, rest) = rest.split_at(n);
+                    let (p2, p3) = rest.split_at(n);
+                    let g0 = grids[ch0];
+                    let g1 = grids[ch0 + 1];
+                    let g2 = grids[ch0 + 2];
+                    let g3 = grids[ch0 + 3];
+                    for p in 0..n {
+                        dst_c4[p] = u32::from_le_bytes([
+                            g0.quantize(p0[p]),
+                            g1.quantize(p1[p]),
+                            g2.quantize(p2[p]),
+                            g3.quantize(p3[p]),
+                        ]);
+                    }
+                };
+                if o_len >= 16_384 {
+                    out_u32[..total_words]
+                        .par_chunks_exact_mut(n)
+                        .enumerate()
+                        .for_each_init(|| Vec::with_capacity(4 * n), fuse_group);
+                } else {
+                    let mut buf4 = vec![0.0f32; 4 * n];
+                    out_u32[..total_words]
+                        .chunks_exact_mut(n)
+                        .enumerate()
+                        .for_each(|item| fuse_group(&mut buf4, item));
+                }
+            })
+        })?;
+        Ok(true)
     }
 }
 

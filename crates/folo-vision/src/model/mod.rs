@@ -34,6 +34,7 @@
 //! # }
 //! ```
 
+pub(crate) mod attn_simd;
 pub mod blocks;
 pub mod detector;
 pub mod head;
