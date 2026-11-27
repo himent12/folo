@@ -5,7 +5,8 @@ import { flush as flushSync, type Component } from 'fw';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { hub } from '$lib/api/index';
 import { MockApi } from '$lib/api/mock';
-import { BENCH_FEATURE, BENCH_GENERATED_FEATURE, isGeneratedBenchSource } from '$lib/bench/rules';
+import { renderImage } from '$lib/api/mock/render';
+import { BENCH_FEATURE, BENCH_GENERATED_FEATURE, isGeneratedBenchSource, resolveGeneratedShapes } from '$lib/bench/rules';
 import { parse, router } from '$lib/router';
 import { undescribedFields } from '$lib/ui/fieldA11y';
 import { toast } from '$lib/ui/toast';
@@ -220,5 +221,99 @@ describe('Bench generated-scene source parity', () => {
         source: { kind: 'generated', images: 4, extra_field: true } as never,
       }),
     ).rejects.toMatchObject({ status: 422, code: 'invalid_body' });
+  });
+
+  it('keeps Benchmarks desktop fixed column widths compact with bounded Images from truncation', async () => {
+    await hub.api.createBench({
+      name: 'Round 23 Live QA Generated',
+      source: { kind: 'generated', images: 8, classes: ['circle', 'square'], imgsz: 128, seed: 42 },
+    });
+    open(Benchmarks, {});
+    await settle();
+
+    const fixedWidths = [...document.querySelectorAll<HTMLTableCellElement>('table.benches thead th')]
+      .map((th) => Number.parseInt(th.style.width, 10))
+      .filter((n) => Number.isFinite(n));
+    const totalFixed = fixedWidths.reduce((a, b) => a + b, 0);
+    // At 1280px desktop with expanded sidebar (~1012px table width), fixed columns leave >= 230px for the Benchmark name.
+    expect(totalFixed).toBeLessThanOrEqual(780);
+
+    const srcRow = document.querySelector<HTMLElement>('table.benches tbody tr[data-row] td.src .src-row');
+    expect(srcRow?.getAttribute('title')).toContain('generated scenes');
+    expect(srcRow?.querySelector('.src-name.truncate')).not.toBeNull();
+  });
+
+  it('resolves generated shapes per folo-data rules and draws distinct ring and heart paths in mock mode', async () => {
+    expect(resolveGeneratedShapes(['ring', 'heart'])).toEqual(['ring', 'heart']);
+    expect(resolveGeneratedShapes(['Circle', 'Bolt', 'bolt'])).toEqual(['circle', 'square', 'triangle']);
+
+    const ellipseCalls: unknown[][] = [];
+    const bezierCalls: unknown[][] = [];
+    const fillCalls: unknown[][] = [];
+    const ctxStub = {
+      scale: vi.fn(),
+      createLinearGradient: () => ({ addColorStop: vi.fn() }),
+      createRadialGradient: () => ({ addColorStop: vi.fn() }),
+      fillRect: vi.fn(),
+      save: vi.fn(),
+      restore: vi.fn(),
+      beginPath: vi.fn(),
+      moveTo: vi.fn(),
+      lineTo: vi.fn(),
+      closePath: vi.fn(),
+      rect: vi.fn(),
+      roundRect: vi.fn(),
+      ellipse: (...args: unknown[]) => ellipseCalls.push(args),
+      bezierCurveTo: (...args: unknown[]) => bezierCalls.push(args),
+      fill: (...args: unknown[]) => fillCalls.push(args),
+      clip: vi.fn(),
+    } as unknown as CanvasRenderingContext2D;
+    const origOffscreen = globalThis.OffscreenCanvas;
+    vi.stubGlobal('OffscreenCanvas', undefined);
+    const getCtxSpy = vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(ctxStub);
+    const toBlobSpy = vi.spyOn(HTMLCanvasElement.prototype, 'toBlob').mockImplementation((cb) => cb(new Blob(['ok'], { type: 'image/jpeg' })));
+    try {
+      await renderImage(
+        {
+          id: 'gen_ring_heart',
+          name: 'gen',
+          path: 'generated',
+          format: 'yolo',
+          classes: ['ring', 'heart'],
+          classWeights: [1, 1],
+          classShape: ['round', 'square'],
+          renderShapes: resolveGeneratedShapes(['ring', 'heart']),
+          splits: { train: 0, val: 1, test: 0 },
+          width: 128,
+          height: 128,
+          meanBoxes: 2,
+          emptyRate: 0,
+          sizeRange: [0.2, 0.3],
+          brokenLabels: 0,
+          createdAgoS: 0,
+          style: 'shapes',
+          seed: 1,
+        },
+        {
+          id: '1',
+          file: '000000.jpg',
+          split: 'val',
+          width: 128,
+          height: 128,
+          boxes: [
+            { class: 0, x1: 10, y1: 10, x2: 50, y2: 50 },
+            { class: 1, x1: 60, y1: 60, x2: 100, y2: 100 },
+          ],
+        },
+        0,
+      );
+      expect(ellipseCalls.length).toBeGreaterThanOrEqual(2);
+      expect(fillCalls.some((c) => c[0] === 'evenodd')).toBe(true);
+      expect(bezierCalls.length).toBeGreaterThanOrEqual(2);
+    } finally {
+      getCtxSpy.mockRestore();
+      toBlobSpy.mockRestore();
+      vi.stubGlobal('OffscreenCanvas', origOffscreen);
+    }
   });
 });

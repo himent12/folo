@@ -51,6 +51,7 @@ import {
   GENERATIONS_MAX,
   generatedShapeCollision,
   generatedSourceName,
+  resolveGeneratedShapes,
   IMAGES_DEFAULT,
   IMAGES_MAX,
   IMAGES_PAGE_MAX,
@@ -202,6 +203,7 @@ export class MockBench extends MockBenchState {
             { width: imgsz, height: Math.max(GENERATED_IMGSZ_MIN, Math.round((imgsz * 2) / 3)), weight: 1 },
           ]
         : undefined;
+      const renderShapes = resolveGeneratedShapes(classes);
       const spec: MockDatasetSpec = {
         id: `gen_${seed}_${imgsz}_${classes.join('_')}`,
         name: generatedSourceName({ images: imagesCount, imgsz, seed, vary_aspect: varyAspect }),
@@ -209,7 +211,8 @@ export class MockBench extends MockBenchState {
         format: 'yolo',
         classes,
         classWeights: classes.map(() => 1),
-        classShape: classes.map((c) => (c.toLowerCase() === 'circle' || c.toLowerCase() === 'ring' ? 'round' : 'square')),
+        classShape: renderShapes.map((s) => (s === 'circle' || s === 'ring' ? 'round' : 'square')),
+        renderShapes,
         splits: { train: 0, val: imagesCount, test: 0 },
         width: imgsz,
         height: imgsz,

@@ -452,6 +452,7 @@ export default function Playground() {
   });
 
   const singleJson = computed(() => {
+    if (isUnsyncedVideoFn()) return null;
     const h = hidden.get();
     const cls = classes.get();
     const hiddenClasses = h.size ? [...h].sort((a, b) => a - b).map((c) => cls[c] ?? `class ${c}`) : undefined;
@@ -560,17 +561,22 @@ export default function Playground() {
     else cmp.toggleHiddenBName(nameB);
   }
 
-  const classList = () => (
-    <ClassList
-      result={showingB.get() ? cmp.resultB.get() : result.get()}
-      counts={showingB.get() ? cmp.countsB.get() : counts.get()}
-      pred={showingB.get() ? cmp.predB.get() : pred.get()}
-      hidden={showingB.get() ? cmp.hiddenB.get() : hidden.get()}
-      classes={showingB.get() ? cmp.classesB.get() : classes.get()}
-      maxCount={showingB.get() ? cmp.maxCountB.get() : maxCount.get()}
-      toggleClass={showingB.get() ? toggleClassB : toggleClass}
-    />
-  );
+  const unsyncedPreviewState = (): 'ready' | 'loading' | 'error' | null =>
+    !isUnsyncedVideoFn() ? null : mediaSession.videoErr.get() ? 'error' : mediaSession.videoReady.get() && !mediaSession.seeking.get() ? 'ready' : 'loading';
+  const classList = () => {
+    const u = isUnsyncedVideoFn();
+    return (
+      <ClassList
+        result={u ? null : showingB.get() ? cmp.resultB.get() : result.get()}
+        counts={u ? [] : showingB.get() ? cmp.countsB.get() : counts.get()}
+        pred={u ? null : showingB.get() ? cmp.predB.get() : pred.get()}
+        hidden={showingB.get() ? cmp.hiddenB.get() : hidden.get()}
+        classes={showingB.get() ? cmp.classesB.get() : classes.get()}
+        maxCount={showingB.get() ? cmp.maxCountB.get() : maxCount.get()}
+        toggleClass={showingB.get() ? toggleClassB : toggleClass}
+      />
+    );
+  };
 
   const zoomResetKey = computed(() => {
     const m = mediaSession.mode.get();
@@ -606,11 +612,11 @@ export default function Playground() {
       narrow={narrow.current}
       modelA={model.get()}
       modelB={cmp.modelB.get()}
-      predA={pred.get()}
-      predB={cmp.predB.get()}
+      predA={isUnsyncedVideoFn() ? null : pred.get()}
+      predB={isUnsyncedVideoFn() ? null : cmp.predB.get()}
       predictingA={predicting.get()}
       predictingB={cmp.predictingB.get()}
-      resultMsA={result.get()?.ms ?? null}
+      resultMsA={isUnsyncedVideoFn() ? null : (result.get()?.ms ?? null)}
       adapter={engine.info?.adapter}
     />
   );
@@ -699,34 +705,38 @@ export default function Playground() {
   );
 
   // The detections: a panel under the image below 1024 px, the rail's Detections section (with a Classes tab) above.
-  const results = (rail: boolean) => (
-    <ResultsPanel
-      rail={rail}
-      classCount={showingB.get() ? cmp.countsB.get().length : counts.get().length}
-      classList={classList}
-      showAllButton={showAllButton}
-      onShowAll={clearAllHidden}
-      result={tableResult.get()}
-      bind:tab={tab}
-      rows={tableRows.get()}
-      predicting={showingB.get() ? cmp.predictingB.get() : predicting.get()}
-      notice={showingB.get() ? (cmp.weightsMissingB.get() ? 'file' : cmp.errorB.get() && !cmp.predB.get() ? 'error' : null) : notice.get()}
-      json={activeJson.get()}
-      pred={showingB.get() ? cmp.predB.get() : pred.get()}
-      bind:conf={conf}
-      maxDet={maxDet.get()}
-      hidden={showingB.get() ? cmp.hiddenB.get() : hidden.get()}
-      bind:tbody={tbody}
-      tabRow={tabRow.get()}
-      activeIdx={tableActiveIdx.get()}
-      selectedIdx={tableSelectedIdx.get()}
-      hover={showingB.get() ? cmp.hoverB.get() : hover.get()}
-      picked={showingB.get() ? cmp.pickedB.get() : picked.get()}
-      onHover={(b) => (showingB.peek() ? cmp.hoverB.set(b) : hover.set(b))}
-      onPick={(b) => (showingB.peek() ? cmp.pickedB.set(b) : picked.set(b))}
-      onrowkey={onrowkey}
-    />
-  );
+  const results = (rail: boolean) => {
+    const unsynced = isUnsyncedVideoFn();
+    return (
+      <ResultsPanel
+        rail={rail}
+        unsyncedPreview={unsyncedPreviewState()}
+        classCount={unsynced ? 0 : showingB.get() ? cmp.countsB.get().length : counts.get().length}
+        classList={classList}
+        showAllButton={showAllButton}
+        onShowAll={clearAllHidden}
+        result={unsynced ? null : tableResult.get()}
+        bind:tab={tab}
+        rows={unsynced ? [] : tableRows.get()}
+        predicting={showingB.get() ? cmp.predictingB.get() : predicting.get()}
+        notice={showingB.get() ? (cmp.weightsMissingB.get() ? 'file' : cmp.errorB.get() && !cmp.predB.get() ? 'error' : null) : notice.get()}
+        json={activeJson.get()}
+        pred={unsynced ? null : showingB.get() ? cmp.predB.get() : pred.get()}
+        bind:conf={conf}
+        maxDet={maxDet.get()}
+        hidden={showingB.get() ? cmp.hiddenB.get() : hidden.get()}
+        bind:tbody={tbody}
+        tabRow={tabRow.get()}
+        activeIdx={tableActiveIdx.get()}
+        selectedIdx={tableSelectedIdx.get()}
+        hover={showingB.get() ? cmp.hoverB.get() : hover.get()}
+        picked={showingB.get() ? cmp.pickedB.get() : picked.get()}
+        onHover={(b) => (showingB.peek() ? cmp.hoverB.set(b) : hover.set(b))}
+        onPick={(b) => (showingB.peek() ? cmp.pickedB.set(b) : picked.set(b))}
+        onrowkey={onrowkey}
+      />
+    );
+  };
 
   return (
     <>
@@ -829,9 +839,9 @@ export default function Playground() {
                 imageError={imageError.get()}
                 onImageLoad={(ok) => imageError.set(!ok)}
                 onImageRetry={retryImage}
-                pred={pred.get()}
+                pred={isUnsyncedVideoFn() ? null : pred.get()}
                 cut={cut()}
-                kept={kept.get()}
+                kept={isUnsyncedVideoFn() ? [] : kept.get()}
                 truthBoxes={truthBoxes.get()}
                 truthOnly={truthOnly.get()}
                 classes={classes.get()}
@@ -843,6 +853,7 @@ export default function Playground() {
                 bind:hover={hover}
                 pickFromImage={pickFromImage}
                 predicting={predicting.get()}
+                unsyncedPreview={unsyncedPreviewState()}
                 engine={engine}
                 sheetShown={sheetShown.get()}
                 tablet={tablet.get()}
@@ -850,8 +861,8 @@ export default function Playground() {
                 rail={!narrow.current}
                 bind:conf={conf}
                 bind:iou={iou}
-                result={result.get()}
-                rows={rows.get()}
+                result={isUnsyncedVideoFn() ? null : result.get()}
+                rows={isUnsyncedVideoFn() ? [] : rows.get()}
                 hidden={hidden.get()}
                 maxDet={maxDet.get()}
                 weightsMissing={weightsMissing.get()}
@@ -880,12 +891,12 @@ export default function Playground() {
 
               {source.get() && phone.current ? (
                 <PhoneDetails
-                  result={showingB.get() ? cmp.resultB.get() : result.get()}
-                  counts={showingB.get() ? cmp.countsB.get() : counts.get()}
+                  result={isUnsyncedVideoFn() ? null : showingB.get() ? cmp.resultB.get() : result.get()}
+                  counts={isUnsyncedVideoFn() ? [] : showingB.get() ? cmp.countsB.get() : counts.get()}
                   hidden={showingB.get() ? cmp.hiddenB.get() : hidden.get()}
-                  pred={showingB.get() ? cmp.predB.get() : pred.get()}
+                  pred={isUnsyncedVideoFn() ? null : showingB.get() ? cmp.predB.get() : pred.get()}
                   where={cmp.compare.get() ? '' : where.get()}
-                  timingMeta={cmp.compare.get() ? formatCompareTimingMeta(pred.get(), cmp.predB.get()) : undefined}
+                  timingMeta={isUnsyncedVideoFn() ? undefined : cmp.compare.get() ? formatCompareTimingMeta(pred.get(), cmp.predB.get()) : undefined}
                   showAllButton={showAllButton}
                   classList={classList}
                   timingBody={timingBody}
@@ -896,9 +907,9 @@ export default function Playground() {
             {narrow.current ? (
               <SidePanels
                 source={source.get()}
-                result={showingB.get() ? cmp.resultB.get() : result.get()}
-                counts={showingB.get() ? cmp.countsB.get() : counts.get()}
-                pred={showingB.get() ? cmp.predB.get() : pred.get()}
+                result={isUnsyncedVideoFn() ? null : showingB.get() ? cmp.resultB.get() : result.get()}
+                counts={isUnsyncedVideoFn() ? [] : showingB.get() ? cmp.countsB.get() : counts.get()}
+                pred={isUnsyncedVideoFn() ? null : showingB.get() ? cmp.predB.get() : pred.get()}
                 where={cmp.compare.get() ? '' : where.get()}
                 bind:conf={conf}
                 resetButton={resetButton}
@@ -919,7 +930,7 @@ export default function Playground() {
                 compareSummary={cmp.compare.get() ? () => compareSummary(true) : null}
                 detections={() => results(true)}
                 timing={timingBody}
-                where={cmp.compare.get() ? null : pred.get() ? where.get() : null}
+                where={cmp.compare.get() || isUnsyncedVideoFn() ? null : pred.get() ? where.get() : null}
               />
             )}
           </div>

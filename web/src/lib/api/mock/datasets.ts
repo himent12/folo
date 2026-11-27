@@ -16,6 +16,8 @@ export interface MockDatasetSpec {
   classWeights: number[];
   /** Geometry of each class's boxes. */
   classShape: Shape[];
+  /** Explicit rendered shape glyph per class when generated class names include custom labels or varied casing. */
+  renderShapes?: readonly string[];
   splits: Record<Split, number>;
   /** Every image's size, unless `frames` gives each its own. */
   width: number;
