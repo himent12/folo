@@ -4,8 +4,8 @@
 
 use folo_ui::prelude::FluentBuilder;
 use folo_ui::{
-    AnyElement, Context, FontWeight, Hsla, IntoElement, ParentElement, SharedString, Styled, Window, div, px,
-    relative,
+    AnyElement, Context, FontWeight, Hsla, InteractiveElement, IntoElement, ParentElement, SharedString,
+    StatefulInteractiveElement, Styled, Window, div, px, relative,
 };
 
 use super::format::{axis_name, calibration_none, pct, score_text};
@@ -16,7 +16,7 @@ use crate::bench::{
     COMPARE_CLS_SHOWN, COMPARE_MAX, COMPARE_SLOTS, best_in_row, compare_caveats, compare_class_rows,
     compare_condition_rows, intervals_domain, intervals_verdict, is_comparable,
 };
-use crate::controls::Btn;
+use crate::controls::{Btn, tip};
 use crate::screens::{detail_header, loading_rows, page_header};
 use crate::store::Load;
 use crate::theme::{Theme, alpha, radius, theme, ty};
@@ -332,7 +332,12 @@ impl FoloApp {
         for (i, e) in shown.iter().enumerate() {
             let color = slot_color(&t, i);
             let role_el: AnyElement = if i == 0 {
-                text(ty::SM, t.accent_text).child("Baseline").into_any_element()
+                div()
+                    .h(px(crate::theme::size::CONTROL_MD))
+                    .flex()
+                    .items_center()
+                    .child(text(ty::SM, t.accent_text).child("Baseline"))
+                    .into_any_element()
             } else {
                 let (bid, eid) = (b.id.clone(), e.id.clone());
                 self.button(
@@ -350,24 +355,28 @@ impl FoloApp {
                 div()
                     .flex_1()
                     .min_w(px(110.))
+                    .overflow_hidden()
                     .flex()
                     .flex_col()
                     .items_end()
                     .gap(px(4.))
                     .child(
                         div()
+                            .id(SharedString::from(format!("bench-cmp-head-{}", e.id)))
                             .flex()
-                            .items_start()
+                            .items_center()
                             .justify_end()
                             .gap(px(6.))
                             .w_full()
-                            .child(div().pt(px(7.)).child(slot_swatch(color)))
+                            .min_w_0()
+                            .tooltip(tip(e.name.clone(), None))
+                            .child(slot_swatch(color))
                             .child(
                                 text(ty::SM, t.text_primary)
                                     .font_weight(FontWeight::MEDIUM)
                                     .flex_shrink()
                                     .min_w_0()
-                                    .whitespace_normal()
+                                    .ellipsis()
                                     .child(e.name.clone()),
                             ),
                     )

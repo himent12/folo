@@ -200,30 +200,47 @@ impl FoloApp {
                 f32::from(crate::charts::text_width(window, &format!("{p} / "), ty::SM.size))
             })
             + 6.;
-        let room = {
+        let stage_w = {
             let rail = if window.viewport_size().width < px(1100.) { 280. } else { 320. };
-            // The other items, measured: the latency and count texts as they'll read, plus the
-            // fixed chrome (icon 14, gaps 80, rules 3, spacer 8, padding 24, zoom group 134, borders
-            // 2: 265 px) and 10 px of margin.
-            let sim = self.play_target.is_none() && !self.store.api.local_inference();
-            let latency = self.play_pred.ready().map(|p| latency_text(p.timing.total_ms, sim));
-            let shown = self
-                .play_pred
-                .ready()
-                .map(|p| super::page::filter_detections(&p.boxes, self.play_conf, self.play_class).len());
-            let count = shown.map(|n| {
-                format!(
-                    "{n} {} ≥ {}",
-                    if n == 1 { "detection" } else { "detections" },
-                    fmt_conf(self.play_conf)
-                )
-            });
-            let mut w = |s: Option<String>| {
-                s.map_or(0., |s| f32::from(crate::charts::text_width(window, &s, ty::SM.size)))
-            };
-            let others = 265. + w(latency) + w(count) + 10.;
-            self.content_width(window) - rail - 16. - others
+            // Stage width inside its 2 px border.
+            (self.content_width(window) - rail - 16. - 2.).max(0.)
         };
+        let bar_gap = if stage_w < 520. { 8. } else { 10. };
+        let sim = self.play_target.is_none() && !self.store.api.local_inference();
+        let latency_label = self.play_pred.ready().map(|p| latency_text(p.timing.total_ms, sim));
+        let (boxes, count, loading) = match &self.play_pred {
+            Load::Ready(p) => {
+                let b = self.visible_boxes(p, active);
+                let n = b.len();
+                (b, Some(n), false)
+            }
+            Load::Loading => (Vec::new(), None, true),
+            _ => (Vec::new(), None, false),
+        };
+        let count_label = count.map(|n| {
+            format!("{n} {} ≥ {}", if n == 1 { "detection" } else { "detections" }, fmt_conf(self.play_conf))
+        });
+        let mut measure = |s: &str| f32::from(crate::charts::text_width(window, s, ty::SM.size));
+        // Always-present chrome: px(12) padding (24), 4 gaps between [icon, file, spacer, rule,
+        // zoom_bar], image icon (14), spacer min (8), divider rule (1), zoom_bar (help 24 +
+        // zoom-out 32 + Fit 48 + zoom-in 32 + 3*2 gaps = 142), plus 8 px safety margin.
+        let base_chrome = 24. + 4. * bar_gap + 14. + 8. + 1. + 142. + 8.;
+        let loading_cost = if loading { measure("Detecting…") + bar_gap } else { 0. };
+        // Shed secondary readouts before the filename or zoom controls ever clip: count first
+        // (it already sits in the side rail), then latency if the stage is narrower still.
+        let min_file = file_w.min(52.);
+        let mut avail = (stage_w - base_chrome - loading_cost).max(0.);
+        let lat_cost = latency_label.as_deref().map_or(0., |s| measure(s) + 1. + 2. * bar_gap);
+        let show_latency = latency_label.is_some() && avail - lat_cost >= min_file;
+        if show_latency {
+            avail -= lat_cost;
+        }
+        let cnt_cost = count_label.as_deref().map_or(0., |s| measure(s) + 1. + 2. * bar_gap);
+        let show_count = count_label.is_some() && avail - cnt_cost >= min_file;
+        if show_count {
+            avail -= cnt_cost;
+        }
+        let room = avail;
         const SIZE_W: f32 = 68.;
         let (show_prefix, show_size) = match prefix_all {
             None => (false, file_w + SIZE_W <= room),
@@ -234,22 +251,26 @@ impl FoloApp {
         let prefix = prefix_all.clone().filter(|_| show_prefix);
         let file_budget =
             (room - if show_size { SIZE_W } else { 0. } - if show_prefix { full_w - file_w } else { 0. })
-                .clamp(room.clamp(40., 80.), 520.);
-        // The tip carries everything the toolbar shed: the dataset, the size, a cut file name.
-        let tip_text = {
-            let base = if prefix_all.is_some() && !show_prefix { name.to_string() } else { file.clone() };
-            if show_size { base } else { format!("{base} · {size_text}") }
-        };
-        let file_tip = file_w > file_budget || !show_size || (prefix_all.is_some() && !show_prefix);
-        let (boxes, count, loading) = match &self.play_pred {
-            Load::Ready(p) => {
-                let b = self.visible_boxes(p, active);
-                let n = b.len();
-                (b, Some(n), false)
-            }
-            Load::Loading => (Vec::new(), None, true),
-            _ => (Vec::new(), None, false),
-        };
+                .clamp(0., 520.);
+        // The tip carries everything the toolbar shed: the dataset, the size, a cut file name,
+        // and any readout shed on narrow stages.
+        let mut tip_parts =
+            vec![if prefix_all.is_some() && !show_prefix { name.to_string() } else { file.clone() }];
+        if !show_size {
+            tip_parts.push(size_text.clone());
+        }
+        if !show_latency && let Some(lat) = latency_label.as_ref() {
+            tip_parts.push(lat.clone());
+        }
+        if !show_count && let Some(cnt) = count_label.as_ref() {
+            tip_parts.push(cnt.clone());
+        }
+        let tip_text = tip_parts.join(" · ");
+        let file_tip = file_w > file_budget
+            || !show_size
+            || (prefix_all.is_some() && !show_prefix)
+            || (latency_label.is_some() && !show_latency)
+            || (count_label.is_some() && !show_count);
         let bounds_cell = self.play_view.clone();
         if let Some(b) = bounds_cell.get() {
             self.play_pan =
@@ -330,7 +351,7 @@ impl FoloApp {
                     .px(px(12.))
                     .flex()
                     .items_center()
-                    .gap(px(10.))
+                    .gap(px(bar_gap))
                     .bg(t.bg_panel)
                     .border_b_1()
                     .border_color(t.line_subtle)
@@ -385,30 +406,24 @@ impl FoloApp {
                     })
                     .child(div().flex_1().min_w(px(8.)))
                     .when(loading, |d| d.child(text(ty::SM, t.text_tertiary).flex_none().child("Detecting…")))
-                    // The latency always reads here, beside the count (the rail's breakdown is
-                    // below the fold at most window sizes).
+                    // The latency always reads here when it fits, beside the count (the rail's
+                    // breakdown is below the fold at most window sizes).
                     // The built-in demo's number is simulated, and says so wherever it shows.
-                    .when_some(self.play_pred.ready().map(|p| p.timing.total_ms), |d, ms| {
-                        let sim = self.play_target.is_none() && !self.store.api.local_inference();
+                    .when_some(latency_label.filter(|_| show_latency), |d, lat| {
                         // One rule between every group, the image's own (name, size) included, so
                         // a narrow toolbar's spacer never reads as a missing divider.
                         d.child(div().flex_none().w(px(1.)).h(px(16.)).bg(t.line_subtle))
-                            .child(
-                                text(ty::SM, t.text_secondary)
-                                    .flex_none()
-                                    .tnum()
-                                    .child(latency_text(ms, sim)),
-                            )
-                            .child(div().flex_none().w(px(1.)).h(px(16.)).bg(t.line_subtle))
+                            .child(text(ty::SM, t.text_secondary).flex_none().tnum().child(lat))
                     })
-                    .when_some(count, |d, n| {
-                        d.child(div().flex_none().flex().items_center().gap(px(6.)).child(
-                            text(ty::SM, t.text_secondary).tnum().child(format!(
-                                "{n} {} ≥ {}",
-                                if n == 1 { "detection" } else { "detections" },
-                                fmt_conf(self.play_conf)
-                            )),
-                        ))
+                    .when_some(count_label.filter(|_| show_count), |d, cnt| {
+                        d.child(div().flex_none().w(px(1.)).h(px(16.)).bg(t.line_subtle)).child(
+                            div()
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .gap(px(6.))
+                                .child(text(ty::SM, t.text_secondary).tnum().child(cnt)),
+                        )
                     })
                     .child(div().flex_none().w(px(1.)).h(px(16.)).bg(t.line_subtle))
                     .child(zoom_bar.flex_none()),

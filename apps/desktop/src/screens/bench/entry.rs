@@ -177,7 +177,7 @@ impl FoloApp {
                     .flex()
                     .flex_col()
                     .gap(px(16.))
-                    .child(div().children(retry_anchor).child(self.entry_result(&t, &b, &r)))
+                    .child(div().children(retry_anchor).child(self.entry_result(&t, &b, &r, window)))
                     .child(images)
                     .into_any_element()
             }
@@ -210,21 +210,27 @@ impl FoloApp {
         self.page_frame(&t, header, body, cx)
     }
 
-    fn entry_result(&self, t: &Theme, b: &Bench, r: &BenchResult) -> AnyElement {
+    fn entry_result(&self, t: &Theme, b: &Bench, r: &BenchResult, window: &Window) -> AnyElement {
         let t = *t;
         let e = &r.entry;
         let score = e.score.as_ref();
         let axis = |a: BenchAxis| score.and_then(|s| s.axes.iter().find(|x| x.axis == a)).copied();
-        // The score and its five axes, each with its weight.
+        // The score and its five axes, each with its weight. On wide viewports all six sit on one
+        // strip; below 960 px content width they split into two balanced 3-tile rows so labels and
+        // detail notes never collide or overflow the panel border.
+        let two_rows = self.content_width(window) < 960.;
         let kpi = |content: folo_ui::Div, basis: f32| {
-            div().flex_grow().flex_basis(relative(basis)).min_w_0().px(px(16.)).py(px(14.)).child(content)
+            let cell = div().min_w_0().overflow_hidden().px(px(16.)).py(px(14.)).child(content);
+            if two_rows { cell.flex_1() } else { cell.flex_grow().flex_basis(relative(basis)) }
         };
-        let mut kpis = panel(&t).flex().flex_wrap().child(kpi(
+        let mut tiles = Vec::with_capacity(6);
+        tiles.push(kpi(
             div()
                 .flex()
                 .flex_col()
                 .gap(px(4.))
-                .child(kpi_label(&t, "Score"))
+                .min_w_0()
+                .child(kpi_label(&t, "Score").min_w_0().ellipsis())
                 .child(metric(
                     &t,
                     score.map_or("–".to_string(), |s| format!("{:.1}", s.total)),
@@ -262,15 +268,20 @@ impl FoloApp {
                     .mean_iou
                     .map_or("nothing correct".into(), |m| format!("mean IoU {}", f3(m))),
             };
-            kpis = kpis.child(kpi(
+            tiles.push(kpi(
                 div()
                     .flex()
                     .flex_col()
                     .gap(px(4.))
-                    .child(kpi_label(
-                        &t,
-                        &format!("{} · {}", axis_name(a), pct(s.map_or(a.weight(), |s| s.weight))),
-                    ))
+                    .min_w_0()
+                    .child(
+                        kpi_label(
+                            &t,
+                            &format!("{} · {}", axis_name(a), pct(s.map_or(a.weight(), |s| s.weight))),
+                        )
+                        .min_w_0()
+                        .ellipsis(),
+                    )
                     .child(
                         div().h(px(KPI_HEADLINE.line)).flex().items_end().child(
                             metric(&t, axis_text(v), "", KPI_VALUE, KPI_UNIT)
@@ -281,6 +292,14 @@ impl FoloApp {
                 0.12,
             ));
         }
+        let kpis = if two_rows {
+            let mut it = tiles.into_iter();
+            let row1 = div().flex().w_full().children(it.by_ref().take(3));
+            let row2 = div().flex().w_full().border_t_1().border_color(t.line_subtle).children(it);
+            panel(&t).flex().flex_col().child(row1).child(row2)
+        } else {
+            panel(&t).flex().children(tiles)
+        };
 
         // Accuracy and self-labeling, side by side.
         let acc = &r.accuracy;

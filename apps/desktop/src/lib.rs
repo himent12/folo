@@ -94,8 +94,8 @@ Options:
   --server URL          Connect to the folo serve at URL
   --mock                Use the built-in demo data
   --open SCREEN         Start on a screen: overview, datasets, dataset:ID, runs, run:ID, models,
-                        model:ID, benchmarks, bench:ID, bench-entry:ID/ENTRY, playground,
-                        labeling, label:ID, settings, or new-run (the dialog)
+                        model:ID, benchmarks, bench:ID, bench-entry:ID/ENTRY, bench-compare:ID,
+                        playground, labeling, label:ID, settings, or new-run (the dialog)
   --theme MODE|THEME    The mode (dark, light or system), or a theme: dark, midnight, dim,
                         contrast-dark, light, paper, contrast-light, or a custom theme's id
                         (midnight: mode dark with Midnight) [default: the last one, else dark]
@@ -642,9 +642,29 @@ mod tests {
         assert!(window_state::remembers(false, bad_w.is_some()));
         // `--scenario --shot P`: the scenario has no value; --shot keeps its own.
         assert!(one(&["--scenario", "--shot", "a.png"]).starts_with("--scenario: missing"));
-        // Every option --help lists is known.
+        // Every option --help lists is known, and --open lists every screen including bench-compare:ID.
         for flag in VALUE_FLAGS.iter().chain(BARE_FLAGS) {
             assert!(USAGE.contains(flag), "{flag}");
+        }
+        for screen in [
+            "overview",
+            "datasets",
+            "dataset:ID",
+            "runs",
+            "run:ID",
+            "models",
+            "model:ID",
+            "benchmarks",
+            "bench:ID",
+            "bench-entry:ID/ENTRY",
+            "bench-compare:ID",
+            "playground",
+            "labeling",
+            "label:ID",
+            "settings",
+            "new-run",
+        ] {
+            assert!(USAGE.contains(screen), "USAGE missing --open screen `{screen}`");
         }
     }
 

@@ -304,12 +304,13 @@ impl FoloApp {
             .into_any_element()
     }
 
-    /// The machine at a glance, as a 36 px footer row of meters (GPU, CPU, memory).
+    /// The machine at a glance: a 36 px footer row of meters (GPU, CPU, memory) that wraps on narrow viewports.
     fn system_footer(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let t = theme(cx);
         let s = self.store.system.ready()?.clone();
         let meter = |label: String, value: String, frac: f32, color: folo_ui::Hsla| {
             div()
+                .flex_none()
                 .flex()
                 .items_center()
                 .gap(px(8.))
@@ -318,11 +319,14 @@ impl FoloApp {
                 .child(text(ty::SM, t.text_secondary).tnum().whitespace_nowrap().child(value))
         };
         let mut row = div()
-            .h(px(36.))
+            .min_h(px(36.))
             .px(px(16.))
+            .py(px(8.))
             .flex()
+            .flex_wrap()
             .items_center()
-            .gap(px(24.))
+            .gap_x(px(24.))
+            .gap_y(px(6.))
             .border_t_1()
             .border_color(t.line_subtle);
         if let Some(g) = s.gpus.first() {

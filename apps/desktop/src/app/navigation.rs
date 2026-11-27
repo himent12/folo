@@ -45,7 +45,7 @@ pub enum Section {
 
 impl Route {
     /// `overview`, `datasets`, `dataset:ID`, `runs`, `run:ID`, `models`, `model:ID`, `benchmarks`, `bench:ID`,
-    /// `bench-entry:ID/ENTRY`, `playground`, `labeling`, `label:ID`, `settings`.
+    /// `bench-entry:ID/ENTRY`, `bench-compare:ID`, `playground`, `labeling`, `label:ID`, `settings`.
     pub fn parse(s: &str) -> Option<Route> {
         let valid_id = |v: &str| !v.trim().is_empty();
         let (kind, id) = s.split_once(':').map_or((s, None), |(k, i)| (k, Some(i)));
