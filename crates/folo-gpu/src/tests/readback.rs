@@ -121,6 +121,35 @@ fn read_batch_validation_is_atomic() {
         assert!(rb.poll_ready().unwrap());
         assert!(rb.into_vec().unwrap().is_empty());
     }
+
+    // Concurrent failed submission on a destroyed `COPY_SRC` buffer must not steal or poison a valid
+    // readback finishing on another thread, nor return zero-filled bytes for the failed read.
+    for _ in 0..8 {
+        let valid_rb = ctx.read_deferred(buf.raw(), 0, 64).unwrap();
+        let destroyed = ctx.wgpu_device().create_buffer(&wgpu::BufferDescriptor {
+            label: Some("destroyed copy src"),
+            size: 64,
+            usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        destroyed.destroy();
+        let ctx_t = ctx.clone();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let b2 = barrier.clone();
+        let t = std::thread::spawn(move || {
+            b2.wait();
+            ctx_t.read_deferred(&destroyed, 0, 64).and_then(|r| r.into_vec())
+        });
+        barrier.wait();
+        let valid_res = valid_rb.into_vec();
+        let bad_res = t.join().unwrap();
+        assert_eq!(
+            valid_res.unwrap(),
+            vec![1u8; 64],
+            "valid readback must not consume bad submission's error"
+        );
+        assert!(matches!(bad_res, Err(GpuError::Wgpu(_))), "destroyed buffer read must fail: {bad_res:?}");
+    }
 }
 
 /// Dropping an unfinished `Readback` retires its staging buffer instead of returning it to the reuse pool while

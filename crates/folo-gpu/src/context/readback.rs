@@ -55,8 +55,8 @@ impl GpuContext {
     ///
     /// Subsequent GPU work can be encoded and submitted before collecting the result with
     /// [`Readback::finish`] / [`Readback::finish_async`]: waiting targets only this readback's submission
-    /// instead of draining later queued work. Dropping the returned [`Readback`] unmaps and returns its staging
-    /// buffer to the pool cleanly.
+    /// instead of draining later queued work. Dropping an unfinished [`Readback`] unmaps and retires its
+    /// staging buffer from the pool cleanly.
     pub fn read_deferred(&self, buf: &wgpu::Buffer, offset: u64, len: u64) -> Result<Readback> {
         let mut batch = self.read_batch_deferred(&[(buf, offset, len)])?;
         Ok(batch.pop().expect("single readback"))
@@ -105,7 +105,9 @@ impl GpuContext {
             return Ok((0..reads.len()).map(|_| Readback { inner: None }).collect());
         }
         self.record_taint("a readback");
-        let submission = {
+        // Hold `batch` across both `submit` and `take_error` so a concurrent thread finishing an earlier valid
+        // `Readback` cannot drain a validation error produced by this submission before we observe it.
+        let (submission, submit_err) = {
             let mut b = self.inner.batch.lock().expect("batch lock");
             let enc = self.encoder(&mut b);
             for item in prepared.iter().flatten() {
@@ -113,9 +115,10 @@ impl GpuContext {
                 let (buf, offset, _) = reads[*idx];
                 enc.copy_buffer_to_buffer(buf, offset, staging.raw(), 0, *len4);
             }
-            self.submit(&mut b)
+            let submission = self.submit(&mut b);
+            (submission, self.take_error())
         };
-        if let Err(e) = self.take_error() {
+        if let Err(e) = submit_err {
             for (_, mut staging, _, _) in prepared.into_iter().flatten() {
                 staging.discard();
             }
@@ -350,7 +353,13 @@ impl PendingRead {
             .map_err(|e| GpuError::Map(e.to_string()));
         let ctx = self.ctx.clone();
         drop(self);
-        ctx.take_error()?;
+        // Serialize error draining with `read_batch_deferred`'s submit-and-drain critical section (`batch` ->
+        // `errors` lock order) so a concurrent failed submission keeps its own error.
+        let err = {
+            let _b = ctx.inner.batch.lock().expect("batch lock");
+            ctx.take_error()
+        };
+        err?;
         out
     }
 }
