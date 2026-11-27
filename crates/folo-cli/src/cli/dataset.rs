@@ -1,4 +1,5 @@
-//! `folo dataset` subcommands and arguments (`check`, `stats`, `synth`, `convert`, `split`, `merge`, `filter`).
+//! `folo dataset` subcommands and arguments (`check`, `stats`, `synth`, `convert`, `split`, `merge`, `filter`,
+//! `export`).
 
 use std::path::PathBuf;
 
@@ -27,6 +28,9 @@ pub enum DatasetCommand {
     /// Filter a dataset by class whitelist/blacklist, split selection, box area/pixel size, image dimensions, and
     /// optional empty-image dropping.
     Filter(FilterArgs),
+    /// Export a dataset (YOLO, COCO or Pascal VOC) to spec-compliant COCO instances JSON with selectable splits
+    /// and copy / hard-link / reference image handling.
+    Export(ExportDatasetArgs),
 }
 
 /// Dataset format on disk.
@@ -342,4 +346,62 @@ pub struct FilterArgs {
     /// Remove images that have zero surviving boxes after filtering.
     #[arg(long)]
     pub drop_empty_images: bool,
+}
+
+/// Export format of `folo dataset export`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+pub enum ExportDatasetFormatArg {
+    /// Spec-compliant COCO instances JSON (`annotations/instances_<split>.json`).
+    #[default]
+    Coco,
+}
+
+/// How `folo dataset export --format coco` handles source images.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+pub enum CocoImageModeArg {
+    /// Copy images byte for byte into `<out>/images/<split>/` (default; self-contained).
+    #[default]
+    Copy,
+    /// Hard-link images into `<out>/images/<split>/`, falling back to a byte-for-byte copy across filesystems.
+    Link,
+    /// Do not copy or link images; reference source images in place via relative paths from `<out>/annotations/`.
+    Reference,
+}
+
+impl From<CocoImageModeArg> for folo_data::convert::CocoImageMode {
+    fn from(m: CocoImageModeArg) -> Self {
+        match m {
+            CocoImageModeArg::Copy => folo_data::convert::CocoImageMode::Copy,
+            CocoImageModeArg::Link => folo_data::convert::CocoImageMode::Link,
+            CocoImageModeArg::Reference => folo_data::convert::CocoImageMode::Reference,
+        }
+    }
+}
+
+/// `folo dataset export`.
+#[derive(Debug, Args)]
+pub struct ExportDatasetArgs {
+    /// Dataset to export: a folder (YOLO, COCO or Pascal VOC), data.yaml, COCO .json or Pascal VOC .xml.
+    pub path: PathBuf,
+    /// Output folder (created; must not exist or be empty).
+    #[arg(long, value_name = "DIR")]
+    pub out: PathBuf,
+    /// Target export format (`coco`).
+    #[arg(long, value_enum, default_value_t = ExportDatasetFormatArg::Coco)]
+    pub format: ExportDatasetFormatArg,
+    /// Format of the input dataset.
+    #[arg(long, value_enum, default_value_t = FormatArg::Auto)]
+    pub from: FormatArg,
+    /// Splits to export (`train`, `val`, `test`; comma-separated or repeatable; default: all non-empty splits).
+    #[arg(long = "split", value_enum, value_delimiter = ',')]
+    pub split: Vec<SplitArg>,
+    /// How source images are materialized or referenced (`copy`, `link`, or `reference`).
+    #[arg(long, value_enum, default_value_t = CocoImageModeArg::Copy)]
+    pub images: CocoImageModeArg,
+    /// Pretty-print the COCO instances JSON files instead of writing compact JSON.
+    #[arg(long)]
+    pub pretty: bool,
+    /// Optional `info.description` written to each COCO JSON file.
+    #[arg(long, value_name = "TEXT")]
+    pub description: Option<String>,
 }

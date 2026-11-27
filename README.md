@@ -16,7 +16,7 @@ and first-class agent tooling.
 - **End-to-end computer vision.** Label raw images with coding agents, train locally or on rented cloud GPUs, validate
   with pycocotools-exact mAP, stress-test with vision benchmarks, and export to `.folo` or ONNX.
 - **Built for agents.** CLI commands support `--json` with stable exit codes, `folo describe --json` exposes the full
-  schema, and `folo mcp` gives Claude Code, Codex, Antigravity, or any MCP client 43 tools.
+  schema, and `folo mcp` gives Claude Code, Codex, Antigravity, or any MCP client 44 tools.
 - **Runs in the browser.** The same Rust detector compiles to WebAssembly on WebGPU or wasm CPU (~14 ms on WebGPU for
   `folo-n` at 640×640 in Chrome).
 
@@ -197,7 +197,7 @@ Desktop lives in its own cargo workspace so engine builds stay fast ([apps/deskt
 ## Use FOLO from an agent
 
 **MCP.** `folo mcp` is a [Model Context Protocol](https://modelcontextprotocol.io) server over stdio (MCP 2026-07-28 and
-2025-11-25) with 43 tools covering datasets, agent labeling, local and cloud training, evaluation, prediction, export,
+2025-11-25) with 44 tools covering datasets, agent labeling, local and cloud training, evaluation, prediction, export,
 and vision benchmarks — plus `folo://` resources and three prompts against `--data-dir` (default `~/.folo`).
 
 ```sh

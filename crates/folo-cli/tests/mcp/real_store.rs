@@ -705,3 +705,176 @@ fn folo2_end_to_end_embedded() {
 
     c.finish();
 }
+
+/// MCP `dataset_export`: exports registered datasets to COCO JSON with default and explicit `out`, split filtering,
+/// `reference` / `copy` image modes, `pretty` + `description`, refuses `--mock` with `not_supported`, and enforces
+/// `--confine` on `out`.
+#[test]
+fn dataset_export_coco_modes_and_guards() {
+    let dir = tmp_dir("mcp-dataset-export");
+    let home = dir.join("home");
+    let mut c = spawn(&["--data-dir", home.to_str().unwrap(), "--device", "cpu"], None);
+    init_old(&mut c);
+    let schemas = check_tools(&mut c, &ALL_TOOLS);
+
+    let ds = checked(
+        &mut c,
+        &schemas,
+        "create_synthetic_dataset",
+        json!({ "name": "export_src", "images": 8, "imgsz": 64, "classes": ["circle", "square"], "seed": 21 }),
+    );
+    let ds_id = ds["id"].as_str().unwrap().to_string();
+
+    // Default output under `<data_dir>/exports/` with copy mode.
+    let exp_default = checked(
+        &mut c,
+        &schemas,
+        "dataset_export",
+        json!({ "dataset_id": ds_id, "format": "coco", "pretty": true, "description": "mcp export" }),
+    );
+    assert_eq!(exp_default["format"], "coco");
+    assert_eq!(exp_default["images"], "copy");
+    assert_eq!(exp_default["categories"], 2);
+    assert_eq!(
+        exp_default["splits"]["train"].as_u64().unwrap() + exp_default["splits"]["val"].as_u64().unwrap(),
+        8,
+        "{exp_default}"
+    );
+    let default_out = std::path::PathBuf::from(exp_default["path"].as_str().unwrap());
+    assert!(default_out.join("annotations/instances_train.json").is_file(), "{exp_default}");
+    assert!(default_out.join("annotations/instances_val.json").is_file(), "{exp_default}");
+
+    // Explicit `out`, `splits: ["val"]`, and `images: "reference"`.
+    let custom_out = dir.join("custom_ref_export");
+    let exp_ref = checked(
+        &mut c,
+        &schemas,
+        "dataset_export",
+        json!({
+            "dataset_id": ds_id,
+            "out": custom_out.to_str().unwrap(),
+            "splits": ["val"],
+            "images": "reference"
+        }),
+    );
+    assert_eq!(exp_ref["images"], "reference");
+    assert_eq!(exp_ref["exported_splits"].as_array().unwrap().len(), 1, "{exp_ref}");
+    assert_eq!(exp_ref["exported_splits"][0]["split"], "val");
+    assert!(!custom_out.join("images").exists());
+    assert!(custom_out.join("annotations/instances_val.json").is_file());
+
+    // Non-empty target dir fails with `output_exists`.
+    c.tool_error(
+        "dataset_export",
+        json!({ "dataset_id": ds_id, "out": custom_out.to_str().unwrap() }),
+        "output_exists",
+    );
+
+    // Non-existent nested target inside the source dataset (relative, absolute, and `..` + differing case) is rejected.
+    let ds_path = std::path::PathBuf::from(ds["path"].as_str().unwrap());
+    let ds_folder = ds_path.file_name().unwrap().to_str().unwrap();
+    let nested_rel = format!("datasets/{ds_folder}/nested_inside_new");
+    c.tool_error("dataset_export", json!({ "dataset_id": ds_id, "out": nested_rel }), "invalid_arguments");
+    assert!(!ds_path.join("nested_inside_new").exists(), "overlapping export must not create nested folder");
+    let nested_dotdot = format!("exports/../datasets/{}/nested_dotdot_new", ds_folder.to_ascii_uppercase());
+    if cfg!(windows) {
+        c.tool_error(
+            "dataset_export",
+            json!({ "dataset_id": ds_id, "out": nested_dotdot }),
+            "invalid_arguments",
+        );
+        assert!(!ds_path.join("nested_dotdot_new").exists(), "dotdot overlap must not create nested folder");
+    } else {
+        let nested_dotdot_exact = format!("exports/../datasets/{ds_folder}/nested_dotdot_new");
+        c.tool_error(
+            "dataset_export",
+            json!({ "dataset_id": ds_id, "out": nested_dotdot_exact }),
+            "invalid_arguments",
+        );
+        assert!(!ds_path.join("nested_dotdot_new").exists(), "dotdot overlap must not create nested folder");
+    }
+    let nested_abs = ds_path.join("nested_abs_new");
+    c.tool_error(
+        "dataset_export",
+        json!({ "dataset_id": ds_id, "out": nested_abs.to_str().unwrap() }),
+        "invalid_arguments",
+    );
+    assert!(!nested_abs.exists(), "overlapping absolute export must not create nested folder");
+
+    // Failed default-`out` export (`splits: ["test"]` empty) cleans up its allocated folder under `exports/`.
+    let exports_before: Vec<_> = std::fs::read_dir(home.join("exports")).unwrap().collect();
+    c.tool_error("dataset_export", json!({ "dataset_id": ds_id, "splits": ["test"] }), "invalid_dataset");
+    let exports_after: Vec<_> = std::fs::read_dir(home.join("exports")).unwrap().collect();
+    assert_eq!(exports_before.len(), exports_after.len(), "failed default export must not leave empty dir");
+
+    // Default `out: None` refuses overlap when the registered dataset is rooted at `--data-dir` itself.
+    let rooted_home = dir.join("rooted_home");
+    let syn = folo_data::synthetic::SyntheticConfig {
+        images: 4,
+        classes: vec!["circle".into()],
+        imgsz: 64,
+        seed: 22,
+        vary_aspect: false,
+        val_fraction: 0.25,
+        ..Default::default()
+    };
+    folo_data::synthetic::write_yolo(&syn, &rooted_home, folo_data::ImageFormat::Png).unwrap();
+    let mut rooted_c = spawn(&["--data-dir", rooted_home.to_str().unwrap(), "--device", "cpu"], None);
+    init_old(&mut rooted_c);
+    let rooted = rooted_c.ok(
+        "register_dataset",
+        json!({ "name": "rooted_at_data_dir", "path": rooted_home.to_str().unwrap() }),
+    );
+    rooted_c.tool_error(
+        "dataset_export",
+        json!({ "dataset_id": rooted["id"].as_str().unwrap() }),
+        "invalid_arguments",
+    );
+    assert!(!rooted_home.join("exports").exists(), "overlapping default export must not create exports/");
+    rooted_c.finish();
+    c.finish();
+
+    // `--confine` refuses an `out` path escaping `--data-dir` with `path_outside_data_dir` and a write-specific hint.
+    let mut confined = spawn(&["--data-dir", home.to_str().unwrap(), "--confine", "--device", "cpu"], None);
+    init_old(&mut confined);
+    let outside = dir.join("escaped_export");
+    let conf_err = confined.tool_error(
+        "dataset_export",
+        json!({ "dataset_id": ds_id, "out": outside.to_str().unwrap() }),
+        "path_outside_data_dir",
+    );
+    let hint = conf_err["hint"].as_str().unwrap_or("");
+    assert!(hint.contains("output directory inside --data-dir"), "expected write-specific hint: {conf_err}");
+    assert!(!hint.contains("only reads"), "hint must not say read-only for an output path: {conf_err}");
+    assert!(!outside.exists(), "confined refusal must not create target directory");
+
+    // A confined `out` traversing through a missing directory outside `--data-dir` and back in via `..` writes
+    // only to the resolved in-bounds destination without creating the stray outside directory.
+    let home_name = home.file_name().unwrap().to_str().unwrap();
+    let stray_traversal = format!("../stray_outside/../{home_name}/confined_dotdot_out");
+    let confined_ok = checked(
+        &mut confined,
+        &schemas,
+        "dataset_export",
+        json!({ "dataset_id": ds_id, "out": stray_traversal, "images": "reference" }),
+    );
+    assert!(home.join("confined_dotdot_out/annotations/instances_train.json").is_file(), "{confined_ok}");
+    assert!(
+        !dir.join("stray_outside").exists(),
+        "stray intermediate dir outside data dir must not be created"
+    );
+    confined.finish();
+
+    // `--mock` (also with `--confine` and explicit `out`) refuses `dataset_export` without creating export dirs.
+    let mock_home = dir.join("mock_home");
+    let mut mock_c = spawn(&["--data-dir", mock_home.to_str().unwrap(), "--mock", "--confine"], None);
+    init_old(&mut mock_c);
+    let list = mock_c.ok("list_datasets", json!({}));
+    let mock_id = list["items"][0]["id"].as_str().unwrap().to_string();
+    mock_c.tool_error("dataset_export", json!({ "dataset_id": mock_id, "out": "sub" }), "not_supported");
+    assert!(
+        !mock_home.join("exports").exists() && !mock_home.join("sub").exists(),
+        "mock mode must not create exports/ or explicit out dir"
+    );
+    mock_c.finish();
+}

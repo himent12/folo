@@ -18,6 +18,7 @@ mod arguments;
 mod bench;
 mod cloud;
 mod curate;
+mod dataset_export;
 mod datasets;
 mod dispatch;
 mod info;
@@ -71,7 +72,7 @@ impl SchemaCache {
 /// Every tool, in the order of docs/MCP.md.
 pub static TOOLS: &[ToolDef] = &TOOL_TABLE;
 
-static TOOL_TABLE: [ToolDef; 43] = [
+static TOOL_TABLE: [ToolDef; 44] = [
     ToolDef {
         name: "folo_info",
         description: "FOLO version, compute devices (CPU, GPUs), data dir, read-only flag and the model scales \
@@ -159,6 +160,15 @@ static TOOL_TABLE: [ToolDef; 43] = [
         mutating: true,
         input: terse_input::<FilterDatasetArgs>,
         output: terse_output::<FilterDatasetResult>,
+        schemas: SchemaCache::new(),
+    },
+    ToolDef {
+        name: "dataset_export",
+        description: "Exports a registered dataset to spec-compliant COCO instances JSON with selectable splits \
+                      and copy, hard-link, or reference image handling.",
+        mutating: true,
+        input: terse_input::<DatasetExportArgs>,
+        output: terse_output::<DatasetExportResult>,
         schemas: SchemaCache::new(),
     },
     ToolDef {

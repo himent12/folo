@@ -1,5 +1,5 @@
-//! MCP schemas for validation error diagnostics (`val`) and dataset curation tools (`audit_dataset`,
-//! `merge_datasets`, `filter_dataset`).
+//! MCP schemas for validation error diagnostics (`val`) and dataset curation/export tools (`audit_dataset`,
+//! `merge_datasets`, `filter_dataset`, `dataset_export`).
 
 use std::collections::BTreeMap;
 
@@ -268,4 +268,77 @@ pub struct FilterDatasetResult {
     /// Class names from `include_classes` / `exclude_classes` that did not match any class in the source dataset.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unmatched_classes: Vec<String>,
+}
+
+/// Output format for `dataset_export`.
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum DatasetExportFormat {
+    /// COCO Detection JSON (`annotations/instances_<split>.json`).
+    #[default]
+    Coco,
+}
+
+/// How `dataset_export` handles image files in the exported COCO dataset.
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum DatasetExportImageMode {
+    /// Copy every image byte-for-byte into `images/<split>/`.
+    #[default]
+    Copy,
+    /// Hard-link images into `images/<split>/`, falling back to copying across filesystems.
+    Link,
+    /// Write annotations only, referencing source images via relative paths.
+    Reference,
+}
+
+/// `dataset_export` arguments.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DatasetExportArgs {
+    /// Registered source dataset id (`list_datasets`).
+    pub dataset_id: String,
+    /// Target export format (default `"coco"`).
+    #[serde(default)]
+    pub format: DatasetExportFormat,
+    /// Optional destination folder (defaults to `<data_dir>/exports/<dataset>-coco`). Must not exist or be empty.
+    #[serde(default)]
+    pub out: Option<String>,
+    /// Optional subset of splits to export (`train`, `val`, `test`; omitted exports all present splits).
+    #[serde(default)]
+    pub splits: Option<Vec<Split>>,
+    /// How images are materialized: `"copy"` (default), `"link"`, or `"reference"`.
+    #[serde(default)]
+    pub images: DatasetExportImageMode,
+    /// Pretty-print COCO JSON files (default false, compact).
+    #[serde(default)]
+    pub pretty: bool,
+    /// Optional description stored in the COCO `info.description` field.
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+/// One exported split in `DatasetExportResult`.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct DatasetExportSplitSummary {
+    pub split: Split,
+    pub annotation_file: String,
+    pub images: usize,
+    pub annotations: usize,
+    pub linked_images: usize,
+    pub copied_images: usize,
+    pub referenced_images: usize,
+}
+
+/// `dataset_export` result.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct DatasetExportResult {
+    pub dataset_id: String,
+    pub path: String,
+    pub format: DatasetExportFormat,
+    pub images: DatasetExportImageMode,
+    pub categories: usize,
+    pub splits: Splits,
+    pub boxes: usize,
+    pub exported_splits: Vec<DatasetExportSplitSummary>,
 }

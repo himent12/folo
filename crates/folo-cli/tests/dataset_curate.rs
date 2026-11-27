@@ -303,3 +303,134 @@ fn dataset_check_perceptual_detects_recompressed_split_leakage() {
     assert_eq!(code, 2);
     assert_eq!(err["error"]["code"], "usage");
 }
+
+#[test]
+fn dataset_export_coco_modes_splits_and_errors() {
+    let dir = TestDir::new("cli-dataset-export-coco");
+    let src = dir.join("src");
+    let (code, _, stderr) = folo(&[
+        "dataset",
+        "synth",
+        s(&src),
+        "--images",
+        "10",
+        "--classes",
+        "circle,square",
+        "--imgsz",
+        "64",
+        "--seed",
+        "13",
+        "--json",
+    ]);
+    assert_eq!(code, 0, "{stderr}");
+
+    // 1. Copy mode (default) with pretty JSON and description; round-trips through `dataset check` and `stats`.
+    let out_copy = dir.join("coco_copy");
+    let (code, rec, stderr) = folo_one(&[
+        "dataset",
+        "export",
+        s(&src),
+        "--out",
+        s(&out_copy),
+        "--format",
+        "coco",
+        "--pretty",
+        "--description",
+        "sprint 14 export",
+        "--json",
+    ]);
+    assert_eq!(code, 0, "{stderr}: {rec}");
+    assert_eq!(rec["from"], "yolo");
+    assert_eq!(rec["format"], "coco");
+    assert_eq!(rec["images"], "copy");
+    assert_eq!(rec["pretty"], true);
+    assert_eq!(rec["categories"], 2);
+    assert_eq!(
+        rec["splits"]["train"].as_u64().unwrap() + rec["splits"]["val"].as_u64().unwrap(),
+        10,
+        "{rec}"
+    );
+    assert!(rec["boxes"].as_u64().unwrap() > 0, "{rec}");
+    assert_eq!(rec["exported_splits"].as_array().unwrap().len(), 2, "{rec}");
+    let train_json_path = out_copy.join("annotations/instances_train.json");
+    let train_raw = std::fs::read_to_string(&train_json_path).unwrap();
+    assert!(train_raw.contains('\n'), "pretty JSON should contain newlines");
+    let train_json: serde_json::Value = serde_json::from_str(&train_raw).unwrap();
+    assert_eq!(train_json["info"]["description"], "sprint 14 export");
+    let (code, chk, stderr) = folo_one(&["dataset", "check", s(&out_copy), "--json"]);
+    assert_eq!(code, 0, "{stderr}: {chk}");
+    assert_eq!(chk["clean"], true);
+    assert_eq!(chk["format"], "coco");
+
+    // 2. Link mode with mixed `--split val --split test` (empty `test` split is skipped, `val` exported).
+    let out_link = dir.join("coco_link");
+    let (code, rec, stderr) = folo_one(&[
+        "dataset",
+        "export",
+        s(&src),
+        "--out",
+        s(&out_link),
+        "--images",
+        "link",
+        "--split",
+        "val",
+        "--split",
+        "test",
+        "--json",
+    ]);
+    assert_eq!(code, 0, "{stderr}: {rec}");
+    assert_eq!(rec["images"], "link");
+    let splits = rec["exported_splits"].as_array().unwrap();
+    assert_eq!(splits.len(), 1, "{rec}");
+    assert_eq!(splits[0]["split"], "val");
+    assert!(
+        splits[0]["linked_images"].as_u64().unwrap() + splits[0]["copied_images"].as_u64().unwrap()
+            == splits[0]["images"].as_u64().unwrap(),
+        "{rec}"
+    );
+    assert!(!out_link.join("annotations/instances_train.json").exists());
+    assert!(out_link.join("annotations/instances_val.json").is_file());
+
+    // 3. Reference mode writes annotations only without creating `images/`.
+    let out_ref = dir.join("coco_ref");
+    let (code, rec, stderr) =
+        folo_one(&["dataset", "export", s(&src), "--out", s(&out_ref), "--images", "reference", "--json"]);
+    assert_eq!(code, 0, "{stderr}: {rec}");
+    assert_eq!(rec["images"], "reference");
+    assert!(!out_ref.join("images").exists(), "reference mode must not copy images");
+    assert!(rec["exported_splits"][0]["referenced_images"].as_u64().unwrap() > 0, "{rec}");
+
+    // 4. Error cases: non-empty `--out` (`output_exists`, exit 1), `--out` inside input (`usage`, exit 2),
+    // and missing requested split (`invalid_dataset`, exit 1).
+    let (code, err, _) = folo_one(&["dataset", "export", s(&src), "--out", s(&out_copy), "--json"]);
+    assert_eq!(code, 1);
+    assert_eq!(err["error"]["code"], "output_exists");
+
+    let (code, err, _) = folo_one(&["dataset", "export", s(&src), "--out", s(&src.join("nested")), "--json"]);
+    assert_eq!(code, 2);
+    assert_eq!(err["error"]["code"], "usage");
+
+    let out_missing = dir.join("coco_missing_split");
+    let (code, err, _) =
+        folo_one(&["dataset", "export", s(&src), "--out", s(&out_missing), "--split", "test", "--json"]);
+    assert_eq!(code, 1);
+    assert_eq!(err["error"]["code"], "invalid_dataset");
+    assert!(!out_missing.join(".folo-unfinished").exists(), "failed export must not leave unfinished marker");
+
+    // A `--out` traversing through a missing intermediate directory inside `src` and back out via `..` writes
+    // only to the resolved destination without creating the stray intermediate directory inside `src`.
+    let stray_via_src = src.join("stray_missing").join("..").join("..").join("coco_via_dotdot");
+    let (code, rec, stderr) = folo_one(&[
+        "dataset",
+        "export",
+        s(&src),
+        "--out",
+        s(&stray_via_src),
+        "--images",
+        "reference",
+        "--json",
+    ]);
+    assert_eq!(code, 0, "{stderr}: {rec}");
+    assert!(!src.join("stray_missing").exists(), "stray intermediate dir inside source must not be created");
+    assert!(dir.join("coco_via_dotdot/annotations/instances_train.json").is_file());
+}

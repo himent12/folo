@@ -230,8 +230,9 @@ mod tests {
     /// field trips it.
     #[test]
     fn json_records_spell_paths_with_forward_slashes() {
-        // Not raw paths: a command's words, and a string `json::path` made a few lines above.
-        const FINE: [(&str, &str); 2] = [("describe.rs", "path"), ("stop.rs", "run_dir")];
+        // Not raw paths: a command's words, a string `json::path` made a few lines above, and a COCO annotation count.
+        const FINE: [(&str, &str); 3] =
+            [("describe.rs", "path"), ("stop.rs", "run_dir"), ("export.rs", "annotations")];
         let mut files = Vec::new();
         sources(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut files);
         let mut raw = Vec::new();

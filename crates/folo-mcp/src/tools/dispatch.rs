@@ -159,6 +159,7 @@ impl Inner {
             "audit_dataset" => self.audit_dataset(parse_args(args)?).await,
             "merge_datasets" => self.merge_datasets(parse_args(args)?).await,
             "filter_dataset" => self.filter_dataset(parse_args(args)?).await,
+            "dataset_export" => self.dataset_export(parse_args(args)?).await,
             "list_models" => self.list_models(parse_args(args)?).await,
             "train" => self.train(args).await,
             "run_status" => self.run_status(parse_args(args)?).await,
