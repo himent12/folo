@@ -632,10 +632,11 @@ mod tests {
         .to_rgba8();
         assert_ne!(cmp_cafe, cmp_q, "Unicode Compare caption 'café-model' must not degrade to 'caf?-model'");
 
-        // Embedded CR/LF in class labels and Compare captions must be normalized without panicking.
+        // Embedded CR/LF and Unicode line/paragraph separators (including mixed-direction U+2029)
+        // in class labels and Compare captions must be normalized without panicking.
         let nl_single = render_annotated_single_png(
             &base,
-            &mk("traffic\nlight\r\nextra"),
+            &mk("traffic\nlight\r\n\u{2028}\u{2029}إشارة"),
             true,
             true,
             &palette,
@@ -643,13 +644,15 @@ mod tests {
         )
         .unwrap();
         assert_eq!(image::load_from_memory(&nl_single).unwrap().to_rgba8().dimensions(), (220, 120));
-        let cap_nl_a =
-            ComparePaneCaption { title: "A · model\nline2".into(), meta: "1 det\r\n· 2.0 ms".into() };
-        let cap_nl_b = ComparePaneCaption { title: "B · model\rB".into(), meta: "0 dets".into() };
+        let cap_nl_a = ComparePaneCaption {
+            title: "A · model\nline2\u{2029}إشارة".into(),
+            meta: "1 det\r\n· 2.0 ms".into(),
+        };
+        let cap_nl_b = ComparePaneCaption { title: "B · model\rB\u{2028}C".into(), meta: "0 dets".into() };
         let nl_cmp = render_annotated_compare_png(
             &base,
             &cap_nl_a,
-            &mk("sign\nstop"),
+            &mk("sign\nstop\u{2029}إشارة"),
             &cap_nl_b,
             &[],
             true,
@@ -659,6 +662,27 @@ mod tests {
         )
         .unwrap();
         assert!(image::load_from_memory(&nl_cmp).unwrap().to_rgba8().width() >= 480);
+
+        #[cfg(any(not(windows), feature = "portable-text"))]
+        {
+            let portable_app = folo_ui::HeadlessApp::new(folo_ui::HeadlessOptions {
+                text: folo_ui::TextBackend::Portable,
+                ..Default::default()
+            });
+            let pts = portable_app.read(|cx| cx.text_system().clone());
+            let fonts = crate::FONTS.iter().map(|f| std::borrow::Cow::Borrowed(*f)).collect();
+            pts.add_fonts(fonts).expect("load bundled Geist fonts on portable backend");
+            let portable_png = render_annotated_single_png(
+                &base,
+                &mk("traffic\u{2029}إشارة\u{001E}end"),
+                true,
+                true,
+                &palette,
+                Some(&pts),
+            )
+            .unwrap();
+            assert_eq!(image::load_from_memory(&portable_png).unwrap().to_rgba8().dimensions(), (220, 120));
+        }
     }
 
     #[test]

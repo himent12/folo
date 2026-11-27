@@ -573,7 +573,7 @@ fn bench_filter_switch_at_bottom_keeps_scroll_offset_anchored() {
 
     // Open an inline preview that does NOT match `FalsePositives`, scroll to the bottom, and
     // activate `FalsePositives` (closing the preview): page_scroll must stay anchored without jumping.
-    let (eid, preview_scroll_before) = drive(&mut app, window, |this, w, cx| {
+    let eid = drive(&mut app, window, |this, w, cx| {
         this.bench.entry_image_filter = EntryImageFilter::All;
         let eid = match &this.route {
             Route::BenchEntry(_, e) => e.clone(),
@@ -597,9 +597,8 @@ fn bench_filter_switch_at_bottom_keeps_scroll_offset_anchored() {
         this.bench.selected_entry_image = Some((bid.into(), eid.clone(), non_fp_img));
         this.focus_key("eimg-filter-fp", w, cx);
         cx.notify();
-        (eid, 0.0f32)
+        eid
     });
-    let _ = preview_scroll_before;
     app.frame(window.into());
     let preview_scroll_before = drive(&mut app, window, |this, w, cx| {
         let max_y = this.page_scroll.max_offset().height;

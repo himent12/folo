@@ -77,10 +77,18 @@ pub(super) fn fill_rect_clipped(
     }
 }
 
-/// Normalizes CR/LF breaks into single spaces so `WindowTextSystem::shape_line`'s single-line
-/// contract is never violated by class or model names containing embedded newlines.
+/// Normalizes ASCII and Unicode line/paragraph breaks (CR, LF, VT, FF, FS/GS/RS, NEL, U+2028,
+/// U+2029) into single spaces so `WindowTextSystem::shape_line` always receives a single paragraph
+/// on every text backend (DirectWrite and cosmic-text).
 fn single_line_text(text: &str) -> Cow<'_, str> {
-    if !text.contains(['\n', '\r']) {
+    fn is_line_or_para_break(ch: char) -> bool {
+        matches!(
+            ch,
+            '\n' | '\r' | '\u{000B}' | '\u{000C}' | '\u{001C}'
+                ..='\u{001E}' | '\u{0085}' | '\u{2028}' | '\u{2029}'
+        )
+    }
+    if !text.chars().any(is_line_or_para_break) {
         return Cow::Borrowed(text);
     }
     let mut out = String::with_capacity(text.len());
@@ -95,6 +103,10 @@ fn single_line_text(text: &str) -> Cow<'_, str> {
                 if !prev_cr {
                     out.push(' ');
                 }
+                prev_cr = false;
+            }
+            c if is_line_or_para_break(c) => {
+                out.push(' ');
                 prev_cr = false;
             }
             other => {
