@@ -131,4 +131,18 @@ describe('ErrorState', () => {
     expect(r.target.querySelector('.hint')).toBeNull();
     r.done();
   });
+
+  it('renders a connection refusal with Retry and Connection settings, without synthetic code details', () => {
+    const r = render({
+      error: new ApiError(0, 'connect_refused', "This server needs a token (folo serve --token), which Studio can't send."),
+      title: 'Could not load the overview',
+      retry: () => {},
+    });
+    expect(r.text('.title')).toBe('Could not load the overview');
+    expect(r.text('.msg')).toContain('folo serve --token');
+    expect(r.target.querySelector('details.code')).toBeNull();
+    const labels = [...r.target.querySelectorAll('.acts button, .acts a')].map((el) => el.textContent?.trim());
+    expect(labels).toEqual(['Retry', 'Connection settings']);
+    r.done();
+  });
 });

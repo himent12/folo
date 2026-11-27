@@ -211,6 +211,20 @@ class Hub {
   set demoSlow(v: boolean) {
     this.#demoSlow.set(v);
   }
+  /**
+   * Connection-level error while `mode === 'connecting'` and the handshake has already failed or been refused (e.g.
+   * `folo serve --token`, another service, or nothing answering past `SLOW_CONNECT`). Null while a connect is still
+   * in its initial grace window or once connected.
+   */
+  #connectError = computed<ApiError | null>(() => {
+    if (this.#mode.get() !== 'connecting' || !this.#unreachable.get()) return null;
+    const refused = this.#refused.get();
+    if (refused) return new ApiError(0, 'connect_refused', refused);
+    return new ApiError(0, 'network', 'Cannot reach the FOLO server.', 'Is folo serve running? Check the server URL in Settings.');
+  });
+  get connectError(): ApiError | null {
+    return this.#connectError.get();
+  }
   /** Bumps each time the server answers again after an outage, or lets Studio in again: Resources in error or holding
    * data refetch. */
   get back(): number {
@@ -237,6 +251,8 @@ class Hub {
 
   #attempt = 0;
   #ctrl: AbortController | null = null;
+  /** The server target of the latest `connect()` call, so switching to a different server clears prior data at once. */
+  #target: string | null = null;
 
   /**
    * (Re)connects. A newer call supersedes an older one still waiting on its health check. Resolves once the user can
@@ -249,7 +265,14 @@ class Hub {
     this.#ctrl?.abort();
     const ctrl = new AbortController();
     this.#ctrl = ctrl;
+    const target = forcedMock ? 'mock' : this.serverUrl;
+    const prevApi = unshare(this.#api.peek());
+    const prevLive = prevApi instanceof HttpApi ? prevApi.base || (typeof location === 'undefined' ? '' : location.origin) : 'mock';
+    const prevTarget = this.#target ?? (this.#mode.peek() === 'connecting' ? null : prevLive);
+    const switched = prevTarget !== null && prevTarget !== target;
+    this.#target = target;
     this.mode = 'connecting';
+    if (switched) this.epoch++;
     this.#unreachable.set(false);
     this.#refused.set(null);
     this.#demoError.set(null);

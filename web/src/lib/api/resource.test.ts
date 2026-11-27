@@ -216,4 +216,36 @@ describe('Resource', () => {
       process.off('unhandledRejection', onUnhandled);
     }
   });
+
+  it('clears previous server data on epoch change while connecting, surfaces connectError, and delegates refresh() to hub.connect()', async () => {
+    let r!: Resource<string>;
+    const stop = root(() => {
+      r = new Resource(() => Promise.resolve('server A'));
+    });
+    flushSync();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(r.data).toBe('server A');
+
+    // Switching to another server that refuses access (`folo serve --token`): epoch bumps while mode is connecting.
+    const refused = new Error('token required');
+    const errSpy = vi.spyOn(hub, 'connectError', 'get').mockReturnValue(refused as never);
+    const connectSpy = vi.spyOn(hub, 'connect').mockResolvedValue(undefined);
+    try {
+      hub.mode = 'connecting';
+      hub.epoch++;
+      flushSync();
+      expect(r.data).toBeUndefined();
+      expect(r.loading).toBe(false);
+      expect(r.error).toBe(refused);
+
+      // Clicking Retry while still connecting calls hub.connect() instead of querying the previous server's Api.
+      await r.refresh();
+      expect(connectSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      errSpy.mockRestore();
+      connectSpy.mockRestore();
+      hub.mode = 'mock';
+      stop();
+    }
+  });
 });

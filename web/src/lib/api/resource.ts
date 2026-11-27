@@ -125,6 +125,8 @@ export class Resource<T> {
   #seq = 0;
   /** The hub epoch of the last fetch (see above). */
   #epoch: number | null = null;
+  /** True after this Resource has started its first real fetch (`startFrom` only applies once). */
+  #started = false;
   /** The read this Resource is loading its data with (none during a quiet refresh): what `startFrom` can wait on. */
   #loadingRead: Promise<T> | null = null;
   /** The fetch that is waiting on another Resource's read (`startFrom`), by its controller. */
@@ -137,18 +139,38 @@ export class Resource<T> {
   constructor(fetcher: (signal: AbortSignal) => Promise<T>, opts: ResourceOptions<T> = {}) {
     this.#fetcher = fetcher;
     effect(() => {
-      if (hub.mode === 'connecting') return;
       const epoch = hub.epoch;
-      const first = this.#epoch === null;
-      if (epoch !== this.#epoch) {
-        this.#epoch = epoch;
+      if (this.#epoch !== null && epoch !== this.#epoch) {
+        this.#epoch = null;
         this.#invalidated = false;
         untrack(() => {
           this.data = undefined;
+          this.error = undefined;
           this.stale = undefined;
           this.updated = null;
+          this.loading = true;
         });
       }
+      if (hub.mode === 'connecting') {
+        // Once the connection attempt has settled as unreachable or refused (e.g. `folo serve --token`), exit loading
+        // so screens without data show a recovery error instead of pulsing skeletons indefinitely.
+        const err = hub.connectError;
+        untrack(() => {
+          if (this.data === undefined) {
+            if (err !== null) {
+              this.error = err;
+              this.loading = false;
+            } else {
+              this.error = undefined;
+              this.loading = true;
+            }
+          }
+        });
+        return;
+      }
+      const first = !this.#started;
+      this.#started = true;
+      this.#epoch = epoch;
       const ctrl = new AbortController();
       // Reactive reads inside the fetcher (before its first await) are tracked by this effect; a synchronous throw
       // settles as a regular fetch error instead of crashing the effect.
@@ -214,6 +236,7 @@ export class Resource<T> {
   /** Refetch, keeping the current data visible (with no data yet, a Retry: back to loading, then the outcome). */
   refresh(): Promise<void> {
     if (this.#disposed) return Promise.resolve();
+    if (hub.mode === 'connecting') return hub.connect();
     const ctrl = new AbortController();
     return untrack(() => this.#settle(this.#ask(ctrl.signal), ctrl, true));
   }

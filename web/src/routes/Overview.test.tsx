@@ -9,6 +9,7 @@ import { flush } from 'fw';
 import { render } from '../../framework/testing';
 import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 import { ApiError } from '$lib/api/client';
+import { TOKEN_WALL } from '$lib/api/handshake';
 import { hub } from '$lib/api/index';
 import { MockApi } from '$lib/api/mock';
 import { deviceName } from '$lib/format';
@@ -594,6 +595,57 @@ describe('Overview', () => {
     await vi.waitFor(() => {
       flush();
       expect(document.activeElement).toBe(target.querySelector('h1[data-route-focus]'));
+    });
+  });
+
+  it('exits loading and shows the token refusal error with Retry and Connection settings on a cold-loaded --token server (playtest R17)', async () => {
+    vi.useFakeTimers();
+    let needsToken = true;
+    const HEALTH = { status: 'ok', version: '0.1.0', api: 'v1', mock: false };
+    vi.stubGlobal('fetch', async (url: string, init?: RequestInit) => {
+      if (url.endsWith('/api/health')) return Response.json(HEALTH);
+      if (needsToken) return Response.json({ error: { code: 'unauthorized', message: 'this server needs a token', hint: null } }, { status: 401 });
+      if (init?.method === 'HEAD') return new Response(null, { status: 200 });
+      if (url.endsWith('/api/runs')) return Response.json({ runs: [] });
+      if (url.endsWith('/api/models')) return Response.json({ models: [] });
+      if (url.endsWith('/api/datasets')) return Response.json({ datasets: [] });
+      if (url.endsWith('/api/system')) return Response.json({ version: '0.1.0', cpu: { name: 'CPU', cores: 4 }, gpus: [], memory_bytes: 0, features: [] });
+      return Response.json({});
+    });
+    onTestFinished(() => {
+      vi.unstubAllGlobals();
+      vi.useRealTimers();
+      hub.mode = 'mock';
+    });
+
+    router.route = parse('#/');
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    const connecting = hub.connect();
+    c = render(() => <Overview />, target);
+    flush();
+
+    await connecting;
+    flush();
+    expect(hub.mode).toBe('connecting');
+    expect(hub.refused).toBe(TOKEN_WALL);
+    // Must exit skeletons immediately and show the single page-level recovery block instead of loading placeholders.
+    expect(target.querySelector('.live .err')).not.toBeNull();
+    expect(target.querySelector('#recent-runs')).toBeNull();
+    expect(target.querySelector('#best-models')).toBeNull();
+    expect(target.querySelector('.live .err .msg')?.textContent).toContain('folo serve --token');
+    expect(target.querySelector('.page .facts')?.textContent).toBe('Not connected');
+    const actions = [...target.querySelectorAll('.live .err .acts button, .live .err .acts a')].map((el) => el.textContent?.trim());
+    expect(actions).toEqual(['Retry', 'Connection settings']);
+
+    // Once the server drops --token, clicking Retry reconnects and loads Overview.
+    needsToken = false;
+    target.querySelector<HTMLButtonElement>('.live .err .acts button')!.click();
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.waitFor(() => {
+      flush();
+      expect(hub.mode).toBe('live');
+      expect(target.querySelector('.live .err')).toBeNull();
     });
   });
 });

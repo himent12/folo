@@ -80,6 +80,10 @@ export default function Overview() {
   // Published weights (`folo weights pull`, Desktop's download) are not the user's work: day one still shows the way in.
   const fresh = computed(() => noDatasets.get() && runList.get()?.length === 0 && !!models.data?.every((m) => m.source === 'published'));
   function retryAll() {
+    if (hub.mode === 'connecting') {
+      void hub.connect();
+      return;
+    }
     void runs.refresh();
     void models.refresh();
     void datasets.refresh();

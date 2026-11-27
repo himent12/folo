@@ -98,12 +98,14 @@ export interface ErrorStateProps {
 export default function ErrorState(props: ErrorStateProps) {
   // Connection failures look the same everywhere: what was tried, and both ways out (retry, settings).
   const offline = computed(() => isOffline(props.error));
+  const connectRefused = computed(() => props.error instanceof ApiError && props.error.code === 'connect_refused');
   const gone = computed(() => goneOf(props.error));
   const heading = computed(() => {
     const g = gone.get();
     if (offline.get()) return "Can't reach the FOLO server";
     if (g) return `${sentence(g.noun).replace(/\.$/, '')} not found`;
     if (props.title) return props.title;
+    if (connectRefused.get()) return 'Not connected to the FOLO server';
     // No title from the screen: what the request was for, else what kind of failure it was (never "this").
     const what = props.error instanceof ApiError ? readOf(props.error.request) : null;
     if (what) return `Could not load ${what}`;
@@ -133,7 +135,7 @@ export default function ErrorState(props: ErrorStateProps) {
     return h ? sentence(h) : undefined;
   });
   const code = computed(() =>
-    props.error instanceof ApiError ? `${props.error.code}${props.error.status ? ` · HTTP ${props.error.status}` : ''}` : undefined,
+    props.error instanceof ApiError && !connectRefused.get() ? `${props.error.code}${props.error.status ? ` · HTTP ${props.error.status}` : ''}` : undefined,
   );
   const request = computed(() => (props.error instanceof ApiError ? props.error.request : undefined));
   const detail = computed(() => (oom.get() ? oomDetail(raw.get()) : null));
@@ -183,7 +185,7 @@ export default function ErrorState(props: ErrorStateProps) {
             height, centred on each other (Connection settings a ghost button beside Retry, never a text link off its
             baseline); on phones the one remedy layout (ui/Button's .cta-stack), each a full-width 44 px button, the
             primary first. */}
-        {retry.get() || offline.get() || props.actions || list.get() ? (
+        {retry.get() || offline.get() || connectRefused.get() || props.actions || list.get() ? (
           <div class="acts cta-stack">
             {props.actions}
             {list.get() ? (
@@ -196,7 +198,7 @@ export default function ErrorState(props: ErrorStateProps) {
                 Retry
               </Button>
             ) : null}
-            {offline.get() ? (
+            {offline.get() || connectRefused.get() ? (
               <Button size="sm" variant="ghost" icon={Settings} href={href('/settings')}>
                 Connection settings
               </Button>
