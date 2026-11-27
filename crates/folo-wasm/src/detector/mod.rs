@@ -21,7 +21,7 @@ mod tiled;
 mod tta;
 
 use std::cell::RefCell;
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::future::Future;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -36,18 +36,21 @@ use folo_gpu::GpuContext;
 use folo_nn::io::{ModelFile, Purpose};
 use folo_vision::boxes::Xyxy;
 use folo_vision::model::HeadMode;
+use folo_vision::model::quant;
 use folo_vision::model::v2::fuse_cls_iou_scores;
-use folo_vision::nms::{Candidate, Detection, NmsConfig, nms_candidates, topk_candidates};
+use folo_vision::nms::{Candidate, Detection, NmsConfig, nms_candidates, postprocess, topk_candidates};
 use folo_vision::{
-    Detector as VisionDetector, DetectorOutput, HeadOutput, Precision, PredictConfig, Predictor, Timing,
+    Detector as VisionDetector, DetectorOutput, HeadOutput, Precision as VisionPrecision, PredictConfig,
+    Predictor, Timing,
 };
 
 use crate::simd::{RgbaScratch, letterbox_rgba_planar_f32_with_scratch, rgba_to_rgb};
 
 pub use options::{
-    Backend, BackendChoice, DetectOptions, DetectResult, DetectorInfo, LoadOptions, TileDetectOptions,
-    TtaDetectOptions,
+    Backend, BackendChoice, DetectOptions, DetectResult, DetectorInfo, LoadOptions, Precision,
+    TileDetectOptions, TtaDetectOptions,
 };
+pub(crate) use options::{nms_config, parse_class_id_key};
 pub use tiled::MAX_BROWSER_TILES;
 
 /// `u8` pixel → network input (`folo_vision::predict::INV_255`).
@@ -105,6 +108,7 @@ pub struct Detector {
     gpu: Option<GpuContext>,
     model_id: String,
     fallback: Option<String>,
+    precision_fallback: Option<String>,
 }
 
 pub(crate) fn err(e: impl std::fmt::Display) -> String {
@@ -181,25 +185,80 @@ impl Drop for PooledRgb<'_> {
 }
 
 impl Detector {
-    /// Parse `bytes` (a `.folo` weights file, export or checkpoint; EMA weights when present) and place the
-    /// model on the chosen backend.
+    /// Parse `bytes` (a `.folo` weights file, export or checkpoint; EMA weights when present; including quantized
+    /// `folo.quant` int8 checkpoints) and place the model on the chosen backend.
     pub async fn load(bytes: Vec<u8>, opts: LoadOptions) -> Result<Self, String> {
         let file = ModelFile::from_bytes(bytes).map_err(err)?;
         let imgsz = opts.imgsz.unwrap_or(file.metadata().imgsz);
         validate_imgsz(imgsz)?;
         let cfg = PredictConfig { imgsz, ..PredictConfig::default() };
         let model_id = opts.model_id.unwrap_or_default();
+        let has_quant = file.metadata().extra.contains_key(quant::META_KEY);
+
         let mut fallback = None;
         if opts.backend != BackendChoice::Cpu {
-            match Self::load_gpu(&file, &cfg, &model_id, opts.precision).await {
-                Ok(d) => return Ok(d),
-                Err(e) if opts.backend == BackendChoice::Auto => fallback = Some(e),
-                Err(e) => return Err(format!("WebGPU backend unavailable: {e}")),
+            if opts.precision == Some(Precision::Int8) && opts.backend == BackendChoice::Auto {
+                // Explicit `precision: "int8"` on `backend: "auto"` targets the CPU directly without spinning
+                // up WebGPU.
+                fallback = Some("int8 inference runs on the CPU".into());
+            } else {
+                let (gpu_prec, gpu_prec_fallback) = match opts.precision {
+                    Some(Precision::F16) => (VisionPrecision::F16, None),
+                    Some(Precision::Int8) => (
+                        VisionPrecision::F32,
+                        Some("int8 inference runs on the CPU; running in f32 on WebGPU".into()),
+                    ),
+                    Some(Precision::F32) | None => (VisionPrecision::F32, None),
+                };
+                match Self::load_gpu(&file, &cfg, &model_id, gpu_prec, gpu_prec_fallback).await {
+                    Ok(d) => return Ok(d),
+                    Err(e) if opts.backend == BackendChoice::Auto => fallback = Some(e),
+                    Err(e) => return Err(format!("WebGPU backend unavailable: {e}")),
+                }
             }
         }
-        let predictor =
-            Predictor::from_detector_with_precision(cpu_model(&file)?, cfg.clone(), opts.precision)
+
+        let (predictor, precision_fallback) = match opts.precision {
+            Some(Precision::Int8) => {
+                let model = VisionDetector::from_file_int8(&file).map_err(err)?;
+                let predictor = Predictor::from_detector(model, cfg.clone()).map_err(err)?;
+                (predictor, None)
+            }
+            None if has_quant => match VisionDetector::from_file_int8(&file) {
+                Ok(model) => {
+                    let predictor = Predictor::from_detector(model, cfg.clone()).map_err(err)?;
+                    (predictor, None)
+                }
+                Err(e) => {
+                    let predictor = Predictor::from_detector_with_precision(
+                        cpu_model(&file)?,
+                        cfg.clone(),
+                        VisionPrecision::F32,
+                    )
+                    .map_err(err)?;
+                    (predictor, Some(format!("int8 calibration unavailable ({e}); running in f32")))
+                }
+            },
+            Some(Precision::F16) => {
+                let predictor = Predictor::from_detector_with_precision(
+                    cpu_model(&file)?,
+                    cfg.clone(),
+                    VisionPrecision::F16,
+                )
                 .map_err(err)?;
+                (predictor, None)
+            }
+            Some(Precision::F32) | None => {
+                let predictor = Predictor::from_detector_with_precision(
+                    cpu_model(&file)?,
+                    cfg.clone(),
+                    VisionPrecision::F32,
+                )
+                .map_err(err)?;
+                (predictor, None)
+            }
+        };
+
         Ok(Detector {
             predictor: RefCell::new(predictor),
             base_cfg: cfg,
@@ -210,6 +269,7 @@ impl Detector {
             gpu: None,
             model_id,
             fallback,
+            precision_fallback,
         })
     }
 
@@ -217,7 +277,8 @@ impl Detector {
         file: &ModelFile,
         cfg: &PredictConfig,
         model_id: &str,
-        precision: Precision,
+        precision: VisionPrecision,
+        precision_fallback: Option<String>,
     ) -> Result<Self, String> {
         let device = folo_gpu::init_async().await.map_err(err)?;
         let ctx = GpuContext::shared().map_err(err)?;
@@ -235,6 +296,7 @@ impl Detector {
             gpu: Some(ctx),
             model_id: model_id.to_string(),
             fallback: None,
+            precision_fallback,
         };
         // One pass on a small gray image, letterboxed to the configured size like any input, compiles the
         // kernels a real call needs (so the first `detect` is fast) and surfaces shader or device errors now,
@@ -278,13 +340,21 @@ impl Detector {
     pub fn info(&self) -> DetectorInfo {
         let p = self.predictor.borrow();
         let det = p.detector();
+        let precision = if det.int8().is_some() {
+            Precision::Int8
+        } else if p.precision() == VisionPrecision::F16 {
+            Precision::F16
+        } else {
+            Precision::F32
+        };
+        let precision_fallback = self.precision_fallback.clone().or_else(|| p.fallback().map(str::to_string));
         DetectorInfo {
             backend: self.backend,
             device: p.device().to_string(),
             adapter: self.gpu.as_ref().map(|g| g.summary().name.clone()).filter(|n| !n.is_empty()),
             fallback: self.fallback.clone(),
-            precision: p.precision(),
-            precision_fallback: p.fallback().map(str::to_string),
+            precision,
+            precision_fallback,
             simd128: folo_core::cpu::gemm::uses_simd128(),
             // The wasm build has no threads (rayon runs on the calling thread there).
             threads: if cfg!(target_arch = "wasm32") {
@@ -314,9 +384,31 @@ impl Detector {
     ) -> Result<DetectResult, String> {
         let t0 = Instant::now();
         validate_rgba(rgba, width, height)?;
-        let cfg = self.predict_config(opts.conf, opts.iou, opts.max_det, self.base_cfg.imgsz)?;
-        let nms = nms_config(&cfg);
+        let (cfg, nms) = self.build_predict_and_nms(
+            opts.conf,
+            opts.iou,
+            opts.max_det,
+            opts.per_class_conf,
+            opts.conf_inclusive,
+            self.base_cfg.imgsz,
+        )?;
         self.detect_single_with_cfg(rgba, width, height, &cfg, &nms, t0).await
+    }
+
+    /// Build and validate a per-call [`PredictConfig`] and [`NmsConfig`] (including `per_class_conf` and
+    /// `conf_inclusive`) from [`Detector::base_cfg`].
+    pub(crate) fn build_predict_and_nms(
+        &self,
+        conf: f32,
+        iou: f32,
+        max_det: usize,
+        per_class_conf: Option<BTreeMap<u32, f32>>,
+        conf_inclusive: bool,
+        imgsz: u32,
+    ) -> Result<(PredictConfig, NmsConfig), String> {
+        let cfg = self.predict_config(conf, iou, max_det, imgsz)?;
+        let nms = nms_config(&cfg, per_class_conf, conf_inclusive)?;
+        Ok((cfg, nms))
     }
 
     /// Build and validate a per-call [`PredictConfig`] from [`Detector::base_cfg`].
@@ -420,6 +512,15 @@ impl Detector {
         let p = self.predictor.borrow();
         let det = p.detector();
         let (raw_dets, inf, post) = if let Some(model) = det.as_v1()
+            && model.candidates_first_applies(Device::Cpu, nms)
+        {
+            let t1 = Instant::now();
+            let cands = model.predict_candidates(&input, nms).map_err(err)?;
+            let inf = ms(t1);
+            let t2 = Instant::now();
+            let dets = model.finish_candidates(&cands[0], nms);
+            (dets, inf, ms(t2))
+        } else if let Some(model) = det.as_v2()
             && model.candidates_first_applies(Device::Cpu, nms)
         {
             let t1 = Instant::now();
@@ -570,9 +671,11 @@ impl Detector {
                         fuse_cls_iou_scores(scores, iou_img, nc, alpha);
                     }
                 }
-                let mut p = self.predictor.borrow_mut();
-                p.set_config(cfg.clone()).map_err(BatchError::from_vision)?;
-                (p.finish(&batch, decoded, nc), inf, t2)
+                let p = self.predictor.borrow();
+                let mode = p.detector().head_mode();
+                let raw_dets: Vec<Vec<Detection>> =
+                    decoded.into_iter().map(|(b, sc)| postprocess(&b, &sc, nc, nms, mode)).collect();
+                (p.finish_detections(&batch, raw_dets), inf, t2)
             }
         };
 
@@ -663,19 +766,6 @@ where
         }
     }
     Ok((all, Timing::new(pre, inf, post)))
-}
-
-/// Converts a [`PredictConfig`] into its matching [`NmsConfig`].
-pub(crate) fn nms_config(cfg: &PredictConfig) -> NmsConfig {
-    NmsConfig {
-        conf: cfg.conf,
-        iou: cfg.iou,
-        max_det: cfg.max_det,
-        fusion: cfg.fusion,
-        fusion_iou: cfg.fusion_iou,
-        score: cfg.score,
-        ..NmsConfig::default()
-    }
 }
 
 /// Whether a `folo_core::Error` from `wgpu` indicates an out-of-memory or device buffer-limit failure

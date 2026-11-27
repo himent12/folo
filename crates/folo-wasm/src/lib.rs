@@ -30,7 +30,7 @@ use wasm_bindgen::prelude::*;
 
 pub use detector::{
     Backend, BackendChoice, DetectOptions, DetectResult, Detector, DetectorInfo, LoadOptions,
-    MAX_BROWSER_TILES, TileDetectOptions, TtaDetectOptions,
+    MAX_BROWSER_TILES, Precision, TileDetectOptions, TtaDetectOptions,
 };
 use js_util::{
     byte_view, bytes_of, js_err, object_dim, parse_dim, parse_options, parse_track_boxes,
@@ -50,8 +50,12 @@ export interface FoloLoadOptions {
   modelId?: string;
   /** Letterbox size (a multiple of 32); defaults to the file's training size. */
   imgsz?: number;
-  /** "f32" (the default) or "f16": half precision on WebGPU with shader-f16, f32 elsewhere (see info()). */
-  precision?: "f32" | "f16";
+  /**
+   * "f32", "f16", or "int8" (omitted: "f32" on WebGPU, or "int8" on the CPU when the `.folo` file carries
+   * `folo.quant` calibration metadata). "f16" uses half precision on WebGPU with shader-f16 (f32 elsewhere);
+   * "int8" runs the quantized CPU backend (f32 on explicit WebGPU, see info()).
+   */
+  precision?: "f32" | "f16" | "int8";
 }
 
 /** Options of `FoloDetector.detect`, with /api/predict's defaults. */
@@ -59,6 +63,16 @@ export interface FoloDetectOptions {
   conf?: number;
   iou?: number;
   maxDet?: number;
+  /**
+   * Optional per-class confidence thresholds (`class_id -> conf`, finite values in `[0, 1]`).
+   * Classes present in this map use their mapped threshold instead of `conf`; other classes fall back to `conf`.
+   */
+  perClassConf?: Record<number, number>;
+  /**
+   * Use inclusive (`score >= conf`) thresholding matching `folo val`'s calibrated F1 operating points
+   * (default `false`: strict `score > conf`).
+   */
+  confInclusive?: boolean;
 }
 
 /** Overlap metric used when merging cross-tile detections. */
@@ -141,8 +155,8 @@ export interface FoloDetectorInfo {
   adapter: string | null;
   fallback: string | null;
   /** The precision the model runs in. */
-  precision: "f32" | "f16";
-  /** Why a requested "f16" runs in f32 (no WebGPU, or no shader-f16), else null. */
+  precision: "f32" | "f16" | "int8";
+  /** Why a requested or embedded precision runs in f32 (e.g. f16 without shader-f16, or int8 on WebGPU), else null. */
   precisionFallback: string | null;
   simd128: boolean;
   threads: number;
