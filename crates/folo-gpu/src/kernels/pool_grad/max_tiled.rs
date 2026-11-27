@@ -66,7 +66,6 @@ fn horiz_vi_vec4(left: vec4<f32>, mid: vec4<f32>, right: vec4<f32>, b: i32, hl: 
     let a7 = VI(right.y, select(-1, b + 5, hr));
     let m23 = pick_vi(a2, a3);
     let m34 = pick_vi(a3, a4);
-    let m45 = pick_vi(a4, a5);
     let m234 = pick_vi(m23, a4);
     let m345 = pick_vi(m34, a5);
     let r0 = pick_vi(pick_vi(a0, a1), m234);

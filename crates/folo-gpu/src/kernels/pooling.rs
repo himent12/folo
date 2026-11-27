@@ -144,7 +144,6 @@ fn horiz_max_vec4(left: vec4<f32>, mid: vec4<f32>, right: vec4<f32>) -> vec4<f32
 fn horiz_max_vec4(left: vec4<f32>, mid: vec4<f32>, right: vec4<f32>) -> vec4<f32> {
     let m23 = max_nan(mid.x, mid.y);
     let m34 = max_nan(mid.y, mid.z);
-    let m45 = max_nan(mid.z, mid.w);
     let m234 = max_nan(m23, mid.z);
     let m345 = max_nan(m34, mid.w);
     return vec4<f32>(

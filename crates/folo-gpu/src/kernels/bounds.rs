@@ -277,7 +277,7 @@ mod tests {
             ("cast_u8_vec4", Spec::new().bool("TO_F16", true)),
             ("u8_to_float_scale", Spec::new().bool("VEC4", true).f16(true)),
             ("rgb8_hwc_to_chw_norm", Spec::new().bool("VEC4", true)),
-            ("letterbox", Spec::new().bool("PREFILTER", false)),
+            ("letterbox", Spec::new().bool("PREFILTER", false).bool("PACKED_SRC", false).bool("VEC4", false)),
             ("tal_topk", Spec::new().u32("K", 64).u32("WG", 16)),
             ("det_box", Spec::new().u32("R", 16).u32("K", 10)),
             ("det_dfl_stats", Spec::new().f16(true).u32("R", 16).bool("MOMENTS", true).bool("ENT", true)),

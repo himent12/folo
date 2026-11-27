@@ -8,6 +8,7 @@ use crate::DType;
 use crate::context::GpuContext;
 use crate::error::{GpuError, Result, shape_err};
 use crate::kernels::gemm::check_dtype;
+use crate::memory_budget::{AllocationKind, MemoryBudget};
 use crate::pipeline::{Access, KernelDef, Params, Source, Spec};
 use crate::pool::GpuBuffer;
 
@@ -317,6 +318,32 @@ pub struct LetterboxDesc {
     pub taps: usize,
 }
 
+/// Returns `Some(pw * ph)` when [`letterbox_rgb8`] should run the two-pass packed-`u32` box prefilter:
+/// - `fx * fy >= 4` so avoiding 4-corner recomputation outweighs the extra dispatch and intermediate traffic,
+/// - `4 * rw * rh > pw * ph` so Pass 1 evaluates strictly fewer cells than 4 corners per resized pixel, and
+/// - the compact `pw * ph * 4` scratch buffer fits within per-buffer limits and immediately available VRAM
+///   headroom (`fits && !needs_reclaim`), falling back to the 1-pass shader under GPU memory pressure.
+fn letterbox_two_pass_cells(
+    budget: &MemoryBudget,
+    fx: usize,
+    fy: usize,
+    pw: usize,
+    ph: usize,
+    rw: usize,
+    rh: usize,
+) -> Option<usize> {
+    if (fx == 1 && fy == 1) || fx.saturating_mul(fy) < 4 {
+        return None;
+    }
+    let cells = pw.checked_mul(ph)?;
+    if cells > u32::MAX as usize || rw.saturating_mul(rh).saturating_mul(4) <= cells {
+        return None;
+    }
+    let bytes = (cells as u64).checked_mul(4)?;
+    let est = budget.estimate_headroom(bytes, AllocationKind::Storage);
+    (est.fits && !est.needs_reclaim).then_some(cells)
+}
+
 /// Letterbox one image (see [`LetterboxDesc`]) into `y` of `dtype`. In f32 bit-exact with folo-data's CPU
 /// resize followed by `value as f32 * scale`; in f16 converted from that f32 value (within 1 binary16 ULP under
 /// WGSL's floating-point conversion rules).
@@ -372,27 +399,25 @@ pub fn letterbox_rgb8(
     let prefilter = fx > 1 || fy > 1;
     let pw = sw.div_ceil(fx);
     let ph = sh.div_ceil(fy);
-    let pn = pw.checked_mul(ph);
-    // Run the 2-pass box prefilter when blocks have >= 4 source pixels (so avoiding 4-corner recomputation
-    // outweighs the extra dispatch and packed intermediate traffic), when 2-pass computes fewer cells than
-    // 4 * rw * rh, and when the compact packed-u32 intermediate fits within the storage binding limit.
-    let use_two_pass = prefilter
-        && fx.saturating_mul(fy) >= 4
-        && pn.is_some_and(|cells| {
-            cells <= u32::MAX as usize
-                && (cells as u64).saturating_mul(4) <= ctx.caps().max_storage_buffer_binding_size
-                && rw.saturating_mul(rh).saturating_mul(4) > cells
-        });
-    let pre_buf = if use_two_pass {
-        let cells = pn.expect("checked above");
-        let buf = ctx.alloc((cells as u64) * 4)?;
-        let kp = ctx.kernel(&LETTERBOX_PREFILTER, Spec::new())?;
-        let pp = Params::new().uz(cells)?.uz(pw)?.uz(sw)?.uz(sh)?.uz(fx)?.uz(fy)?.uz(d.src_offset)?;
-        ctx.dispatch(&kp, &[src, buf.raw()], &pp, ctx.grid_1d(cells as u64, 256)?)?;
-        Some(buf)
+    let pre_cells = if prefilter && fx.saturating_mul(fy) >= 4 {
+        letterbox_two_pass_cells(&ctx.memory_budget(), fx, fy, pw, ph, rw, rh)
     } else {
         None
     };
+    let pre_buf = if let Some(cells) = pre_cells {
+        match ctx.alloc((cells as u64) * 4) {
+            Ok(buf) => {
+                let kp = ctx.kernel(&LETTERBOX_PREFILTER, Spec::new())?;
+                let pp = Params::new().uz(cells)?.uz(pw)?.uz(sw)?.uz(sh)?.uz(fx)?.uz(fy)?.uz(d.src_offset)?;
+                ctx.dispatch(&kp, &[src, buf.raw()], &pp, ctx.grid_1d(cells as u64, 256)?)?;
+                Some(buf)
+            }
+            Err(_) => None,
+        }
+    } else {
+        None
+    };
+    let use_two_pass = pre_buf.is_some();
     // Use 4-pixel-per-thread coalesced `vec4<T>` stores when reading aligned packed-u32 prefiltered pixels or
     // same-size non-prefiltered frames (low register pressure); fractional resizes on raw RGB bytes keep 1
     // pixel per thread so unaligned `rgb_at` loads maximize occupancy.
@@ -631,7 +656,9 @@ pub(crate) static DEFS: &[&KernelDef] =
 
 #[cfg(test)]
 mod tests {
-    use super::prefilter_fits;
+    use super::{letterbox_two_pass_cells, prefilter_fits};
+    use crate::memory_budget::{MemoryBudget, MemoryLimits, MemoryUsage};
+    use crate::pool::PoolStats;
 
     #[test]
     fn prefilter_guard_counts_the_rounding_term() {
@@ -641,5 +668,57 @@ mod tests {
         assert!((4101u64 * 4101 * 255) <= u32::MAX as u64);
         assert!(!prefilter_fits(4101, 4101));
         assert!(!prefilter_fits(usize::MAX, 2));
+    }
+
+    #[test]
+    fn two_pass_letterbox_falls_back_under_memory_pressure_and_limits() {
+        let limits = MemoryLimits {
+            max_buffer_size: 64 * 1024 * 1024,
+            max_storage_buffer_binding_size: 32 * 1024 * 1024,
+            dedicated_bytes: Some(100 * 1024 * 1024),
+        };
+        // 4096x4096 -> 2048x2048 with 2x2 prefilter => pw=2048, ph=2048 => 16 MiB scratch.
+        let ample = MemoryBudget::new(limits, MemoryUsage::from_pool(PoolStats::default()));
+        assert_eq!(letterbox_two_pass_cells(&ample, 2, 2, 2048, 2048, 2048, 2048), Some(2048 * 2048));
+
+        // Tight live VRAM (only 8 MiB remaining < 16 MiB scratch) must decline 2-pass and keep 1-pass.
+        let tight_live = MemoryBudget::new(
+            limits,
+            MemoryUsage::from_pool(PoolStats {
+                live_bytes: 92 * 1024 * 1024,
+                allocated_bytes: 92 * 1024 * 1024,
+                ..PoolStats::default()
+            }),
+        );
+        assert_eq!(letterbox_two_pass_cells(&tight_live, 2, 2, 2048, 2048, 2048, 2048), None);
+
+        // Tight un-reclaimed VRAM (live + cached leaves < 16 MiB without eviction) also declines 2-pass.
+        let tight_cached = MemoryBudget::new(
+            limits,
+            MemoryUsage::from_pool(PoolStats {
+                live_bytes: 50 * 1024 * 1024,
+                cached_bytes: 40 * 1024 * 1024,
+                allocated_bytes: 90 * 1024 * 1024,
+                ..PoolStats::default()
+            }),
+        );
+        assert_eq!(letterbox_two_pass_cells(&tight_cached, 2, 2, 2048, 2048, 2048, 2048), None);
+
+        // Exceeding max_storage_buffer_binding_size or max_buffer_size declines 2-pass.
+        let small_bind = MemoryLimits {
+            max_buffer_size: 64 * 1024 * 1024,
+            max_storage_buffer_binding_size: 8 * 1024 * 1024,
+            dedicated_bytes: None,
+        };
+        let b_bind = MemoryBudget::new(small_bind, MemoryUsage::from_pool(PoolStats::default()));
+        assert_eq!(letterbox_two_pass_cells(&b_bind, 2, 2, 2048, 2048, 2048, 2048), None);
+
+        let small_buf = MemoryLimits {
+            max_buffer_size: 8 * 1024 * 1024,
+            max_storage_buffer_binding_size: 32 * 1024 * 1024,
+            dedicated_bytes: None,
+        };
+        let b_buf = MemoryBudget::new(small_buf, MemoryUsage::from_pool(PoolStats::default()));
+        assert_eq!(letterbox_two_pass_cells(&b_buf, 2, 2, 2048, 2048, 2048, 2048), None);
     }
 }
