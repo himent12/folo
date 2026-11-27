@@ -35,6 +35,7 @@ import ExportDialog from './model/ExportDialog';
 import { FROM_SCRATCH_META, origin } from '$lib/lineage';
 import Lineage from '$lib/ui/Lineage';
 import Meta from '$lib/ui/Meta';
+import { toast } from '$lib/ui/toast';
 import PrCurves from './model/PrCurves';
 import Callout from './run/Callout';
 import { MODEL_SECTIONS, sectionShown, type ModelSection } from './model/sections';
@@ -43,6 +44,11 @@ import KpiSummary from './model/KpiSummary';
 import DetailsList, { type ModelContext, type ProvenanceErrors } from './model/DetailsList';
 import { finishedEpochs, weightsEpoch } from './model/weightsEpoch';
 import ConfusionPanel from './model/ConfusionPanel';
+import ThresholdsBar from './model/ThresholdsBar';
+import { buildModelThresholds, downloadModelThresholds } from './model/thresholds';
+import { formatConfThreshold } from './playground/perClassConf';
+import { playgroundPath, stageThresholdHandoff } from './playground/session';
+import { DEFAULTS as PLAYGROUND_DEFAULTS } from './playground/predict';
 import { datasetPresence, datasetsFor } from './overview/newDatasets';
 
 export default function Model() {
@@ -76,6 +82,24 @@ export default function Model() {
           ]
         : []),
       { id: 'model-export', label: `Export ${m.name}`, match: ['Export model', 'ONNX'], icon: Download, run: () => exportOpen.set(true) },
+      ...(calibration.get()
+        ? [
+            {
+              id: 'model-download-thresholds',
+              label: 'Download calibrated thresholds (JSON)',
+              match: ['thresholds.json', 'per-class'],
+              icon: Download,
+              run: () => downloadThresholds(),
+            },
+            {
+              id: 'model-apply-playground',
+              label: `Apply calibrated thresholds in Playground`,
+              match: ['Playground', 'thresholds'],
+              icon: ScanSearch,
+              run: () => applyThresholdsInPlayground(),
+            },
+          ]
+        : []),
       { id: 'model-try', label: `Try ${m.name} in Playground`, match: ['Try model'], icon: ScanSearch, run: () => router.go(`/playground?model=${encodeURIComponent(m.id)}`) },
       { id: 'model-copy-id', label: 'Copy model id', match: [m.id], icon: Copy, run: () => void copyText(m.id, 'model id') },
     ];
@@ -163,6 +187,45 @@ export default function Model() {
     if (ds && e.source.datasetId === null && e.source.datasetName === null) e.source = { ...e.source, datasetId: ds.id, datasetName: ds.name };
     return e;
   });
+  const calibration = computed(() => (model.data && ev.get() ? buildModelThresholds(model.data, ev.get()!) : null));
+
+  function downloadThresholds() {
+    const mData = model.data;
+    const cal = calibration.peek();
+    if (!mData || !cal) return;
+    if (downloadModelThresholds(mData.name, cal)) {
+      const n = cal.payload.per_class.length;
+      toast.success(
+        'Thresholds downloaded',
+        `Saved global ${formatConfThreshold(cal.payload.global.best_conf)} and ${n} ${n === 1 ? 'class threshold' : 'class thresholds'} (ready for folo predict --thresholds or Playground).`,
+        undefined,
+        { key: 'model-thresholds' },
+      );
+    }
+  }
+
+  function applyThresholdsInPlayground() {
+    const mData = model.data;
+    const cal = calibration.peek();
+    if (!mData || !cal) return;
+    stageThresholdHandoff({
+      modelId: mData.id,
+      modelName: mData.name,
+      globalConf: cal.payload.global.best_conf,
+      perClassConf: cal.perClassConf,
+      classes: mData.classes,
+    });
+    router.go(
+      playgroundPath({
+        model: mData.id,
+        source: null,
+        conf: cal.payload.global.best_conf,
+        iou: PLAYGROUND_DEFAULTS.iou,
+        maxDet: PLAYGROUND_DEFAULTS.maxDet,
+        perClassConf: cal.perClassConf,
+      }),
+    );
+  }
   /**
    * What the page's numbers were measured on. Before the evaluation loads (or when it fails), the run's dataset: its
    * validation split, or its training split when it has no validation images, as training and /eval both fall back.
@@ -441,18 +504,27 @@ export default function Model() {
                   )}
                 >
                   {ev.get() ? (
-                    <PrCurves
-                      classes={m().classes}
-                      ev={ev.get()!}
-                      // A file's stored AP50 (imported, published) may be on another dataset than these curves.
-                      map50={m().run_id ? (m().metrics?.map50 ?? null) : null}
-                      view={phone.current ? 'curves' : 'all'}
-                      bind:allCurves={allCurves}
-                      modeInHeader
-                      bind:selected={prSelected}
-                      bind:hovered={prHovered}
-                      onback={backTo.get() !== null ? backToClasses : undefined}
-                    />
+                    <>
+                      <PrCurves
+                        classes={m().classes}
+                        ev={ev.get()!}
+                        // A file's stored AP50 (imported, published) may be on another dataset than these curves.
+                        map50={m().run_id ? (m().metrics?.map50 ?? null) : null}
+                        view={phone.current ? 'curves' : 'all'}
+                        bind:allCurves={allCurves}
+                        modeInHeader
+                        bind:selected={prSelected}
+                        bind:hovered={prHovered}
+                        onback={backTo.get() !== null ? backToClasses : undefined}
+                      />
+                      {calibration.get() ? (
+                        <ThresholdsBar
+                          calibration={calibration.get()!}
+                          onDownload={downloadThresholds}
+                          onApplyPlayground={applyThresholdsInPlayground}
+                        />
+                      ) : null}
+                    </>
                   ) : unevaluable.get() ? (
                     notEvaluated()
                   ) : evaluation.error ? (
@@ -518,7 +590,12 @@ export default function Model() {
               </div>
             </div>
           </Page>
-          <ExportDialog model={m()} bind:open={exportOpen} />
+          <ExportDialog
+            model={m()}
+            bind:open={exportOpen}
+            datasetPath={context.data?.dataset?.path ?? null}
+            evalSplit={source.get().split ?? null}
+          />
         </>
       )}
     </>

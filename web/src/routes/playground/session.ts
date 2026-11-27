@@ -10,7 +10,7 @@ import { hub } from '$lib/api/index';
 import type { Dataset, DatasetImage as Img, Prediction, Split } from '$lib/api/types';
 import type { InferenceConfig } from '$lib/inference/browser';
 import type { CompareViewMode } from './compare';
-import type { PerClassConfMap } from './perClassConf';
+import { normalizePerClassConf, roundConf, type PerClassConfMap } from './perClassConf';
 import { DEFAULTS } from './predict';
 import type { Source } from './source';
 
@@ -44,6 +44,74 @@ export const session = {
   get: (): Session | null => (kept?.server === hub.server ? kept.session : null),
   set: (s: Session | null) => void (kept = s && { server: hub.server, session: s }),
 };
+
+/** One-shot calibrated thresholds handoff staged by Model Detail (`Apply in Playground`). */
+export interface ThresholdHandoff {
+  modelId: string;
+  modelName?: string;
+  globalConf: number;
+  perClassConf: PerClassConfMap;
+  classes: string[];
+}
+
+let stagedHandoff: { server: string; handoff: ThresholdHandoff } | null = null;
+
+/** Stages calibrated thresholds for the next Playground mount/navigation on this server. */
+export function stageThresholdHandoff(h: ThresholdHandoff): void {
+  stagedHandoff = {
+    server: hub.server,
+    handoff: {
+      ...h,
+      globalConf: roundConf(h.globalConf),
+      perClassConf: normalizePerClassConf(h.perClassConf),
+      classes: [...h.classes],
+    },
+  };
+}
+
+/** Consumes a staged calibrated threshold handoff matching `modelId` (or clears it if for another model). */
+export function consumeThresholdHandoff(modelId: string | null): ThresholdHandoff | null {
+  if (!stagedHandoff || stagedHandoff.server !== hub.server) return null;
+  const h = stagedHandoff.handoff;
+  stagedHandoff = null;
+  if (modelId && h.modelId !== modelId) return null;
+  return h;
+}
+
+const MAX_PCC_URL_LEN = 1200;
+const CANONICAL_CLASS_ID = /^(?:0|[1-9]\d*)$/;
+
+/** Serializes `perClassConf` into a compact `0:0.42,1:0.35` query parameter, or null when empty or too long. */
+export function serializePerClassParam(map: Readonly<Record<number, number>> | null | undefined): string | null {
+  const norm = normalizePerClassConf(map);
+  const ids = Object.keys(norm)
+    .map(Number)
+    .sort((a, b) => a - b);
+  if (!ids.length) return null;
+  const encoded = ids.map((id) => `${id}:${norm[id]!}`).join(',');
+  return encoded.length <= MAX_PCC_URL_LEN ? encoded : null;
+}
+
+/** Parses `pcc=0:0.42,1:0.35` from URL query parameters, returning null when absent or invalid. */
+export function perClassFromUrl(q: URLSearchParams): PerClassConfMap | null {
+  const raw = q.get('pcc');
+  if (!raw || !raw.trim()) return null;
+  const out: PerClassConfMap = {};
+  for (const token of raw.split(',')) {
+    const trimmed = token.trim();
+    if (!trimmed) continue;
+    const colon = trimmed.indexOf(':');
+    if (colon <= 0) continue;
+    const k = trimmed.slice(0, colon).trim();
+    const vStr = trimmed.slice(colon + 1).trim();
+    if (!CANONICAL_CLASS_ID.test(k) || !vStr) continue;
+    const id = Number(k);
+    const v = Number(vStr);
+    if (!Number.isSafeInteger(id) || id > 0xffff_ffff || !Number.isFinite(v) || v < 0 || v > 1) continue;
+    out[id] = roundConf(v);
+  }
+  return Object.keys(out).length ? out : null;
+}
 
 /** A source as the session keeps it. */
 export function keep(s: Source | null): KeptSource | null {
@@ -119,6 +187,7 @@ export function playgroundPath(s: {
   conf: number;
   iou: number;
   maxDet: number;
+  perClassConf?: Readonly<Record<number, number>> | null;
   compare?: boolean;
   modelB?: string | null;
   view?: CompareViewMode;
@@ -144,6 +213,8 @@ export function playgroundPath(s: {
   if (s.conf !== DEFAULTS.conf) q.set('conf', String(s.conf));
   if (s.iou !== DEFAULTS.iou) q.set('iou', String(s.iou));
   if (s.maxDet !== DEFAULTS.maxDet) q.set('max', String(s.maxDet));
+  const pcc = serializePerClassParam(s.perClassConf);
+  if (pcc) q.set('pcc', pcc);
   const qs = String(q);
   return `/playground${qs ? `?${qs}` : ''}`;
 }

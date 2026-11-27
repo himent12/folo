@@ -1,18 +1,22 @@
 /**
  * Collapsible CLI commands section for Model Detail ExportDialog: shows copy-ready `folo export`
  * (synced with the selected format, decoded/raw output, half precision, and dynamic ONNX axes),
- * `folo predict` quick snippets (Standard, SAHI `--tile`, `--tta`, ByteTrack `--track`), and
- * `folo quantize` selective-f32 int8 calibration presets.
+ * `folo val --save-thresholds` calibration, `folo predict` quick snippets (Standard, SAHI `--tile`,
+ * `--tta`, ByteTrack `--track`, with optional `--thresholds`), and `folo quantize` selective-f32
+ * int8 calibration presets.
  */
+import Check from '$icons/check';
 import ChevronRight from '$icons/chevron-right';
 import { computed, css, effect, For, signal } from 'fw';
 import type { ExportFormat, Model } from '$lib/api/types';
+import { safeFilename } from '$lib/tableExport';
 import CommandLine from '$lib/ui/CommandLine';
 import Segmented from '$lib/ui/Segmented';
 import {
   buildExportCli,
   buildPredictCli,
   buildQuantizeCli,
+  buildValCli,
   ONNX_AXES_OPTIONS,
   PREDICT_SNIPPET_OPTIONS,
   QUANTIZE_PRESET_OPTIONS,
@@ -29,6 +33,10 @@ export interface ExportCliPanelProps {
   axes: OnnxDynamicAxes;
   /** True on servers without `export_dynamic_axes`: shows a CLI-only axis picker that never alters server export switches. */
   showAxesPicker: boolean;
+  /** Optional local dataset path for `folo val --data`. */
+  datasetPath?: string | null;
+  /** Evaluated split (`train` adds `--split train` to `folo val`). */
+  evalSplit?: string | null;
 }
 
 const AXES_SEG = ONNX_AXES_OPTIONS.map((o) => ({ value: o.value, label: o.label }));
@@ -38,6 +46,8 @@ const QUANTIZE_SEG = QUANTIZE_PRESET_OPTIONS.map((o) => ({ value: o.value, label
 export default function ExportCliPanel(props: ExportCliPanelProps) {
   const open = signal(false);
   const predictMode = signal<PredictSnippetMode>('sahi');
+  const saveThresholds = signal(true);
+  const useThresholds = signal(false);
   const quantizePreset = signal<QuantizePreset>('auto');
   /** Local CLI-only dynamic axis override when the server does not expose split dynamic axes. */
   const cliAxes = signal<OnnxDynamicAxes>(props.axes);
@@ -46,6 +56,7 @@ export default function ExportCliPanel(props: ExportCliPanelProps) {
   });
 
   const activeAxes = computed<OnnxDynamicAxes>(() => (props.showAxesPicker ? cliAxes.get() : props.axes));
+  const thresholdsFile = computed(() => safeFilename(`${props.model.name || 'model'}-thresholds`, 'json'));
 
   const exportCmd = computed(() =>
     buildExportCli(props.model, {
@@ -55,7 +66,19 @@ export default function ExportCliPanel(props: ExportCliPanelProps) {
       axes: activeAxes.get(),
     }),
   );
-  const predictCmd = computed(() => buildPredictCli(props.model, predictMode.get()));
+  const valCmd = computed(() =>
+    buildValCli(props.model, {
+      datasetPath: props.datasetPath,
+      split: props.evalSplit,
+      saveThresholds: saveThresholds.get(),
+      thresholdsPath: thresholdsFile.get(),
+    }),
+  );
+  const predictCmd = computed(() =>
+    buildPredictCli(props.model, predictMode.get(), {
+      thresholdsPath: useThresholds.get() ? thresholdsFile.get() : null,
+    }),
+  );
   const predictDesc = computed(
     () => PREDICT_SNIPPET_OPTIONS.find((o) => o.value === predictMode.get())?.desc ?? '',
   );
@@ -63,7 +86,13 @@ export default function ExportCliPanel(props: ExportCliPanelProps) {
   const quantizeDesc = computed(
     () => QUANTIZE_PRESET_OPTIONS.find((o) => o.value === quantizePreset.get())?.desc ?? '',
   );
-  const placeholder = computed(() => exportCmd.get().placeholder ?? predictCmd.get().placeholder ?? quantizeCmd.get().placeholder);
+  const placeholder = computed(
+    () =>
+      exportCmd.get().placeholder ??
+      valCmd.get().placeholder ??
+      predictCmd.get().placeholder ??
+      quantizeCmd.get().placeholder,
+  );
 
   return (
     <div class="cli-wrap" data-export-cli>
@@ -75,7 +104,7 @@ export default function ExportCliPanel(props: ExportCliPanelProps) {
       >
         <ChevronRight size={14} class={open.get() ? 'chev open' : 'chev'} aria-hidden="true" />
         <span class="cli-title">CLI commands</span>
-        <span class="cli-meta">export, predict &amp; quantize</span>
+        <span class="cli-meta">export, val, predict &amp; quantize</span>
       </button>
       {open.get() ? (
         <div class="cli-body">
@@ -95,9 +124,58 @@ export default function ExportCliPanel(props: ExportCliPanelProps) {
 
           <div class="cli-block">
             <div class="cli-head">
+              <span class="cli-label">Validate &amp; calibrate</span>
+              <label class="cli-check">
+                <input
+                  type="checkbox"
+                  checked={saveThresholds.get()}
+                  onchange={(e) => saveThresholds.set((e.currentTarget as HTMLInputElement).checked)}
+                />
+                <span class="cbox" aria-hidden="true">
+                  <Check size={11} strokeWidth={2.5} />
+                </span>
+                <span>Save thresholds</span>
+              </label>
+            </div>
+            <CommandLine
+              command={valCmd.get().line}
+              label="Validate CLI command"
+              copied={
+                saveThresholds.get()
+                  ? 'Run this command to evaluate and save calibrated per-class thresholds JSON.'
+                  : 'Run this command to evaluate the model from the CLI.'
+              }
+            />
+            <p class="cli-hint">
+              {saveThresholds.get() ? (
+                <>
+                  Writes calibrated global and per-class F1 thresholds via <span class="mono">--save-thresholds</span> for{' '}
+                  <span class="mono">folo predict --thresholds</span> or Playground import.
+                </>
+              ) : (
+                <>Evaluate mAP, precision, and recall on your dataset.</>
+              )}
+            </p>
+          </div>
+
+          <div class="cli-block">
+            <div class="cli-head">
               <span class="cli-label">Predict</span>
               <Segmented label="Predict snippet mode" size="sm" bind:value={predictMode} options={PREDICT_SEG} />
             </div>
+            <label class="cli-check">
+              <input
+                type="checkbox"
+                checked={useThresholds.get()}
+                onchange={(e) => useThresholds.set((e.currentTarget as HTMLInputElement).checked)}
+              />
+              <span class="cbox" aria-hidden="true">
+                <Check size={11} strokeWidth={2.5} />
+              </span>
+              <span>
+                Use calibrated thresholds (<span class="mono">--thresholds</span>)
+              </span>
+            </label>
             <CommandLine
               command={predictCmd.get().line}
               label="Predict CLI command"
@@ -198,12 +276,50 @@ css`
     font-weight: var(--weight-medium);
     color: var(--text-secondary);
   }
+  .cli-check {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    color: var(--text-secondary);
+    cursor: pointer;
+    width: fit-content;
+  }
+  .cli-check input {
+    position: absolute;
+    opacity: 0;
+    width: 1px;
+    height: 1px;
+  }
+  .cbox {
+    display: grid;
+    place-items: center;
+    width: 14px;
+    height: 14px;
+    border-radius: var(--radius-xs);
+    border: 1px solid var(--line-control);
+    background: var(--bg-inset);
+    color: transparent;
+    flex-shrink: 0;
+  }
+  .cli-check input:checked + .cbox {
+    border-color: var(--text-primary);
+    background: var(--text-primary);
+    color: var(--bg-panel);
+  }
+  .cli-check input:focus-visible + .cbox {
+    outline: var(--size-focus-ring) solid var(--focus);
+    outline-offset: 2px;
+  }
   .cli-hint {
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
     color: var(--text-tertiary);
   }
-  .cli-hint .mono {
+  .cli-hint .mono,
+  .cli-check .mono {
     color: var(--text-secondary);
   }
 `;

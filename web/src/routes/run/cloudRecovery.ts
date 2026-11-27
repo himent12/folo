@@ -1,0 +1,250 @@
+// Derives spot preemption and automatic checkpoint-resume status for cloud runs from `RunCloud`,
+// `Run` outcome fields, and the run's log lines emitted by `crates/folo-server/src/cloud/executor/`.
+// Distinguishes live automatic spot recovery from permanent failures (exhausted retry budget or
+// missing synced checkpoint) and tracks the attempt counter incrementally for live SSE logs.
+import type { AppendLog, LogCursor } from '$lib/api/appendLog';
+import type { LogLine, Run, RunCloud } from '$lib/api/types';
+
+export type SpotRecoveryKind = 'recovering' | 'resumed' | 'exhausted' | 'no_checkpoint' | 'stopped';
+
+export interface SpotRecovery {
+  kind: SpotRecoveryKind;
+  /** Number of automatic preemption resume attempts observed. */
+  attempts: number;
+  /** Retry budget reported by the server (`attempt N/M`), or null when not reported. */
+  maxAttempts: number | null;
+  /** Checkpoint epoch resumed from (`epoch E`), or null when not reported. */
+  resumeEpoch: number | null;
+  /** Backoff delay in seconds if the latest attempt reported one. */
+  backoffSeconds: number | null;
+  /** Short badge label (e.g. "Spot auto-resume 1/3", "Auto-resumed", "Auto-resume exhausted"). */
+  badge: string;
+  /** Human-readable status copy distinguishing automatic spot recovery from permanent failure. */
+  summary: string;
+}
+
+export type SpotRecoveryRun = Pick<Run, 'status' | 'error' | 'error_code'>;
+
+interface ScanAcc {
+  sawRecovery: boolean;
+  attempts: number;
+  maxAttempts: number | null;
+  resumeEpoch: number | null;
+  backoffSeconds: number | null;
+  exhaustedMax: number | null;
+  noCheckpoint: boolean;
+  stoppedDuringRecovery: boolean;
+}
+
+const AUTO_RESUME_RE =
+  /auto-resuming from synced checkpoint[^\n]*?\(epoch (\d+),\s*attempt (\d+)\/(\d+)(?: after ([\d.]+)s backoff)?\)/i;
+const RELEASE_PREEMPTED_RE = /releasing the preempted instance before resuming on a new worker/i;
+const RESTART_RECOVERY_RE = /server restarted during preemption recovery; continuing auto-resume/i;
+const EXHAUSTED_RE = /automatic checkpoint resume exhausted all (\d+) attempt/i;
+const NO_CHECKPOINT_RE =
+  /no (?:synced checkpoint \(weights\/last\.folo\)|incomplete weights\/last\.folo) is available to (?:auto-)?resume from|has no incomplete training state to auto-resume from/i;
+const STOPPED_RECOVERY_RE = /stop(?:ped| requested) during preemption recovery/i;
+
+function emptyAcc(): ScanAcc {
+  return {
+    sawRecovery: false,
+    attempts: 0,
+    maxAttempts: null,
+    resumeEpoch: null,
+    backoffSeconds: null,
+    exhaustedMax: null,
+    noCheckpoint: false,
+    stoppedDuringRecovery: false,
+  };
+}
+
+function scanMessage(acc: ScanAcc, message: string): void {
+  const auto = AUTO_RESUME_RE.exec(message);
+  if (auto) {
+    acc.sawRecovery = true;
+    const ep = Number(auto[1]);
+    const att = Number(auto[2]);
+    const max = Number(auto[3]);
+    const backoff = auto[4] !== undefined ? Number(auto[4]) : null;
+    if (Number.isFinite(ep)) acc.resumeEpoch = ep;
+    if (Number.isFinite(att)) acc.attempts = Math.max(acc.attempts, att);
+    if (Number.isFinite(max)) acc.maxAttempts = max;
+    acc.backoffSeconds = backoff !== null && Number.isFinite(backoff) ? backoff : null;
+    return;
+  }
+  if (RELEASE_PREEMPTED_RE.test(message) || RESTART_RECOVERY_RE.test(message)) {
+    acc.sawRecovery = true;
+    if (acc.attempts === 0) acc.attempts = 1;
+  }
+  const ex = EXHAUSTED_RE.exec(message);
+  if (ex) {
+    const max = Number(ex[1]);
+    if (Number.isFinite(max)) acc.exhaustedMax = max;
+  }
+  if (NO_CHECKPOINT_RE.test(message)) {
+    acc.noCheckpoint = true;
+  }
+  if (STOPPED_RECOVERY_RE.test(message)) {
+    acc.stoppedDuringRecovery = true;
+  }
+}
+
+const RECOVERING_PHASES = new Set(['provisioning', 'booting', 'syncing']);
+
+function recoveringStepText(phase: string): string {
+  switch (phase) {
+    case 'booting':
+      return 'booting a replacement worker';
+    case 'syncing':
+      return 'syncing the dataset and checkpoint to a replacement worker';
+    default:
+      return 'provisioning a replacement worker';
+  }
+}
+
+function resolveRecovery(
+  acc: ScanAcc,
+  cloud: Pick<RunCloud, 'phase'>,
+  run?: SpotRecoveryRun,
+): SpotRecovery | null {
+  // Also inspect run.error in case logs were truncated or not yet loaded on a failed/stopped run.
+  let exhaustedMax = acc.exhaustedMax;
+  let noCheckpoint = acc.noCheckpoint;
+  let stoppedDuringRecovery = acc.stoppedDuringRecovery;
+  if (run?.error) {
+    const ex = EXHAUSTED_RE.exec(run.error);
+    if (ex && Number.isFinite(Number(ex[1]))) exhaustedMax = Number(ex[1]);
+    if (NO_CHECKPOINT_RE.test(run.error)) noCheckpoint = true;
+    if (STOPPED_RECOVERY_RE.test(run.error)) stoppedDuringRecovery = true;
+  }
+
+  const attempts = exhaustedMax !== null ? Math.max(acc.attempts, exhaustedMax) : acc.attempts;
+  const maxAttempts = exhaustedMax ?? acc.maxAttempts;
+  const resumeEpoch = acc.resumeEpoch;
+  const backoffSeconds = acc.backoffSeconds;
+
+  if (run?.status === 'failed') {
+    if (exhaustedMax !== null) {
+      const unit = exhaustedMax === 1 ? 'attempt' : 'attempts';
+      return {
+        kind: 'exhausted',
+        attempts,
+        maxAttempts,
+        resumeEpoch,
+        backoffSeconds,
+        badge: 'Auto-resume exhausted',
+        summary: `Spot worker preempted; automatic checkpoint resume exhausted all ${exhaustedMax} ${unit}. Permanent failure — resume manually to continue from the last synced checkpoint.`,
+      };
+    }
+    if (noCheckpoint) {
+      return {
+        kind: 'no_checkpoint',
+        attempts,
+        maxAttempts,
+        resumeEpoch,
+        backoffSeconds,
+        badge: 'Preempted · no checkpoint',
+        summary:
+          'Spot worker was preempted with no resumable synced checkpoint (weights/last.folo), so automatic recovery could not run. Permanent failure — start the run again to retry.',
+      };
+    }
+    if (acc.sawRecovery) {
+      const count = attempts === 1 ? '1 spot preemption' : `${attempts} spot preemptions`;
+      return {
+        kind: 'resumed',
+        attempts,
+        maxAttempts,
+        resumeEpoch,
+        backoffSeconds,
+        badge: attempts === 1 ? 'Auto-resumed (1×)' : `Auto-resumed (${attempts}×)`,
+        summary: `Automatically recovered from ${count}${resumeEpoch !== null ? ` (last resumed from epoch ${resumeEpoch})` : ''} before the run ended.`,
+      };
+    }
+    return null;
+  }
+
+  if (run?.status === 'stopped' && stoppedDuringRecovery) {
+    const attText =
+      attempts > 0 ? ` (attempt ${attempts}${maxAttempts !== null ? ` of ${maxAttempts}` : ''})` : '';
+    return {
+      kind: 'stopped',
+      attempts,
+      maxAttempts,
+      resumeEpoch,
+      backoffSeconds,
+      badge: 'Stopped during spot recovery',
+      summary: `Stopped while auto-resuming from spot preemption${attText}. Synced checkpoint weights/last.folo was kept.`,
+    };
+  }
+
+  if (!acc.sawRecovery) return null;
+
+  const active =
+    run?.status === undefined ||
+    run.status === 'queued' ||
+    run.status === 'running' ||
+    run.status === 'stopping';
+  if (active && RECOVERING_PHASES.has(cloud.phase)) {
+    const attemptBadge =
+      maxAttempts !== null ? `Spot auto-resume ${attempts}/${maxAttempts}` : `Spot auto-resume #${attempts}`;
+    const attemptDetail =
+      maxAttempts !== null ? `attempt ${attempts} of ${maxAttempts}` : `attempt ${attempts}`;
+    const epochNote = resumeEpoch !== null ? ` from epoch ${resumeEpoch}` : '';
+    return {
+      kind: 'recovering',
+      attempts,
+      maxAttempts,
+      resumeEpoch,
+      backoffSeconds,
+      badge: attemptBadge,
+      summary: `Spot worker preempted — automatically ${recoveringStepText(cloud.phase)} to resume${epochNote} (${attemptDetail}). Automatic recovery in progress, not a permanent failure.`,
+    };
+  }
+
+  const count = attempts === 1 ? '1 spot preemption' : `${attempts} spot preemptions`;
+  return {
+    kind: 'resumed',
+    attempts,
+    maxAttempts,
+    resumeEpoch,
+    backoffSeconds,
+    badge: attempts === 1 ? 'Auto-resumed (1×)' : `Auto-resumed (${attempts}×)`,
+    summary: `Recovered automatically from ${count}${resumeEpoch !== null ? ` (resumed from epoch ${resumeEpoch})` : ''}.`,
+  };
+}
+
+/** Pure helper deriving spot preemption recovery status from a cloud run's state and log lines. */
+export function parseSpotRecovery(
+  cloud: Pick<RunCloud, 'phase'>,
+  run: SpotRecoveryRun | undefined,
+  logs: readonly LogLine[],
+): SpotRecovery | null {
+  const acc = emptyAcc();
+  for (const line of logs) scanMessage(acc, line.message);
+  return resolveRecovery(acc, cloud, run);
+}
+
+/**
+ * Incremental scanner over `LiveRun.logsLog` (mirroring `WarningsLog`) so 10 Hz training ticks
+ * never re-scan the entire run log.
+ */
+export class SpotRecoveryTracker {
+  #cursor: LogCursor | null = null;
+  #acc: ScanAcc = emptyAcc();
+
+  sync(
+    log: AppendLog<LogLine>,
+    cloud: Pick<RunCloud, 'phase'> | undefined,
+    run: SpotRecoveryRun | undefined,
+  ): SpotRecovery | null {
+    const r = log.read(this.#cursor);
+    this.#cursor = r.cursor;
+    if (r.reset) {
+      this.#acc = emptyAcc();
+    }
+    for (const line of r.added) {
+      scanMessage(this.#acc, line.message);
+    }
+    return cloud ? resolveRecovery(this.#acc, cloud, run) : null;
+  }
+}

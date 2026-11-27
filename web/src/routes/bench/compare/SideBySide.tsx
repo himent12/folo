@@ -2,8 +2,12 @@
  * Side-by-side comparison table (desktop/tablet) and stacked entry-by-entry list (phones) for BenchCompare:
  * scores and five axes against the first entry (the baseline), with "Make baseline" swaps and best-in-row highlights.
  */
+import Check from '$icons/check';
+import Copy from '$icons/copy';
+import Download from '$icons/download';
 import { computed, createUniqueId, css, For, Index } from 'fw';
 import type { BenchEntry } from '$lib/api/types';
+import Button from '$lib/ui/Button';
 import NoValue from '$lib/ui/NoValue';
 import Panel from '$lib/ui/Panel';
 import Select from '$lib/ui/Select';
@@ -21,6 +25,12 @@ export interface SideBySideProps {
   makeBaseline: (eid: string) => void;
   /** Renders the slot colour/pattern swatch for an entry id. */
   keyMark: (eid: string) => JSX.Element;
+  /** Copies the side-by-side comparison report (scores, axes, and stress conditions) as Markdown. */
+  onCopyMarkdown?: () => void;
+  /** Downloads the side-by-side comparison report as CSV. */
+  onDownloadCsv?: () => void;
+  /** True briefly after Copy Markdown succeeds. */
+  copiedMd?: boolean;
 }
 
 export default function SideBySide(props: SideBySideProps) {
@@ -82,7 +92,27 @@ export default function SideBySide(props: SideBySideProps) {
   };
 
   return (
-    <Panel title="Side by side" meta="against the first, the baseline" pad="none">
+    <Panel
+      title="Side by side"
+      meta="against the first, the baseline"
+      pad="none"
+      actions={
+        props.shown.length >= 2 && (props.onCopyMarkdown || props.onDownloadCsv) ? (
+          <>
+            {props.onCopyMarkdown ? (
+              <Button size="sm" variant="ghost" icon={props.copiedMd ? Check : Copy} data-compare-copy-md onclick={props.onCopyMarkdown}>
+                {props.copiedMd ? 'Copied' : 'Copy Markdown'}
+              </Button>
+            ) : null}
+            {props.onDownloadCsv ? (
+              <Button size="sm" variant="ghost" icon={Download} data-compare-download-csv onclick={props.onDownloadCsv}>
+                Download CSV
+              </Button>
+            ) : null}
+          </>
+        ) : undefined
+      }
+    >
       <div class="scroll">
         <table ref={(el) => (tableEl = el)} tabindex={-1} class="table cmp" aria-label="Scores and axes side by side">
           <thead>

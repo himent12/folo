@@ -229,7 +229,11 @@ export type CheckpointCliMode = 'val' | 'predict';
 
 export interface CheckpointCliBundle {
   val: string;
+  /** `folo val` with `--save-thresholds thresholds.json` (calibrated per-class F1 thresholds). */
+  valThresholds: string;
   predict: string;
+  /** `folo predict` with `--thresholds thresholds.json` (mutually exclusive with `--conf`). */
+  predictThresholds: string;
   /** Filename placeholder when the checkpoint's file path is unknown. */
   modelPlaceholder: string | null;
   /** Dataset placeholder when the dataset's path is unknown (e.g. removed dataset). */
@@ -241,7 +245,8 @@ function flagArg(flag: string, value: string): string {
 }
 
 /**
- * Builds shell-safe `folo val` and `folo predict` commands for a run's best checkpoint (matching docs/CLI.md).
+ * Builds shell-safe `folo val` and `folo predict` commands for a run's best checkpoint (matching docs/CLI.md),
+ * including calibrated threshold variants (`--save-thresholds` / `--thresholds`).
  * Returns `null` when the run has no saved checkpoint model yet.
  */
 export function buildCheckpointCli(
@@ -269,7 +274,9 @@ export function buildCheckpointCli(
 
   return {
     val: valParts.join(' '),
+    valThresholds: [...valParts, '--save-thresholds thresholds.json'].join(' '),
     predict: predictParts.join(' '),
+    predictThresholds: [...predictParts, '--thresholds thresholds.json'].join(' '),
     modelPlaceholder,
     dataPlaceholder,
   };

@@ -1,0 +1,270 @@
+// @vitest-environment happy-dom
+// Tests for spot preemption & automatic checkpoint-resume detection (`cloudRecovery.ts`),
+// CloudPanel recovery badges / status copy / attempt counter, and live Run page integration.
+import { flush as flushSync } from 'fw';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { render, type Rendered } from '../../../framework/testing';
+import { AppendLog } from '$lib/api/appendLog';
+import type { RunEventHandlers } from '$lib/api/client';
+import { hub } from '$lib/api/index';
+import { MockApi } from '$lib/api/mock';
+import type { LogLine, RunCloud } from '$lib/api/types';
+import { parse, router } from '$lib/router';
+import RunPage from '../Run';
+import CloudPanel from './CloudPanel';
+import { parseSpotRecovery, SpotRecoveryTracker } from './cloudRecovery';
+
+const GiB = 2 ** 30;
+const baseCloud = (extra: Partial<RunCloud> = {}): RunCloud => ({
+  connection_id: 'cc_1',
+  provider: 'runpod',
+  offer: {
+    id: 'o',
+    gpu: 'RTX 4090',
+    gpu_count: 1,
+    vram_bytes: 24 * GiB,
+    price_per_hour: 0.69,
+    region: null,
+    detail: 'Community Cloud',
+    availability: 'high',
+  },
+  instance_id: null,
+  phase: 'provisioning',
+  progress: null,
+  max_hours: 12,
+  deadline: new Date(Date.now() + 3_600_000).toISOString(),
+  cost_usd: 0.42,
+  synced: new Date(Date.now() - 60_000).toISOString(),
+  ...extra,
+});
+
+const log = (message: string, level: LogLine['level'] = 'warn'): LogLine => ({
+  t: '2026-11-27T10:00:00Z',
+  level,
+  message,
+});
+
+let target: HTMLElement;
+let view: Rendered | undefined;
+
+beforeEach(() => {
+  hub.api = new MockApi('normal', 0);
+  hub.mode = 'mock';
+  target = document.createElement('div');
+  document.body.appendChild(target);
+});
+
+afterEach(() => {
+  view?.unmount();
+  view = undefined;
+  target.remove();
+  vi.restoreAllMocks();
+});
+
+describe('parseSpotRecovery & SpotRecoveryTracker', () => {
+  it('returns null when no preemption or spot recovery occurred', () => {
+    const res = parseSpotRecovery(baseCloud({ phase: 'training' }), { status: 'running', error: null }, [
+      log('launching RTX 4090 at RunPod (30 GB disk)', 'info'),
+      log('the worker answers: FOLO 0.9.0 training on gpu:0', 'info'),
+    ]);
+    expect(res).toBeNull();
+  });
+
+  it('distinguishes live automatic spot recovery from permanent failure and tracks attempt counters', () => {
+    const lines = [
+      log('releasing the preempted instance before resuming on a new worker', 'info'),
+      log(
+        'worker preempted or lost (the worker stopped answering (timeout) and its instance is gone); auto-resuming from synced checkpoint weights/last.folo (epoch 12, attempt 1/3 after 5.0s backoff)',
+      ),
+    ];
+
+    const recovering = parseSpotRecovery(
+      baseCloud({ phase: 'provisioning' }),
+      { status: 'running', error: null },
+      lines,
+    )!;
+    expect(recovering.kind).toBe('recovering');
+    expect(recovering.attempts).toBe(1);
+    expect(recovering.maxAttempts).toBe(3);
+    expect(recovering.resumeEpoch).toBe(12);
+    expect(recovering.backoffSeconds).toBe(5);
+    expect(recovering.badge).toBe('Spot auto-resume 1/3');
+    expect(recovering.summary).toContain('not a permanent failure');
+    expect(recovering.summary).toContain('epoch 12');
+
+    // Once the replacement worker enters training, state switches to recovered/resumed.
+    const resumed = parseSpotRecovery(
+      baseCloud({ phase: 'training', instance_id: 'ci_2' }),
+      { status: 'running', error: null },
+      lines,
+    )!;
+    expect(resumed.kind).toBe('resumed');
+    expect(resumed.badge).toBe('Auto-resumed (1×)');
+    expect(resumed.summary).toContain('1 spot preemption');
+  });
+
+  it('reports permanent failure distinctly when auto-resume exhausts retries or lacks a checkpoint', () => {
+    const exhausted = parseSpotRecovery(
+      baseCloud({ phase: 'released', ended_in: 'training' }),
+      {
+        status: 'failed',
+        error_code: 'cloud_instance_lost',
+        error:
+          'the worker stopped answering and its instance is gone; automatic checkpoint resume exhausted all 3 attempt(s) — the weights copied so far stay (resume the run to continue from them)',
+      },
+      [],
+    )!;
+    expect(exhausted.kind).toBe('exhausted');
+    expect(exhausted.attempts).toBe(3);
+    expect(exhausted.maxAttempts).toBe(3);
+    expect(exhausted.badge).toBe('Auto-resume exhausted');
+    expect(exhausted.summary).toContain('Permanent failure');
+
+    const noCkpt = parseSpotRecovery(
+      baseCloud({ phase: 'released', ended_in: 'training' }),
+      {
+        status: 'failed',
+        error_code: 'cloud_instance_lost',
+        error:
+          'the worker no longer has the run; no synced checkpoint (weights/last.folo) is available to auto-resume from',
+      },
+      [],
+    )!;
+    expect(noCkpt.kind).toBe('no_checkpoint');
+    expect(noCkpt.badge).toBe('Preempted · no checkpoint');
+    expect(noCkpt.summary).toContain('no resumable synced checkpoint');
+
+    const stopped = parseSpotRecovery(
+      baseCloud({ phase: 'released', ended_in: 'provisioning' }),
+      { status: 'stopped', error: null },
+      [
+        log('worker preempted or lost (gone); auto-resuming from synced checkpoint weights/last.folo (epoch 4, attempt 2/3)'),
+        log('stopped during preemption recovery; synced checkpoint weights/last.folo kept', 'info'),
+      ],
+    )!;
+    expect(stopped.kind).toBe('stopped');
+    expect(stopped.badge).toBe('Stopped during spot recovery');
+    expect(stopped.summary).toContain('attempt 2 of 3');
+  });
+
+  it('tracks appended SSE log lines incrementally and resets across AppendLog epochs', () => {
+    const appendLog = new AppendLog<LogLine>();
+    const tracker = new SpotRecoveryTracker();
+    const cloud = baseCloud({ phase: 'provisioning' });
+    const run = { status: 'running' as const, error: null };
+
+    expect(tracker.sync(appendLog, cloud, run)).toBeNull();
+    appendLog.push(
+      log('worker preempted or lost (gone); auto-resuming from synced checkpoint weights/last.folo (epoch 7, attempt 1/3)'),
+    );
+    expect(tracker.sync(appendLog, cloud, run)?.attempts).toBe(1);
+
+    appendLog.push(
+      log('worker preempted or lost (gone); auto-resuming from synced checkpoint weights/last.folo (epoch 9, attempt 2/3)'),
+    );
+    const second = tracker.sync(appendLog, cloud, run)!;
+    expect(second.attempts).toBe(2);
+    expect(second.resumeEpoch).toBe(9);
+
+    // Replacing the log (new run / reconnect) resets the tracker cleanly.
+    appendLog.replace([log('launching RTX 4090 at RunPod (30 GB disk)', 'info')]);
+    expect(tracker.sync(appendLog, cloud, run)).toBeNull();
+  });
+});
+
+describe('CloudPanel & Run spot preemption recovery UI', () => {
+  const text = (el: Element | null | undefined) => el?.textContent?.replace(/\s+/g, ' ').trim() ?? '';
+  const fact = (label: string) =>
+    text([...target.querySelectorAll('#cloud .facts > div')].find((d) => text(d.querySelector('dt')) === label)?.querySelector('dd'));
+
+  it('renders recovering badge, non-failure status copy, and attempt counter in CloudPanel', () => {
+    const recovery = parseSpotRecovery(baseCloud({ phase: 'booting' }), { status: 'running', error: null }, [
+      log('worker preempted or lost (gone); auto-resuming from synced checkpoint weights/last.folo (epoch 12, attempt 1/3 after 5.0s backoff)'),
+    ])!;
+    view = render(
+      () => (
+        <CloudPanel
+          cloud={baseCloud({ phase: 'booting' })}
+          provider="RunPod"
+          run={{ status: 'running' }}
+          recovery={recovery}
+        />
+      ),
+      target,
+    );
+    flushSync();
+
+    expect(text(target.querySelector('[data-spot-recovery-badge="recovering"]'))).toBe('Spot auto-resume 1/3');
+    expect(text(target.querySelector('[data-spot-recovery="recovering"]'))).toContain('not a permanent failure');
+    expect(fact('Spot recoveries')).toBe('1 of 3 · epoch 12');
+  });
+
+  it('renders permanent failure alert distinctly when spot auto-resume is exhausted', () => {
+    const recovery = parseSpotRecovery(
+      baseCloud({ phase: 'released', ended_in: 'training' }),
+      {
+        status: 'failed',
+        error_code: 'cloud_instance_lost',
+        error: 'gone; automatic checkpoint resume exhausted all 3 attempt(s)',
+      },
+      [],
+    )!;
+    view = render(
+      () => (
+        <CloudPanel
+          cloud={baseCloud({ phase: 'released', ended_in: 'training' })}
+          provider="RunPod"
+          run={{ status: 'failed', error_code: 'cloud_instance_lost' }}
+          recovery={recovery}
+        />
+      ),
+      target,
+    );
+    flushSync();
+
+    expect(text(target.querySelector('[data-spot-recovery-badge="exhausted"]'))).toBe('Auto-resume exhausted');
+    const line = target.querySelector('[data-spot-recovery="exhausted"]')!;
+    expect(line.getAttribute('role')).toBe('alert');
+    expect(text(line)).toContain('Permanent failure');
+    expect(fact('Spot recoveries')).toBe('3 of 3 · exhausted');
+  });
+
+  it('surfaces live SSE spot preemption recovery on the Run page and switches to resumed once training continues', async () => {
+    const api = new MockApi('cloud-training', 0);
+    let handlers: RunEventHandlers = {};
+    vi.spyOn(api, 'runEvents').mockImplementation((_id, h) => {
+      handlers = h;
+      return () => {};
+    });
+    const run = (await api.runs()).find((r) => r.cloud && r.status === 'running')!;
+    hub.api = api;
+    router.route = parse(`#/runs/${run.id}`);
+    view = render(() => <RunPage />, target);
+
+    await vi.waitFor(() => {
+      flushSync();
+      if (!target.querySelector('#cloud .phases')) throw new Error('waiting for CloudPanel');
+    });
+
+    // Server emits preemption log + transitions Run.cloud back to provisioning.
+    handlers.cloud?.({ ...run.cloud!, phase: 'provisioning', instance_id: null, progress: null });
+    handlers.log?.(
+      log('worker preempted or lost (instance gone); auto-resuming from synced checkpoint weights/last.folo (epoch 5, attempt 1/3 after 5.0s backoff)'),
+    );
+    await vi.waitFor(() => {
+      flushSync();
+      if (!target.querySelector('[data-spot-recovery="recovering"]')) throw new Error('waiting for spot recovery UI');
+    });
+    expect([...target.querySelectorAll('.status-row .badge')].map(text)).toContain('Spot auto-resume 1/3');
+    expect(fact('Spot recoveries')).toBe('1 of 3 · epoch 5');
+
+    // Replacement worker resumes training -> header warning badge clears, CloudPanel shows Auto-resumed.
+    handlers.cloud?.({ ...run.cloud!, phase: 'training', instance_id: 'ci_replacement' });
+    await vi.waitFor(() => {
+      flushSync();
+      if (!target.querySelector('[data-spot-recovery="resumed"]')) throw new Error('waiting for resumed UI');
+    });
+    expect([...target.querySelectorAll('.status-row .badge')].map(text)).not.toContain('Spot auto-resume 1/3');
+    expect(text(target.querySelector('[data-spot-recovery-badge="resumed"]'))).toBe('Auto-resumed (1×)');
+  });
+});

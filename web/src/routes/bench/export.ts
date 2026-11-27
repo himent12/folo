@@ -1,13 +1,20 @@
 /**
- * Pure CSV / JSON payload builders for the Benchmarks list, a single benchmark's leaderboard, and BenchCompare.
+ * Pure CSV / JSON / Markdown payload builders for the Benchmarks list, a single benchmark's leaderboard, and BenchCompare.
  */
 import type { Bench, BenchEntry, BenchResult, LabelAgent } from '$lib/api/types';
 import { AXES } from '$lib/bench/rules';
-import type { CsvCell } from '$lib/tableExport';
+import { exportTableCsv, exportTableJson, type CsvCell } from '$lib/tableExport';
+import { toast } from '$lib/ui/toast';
 import { diffAsPrinted } from './charts';
 import { ranks, stale } from './leaderboard';
 import type { Row } from './compare/state';
-import { contestantFacts, sourceKind } from './words';
+import { contestantFacts, imagesText, keptText, sourceKind } from './words';
+
+export interface CompareConditionRow {
+  key: string;
+  name: string;
+  values: (number | null)[];
+}
 
 export interface TableExportPayload {
   filenameBase: string;
@@ -150,6 +157,18 @@ export function leaderboardExport(bench: Bench, entries: readonly BenchEntry[], 
   };
 }
 
+const escMd = (s: string) => s.replaceAll('|', '\\|').replace(/[\r\n]+/g, ' ');
+
+function conditionDelta(v: number | null, base: number | null, comparable: boolean): { delta: number | null; printed: string | null } {
+  if (!comparable || v === null || base === null || !Number.isFinite(v) || !Number.isFinite(base)) {
+    return { delta: null, printed: null };
+  }
+  const diffPts = Math.round(v * 100) - Math.round(base * 100);
+  const delta = diffPts === 0 ? 0 : diffPts / 100;
+  const printed = diffPts === 0 ? '±0 pp' : `${diffPts > 0 ? '+' : '−'}${Math.abs(diffPts)} pp`;
+  return { delta, printed };
+}
+
 export function compareExport(
   bench: Bench,
   shown: readonly BenchEntry[],
@@ -158,12 +177,15 @@ export function compareExport(
   best: (key: string, values: (number | null)[], d: number) => Set<number>,
   caveats: readonly { text: string }[],
   results: readonly (BenchResult | undefined)[],
+  conditions: readonly CompareConditionRow[] = [],
+  labelOf?: (e: BenchEntry) => string,
 ): TableExportPayload {
+  const entryName = (e: BenchEntry) => (labelOf ? labelOf(e) : e.name);
   const headers: string[] = ['measure'];
   for (let i = 0; i < shown.length; i++) {
-    const e = shown[i]!;
-    headers.push(i === 0 ? `${e.name} (baseline)` : e.name);
-    if (i > 0) headers.push(`${e.name} vs baseline`);
+    const name = entryName(shown[i]!);
+    headers.push(i === 0 ? `${name} (baseline)` : name);
+    if (i > 0) headers.push(`${name} vs baseline`);
   }
   const rows: CsvCell[][] = [];
   const measures = tableRows.map((row) => {
@@ -182,7 +204,7 @@ export function compareExport(
       if (i > 0) csvRow.push(delta);
       return {
         id: e.id,
-        name: e.name,
+        name: entryName(e),
         value: v,
         delta,
         delta_printed: deltaPrinted,
@@ -191,6 +213,27 @@ export function compareExport(
     });
     rows.push(csvRow);
     return { key: row.key, label: row.label, values: entryCells };
+  });
+
+  const conditionItems = conditions.map((cond) => {
+    const csvRow: CsvCell[] = [`Condition · ${cond.name}`];
+    const baseVal = cond.values[0] ?? null;
+    const entryCells = shown.map((e, i) => {
+      const v = cond.values[i] ?? null;
+      const comparable = i > 0 && !old[i] && !old[0];
+      const { delta, printed } = conditionDelta(v, baseVal, comparable);
+      csvRow.push(v);
+      if (i > 0) csvRow.push(delta);
+      return {
+        id: e.id,
+        name: entryName(e),
+        retention: v,
+        delta,
+        delta_printed: printed,
+      };
+    });
+    rows.push(csvRow);
+    return { condition: cond.key, name: cond.name, values: entryCells };
   });
 
   return {
@@ -203,7 +246,7 @@ export function compareExport(
       caveats: caveats.map((c) => c.text),
       entries: shown.map((e, i) => ({
         id: e.id,
-        name: e.name,
+        name: entryName(e),
         baseline: i === 0,
         earlier_version: old[i] ?? false,
         score: e.score?.total ?? null,
@@ -220,6 +263,142 @@ export function compareExport(
           : null,
       })),
       measures,
+      ...(conditionItems.length ? { conditions: conditionItems } : {}),
     },
   };
+}
+
+/**
+ * Renders a clean GitHub-Flavored Markdown comparison report for BenchCompare:
+ * overall score + axis values and baseline deltas, plus per-stress-condition accuracy kept rows.
+ */
+export function compareMarkdown(
+  bench: Bench,
+  shown: readonly BenchEntry[],
+  tableRows: readonly Row[],
+  old: readonly boolean[],
+  best: (key: string, values: (number | null)[], d: number) => Set<number>,
+  caveats: readonly { text: string }[],
+  conditions: readonly CompareConditionRow[] = [],
+  labelOf?: (e: BenchEntry) => string,
+): string {
+  const entryName = (e: BenchEntry) => (labelOf ? labelOf(e) : e.name);
+  const baseline = shown[0] ? entryName(shown[0]) : '—';
+  const colHeaders: string[] = ['Measure'];
+  const colAlign: string[] = ['---'];
+  for (let i = 0; i < shown.length; i++) {
+    const name = escMd(entryName(shown[i]!));
+    colHeaders.push(i === 0 ? `${name} (baseline)` : name);
+    colAlign.push('---:');
+    if (i > 0) {
+      colHeaders.push(`${name} vs baseline`);
+      colAlign.push('---:');
+    }
+  }
+
+  const lines: string[] = [
+    `# Benchmark comparison: ${escMd(bench.name)}`,
+    '',
+    `${imagesText(bench.images)} · ${shown.length} entries · baseline: **${escMd(baseline)}**`,
+    '',
+    '## Score & axes',
+    '',
+    `| ${colHeaders.join(' | ')} |`,
+    `| ${colAlign.join(' | ')} |`,
+  ];
+
+  for (const row of tableRows) {
+    const winners = best(row.key, row.values, row.d);
+    const baseVal = row.values[0] ?? null;
+    const cells: string[] = [escMd(row.label)];
+    for (let i = 0; i < shown.length; i++) {
+      const v = row.values[i] ?? null;
+      if (v === null) {
+        cells.push('—');
+      } else {
+        const printed = escMd(row.fmt(v));
+        cells.push(winners.has(i) ? `**${printed}**` : printed);
+      }
+      if (i > 0) {
+        const d = !old[i] && !old[0] ? diffAsPrinted(v, baseVal, row.d) : null;
+        cells.push(d ? escMd(d) : '—');
+      }
+    }
+    lines.push(`| ${cells.join(' | ')} |`);
+  }
+
+  if (conditions.length) {
+    const condHeaders = ['Condition', ...colHeaders.slice(1)];
+    lines.push('', '## Stress conditions (accuracy kept)', '', `| ${condHeaders.join(' | ')} |`, `| ${colAlign.join(' | ')} |`);
+    for (const cond of conditions) {
+      const baseVal = cond.values[0] ?? null;
+      const cells: string[] = [escMd(cond.name)];
+      for (let i = 0; i < shown.length; i++) {
+        const v = cond.values[i] ?? null;
+        cells.push(v === null ? '—' : escMd(keptText(v)));
+        if (i > 0) {
+          const { printed } = conditionDelta(v, baseVal, !old[i] && !old[0]);
+          cells.push(printed ? escMd(printed) : '—');
+        }
+      }
+      lines.push(`| ${cells.join(' | ')} |`);
+    }
+  }
+
+  if (caveats.length) {
+    lines.push('', '### Notes', '');
+    for (const c of caveats) {
+      lines.push(`- ${escMd(c.text)}`);
+    }
+  }
+
+  return `${lines.join('\n')}\n`;
+}
+
+/** Triggers BenchCompare CSV or JSON download and returns an announcement string on success. */
+export function runCompareDownload(
+  format: 'csv' | 'json',
+  bench: Bench | undefined,
+  shown: readonly BenchEntry[],
+  rows: readonly Row[],
+  old: readonly boolean[],
+  best: (key: string, values: (number | null)[], d: number) => Set<number>,
+  caveats: readonly { text: string }[],
+  results: readonly (BenchResult | undefined)[],
+  conditions: readonly CompareConditionRow[],
+): string | null {
+  if (!bench || shown.length < 2) return null;
+  const payload = compareExport(bench, shown, rows, old, best, caveats, results, conditions);
+  const ok =
+    format === 'csv'
+      ? exportTableCsv(payload.filenameBase, payload.headers, payload.rows)
+      : exportTableJson(payload.filenameBase, payload.json);
+  return ok ? `Exported comparison of ${shown.length} entries as ${format.toUpperCase()}.` : null;
+}
+
+/** Copies BenchCompare Markdown to clipboard, showing toast feedback and returning an announcement string on success. */
+export async function runCompareCopyMarkdown(
+  bench: Bench | undefined,
+  shown: readonly BenchEntry[],
+  rows: readonly Row[],
+  old: readonly boolean[],
+  best: (key: string, values: (number | null)[], d: number) => Set<number>,
+  caveats: readonly { text: string }[],
+  conditions: readonly CompareConditionRow[],
+  labelOf: (e: BenchEntry) => string,
+): Promise<string | null> {
+  if (!bench || shown.length < 2) return null;
+  const md = compareMarkdown(bench, shown, rows, old, best, caveats, conditions, labelOf);
+  try {
+    await navigator.clipboard.writeText(md);
+    toast.success('Markdown copied', `Comparison of ${shown.length} entries copied to clipboard.`, undefined, {
+      key: 'bench-compare-export',
+    });
+    return `Copied comparison of ${shown.length} entries as Markdown.`;
+  } catch {
+    toast.error(new Error('Your browser blocked clipboard access.'), 'Could not copy Markdown', {
+      key: 'bench-compare-export',
+    });
+    return null;
+  }
 }
