@@ -45,9 +45,7 @@ pub(crate) use input_grad::{
     subpixel_epilogue_coop, subpixel_epilogue_gemm,
 };
 pub use sites::conv2d_sites;
-pub(crate) use sites::{
-    SITES_BINDING, SITES_LIVE, SITES_RETIRE, forward_column, fwd_tap_mask_load, fwd_tap_mask_setup,
-};
+pub(crate) use sites::{SITES_BINDING, SITES_LIVE, forward_column, fwd_tap_mask_load, fwd_tap_mask_setup};
 #[cfg(test)]
 pub(crate) use weight_grad::{LAST_ROUTE, WgradRoute};
 pub(crate) use weight_grad::{

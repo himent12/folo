@@ -115,14 +115,15 @@ pub fn pack_f32_to_rgb0_u8(x: &[f32], n: usize, h: usize, w: usize, out: &mut [u
         }
         return;
     }
-    const BLOCK: usize = 4096;
-    let blocks = hw.div_ceil(BLOCK);
+    let threads = rayon::current_num_threads();
+    let block = (hw / (2 * threads).max(1)).clamp(4096, 16_384);
+    let blocks = hw.div_ceil(block);
     let optr = OutPtr(out.as_mut_ptr());
     let optr = &optr;
     crate::cpu::par_for(n * blocks, &|t| {
         let (img, b) = (t / blocks, t % blocks);
-        let p0 = b * BLOCK;
-        let len = BLOCK.min(hw - p0);
+        let p0 = b * block;
+        let len = block.min(hw - p0);
         let base = img * 3 * hw + p0;
         // SAFETY: each `(img, b)` owns disjoint words `img * hw + p0..+len` inside `out`.
         let o = unsafe { std::slice::from_raw_parts_mut(optr.at(img * hw + p0), len) };

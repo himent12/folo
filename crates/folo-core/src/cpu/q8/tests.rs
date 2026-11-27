@@ -249,11 +249,11 @@ fn plan_covers_the_conv_in_few_big_tasks() {
         (2, 5, 3, 100, 8),
         (1, 9, 40, 9216, 1),
     ];
-    // Both orders: a small input (channel groups first) and a big one (pixel chunks first).
-    for ((n, chunks, og, unit, threads), input) in
-        cases.into_iter().flat_map(|c| [(c, 1 << 10), (c, 1 << 30)])
+    // Both orders: a small input (channel groups first, with and without B-panel min_og_blk) and a big one.
+    for ((n, chunks, og, unit, threads), (input, min_og_blk)) in
+        cases.into_iter().flat_map(|c| [(c, (1 << 10, 1)), (c, (1 << 10, 4)), (c, (1 << 30, 1))])
     {
-        let (cb, ob) = plan(n, chunks, og, unit, input, (threads, TASK_MACS));
+        let (cb, ob) = plan(n, chunks, og, unit, input, min_og_blk, (threads, TASK_MACS));
         assert!((1..=chunks).contains(&cb) && (1..=og).contains(&ob));
         let tasks = n * chunks.div_ceil(cb) * og.div_ceil(ob);
         let macs = n * chunks * og * unit;
