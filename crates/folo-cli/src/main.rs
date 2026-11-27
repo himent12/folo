@@ -870,8 +870,14 @@ mod tests {
             }
             let mut argv: Vec<String> = cmd_path.split_whitespace().map(ToString::to_string).collect();
             argv.push(a_scoped["long"].as_str().unwrap().to_string());
-            if a_scoped["type"] != "boolean" {
-                argv.push("dummy".to_string());
+            match a_scoped["type"].as_str().unwrap_or("") {
+                "boolean" => {}
+                "integer" => argv.push("1".to_string()),
+                "number" => argv.push("0.2".to_string()),
+                "enum" => {
+                    argv.push(a_scoped["possible_values"][0]["value"].as_str().unwrap_or("dummy").to_string())
+                }
+                _ => argv.push("dummy".to_string()),
             }
             let err = clear_envs(Cli::command()).try_get_matches_from(&argv).unwrap_err();
             assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument, "{argv:?}: {err}");

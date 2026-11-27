@@ -545,25 +545,56 @@ impl Store for HttpStore {
     }
 
     fn predict(&self, input: PredictInput) -> Result<PredictResponse, Error> {
+        let has_opts = input.options.tile.is_some() || input.options.tta.is_some();
+        if has_opts && !self.has_feature(folo_server::store::FEATURE_PREDICT_OPTIONS)? {
+            return Err(Error::new(
+                StatusCode::NOT_IMPLEMENTED,
+                "not_implemented",
+                format!(
+                    "the folo serve at {} is too old for SAHI tiling (`tile`) or TTA (`tta`)",
+                    self.base()
+                ),
+            )
+            .hint("update folo serve, or run without `tile` / `tta`"));
+        }
         match input.source {
-            PredictSource::Dataset { dataset_id, image_id } => self.post(
-                "/predict",
-                &PredictRequest {
+            PredictSource::Dataset { dataset_id, image_id } => {
+                let mut body = serde_json::to_value(&PredictRequest {
                     model_id: input.model_id,
                     dataset_id,
                     image_id,
                     conf: input.conf,
                     iou: input.iou,
                     max_det: input.max_det,
-                },
-            ),
+                })
+                .map_err(|e| Error::internal(e.to_string()))?;
+                if let Some(tile) = &input.options.tile {
+                    body["tile"] = serde_json::to_value(tile).map_err(|e| Error::internal(e.to_string()))?;
+                }
+                if let Some(tta) = &input.options.tta {
+                    body["tta"] = serde_json::to_value(tta).map_err(|e| Error::internal(e.to_string()))?;
+                }
+                self.post("/predict", &body)
+            }
             PredictSource::Upload(bytes) => {
-                let fields = [
+                let mut fields = vec![
                     ("model_id", input.model_id),
                     ("conf", input.conf.to_string()),
                     ("iou", input.iou.to_string()),
                     ("max_det", input.max_det.to_string()),
                 ];
+                if let Some(tile) = &input.options.tile {
+                    fields.push((
+                        "tile",
+                        serde_json::to_string(tile).map_err(|e| Error::internal(e.to_string()))?,
+                    ));
+                }
+                if let Some(tta) = &input.options.tta {
+                    fields.push((
+                        "tta",
+                        serde_json::to_string(tta).map_err(|e| Error::internal(e.to_string()))?,
+                    ));
+                }
                 let (ct, body) = multipart(&fields, &bytes)?;
                 self.client.send("/predict", &ct, &body).map_err(store_error)
             }

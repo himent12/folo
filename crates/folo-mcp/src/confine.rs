@@ -246,7 +246,11 @@ impl Confinement {
             let p = entry.path();
             self.policy.check_path_if_present(&p).map_err(&wrap)?;
             let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
-            if matches!(name.as_str(), "annotations" | "train" | "val" | "valid" | "test") && p.is_dir() {
+            if matches!(
+                name.as_str(),
+                "annotations" | "jpegimages" | "imagesets" | "train" | "val" | "valid" | "test"
+            ) && p.is_dir()
+            {
                 let sub_entries = std::fs::read_dir(&p).map_err(|e| read_err(&p, e))?;
                 for sub in sub_entries {
                     let sub = sub.map_err(|e| read_err(&p, e))?;

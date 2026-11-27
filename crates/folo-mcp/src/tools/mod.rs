@@ -117,8 +117,8 @@ static TOOL_TABLE: [ToolDef; 40] = [
     },
     ToolDef {
         name: "register_dataset",
-        description: "Registers a YOLO or COCO dataset folder on disk (never moves or changes files) and returns \
-                      it with statistics.",
+        description: "Registers a YOLO, COCO or Pascal VOC dataset folder on disk (never moves or changes files) \
+                      and returns it with statistics.",
         mutating: true,
         input: input::<RegisterArgs>,
         output: api_output::<Dataset>,
@@ -195,8 +195,8 @@ static TOOL_TABLE: [ToolDef; 40] = [
     },
     ToolDef {
         name: "predict",
-        description: "Detects objects in one image (a file path, base64 bytes, or a dataset image). Boxes are \
-                      pixel xyxy, highest score first.",
+        description: "Detects objects in one image (a file path, base64 bytes, or a dataset image), optionally \
+                      with SAHI tiling (`tile`) or Test-Time Augmentation (`tta`). Boxes are pixel xyxy, highest score first.",
         mutating: false,
         input: input::<PredictArgs>,
         output: api_output::<PredictResponse>,
@@ -204,8 +204,8 @@ static TOOL_TABLE: [ToolDef; 40] = [
     },
     ToolDef {
         name: "predict_batch",
-        description: "Detects objects in up to 256 images (paths or a glob). Returns summaries; the per-image \
-                      boxes are in the linked folo://predictions/{batch_id} resource. Reports progress.",
+        description: "Detects objects in up to 256 images (paths or a glob), optionally with SAHI tiling (`tile`) \
+                      or TTA (`tta`). Returns summaries; the per-image boxes are in the linked folo://predictions/{batch_id} resource. Reports progress.",
         mutating: false,
         input: input::<PredictBatchArgs>,
         output: output::<PredictBatchResult>,

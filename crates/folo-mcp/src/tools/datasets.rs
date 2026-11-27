@@ -667,6 +667,12 @@ mod tests {
                 conf: 0.25,
                 iou: 0.7,
                 max_det: 10,
+                tile: None,
+                tile_overlap: None,
+                tile_full_image: None,
+                tta: false,
+                tta_scales: None,
+                tta_hflip: None,
             })
             .await
             .err()

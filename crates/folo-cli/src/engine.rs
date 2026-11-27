@@ -32,7 +32,7 @@ pub fn open_dataset_splits(
     let path = Path::new(arg);
     if !path.exists() {
         return Err(CliError::new(ExitCode::NotFound, "dataset_not_found", format!("{arg} does not exist"))
-            .hint("pass a YOLO / COCO dataset folder or its data.yaml"));
+            .hint("pass a YOLO, COCO or Pascal VOC dataset folder, data.yaml, COCO .json or VOC .xml"));
     }
     let opts = folo_data::OpenOptions { format, ..folo_data::OpenOptions::default() };
     let ds = folo_data::open_splits(path, &opts, splits).map_err(|e| match e {

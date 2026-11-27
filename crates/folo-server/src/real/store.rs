@@ -506,6 +506,7 @@ impl Store for RealStore {
     }
 
     fn predict(&self, input: PredictInput) -> Result<PredictResponse> {
+        crate::store::check_predict_options(&input.options)?;
         let _gpu = self.idle.using();
         let path = match &input.source {
             PredictSource::Dataset { dataset_id, image_id } => {
@@ -556,11 +557,13 @@ impl Store for RealStore {
             ..PredictConfig::default()
         };
         p.set_config(cfg).map_err(engine_error)?;
-        let pred = p.predict(&decoded).map_err(engine_error)?;
+        input.options.validate(p.model().imgsz()).map_err(engine_error)?;
+        let pred = p.predict_with_options(&decoded, &input.options).map_err(engine_error)?;
         let mut timing = pred.timing.to_api();
         timing.preprocess_ms += decode_ms;
         timing.total_ms += decode_ms;
-        if warm && idle && !self.runs.busy() && self.runs.activity() == activity {
+        let single_pass = input.options.tile.is_none() && input.options.tta.is_none();
+        if single_pass && warm && idle && !self.runs.busy() && self.runs.activity() == activity {
             let precision = match p.precision() {
                 folo_vision::Precision::F16 => InferPrecision::F16,
                 _ => InferPrecision::F32,

@@ -589,7 +589,12 @@ impl Store for MockStore {
     }
 
     fn predict(&self, input: PredictInput) -> Result<PredictResponse> {
+        crate::store::check_predict_options(&input.options)?;
         let model = self.get_model(&input.model_id)?;
+        input
+            .options
+            .validate(model.imgsz)
+            .map_err(|e| Error::new(StatusCode::BAD_REQUEST, "invalid_config", e.to_string()))?;
         let (w, h, truth, seed) = match &input.source {
             PredictSource::Dataset { dataset_id, image_id } => {
                 let ds = self.dataset(dataset_id)?;

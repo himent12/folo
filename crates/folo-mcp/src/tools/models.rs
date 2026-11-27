@@ -6,7 +6,9 @@ use std::time::Instant;
 
 use base64::Engine as _;
 use folo_api::{ExportSpec, Model, OnnxSwitches, ValRequest};
-use folo_server::store::{PredictInput, PredictSource};
+use folo_server::store::{
+    DEFAULT_TTA_SCALES, PredictInput, PredictOptions, PredictSource, TileConfig, TtaConfig,
+};
 use rmcp::model::{ContentBlock, Resource};
 use serde_json::json;
 
@@ -103,6 +105,15 @@ impl Inner {
         if !(1..=300).contains(&a.max_det) {
             return Err(invalid_arguments(format!("max_det must be in 1..=300, got {}", a.max_det)));
         }
+        let options = build_predict_options(
+            a.tile,
+            a.tile_overlap,
+            a.tile_full_image,
+            a.tta,
+            a.tta_scales,
+            a.tta_hflip,
+            a.max_det as usize,
+        )?;
         // The file an `image_path` names, for a decode error (the server only sees the uploaded bytes).
         let mut file = None;
         let source = match (a.image_path, a.image_base64, a.dataset_id, a.image_id) {
@@ -137,8 +148,14 @@ impl Inner {
                 ));
             }
         };
-        let input =
-            PredictInput { model_id: a.model_id, source, conf: a.conf, iou: a.iou, max_det: a.max_det };
+        let input = PredictInput {
+            model_id: a.model_id,
+            source,
+            conf: a.conf,
+            iou: a.iou,
+            max_det: a.max_det,
+            options,
+        };
         let mut r = self.blocking(move |s| s.predict(input)).await.map_err(|mut e| {
             if let Some(f) = &file
                 && e.body.code == "image_decode_failed"
@@ -173,6 +190,15 @@ impl Inner {
     ) -> Result<Output, Error> {
         check_unit("conf", a.conf)?;
         check_unit("iou", a.iou)?;
+        let options = build_predict_options(
+            a.tile,
+            a.tile_overlap,
+            a.tile_full_image,
+            a.tta,
+            a.tta_scales,
+            a.tta_hflip,
+            folo_api::default_max_det() as usize,
+        )?;
         // Validate input source shape and bounds before hitting the store or proxy server.
         let batch_input = match (a.paths, a.glob) {
             (Some(paths), None) => {
@@ -222,6 +248,7 @@ impl Inner {
                 BatchPath::Ready(path) => {
                     let model_id = a.model_id.clone();
                     let (conf, iou) = (a.conf, a.iou);
+                    let options = options.clone();
                     self.blocking(move |s| {
                         let bytes = read_image(&path)?;
                         s.predict(PredictInput {
@@ -230,6 +257,7 @@ impl Inner {
                             conf,
                             iou,
                             max_det: folo_api::default_max_det(),
+                            options,
                         })
                     })
                     .await
@@ -314,6 +342,52 @@ impl Inner {
         let r = self.blocking(move |s| s.export_model(&a.model_id, spec)).await?;
         out(&r, format!("wrote {} ({} bytes)", r.path, r.bytes))
     }
+}
+
+/// Builds and validates optional SAHI tiling or TTA settings upfront before touching the store or proxy.
+fn build_predict_options(
+    tile: Option<u32>,
+    tile_overlap: Option<f32>,
+    tile_full_image: Option<bool>,
+    tta: bool,
+    tta_scales: Option<Vec<f32>>,
+    tta_hflip: Option<bool>,
+    max_det: usize,
+) -> Result<PredictOptions, Error> {
+    if tile.is_none() && (tile_overlap.is_some() || tile_full_image.is_some()) {
+        return Err(invalid_arguments("tile_overlap and tile_full_image require `tile` to be set"));
+    }
+    if !tta && (tta_scales.is_some() || tta_hflip.is_some()) {
+        return Err(invalid_arguments("tta_scales and tta_hflip require `tta: true`"));
+    }
+    if tile.is_some() && tta {
+        return Err(invalid_arguments("`tile` and `tta` cannot be combined in the same prediction call"));
+    }
+    let tile_cfg = if let Some(size) = tile {
+        let overlap = tile_overlap.unwrap_or(0.2);
+        let cfg = TileConfig {
+            tile_width: size,
+            tile_height: size,
+            overlap_x: overlap,
+            overlap_y: overlap,
+            full_image: tile_full_image.unwrap_or(true),
+            max_det,
+            ..TileConfig::default()
+        };
+        cfg.validate().map_err(|e| invalid_arguments(e.to_string()))?;
+        Some(cfg)
+    } else {
+        None
+    };
+    let tta_cfg = if tta {
+        let scales = tta_scales.unwrap_or_else(|| DEFAULT_TTA_SCALES.to_vec());
+        let cfg = TtaConfig { hflip: tta_hflip.unwrap_or(true), scales, ..TtaConfig::default() };
+        cfg.validate().map_err(|e| invalid_arguments(e.to_string()))?;
+        Some(cfg)
+    } else {
+        None
+    };
+    Ok(PredictOptions { tta: tta_cfg, tile: tile_cfg })
 }
 
 /// Reads an image file for inference (non-empty, at most 64 MiB).
@@ -455,7 +529,19 @@ mod tests {
             let err = server
                 .inner
                 .predict_batch(
-                    PredictBatchArgs { model_id: "m_missing".into(), paths, glob, conf: 0.25, iou: 0.7 },
+                    PredictBatchArgs {
+                        model_id: "m_missing".into(),
+                        paths,
+                        glob,
+                        conf: 0.25,
+                        iou: 0.7,
+                        tile: None,
+                        tile_overlap: None,
+                        tile_full_image: None,
+                        tta: false,
+                        tta_scales: None,
+                        tta_hflip: None,
+                    },
                     &mut Progress::none(),
                 )
                 .await
@@ -464,8 +550,8 @@ mod tests {
             assert_eq!(err.body.code, "invalid_arguments");
         }
 
-        // `predict` rejects blank `model_id`, empty `image_base64`, and blank `dataset_id`/`image_id`
-        // identically on both embedded and proxied backends before reading files or hitting the store.
+        // `predict` rejects blank `model_id`, empty `image_base64`, blank `dataset_id`/`image_id`, and invalid
+        // `tile`/`tta` combinations identically on both embedded and proxied backends before hitting the store.
         let embedded = FoloMcp::new(
             Arc::new(folo_server::MockStore::new()),
             None,
@@ -488,6 +574,12 @@ mod tests {
                     conf: 0.25,
                     iou: 0.7,
                     max_det: 10,
+                    tile: None,
+                    tile_overlap: None,
+                    tile_full_image: None,
+                    tta: false,
+                    tta_scales: None,
+                    tta_hflip: None,
                 },
                 PredictArgs {
                     model_id: "m_1".into(),
@@ -498,6 +590,12 @@ mod tests {
                     conf: 0.25,
                     iou: 0.7,
                     max_det: 10,
+                    tile: None,
+                    tile_overlap: None,
+                    tile_full_image: None,
+                    tta: false,
+                    tta_scales: None,
+                    tta_hflip: None,
                 },
                 PredictArgs {
                     model_id: "m_1".into(),
@@ -508,6 +606,60 @@ mod tests {
                     conf: 0.25,
                     iou: 0.7,
                     max_det: 10,
+                    tile: None,
+                    tile_overlap: None,
+                    tile_full_image: None,
+                    tta: false,
+                    tta_scales: None,
+                    tta_hflip: None,
+                },
+                PredictArgs {
+                    model_id: "m_1".into(),
+                    image_path: None,
+                    image_base64: Some("AAAA".into()),
+                    dataset_id: None,
+                    image_id: None,
+                    conf: 0.25,
+                    iou: 0.7,
+                    max_det: 10,
+                    tile: Some(640),
+                    tile_overlap: None,
+                    tile_full_image: None,
+                    tta: true,
+                    tta_scales: None,
+                    tta_hflip: None,
+                },
+                PredictArgs {
+                    model_id: "m_1".into(),
+                    image_path: None,
+                    image_base64: Some("AAAA".into()),
+                    dataset_id: None,
+                    image_id: None,
+                    conf: 0.25,
+                    iou: 0.7,
+                    max_det: 10,
+                    tile: None,
+                    tile_overlap: Some(0.2),
+                    tile_full_image: None,
+                    tta: false,
+                    tta_scales: None,
+                    tta_hflip: None,
+                },
+                PredictArgs {
+                    model_id: "m_1".into(),
+                    image_path: None,
+                    image_base64: Some("AAAA".into()),
+                    dataset_id: None,
+                    image_id: None,
+                    conf: 0.25,
+                    iou: 0.7,
+                    max_det: 10,
+                    tile: None,
+                    tile_overlap: None,
+                    tile_full_image: None,
+                    tta: false,
+                    tta_scales: Some(vec![1.0]),
+                    tta_hflip: None,
                 },
             ] {
                 let err = backend.inner.predict(args).await.err().unwrap();
@@ -553,6 +705,12 @@ mod tests {
                         glob: None,
                         conf: 0.25,
                         iou: 0.7,
+                        tile: None,
+                        tile_overlap: None,
+                        tile_full_image: None,
+                        tta: false,
+                        tta_scales: None,
+                        tta_hflip: None,
                     },
                     &mut Progress::none(),
                 )
@@ -672,6 +830,115 @@ mod tests {
 
         let _ = rtx.send(());
         let _ = rtask.await;
+        let _ = stop_tx.send(());
+        let _ = task.await;
+    }
+
+    /// Proxied `predict` refuses `tile`/`tta` against an older server without `predict_options` (`not_implemented`),
+    /// and forwards both JSON (dataset source) and multipart (upload) options to a current server.
+    #[tokio::test]
+    async fn proxied_predict_gates_and_forwards_tile_and_tta_options() {
+        let home = folo_test_support::TestDir::new("mcp-proxy-predict-opts");
+        let mock_store = Arc::new(folo_server::MockStore::new());
+        let model_id = mock_store.list_models().unwrap()[0].id.clone();
+        let ds_id = mock_store.list_datasets().unwrap()[0].id.clone();
+        let image_id = mock_store
+            .list_images(&ds_id, &folo_server::store::ImageQuery { limit: 1, ..Default::default() })
+            .unwrap()
+            .images[0]
+            .id
+            .clone();
+        let mock_server = folo_server::Server::new(mock_store, Default::default());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn(mock_server.serve(listener, async move {
+            let _ = stop_rx.await;
+        }));
+        let opts = Options {
+            data_dir: home.to_path_buf(),
+            read_only: false,
+            confine: false,
+            device: "cpu".into(),
+            published_weights: None,
+        };
+
+        // 1. Older server without `predict_options`: refused with `not_implemented`.
+        let old_http = Arc::new(HttpStore::new(&url, None).assume_features(vec![]));
+        let old_mcp = FoloMcp::new(old_http.clone(), Some(old_http), opts.clone());
+        let err = old_mcp
+            .inner
+            .predict(PredictArgs {
+                model_id: model_id.clone(),
+                image_path: None,
+                image_base64: None,
+                dataset_id: Some(ds_id.clone()),
+                image_id: Some(image_id.clone()),
+                conf: 0.25,
+                iou: 0.7,
+                max_det: 10,
+                tile: Some(320),
+                tile_overlap: Some(0.2),
+                tile_full_image: Some(true),
+                tta: false,
+                tta_scales: None,
+                tta_hflip: None,
+            })
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(err.body.code, "not_implemented");
+
+        // 2. Current server announcing `predict_options`: succeeds for JSON (`tile`) and multipart (`tta`).
+        let live_http = Arc::new(HttpStore::new(&url, None));
+        let live_mcp = FoloMcp::new(live_http.clone(), Some(live_http), opts);
+        let tiled = live_mcp
+            .inner
+            .predict(PredictArgs {
+                model_id: model_id.clone(),
+                image_path: None,
+                image_base64: None,
+                dataset_id: Some(ds_id),
+                image_id: Some(image_id),
+                conf: 0.25,
+                iou: 0.7,
+                max_det: 10,
+                tile: Some(320),
+                tile_overlap: Some(0.2),
+                tile_full_image: Some(false),
+                tta: false,
+                tta_scales: None,
+                tta_hflip: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(tiled.value["model_id"], model_id);
+
+        let img = folo_data::Image::new(32, 32, [128, 128, 128]);
+        let png = folo_data::encode(&img, folo_data::ImageFormat::Png).unwrap();
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&png);
+        let tta = live_mcp
+            .inner
+            .predict(PredictArgs {
+                model_id: model_id.clone(),
+                image_path: None,
+                image_base64: Some(b64),
+                dataset_id: None,
+                image_id: None,
+                conf: 0.25,
+                iou: 0.7,
+                max_det: 10,
+                tile: None,
+                tile_overlap: None,
+                tile_full_image: None,
+                tta: true,
+                tta_scales: Some(vec![1.0]),
+                tta_hflip: Some(true),
+            })
+            .await
+            .unwrap();
+        assert_eq!(tta.value["model_id"], model_id);
+
         let _ = stop_tx.send(());
         let _ = task.await;
     }

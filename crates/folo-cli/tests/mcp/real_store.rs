@@ -249,3 +249,153 @@ fn published_weights_are_models() {
     assert_eq!(status["config"]["weights"], "folo-n-coco", "{status}");
     c.finish();
 }
+
+/// MCP `predict` and `predict_batch` support SAHI tiling (`tile`) and TTA (`tta`), reject invalid combinations, and
+/// `register_dataset` + `list_dataset_issues` seamlessly handle Pascal VOC datasets and split-leakage warnings.
+#[test]
+fn predict_sahi_tta_and_voc_leakage() {
+    let dir = tmp_dir("sahi-tta-voc");
+    let weights = dir.join("weights");
+    std::fs::create_dir_all(&weights).unwrap();
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+
+    // Create a tiny YOLO dataset, convert to Pascal VOC, and inject a cross-split duplicate image.
+    let yolo_dir = dir.join("yolo");
+    let syn = folo_data::synthetic::SyntheticConfig {
+        images: 6,
+        classes: vec!["circle".into(), "square".into()],
+        imgsz: 64,
+        seed: 7,
+        vary_aspect: false,
+        val_fraction: 0.34,
+        ..Default::default()
+    };
+    folo_data::synthetic::write_yolo(&syn, &yolo_dir, folo_data::ImageFormat::Png).unwrap();
+    let loaded = folo_data::open(&yolo_dir).unwrap();
+    let voc_dir = dir.join("voc");
+    folo_data::convert::convert(&loaded, &voc_dir, folo_data::Format::Voc).unwrap();
+    // Copy the first train image/annotation into JPEGImages & Annotations and list it in val.txt too (split leakage).
+    let train_txt = std::fs::read_to_string(voc_dir.join("ImageSets/Main/train.txt")).unwrap();
+    let first_stem = train_txt.lines().next().unwrap().trim().to_string();
+    let mut val_txt = std::fs::read_to_string(voc_dir.join("ImageSets/Main/val.txt")).unwrap();
+    val_txt.push_str(&format!("{first_stem}\n"));
+    std::fs::write(voc_dir.join("ImageSets/Main/val.txt"), val_txt).unwrap();
+
+    // Save a tiny 2-class model as a published weight so we don't need to train.
+    let mut m = folo_vision::FoloModel::with_rng(
+        folo_vision::ModelConfig::new("n", 2).unwrap(),
+        &mut folo_core::rng::Rng::seed(11),
+    )
+    .unwrap();
+    m.set_classes(vec!["circle".into(), "square".into()]).unwrap();
+    m.save(weights.join("folo-n-coco.folo")).unwrap();
+
+    let mut c =
+        spawn_with_weights(&["--data-dir", home.to_str().unwrap(), "--device", "cpu"], None, &weights);
+    init_old(&mut c);
+    let schemas = check_tools(&mut c, &ALL_TOOLS);
+
+    // Register Pascal VOC dataset with `format: "auto"` and confirm split-leakage warning surfaces cleanly.
+    let ds = checked(
+        &mut c,
+        &schemas,
+        "register_dataset",
+        json!({ "name": "voc-leaked", "path": voc_dir.to_str().unwrap(), "format": "auto" }),
+    );
+    let ds_id = ds["id"].as_str().unwrap().to_string();
+    assert!(ds["splits"]["train"].as_u64().unwrap() > 0 && ds["splits"]["val"].as_u64().unwrap() > 0);
+    let issues = checked(
+        &mut c,
+        &schemas,
+        "list_dataset_issues",
+        json!({ "dataset_id": ds_id, "kind": "duplicate_image" }),
+    );
+    assert!(
+        issues["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| { i["message"].as_str().is_some_and(|m| m.starts_with("split leakage (")) }),
+        "expected split leakage warning in VOC dataset issues: {issues}"
+    );
+
+    // `predict` with SAHI tiling (`tile`) and TTA (`tta`) on dataset image and on file path.
+    let imgs = checked(&mut c, &schemas, "list_dataset_images", json!({ "dataset_id": ds_id, "limit": 2 }));
+    let image_id = imgs["items"][0]["image_id"].as_str().unwrap().to_string();
+    let img_path = voc_dir.join(imgs["items"][0]["file"].as_str().unwrap());
+
+    let tiled = checked(
+        &mut c,
+        &schemas,
+        "predict",
+        json!({
+            "model_id": "folo-n-coco",
+            "dataset_id": ds_id,
+            "image_id": image_id,
+            "conf": 0.001,
+            "tile": 32,
+            "tile_overlap": 0.25,
+            "tile_full_image": true
+        }),
+    );
+    assert_eq!(tiled["image"]["width"], 64);
+
+    let tta = checked(
+        &mut c,
+        &schemas,
+        "predict",
+        json!({
+            "model_id": "folo-n-coco",
+            "image_path": img_path.to_str().unwrap(),
+            "conf": 0.001,
+            "tta": true,
+            "tta_scales": [1.0],
+            "tta_hflip": true
+        }),
+    );
+    assert_eq!(tta["image"]["width"], 64);
+
+    // `predict_batch` supports `tile` and `tta` too.
+    let batch_tile = checked(
+        &mut c,
+        &schemas,
+        "predict_batch",
+        json!({
+            "model_id": "folo-n-coco",
+            "paths": [img_path.to_str().unwrap()],
+            "conf": 0.001,
+            "tile": 32,
+            "tile_full_image": false
+        }),
+    );
+    assert_eq!((batch_tile["processed"].as_u64(), batch_tile["failed_total"].as_u64()), (Some(1), Some(0)));
+
+    let batch_tta = checked(
+        &mut c,
+        &schemas,
+        "predict_batch",
+        json!({
+            "model_id": "folo-n-coco",
+            "paths": [img_path.to_str().unwrap()],
+            "conf": 0.001,
+            "tta": true,
+            "tta_scales": [1.0],
+            "tta_hflip": false
+        }),
+    );
+    assert_eq!((batch_tta["processed"].as_u64(), batch_tta["failed_total"].as_u64()), (Some(1), Some(0)));
+
+    // Combining `tile` and `tta` fails with `invalid_arguments`.
+    c.tool_error(
+        "predict",
+        json!({
+            "model_id": "folo-n-coco",
+            "image_path": img_path.to_str().unwrap(),
+            "tile": 32,
+            "tta": true
+        }),
+        "invalid_arguments",
+    );
+    c.finish();
+}

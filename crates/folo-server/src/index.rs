@@ -250,7 +250,7 @@ pub fn data_error(e: folo_data::DataError, path: &str) -> Error {
                     format!("'{shown}' is not a dataset folder, but '{below}' inside it holds a dataset"),
                 )
                 .hint(format!(
-                    "register '{below}': the folder holding data.yaml, images/ + labels/, or annotations/"
+                    "register '{below}': the folder holding data.yaml, images/ + labels/, annotations/, or Annotations/ + JPEGImages/"
                 ));
             }
             match images_under(Path::new(path), DIAGNOSE_ENTRIES) {
@@ -259,8 +259,8 @@ pub fn data_error(e: folo_data::DataError, path: &str) -> Error {
                     let (path, s) = (folo_data::paths::shown(path), if n == 1 { "" } else { "s" });
                     let message = format!("'{path}' has {n} image{s} but no labels");
                     Error::new(StatusCode::BAD_REQUEST, "unknown_format", message).hint(
-                        "label them first (FOLO Studio: Datasets, Label images), or add YOLO labels/ or a COCO \
-                         annotations/ JSON",
+                        "label them first (FOLO Studio: Datasets, Label images), or add YOLO labels/, COCO \
+                         annotations/ JSON, or Pascal VOC Annotations/ XML",
                     )
                 }
             }
@@ -332,11 +332,12 @@ fn looks_like_dataset(dir: &Path, budget: &mut usize) -> bool {
     // The names detection takes without reading the folder: a YAML, YOLO folders, a Roboflow COCO file.
     let named = ["data.yaml", "data.yml", "dataset.yaml", "dataset.yml"].map(|n| dir.join(n));
     let splits = ["train", "valid", "val", "test"];
-    if !charge(named.len() + 2 + 2 * splits.len()) {
+    if !charge(named.len() + 4 + 2 * splits.len()) {
         return false;
     }
     if named.iter().any(|p| p.is_file())
         || (dir.join("images").is_dir() && dir.join("labels").is_dir())
+        || (dir.join("Annotations").is_dir() && dir.join("JPEGImages").is_dir())
         || splits.iter().any(|s| dir.join(s).join("images").is_dir())
         || splits.iter().any(|s| dir.join(s).join("_annotations.coco.json").is_file())
     {

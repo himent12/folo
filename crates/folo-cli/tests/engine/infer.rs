@@ -557,3 +557,108 @@ fn val_coco_subset_categories_and_fail_fast_validation() {
     assert_eq!(lines.last().unwrap()["error"]["code"], "invalid_dataset", "{lines:?}");
     assert!(!refused_split.parent().unwrap().exists());
 }
+
+/// `folo predict` exposes SAHI tiled inference (`--tile`, `--tile-overlap`, `--no-tile-full-image`, `--tile-batch`,
+/// `--tile-merge`) and TTA (`--tta`, `--tta-scales`, `--no-tta-hflip`), validates ranges and mutual exclusion upfront
+/// before opening the model, and runs end to end on real CPU weights.
+#[test]
+fn predict_sahi_tile_and_tta_validation_and_execution() {
+    // 1. Upfront invalid_config checks (before opening model).
+    let invalid_cases: &[(&[&str], &str)] = &[
+        (&["predict", "--json", "--model", "none.folo", "a.jpg", "--tile", "0"], "--tile"),
+        (
+            &["predict", "--json", "--model", "none.folo", "a.jpg", "--tile", "64", "--tile-overlap", "1.0"],
+            "--tile-overlap",
+        ),
+        (
+            &["predict", "--json", "--model", "none.folo", "a.jpg", "--tile", "64", "--tile-overlap=-0.1"],
+            "--tile-overlap",
+        ),
+        (
+            &["predict", "--json", "--model", "none.folo", "a.jpg", "--tile", "64", "--tile-batch", "0"],
+            "--tile-batch",
+        ),
+        (&["predict", "--json", "--model", "none.folo", "a.jpg", "--tta", "--tta-scales", "0"], "tta scales"),
+        (
+            &[
+                "predict",
+                "--json",
+                "--model",
+                "none.folo",
+                "a.jpg",
+                "--imgsz",
+                "64",
+                "--tta",
+                "--tta-scales",
+                "200",
+            ],
+            "8192",
+        ),
+    ];
+    for (args, expected) in invalid_cases {
+        let (code, lines, stderr) = folo(args);
+        let e = &lines.last().unwrap_or_else(|| panic!("{args:?}: {stderr}"))["error"];
+        assert_eq!((code, e["code"].as_str()), (2, Some("invalid_config")), "{args:?}: {e}");
+        assert!(e["message"].as_str().unwrap().contains(expected), "{args:?}: {e}");
+    }
+
+    // 2. Mutual exclusion and peer-flag requirements are enforced by clap as `usage` (exit 2).
+    for args in [
+        &["predict", "--json", "--model", "none.folo", "a.jpg", "--tile", "64", "--tta"][..],
+        &["predict", "--json", "--model", "none.folo", "a.jpg", "--tile-overlap", "0.2"],
+        &["predict", "--json", "--model", "none.folo", "a.jpg", "--tta-scales", "1.0"],
+        &["predict", "--json", "--model", "none.folo", "a.jpg", "--no-tta-hflip"],
+    ] {
+        let (code, lines, stderr) = folo(args);
+        let e = &lines.last().unwrap_or_else(|| panic!("{args:?}: {stderr}"))["error"];
+        assert_eq!((code, e["code"].as_str()), (2, Some("usage")), "{args:?}: {e}");
+    }
+
+    // 3. End-to-end SAHI tiled inference and TTA execution on a real tiny model.
+    let tiny = tiny_run();
+    let best = tiny.run.join("weights/best.folo");
+    let src_img = tiny.data.join("images/val").read_dir().unwrap().next().unwrap().unwrap().path();
+
+    let (code, lines, stderr) = folo(&[
+        "predict",
+        "--json",
+        "--device",
+        "cpu",
+        "--model",
+        s(&best),
+        s(&src_img),
+        "--conf",
+        "0.001",
+        "--tile",
+        "32",
+        "--tile-overlap",
+        "0.25",
+        "--tile-batch",
+        "2",
+        "--tile-merge",
+        "iou",
+        "--no-tile-full-image",
+    ]);
+    assert_eq!(code, 0, "tile: {stderr}");
+    assert_eq!(lines[0]["event"], "prediction", "{lines:?}");
+    assert_eq!(lines.last().unwrap()["event"], "done", "{lines:?}");
+
+    let (code, lines, stderr) = folo(&[
+        "predict",
+        "--json",
+        "--device",
+        "cpu",
+        "--model",
+        s(&best),
+        s(&src_img),
+        "--conf",
+        "0.001",
+        "--tta",
+        "--tta-scales",
+        "1.0,1.5",
+        "--no-tta-hflip",
+    ]);
+    assert_eq!(code, 0, "tta: {stderr}");
+    assert_eq!(lines[0]["event"], "prediction", "{lines:?}");
+    assert_eq!(lines.last().unwrap()["event"], "done", "{lines:?}");
+}

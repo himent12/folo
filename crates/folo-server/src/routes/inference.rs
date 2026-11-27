@@ -8,11 +8,23 @@ use folo_api::PredictRequest;
 
 use crate::AppState;
 use crate::error::{ApiJson, Error, Result};
-use crate::store::{PredictInput, PredictSource};
+use crate::store::{
+    PredictInput, PredictOptions, PredictSource, TileConfig, TtaConfig, check_predict_options,
+};
 
 use super::blocking;
 
 // ---- inference ---------------------------------------------------------------------------------------------------
+
+#[derive(Debug, serde::Deserialize)]
+struct PredictJsonBody {
+    #[serde(flatten)]
+    base: PredictRequest,
+    #[serde(default)]
+    tile: Option<TileConfig>,
+    #[serde(default)]
+    tta: Option<TtaConfig>,
+}
 
 pub(super) fn field_err(name: &str, e: impl std::fmt::Display) -> Error {
     Error::new(StatusCode::BAD_REQUEST, "invalid_body", format!("field `{name}`: {e}"))
@@ -23,6 +35,7 @@ async fn parse_multipart(mut mp: Multipart) -> Result<PredictInput> {
     let (mut model_id, mut dataset_id, mut image_id) = (None, None, None);
     let (mut conf, mut iou, mut max_det) =
         (folo_api::default_conf(), folo_api::default_iou(), folo_api::default_max_det());
+    let (mut tile, mut tta): (Option<TileConfig>, Option<TtaConfig>) = (None, None);
     while let Some(field) = mp.next_field().await.map_err(|e| Error::multipart("multipart", e))? {
         let name = field.name().unwrap_or("").to_string();
         if name == "image" {
@@ -38,13 +51,19 @@ async fn parse_multipart(mut mp: Multipart) -> Result<PredictInput> {
             "conf" => conf = text.parse().map_err(|e| field_err("conf", e))?,
             "iou" => iou = text.parse().map_err(|e| field_err("iou", e))?,
             "max_det" => max_det = text.parse().map_err(|e| field_err("max_det", e))?,
+            "tile" if !text.is_empty() => {
+                tile = Some(serde_json::from_str(&text).map_err(|e| field_err("tile", e))?);
+            }
+            "tta" if !text.is_empty() => {
+                tta = Some(serde_json::from_str(&text).map_err(|e| field_err("tta", e))?);
+            }
             _ => {}
         }
     }
     let model_id =
         model_id.filter(|m| !m.is_empty()).ok_or_else(|| field_err("model_id", "missing or empty"))?;
     let source = resolve_predict_source(image, dataset_id, image_id)?;
-    Ok(PredictInput { model_id, source, conf, iou, max_det })
+    Ok(PredictInput { model_id, source, conf, iou, max_det, options: PredictOptions { tta, tile } })
 }
 
 /// Validates and selects the single image source of a `POST /api/predict` request (multipart or JSON).
@@ -73,7 +92,8 @@ fn resolve_predict_source(
     }
 }
 
-fn parse_json_predict(r: PredictRequest) -> Result<PredictInput> {
+fn parse_json_predict(body: PredictJsonBody) -> Result<PredictInput> {
+    let r = body.base;
     if r.model_id.trim().is_empty() {
         return Err(field_err("model_id", "missing or empty"));
     }
@@ -89,6 +109,7 @@ fn parse_json_predict(r: PredictRequest) -> Result<PredictInput> {
         conf: r.conf,
         iou: r.iou,
         max_det: r.max_det,
+        options: PredictOptions { tta: body.tta, tile: body.tile },
     })
 }
 
@@ -102,6 +123,7 @@ fn check_thresholds(p: &PredictInput) -> Result<()> {
     if p.max_det == 0 {
         return Err(field_err("max_det", "must be at least 1"));
     }
+    check_predict_options(&p.options)?;
     Ok(())
 }
 
@@ -116,7 +138,7 @@ pub(super) async fn predict(State(st): State<AppState>, req: Request) -> Result<
         let mp = Multipart::from_request(req, &st).await?;
         parse_multipart(mp).await?
     } else {
-        let ApiJson(r) = ApiJson::<PredictRequest>::from_request(req, &st).await?;
+        let ApiJson(r) = ApiJson::<PredictJsonBody>::from_request(req, &st).await?;
         parse_json_predict(r)?
     };
     check_thresholds(&input)?;
@@ -169,13 +191,17 @@ mod tests {
             ("m_1", "ds_1", ""),
             ("m_1", "ds_1", "   "),
         ] {
-            let req = PredictRequest {
-                model_id: model_id.into(),
-                dataset_id: dataset_id.into(),
-                image_id: image_id.into(),
-                conf: 0.25,
-                iou: 0.7,
-                max_det: 100,
+            let req = PredictJsonBody {
+                base: PredictRequest {
+                    model_id: model_id.into(),
+                    dataset_id: dataset_id.into(),
+                    image_id: image_id.into(),
+                    conf: 0.25,
+                    iou: 0.7,
+                    max_det: 100,
+                },
+                tile: None,
+                tta: None,
             };
             let err = parse_json_predict(req).unwrap_err();
             assert_eq!(
@@ -186,13 +212,17 @@ mod tests {
         }
 
         // Non-blank padded IDs keep their exact spelling so JSON HTTP matches embedded MCP lookup semantics.
-        let padded = parse_json_predict(PredictRequest {
-            model_id: " m_1 ".into(),
-            dataset_id: " ds_1 ".into(),
-            image_id: " 0 ".into(),
-            conf: 0.25,
-            iou: 0.7,
-            max_det: 100,
+        let padded = parse_json_predict(PredictJsonBody {
+            base: PredictRequest {
+                model_id: " m_1 ".into(),
+                dataset_id: " ds_1 ".into(),
+                image_id: " 0 ".into(),
+                conf: 0.25,
+                iou: 0.7,
+                max_det: 100,
+            },
+            tile: None,
+            tta: None,
         })
         .unwrap();
         assert_eq!(padded.model_id, " m_1 ");

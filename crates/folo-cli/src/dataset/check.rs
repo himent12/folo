@@ -44,6 +44,7 @@ pub(super) fn check(args: CheckArgs, out: Out) -> Result<(), CliError> {
     let (errors, warnings, infos) =
         (report.count(Severity::Error), report.count(Severity::Warning), report.count(Severity::Info));
     let total = errors + warnings + infos;
+    let split_leakage = report.issues.iter().filter(|i| is_split_leakage(i)).count();
     let by_kind: serde_json::Map<String, Value> =
         report.counts().into_iter().map(|(k, n)| (k.as_str().to_string(), json!(n))).collect();
     let json_min = args.min_severity.unwrap_or(SeverityArg::Info);
@@ -69,6 +70,7 @@ pub(super) fn check(args: CheckArgs, out: Out) -> Result<(), CliError> {
             "warning": warnings,
             "info": infos,
             "total": total,
+            "split_leakage": split_leakage,
             "by_kind": by_kind,
         },
         "filtered_out": filtered_out,
@@ -91,6 +93,11 @@ pub(super) fn check(args: CheckArgs, out: Out) -> Result<(), CliError> {
     } else {
         "see the issues above; --fix-dry-run shows what a cleanup would change"
     }))
+}
+
+/// Whether `i` is a cross-split duplicate leakage warning (`folo_data::audit` / `folo_data::check`).
+fn is_split_leakage(i: &CheckIssue) -> bool {
+    i.kind == CheckKind::DuplicateImage && i.message.starts_with("split leakage (")
 }
 
 /// Whether `i` is `folo_data::check`'s COCO declared-vs-actual dimension mismatch warning.
@@ -243,6 +250,12 @@ fn check_lines(r: &CheckReport, fixes: bool, min_severity: SeverityArg, secs: f6
     }
     if min_severity == SeverityArg::Error && warnings > 0 {
         l.push(format!("({warnings} warning(s) hidden by --min-severity error)"));
+    }
+    let split_leakage = r.issues.iter().filter(|i| is_split_leakage(i)).count();
+    if split_leakage > 0 {
+        l.push(format!(
+            "{split_leakage} cross-split duplicate leakage warning(s) (identical image content across splits; deduplicate or re-split with `folo dataset split`)"
+        ));
     }
     if empty > 0 {
         if min_severity == SeverityArg::Info {

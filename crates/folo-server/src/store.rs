@@ -21,6 +21,35 @@ use tokio::sync::broadcast;
 
 use crate::error::Result;
 
+pub use folo_vision::tta::DEFAULT_TTA_SCALES;
+pub use folo_vision::{PredictOptions, TileConfig, TileMergeMetric, TtaConfig};
+
+/// Server capability flag advertised on `/api/health` and `/api/system` when `POST /api/predict` honours optional
+/// `tile` (SAHI) and `tta` (Test-Time Augmentation) fields.
+pub const FEATURE_PREDICT_OPTIONS: &str = "predict_options";
+
+/// Validates `options` independent of a specific model `imgsz` (`400 invalid_body` on invalid ranges or combining
+/// `tile` with `tta`).
+pub fn check_predict_options(options: &PredictOptions) -> Result<()> {
+    fn bad(field: &str, msg: impl std::fmt::Display) -> crate::error::Error {
+        crate::error::Error::new(
+            axum::http::StatusCode::BAD_REQUEST,
+            "invalid_body",
+            format!("field `{field}`: {msg}"),
+        )
+    }
+    if options.tile.is_some() && options.tta.is_some() {
+        return Err(bad("tile", "cannot be combined with tta"));
+    }
+    if let Some(tile) = &options.tile {
+        tile.validate().map_err(|e| bad("tile", e))?;
+    }
+    if let Some(tta) = &options.tta {
+        tta.validate().map_err(|e| bad("tta", e))?;
+    }
+    Ok(())
+}
+
 /// Filter and page of `GET /api/datasets/{id}/images`.
 #[derive(Clone, Debug, Default)]
 pub struct ImageQuery {
@@ -307,6 +336,8 @@ pub struct PredictInput {
     pub iou: f32,
     /// Maximum detections.
     pub max_det: u32,
+    /// Optional SAHI tiled inference or Test-Time Augmentation settings.
+    pub options: PredictOptions,
 }
 
 /// Where the image of a prediction comes from.
