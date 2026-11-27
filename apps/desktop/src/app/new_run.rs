@@ -14,7 +14,7 @@ use crate::ui::*;
 
 use super::forms::{
     ARCHS, BATCHES, IMGSZ, NewRunForm, OPTIMIZERS, again_run_name, auto_close_mosaic, batch_index,
-    carry_over, free_run_name, parse_epochs, parse_lr, run_name_error,
+    carry_over, free_model_run_name, parse_epochs, parse_lr, run_name_error,
 };
 use super::{FoloApp, Route, RunFilter};
 
@@ -62,9 +62,45 @@ impl FoloApp {
     }
 
     /// The New run dialog prefilled from an earlier run; `note` explains any adjustment.
+    #[cfg(test)]
     pub fn open_new_run_from(
         &mut self,
         config: &TrainConfig,
+        note: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_new_run_from_arch(config, crate::arch::ModelArch::v1(config.arch), note, window, cx);
+    }
+
+    /// The New run dialog prefilled from an existing run, resolving its canonical architecture
+    /// (and triggering any needed HTTP arch probe so Clone/Retry never downgrades `folo2-*` to v1).
+    pub fn open_new_run_from_run(
+        &mut self,
+        run: &Run,
+        config: &TrainConfig,
+        note: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let arch = self.store.run_arch(run);
+        self.open_new_run_from_arch(config, arch, note, window, cx);
+        if let Some(f) = self.new_run.as_mut() {
+            f.source_run_id = Some(run.id.clone());
+            f.arch_touched = false;
+        }
+        self.probe_missing_model_archs(cx);
+        self.probe_run_arch(&run.id, cx);
+        if let Some(w) = config.weights.as_deref() {
+            self.probe_model_arch(w, cx);
+        }
+    }
+
+    /// The New run dialog prefilled from an earlier run with its canonical architecture (`folo-*` or `folo2-*`).
+    pub fn open_new_run_from_arch(
+        &mut self,
+        config: &TrainConfig,
+        arch: crate::arch::ModelArch,
         note: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -75,7 +111,8 @@ impl FoloApp {
         let name = again_run_name(&config.name, runs);
         let cloud_on = self.cloud_on();
         if let Some(f) = self.new_run.as_mut() {
-            f.arch = ARCHS.iter().position(|a| *a == config.arch).unwrap_or(f.arch);
+            f.arch_family = arch.family;
+            f.arch = ARCHS.iter().position(|a| *a == arch.scale).unwrap_or(f.arch);
             f.epochs = config.epochs as f32;
             match idx(&BATCHES, config.batch) {
                 Some(i) => {
@@ -211,7 +248,16 @@ impl FoloApp {
             && self.store.dataset_summary(&draft.dataset).is_some()
         {
             let fh = draft.name.read(cx).focus_handle(cx);
+            let draft_run = draft.source_run_id.clone();
+            let draft_weights = draft.weights.clone();
             self.new_run = Some(draft);
+            self.sync_new_run_arch_after_probe(cx);
+            if let Some(rid) = draft_run.as_deref() {
+                self.probe_run_arch(rid, cx);
+            }
+            if let Some(wid) = draft_weights.as_deref() {
+                self.probe_model_arch(wid, cx);
+            }
             self.nr_recheck_dataset(cx);
             window.focus(&fh);
             cx.notify();
@@ -231,10 +277,15 @@ impl FoloApp {
                 None => return,
             },
         };
-        // The last started run's choices, else the defaults (s, 640 px, 100 epochs).
-        let (arch, imgsz, epochs) = self.new_run_last.unwrap_or((1, 2, 100.0));
+        // The last started run's choices, else the defaults (folo-s, 640 px, 100 epochs).
+        let (mut arch_family, arch, imgsz, epochs) =
+            self.new_run_last.unwrap_or((crate::arch::ArchFamily::Folo, 1, 2, 100.0));
+        if self.store.system.ready().is_some() && !self.store.supports_folo2() {
+            arch_family = crate::arch::ArchFamily::Folo;
+        }
+        let model_arch = crate::arch::ModelArch::new(arch_family, ARCHS[arch]);
         let runs = self.store.runs.ready().map(Vec::as_slice).unwrap_or_default();
-        let suggested = free_run_name(&ds_name, ARCHS[arch], runs);
+        let suggested = free_model_run_name(&ds_name, model_arch, runs);
         let name = cx.new(|cx| {
             let mut i = TextInput::new("run name", cx);
             i.set_text(suggested.clone(), cx);
@@ -345,6 +396,7 @@ impl FoloApp {
             name,
             name_suggested: Some(suggested),
             dataset: ds_id,
+            arch_family,
             arch,
             epochs,
             batch: batch_index(16),
@@ -365,6 +417,8 @@ impl FoloApp {
             weights: None,
             weights_name: None,
             base: None,
+            source_run_id: None,
+            arch_touched: false,
             epochs_input,
             lr_input,
             close_input,
@@ -397,12 +451,93 @@ impl FoloApp {
         let Some(f) = self.new_run.as_mut() else { return };
         let Some(ds) = self.store.dataset_summary(&f.dataset) else { return };
         let runs = self.store.runs.ready().map(Vec::as_slice).unwrap_or_default();
-        let name = free_run_name(&ds.name, ARCHS[f.arch], runs);
+        let name = free_model_run_name(&ds.name, f.model_arch(), runs);
         if f.name_suggested.as_ref().is_none_or(|s| *s == name) {
             return;
         }
         f.name_suggested = Some(name.clone());
         f.name.clone().update(cx, |i, cx| i.set_text(name, cx));
+    }
+
+    /// Reconciles an open New run form after an async `x-folo-arch` or `/cli` probe completes,
+    /// so fine-tune weights or a cloned/retried run never stays on a provisional v1 fallback.
+    pub(super) fn sync_new_run_arch_after_probe(&mut self, cx: &mut Context<Self>) {
+        let desired = {
+            let Some(f) = self.new_run.as_ref() else { return };
+            f.weights.as_deref().and_then(|wid| self.store.model_archs.get(wid).copied()).or_else(|| {
+                (!f.arch_touched)
+                    .then(|| {
+                        f.source_run_id
+                            .as_deref()
+                            .and_then(|rid| self.store.run(rid))
+                            .map(|r| self.store.run_arch(r))
+                    })
+                    .flatten()
+            })
+        };
+        let mut changed = false;
+        if let Some(arch) = desired
+            && let Some(f) = self.new_run.as_mut()
+            && f.model_arch() != arch
+        {
+            f.arch_family = arch.family;
+            f.arch = ARCHS.iter().position(|a| *a == arch.scale).unwrap_or(f.arch);
+            changed = true;
+        }
+        if changed {
+            self.resuggest_run_name(cx);
+            self.ensure_estimate(cx);
+        }
+        cx.notify();
+    }
+
+    /// Whether an async HTTP architecture probe is still in flight for the form's chosen weights
+    /// or cloned/retried source run.
+    pub fn nr_arch_probe_pending(&self) -> bool {
+        let Some(f) = self.new_run.as_ref() else { return false };
+        if let Some(wid) = f.weights.as_deref()
+            && self.store.probing_model_archs.contains(wid)
+        {
+            return true;
+        }
+        if !f.arch_touched
+            && let Some(rid) = f.source_run_id.as_deref()
+        {
+            if self.store.probing_run_archs.contains(rid) {
+                return true;
+            }
+            if let Some(run) = self.store.run(rid) {
+                if run.model_id.as_deref().is_some_and(|mid| self.store.probing_model_archs.contains(mid)) {
+                    return true;
+                }
+                if run
+                    .config
+                    .weights
+                    .as_deref()
+                    .is_some_and(|wid| self.store.probing_model_archs.contains(wid))
+                {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Why a FOLO v2 selection cannot start on the current target, if it cannot: either the server
+    /// does not advertise `folo2_arch`, or Cloud compute is selected (`folo-server` restricts v2
+    /// runs to local training).
+    pub fn nr_folo2_blocked(&self) -> Option<&'static str> {
+        let f = self.new_run.as_ref()?;
+        if !f.arch_family.is_v2() {
+            return None;
+        }
+        if self.store.system.ready().is_some() && !self.store.supports_folo2() {
+            return Some("This server does not support FOLO v2 (folo2_arch). Switch to FOLO v1.");
+        }
+        if self.cloud_on() && f.run_on.is_some() {
+            return Some("FOLO v2 training is local-only for now — switch to Local or FOLO v1.");
+        }
+        None
     }
 
     /// The New run form as the config it would submit (its name as typed), or None without a
@@ -508,12 +643,14 @@ impl FoloApp {
         }
     }
 
-    /// Stable JSON cache key for `POST /api/runs/estimate` (name normalized away).
-    fn estimate_key(&self, cx: &App) -> Option<(String, TrainConfig)> {
+    /// Stable JSON cache key for `POST /api/runs/estimate` (name normalized away, arch family included).
+    fn estimate_key(&self, cx: &App) -> Option<(String, TrainConfig, crate::arch::ModelArch)> {
+        let arch = self.new_run.as_ref()?.model_arch();
         let mut config = self.form_config(cx)?;
         config.name = "estimate".into();
-        let key = serde_json::to_string(&config).unwrap_or_default();
-        Some((key, config))
+        let json = serde_json::to_string(&config).unwrap_or_default();
+        let key = if arch.is_v2() { format!("{}|{json}", arch.as_str()) } else { json };
+        Some((key, config, arch))
     }
 
     /// Asks the server how long the New run form's config would take (servers with
@@ -523,13 +660,15 @@ impl FoloApp {
             return;
         }
         // A value being typed that doesn't parse yet: no estimate for the last good one.
-        // Nor for a cloud run without its offer yet (the config would be this machine's).
+        // Nor for a cloud run without its offer yet, nor for a blocked FOLO v2 target.
         if self.new_run.as_ref().is_some_and(|f| {
             f.epochs_invalid
                 || f.close_invalid
                 || (f.lr_invalid && f.optimizer != 0)
                 || f.optimizer_blocks().is_some()
         }) || self.compute_blocked().is_some()
+            || self.nr_arch_probe_pending()
+            || self.nr_folo2_blocked().is_some()
             || self.nr_device_local_gone().is_some()
         {
             // Cancel a pending ask; an unanswered key would otherwise stay "loading" for good.
@@ -539,7 +678,7 @@ impl FoloApp {
             }
             return;
         }
-        let Some((key, config)) = self.estimate_key(cx) else { return };
+        let Some((key, config, arch)) = self.estimate_key(cx) else { return };
         if self.nr_estimate.as_ref().is_some_and(|(k, _)| *k == key) {
             return;
         }
@@ -549,14 +688,14 @@ impl FoloApp {
         // Settled first (250 ms; at once for the frozen scenes), so a slider drag asks once for
         // the value it stops on rather than for every step.
         if self.frozen {
-            self.request_estimate(key, config, cx);
+            self.request_estimate(key, config, arch, cx);
             return;
         }
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(Duration::from_millis(250)).await;
             this.update(cx, |this, cx| {
                 if this.nr_estimate_gen == generation {
-                    this.request_estimate(key, config, cx);
+                    this.request_estimate(key, config, arch, cx);
                 }
             })
             .ok();
@@ -564,10 +703,16 @@ impl FoloApp {
         .detach();
     }
 
-    fn request_estimate(&mut self, key: String, config: TrainConfig, cx: &mut Context<Self>) {
+    fn request_estimate(
+        &mut self,
+        key: String,
+        config: TrainConfig,
+        arch: crate::arch::ModelArch,
+        cx: &mut Context<Self>,
+    ) {
         self.fetch(
             cx,
-            move |api| api.estimate_run(&config),
+            move |api| api.estimate_run_with_arch(&config, arch.wire_override()),
             move |this, r, cx| {
                 if this.nr_estimate.as_ref().is_none_or(|(k, _)| *k != key) {
                     return;
@@ -589,7 +734,10 @@ impl FoloApp {
         let dataset_blocked = self.dataset_blocked().is_some();
         let weights_gone = self.nr_weights_gone().is_some();
         let device_gone = self.nr_device_gone(cx).is_some();
+        let arch_probe_pending = self.nr_arch_probe_pending();
+        let folo2_blocked = self.nr_folo2_blocked().is_some();
         let Some(form) = self.new_run.as_mut() else { return };
+        let model_arch = form.model_arch();
         // Auto sets its own rate, so an unparsed rate entry doesn't block it.
         let lr_invalid = form.lr_invalid && form.optimizer != 0;
         if form.submitting
@@ -601,6 +749,8 @@ impl FoloApp {
             || dataset_blocked
             || weights_gone
             || device_gone
+            || arch_probe_pending
+            || folo2_blocked
         {
             return;
         }
@@ -621,13 +771,14 @@ impl FoloApp {
         let _ = window;
         self.fetch(
             cx,
-            move |api| api.create_run(config),
+            move |api| api.create_run_with_arch(config, model_arch.wire_override()),
             move |this, r, cx| {
                 let mine = this.new_run.as_ref().is_some_and(|f| f.name.entity_id() == form_id);
                 match r {
                     Ok(run) => {
                         let id = run.id.clone();
                         let name = run.name.clone();
+                        this.store.note_run_arch(&id, model_arch);
                         if let Some(runs) = this.store.runs.ready_mut() {
                             runs.insert(0, run);
                         }
@@ -668,6 +819,7 @@ impl FoloApp {
                                         move |this: &mut Self, w: &mut Window, cx: &mut Context<Self>| {
                                             this.navigate(Route::Runs, w, cx);
                                             this.run_filter = RunFilter::Active;
+                                            this.run_family_filter = None;
                                             this.run_arch_filter = None;
                                             this.run_search.update(cx, |i, cx| i.set_text("", cx));
                                         },
@@ -686,7 +838,8 @@ impl FoloApp {
                         // An earlier, dismissed submission leaves the form now open alone.
                         if mine {
                             // The next New run starts from these choices.
-                            this.new_run_last = this.new_run.as_ref().map(|f| (f.arch, f.imgsz, f.epochs));
+                            this.new_run_last =
+                                this.new_run.as_ref().map(|f| (f.arch_family, f.arch, f.imgsz, f.epochs));
                             this.new_run = None;
                             this.close_menus();
                             this.overlay_return = None;
@@ -793,7 +946,7 @@ impl FoloApp {
         if self.cloud_on() && f.run_on.is_some() {
             return None;
         }
-        let (key, _) = self.estimate_key(cx)?;
+        let (key, _, _) = self.estimate_key(cx)?;
         match &self.nr_estimate {
             Some((k, Load::Failed(e))) if *k == key && e.code == "device_not_found" => {
                 Some(e.message.clone())

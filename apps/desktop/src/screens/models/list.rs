@@ -18,23 +18,28 @@ use crate::screens::{FirstStep, loading_rows, page_header, th};
 use crate::theme::{radius, theme, ty};
 use crate::ui::*;
 
-/// Filters `models` by optional architecture and case-insensitive substring query across model
-/// name, id, architecture, source run name, evaluation group label, and class names.
-pub fn filter_models<'a>(
+/// Filters `models` by optional architecture family, optional scale, and case-insensitive substring
+/// query across model name, id, architecture (`folo-*` / `folo2-*`), source run name, evaluation
+/// group label, and class names.
+pub fn filter_models_with_family<'a>(
     store: &crate::store::Store,
     models: &'a [Model],
+    family: Option<crate::arch::ArchFamily>,
     arch: Option<Arch>,
     query: &str,
 ) -> Vec<&'a Model> {
     let q = query.trim().to_lowercase();
     models
         .iter()
-        .filter(|m| arch.is_none_or(|a| m.arch == a))
+        .filter(|m| {
+            let ma = store.model_arch(m);
+            family.is_none_or(|f| ma.family == f) && arch.is_none_or(|a| ma.scale == a)
+        })
         .filter(|m| {
             q.is_empty()
                 || m.name.to_lowercase().contains(&q)
                 || m.id.to_lowercase().contains(&q)
-                || m.arch.as_str().to_lowercase().contains(&q)
+                || store.model_arch(m).matches_query(&q)
                 || m.classes.iter().any(|c| c.to_lowercase().contains(&q))
                 || m.run_id
                     .as_deref()
@@ -43,6 +48,17 @@ pub fn filter_models<'a>(
                 || eval_set(store, m).label.to_lowercase().contains(&q)
         })
         .collect()
+}
+
+/// Filters `models` by optional architecture and case-insensitive substring query.
+#[cfg(test)]
+pub fn filter_models<'a>(
+    store: &crate::store::Store,
+    models: &'a [Model],
+    arch: Option<Arch>,
+    query: &str,
+) -> Vec<&'a Model> {
+    filter_models_with_family(store, models, None, arch, query)
 }
 
 impl FoloApp {
@@ -65,8 +81,23 @@ impl FoloApp {
             (None, _, Some(_)) => "The model list didn't load".to_string(),
             _ => "Loading…".to_string(),
         };
-        let open = self
-            .button(
+        let mut header_actions = Vec::new();
+        if models.as_ref().is_some_and(|m| m.len() >= 2) {
+            header_actions.push(
+                self.button(
+                    "models-compare",
+                    "Compare models",
+                    Btn::Secondary,
+                    Some("icons/git-compare-arrows.svg"),
+                    window,
+                    cx,
+                    act(|this, w, cx| this.open_model_compare(None, w, cx)),
+                )
+                .into_any_element(),
+            );
+        }
+        header_actions.push(
+            self.button(
                 "models-open",
                 // No model in hand on the index: it opens Playground (a model's page tries that one).
                 "Open Playground",
@@ -76,8 +107,9 @@ impl FoloApp {
                 cx,
                 act(|this, w, cx| this.navigate(Route::Playground, w, cx)),
             )
-            .into_any_element();
-        let header = page_header(&t, "Models", subtitle, vec![open]);
+            .into_any_element(),
+        );
+        let header = page_header(&t, "Models", subtitle, header_actions);
         if let Some(e) = self.store.models.error().cloned() {
             let err = self.error_panel(&e, "models-retry", window, cx);
             return self.page_frame(&t, header, err, cx);
@@ -132,8 +164,45 @@ impl FoloApp {
             }
             Some(l) => {
                 let total = l.len();
+                let families =
+                    [None, Some(crate::arch::ArchFamily::Folo), Some(crate::arch::ArchFamily::Folo2)];
+                let fam_count = |f: Option<crate::arch::ArchFamily>| {
+                    l.iter().filter(|m| f.is_none_or(|w| self.store.model_arch(m).family == w)).count()
+                };
+                let fam_labels: Vec<String> = families
+                    .iter()
+                    .map(|&f| {
+                        let name = match f {
+                            None => "All",
+                            Some(crate::arch::ArchFamily::Folo) => "v1",
+                            Some(crate::arch::ArchFamily::Folo2) => "v2",
+                        };
+                        format!("{name}\u{a0}{}", fam_count(f))
+                    })
+                    .collect();
+                let fam_refs: Vec<&str> = fam_labels.iter().map(String::as_str).collect();
+                let fam_sel = families.iter().position(|f| *f == self.models_family_filter).unwrap_or(0);
+                let fam_seg = self.segmented(
+                    "models-family-filter",
+                    &fam_refs,
+                    fam_sel,
+                    window,
+                    cx,
+                    Rc::new(move |this, i, _, cx| {
+                        this.models_family_filter = families[i];
+                        cx.notify();
+                    }),
+                );
                 let archs = [None, Some(Arch::N), Some(Arch::S), Some(Arch::M), Some(Arch::L), Some(Arch::X)];
-                let arch_count = |a: Option<Arch>| l.iter().filter(|m| a.is_none_or(|w| m.arch == w)).count();
+                let arch_count = |a: Option<Arch>| {
+                    l.iter()
+                        .filter(|m| {
+                            let ma = self.store.model_arch(m);
+                            self.models_family_filter.is_none_or(|f| ma.family == f)
+                                && a.is_none_or(|w| ma.scale == w)
+                        })
+                        .count()
+                };
                 let arch_labels: Vec<String> = archs
                     .iter()
                     .map(|&a| {
@@ -162,17 +231,26 @@ impl FoloApp {
                     }),
                 );
                 let query = self.model_search.read(cx).text().to_string();
-                let filtered: Vec<Model> = filter_models(&self.store, &l, self.models_arch_filter, &query)
-                    .into_iter()
-                    .cloned()
-                    .collect();
-                let is_filtered = self.models_arch_filter.is_some() || !query.trim().is_empty();
+                let filtered: Vec<Model> = filter_models_with_family(
+                    &self.store,
+                    &l,
+                    self.models_family_filter,
+                    self.models_arch_filter,
+                    &query,
+                )
+                .into_iter()
+                .cloned()
+                .collect();
+                let is_filtered = self.models_family_filter.is_some()
+                    || self.models_arch_filter.is_some()
+                    || !query.trim().is_empty();
                 let search = self.search_field("models-search", self.model_search.clone(), 240., window, cx);
                 let mut toolbar = div()
                     .flex()
                     .flex_wrap()
                     .items_center()
                     .gap(px(12.))
+                    .child(fam_seg)
                     .child(arch_seg)
                     .child(div().flex_1().min_w(px(8.)));
                 if is_filtered {
@@ -195,6 +273,7 @@ impl FoloApp {
                         window,
                         cx,
                         act(|this, w, cx| {
+                            this.models_family_filter = None;
                             this.models_arch_filter = None;
                             this.model_search.update(cx, |i, cx| i.set_text("", cx));
                             w.focus(&this.model_search.read(cx).focus_handle(cx));
@@ -362,17 +441,24 @@ impl FoloApp {
                             .child(m.name.clone()),
                     ),
             )
-            // The architecture is a name (sans), with the e2e tag of an end-to-end model.
-            .child(
+            // The architecture is a name (sans), with a v2 badge for FOLO v2 (omitted when e2e is
+            // also shown so `folo2-x` + `e2e` stays inside ARCH_W) and e2e tag for o2o.
+            .child({
+                let model_arch = self.store.model_arch(m);
                 div()
                     .w(px(ARCH_W))
                     .flex_none()
                     .flex()
                     .items_center()
-                    .gap(px(6.))
-                    .child(text(ty::SM, t.text_secondary).whitespace_nowrap().child(m.arch.as_str()))
-                    .when(e2e, |d| d.child(e2e_tag(&t, format!("e2e-m-{}", m.id)))),
-            )
+                    .gap(px(5.))
+                    .child(
+                        text(ty::SM, if model_arch.is_v2() { t.accent_text } else { t.text_secondary })
+                            .whitespace_nowrap()
+                            .child(model_arch.as_str()),
+                    )
+                    .when(model_arch.is_v2() && !e2e, |d| d.child(badge(&t, "v2", Tone::Accent)))
+                    .when(e2e, |d| d.child(e2e_tag(&t, format!("e2e-m-{}", m.id))))
+            })
             .when(c.classes, |d| {
                 d.child(num_cell(
                     64.,
@@ -518,7 +604,7 @@ impl FoloApp {
 const MODEL_NAME_MIN: f32 = 160.;
 /// Row padding, the panel's borders and slack for rounding.
 const MODEL_SLACK: f32 = 32. + 2. + 8.;
-const ARCH_W: f32 = 96.;
+const ARCH_W: f32 = 100.;
 /// mAP50-95 with "joint best" before it.
 const MAP_W: f32 = 130.;
 const SOURCE_W: f32 = 150.;

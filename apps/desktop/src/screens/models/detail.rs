@@ -88,6 +88,7 @@ impl FoloApp {
             .into_any_element();
         let export_btn = self.export_menu(&m, window, cx);
         let e2e = self.model_e2e(&m);
+        let model_arch = self.store.model_arch(&m);
         let title = div()
             .w_full()
             .flex()
@@ -95,7 +96,11 @@ impl FoloApp {
             .gap(px(10.))
             .min_w_0()
             .child(text(ty::XL, t.text_primary).min_w_0().ellipsis().child(m.name.clone()))
-            .child(div().flex_none().child(badge(&t, m.arch.as_str(), Tone::Neutral)))
+            .child(div().flex_none().child(badge(
+                &t,
+                model_arch.as_str(),
+                if model_arch.is_v2() { Tone::Accent } else { Tone::Neutral },
+            )))
             // The same compact tag as every list, right after the architecture badge, its help on
             // hover; the Details panel's Head row gives it a keyboard route.
             .when(e2e, |d| d.child(div().flex_none().child(e2e_tag(&t, "e2e-model-head"))));
@@ -143,12 +148,25 @@ impl FoloApp {
                 act(move |this, w, cx| this.navigate(Route::Run(rid.clone()), w, cx)),
             ));
         }
-        let header = detail_header(
-            &t,
-            title,
-            subtitle,
-            vec![export_btn.into_any_element(), try_btn.into_any_element()],
-        );
+        let mut header_actions = Vec::new();
+        if self.store.models.ready().is_some_and(|l| l.len() >= 2) {
+            let cmp_id = m.id.clone();
+            header_actions.push(
+                self.button(
+                    "model-compare",
+                    "Compare",
+                    Btn::Secondary,
+                    Some("icons/git-compare-arrows.svg"),
+                    window,
+                    cx,
+                    act(move |this, w, cx| this.open_model_compare(Some(cmp_id.clone()), w, cx)),
+                )
+                .into_any_element(),
+            );
+        }
+        header_actions.push(export_btn.into_any_element());
+        header_actions.push(try_btn.into_any_element());
+        let header = detail_header(&t, title, subtitle, header_actions);
 
         let mm = m.metrics;
         // The dataset and split the headline numbers were measured on, named beside them: as the

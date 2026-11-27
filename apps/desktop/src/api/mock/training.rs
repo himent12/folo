@@ -6,6 +6,7 @@ use std::time::Instant;
 use crate::api::time;
 use crate::api::*;
 use crate::synth::Rng;
+use crate::synth::hash;
 
 use super::cloud::{COLLECT_S, CloudSim};
 use super::{LIVE_ID, MOCK_NOW, MockBackend, STEP_DT};
@@ -374,20 +375,140 @@ pub(super) fn resolve(config: &TrainConfig, train_images: u64, classes: usize) -
 }
 
 impl MockBackend {
+    /// Resolves the canonical architecture for a mock training/estimate request: explicit override
+    /// first, then the fine-tuned weights' known architecture, else v1 `config.arch`.
+    pub(super) fn resolve_mock_arch(
+        &self,
+        config: &TrainConfig,
+        arch_override: Option<&str>,
+    ) -> crate::arch::ModelArch {
+        if let Some(raw) = arch_override
+            && let Some(arch) = crate::arch::ModelArch::parse(raw)
+        {
+            return arch;
+        }
+        if let Some(wid) = config.weights.as_deref()
+            && let Some(raw) = self.model_archs.lock().unwrap().get(wid).cloned()
+            && let Some(arch) = crate::arch::ModelArch::parse(&raw)
+        {
+            return arch;
+        }
+        crate::arch::ModelArch::v1(config.arch)
+    }
+
+    /// Starts a mock run with an optional canonical `"folo2-*"` architecture override.
+    pub(super) fn create_run_inner(
+        &self,
+        config: TrainConfig,
+        arch_override: Option<&str>,
+    ) -> ApiResult<Run> {
+        self.check()?;
+        let model_arch = self.resolve_mock_arch(&config, arch_override);
+        if model_arch.is_v2() && config.compute.is_some() {
+            return Err(ApiError::new(
+                "invalid_config",
+                "folo2 architectures are not supported for cloud runs yet (train locally, or use folo-n..folo-x for cloud compute)",
+            ));
+        }
+        let ds = self.fixture(&config.dataset_id)?;
+        // A cloud run is checked like any run plus its compute (docs/API.md, Cloud runs).
+        let target = match &config.compute {
+            Some(c) => {
+                let (conn, offer) = self.compute_offer(c, &config)?;
+                if offer.availability == CloudAvailability::None {
+                    return Err(ApiError::new(
+                        "cloud_refused",
+                        format!("{} has no {} available right now", conn.name, crate::ui::offer_line(&offer)),
+                    )
+                    .with_hint("Pick another GPU, or try again in a few minutes."));
+                }
+                Some((c.clone(), conn, offer))
+            }
+            None => None,
+        };
+        let mut runs = self.runs.lock().unwrap();
+        let id = format!("run_{:04x}", hash(&format!("{}{}", config.name, runs.len())) & 0xFFFF);
+        let spe = (ds.ds.splits.train / config.batch.max(1) as u64).max(1);
+        let curve = Curve {
+            seed: hash(&id),
+            epochs: config.epochs,
+            spe,
+            lr0: resolve(&config, ds.ds.splits.train, ds.ds.classes.len()).lr0 as f32,
+            batch: config.batch,
+            map_max: 0.66,
+            ips: 380.0,
+            classes: ds.ds.classes.len() as u32,
+            close_mosaic: config.augment.close_mosaic,
+        };
+        let now = self.sim_now();
+        let mut f = RunFixture {
+            run: Run {
+                id: id.clone(),
+                name: config.name.clone(),
+                status: RunStatus::Running,
+                created: time::format(now),
+                started: Some(time::format(now)),
+                finished: None,
+                paused_s: None,
+                epoch: 0,
+                epochs: config.epochs,
+                step: 0,
+                steps_per_epoch: spe,
+                eta_s: None,
+                best: None,
+                device: if config.device == "cpu" {
+                    super::CPU_DEVICE.into()
+                } else {
+                    super::GPU_DEVICE.into()
+                },
+                model_id: None,
+                error: None,
+                error_code: None,
+                resolved: None,
+                queue_position: None,
+                cloud: None,
+                dataset: Some(RunDataset { name: ds.ds.name.clone(), classes: ds.ds.classes.clone() }),
+                config,
+            },
+            curve,
+            live: (!self.frozen && target.is_none()).then(|| (0, std::time::Instant::now())),
+            step: 0,
+            logs: Vec::new(),
+            cloud: None,
+        };
+        if let Some((compute, conn, offer)) = target {
+            let base =
+                super::cloud::launch_state(&id, &compute, &conn.provider, offer, conn.provider == "runpod");
+            let mut sim =
+                super::cloud::CloudSim::new(base, self.clock, self.clock.now(), f.run.epochs as u64 * spe);
+            sim.upload_bytes = ds.ds.splits.total() * 180_000;
+            f.cloud = Some(sim);
+        }
+        f.logs = initial_logs(&f, if f.cloud.is_some() { now } else { now - 5 });
+        let run = Self::snapshot(&f);
+        runs.insert(0, f);
+        drop(runs);
+        if model_arch.is_v2() {
+            self.run_archs.lock().unwrap().insert(id, model_arch.as_str().into());
+        }
+        Ok(run)
+    }
+
     /// The demo's `folo train` command for a config (the flags the CLI takes for what the form sets).
-    pub(super) fn cli_for(&self, c: &TrainConfig) -> CliCommand {
+    pub(super) fn cli_for(&self, c: &TrainConfig, arch_override: Option<&str>) -> CliCommand {
         let ds = self
             .datasets
             .iter()
             .find(|d| d.ds.id == c.dataset_id)
             .map_or(c.dataset_id.clone(), |d| d.ds.path.replace('\\', "/"));
+        let arch = arch_override.unwrap_or_else(|| c.arch.as_str());
         let mut argv: Vec<String> = vec![
             "folo".into(),
             "train".into(),
             "--data".into(),
             ds,
             "--arch".into(),
-            c.arch.as_str().into(),
+            arch.into(),
             "--epochs".into(),
             c.epochs.to_string(),
             "--batch".into(),

@@ -61,7 +61,10 @@ impl FoloApp {
             models
                 .iter()
                 .map(|m| {
-                    (m.name.clone().into(), Some(format!("{} · {} px", m.arch.as_str(), m.imgsz).into()))
+                    (
+                        m.name.clone().into(),
+                        Some(format!("{} · {} px", self.store.model_arch(m).as_str(), m.imgsz).into()),
+                    )
                 })
                 .collect(),
             // None set, or deleted: none of them is the choice, so the first one can be picked.
@@ -164,7 +167,7 @@ impl FoloApp {
                     } else {
                         "train images"
                     },
-                    m.arch.as_str(),
+                    self.store.model_arch(m).as_str(),
                     LOOP_EPOCHS[epochs],
                     if gens > 1 {
                         format!("Each student teaches the next, {gens} generations in all.")

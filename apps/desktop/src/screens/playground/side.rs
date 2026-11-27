@@ -53,7 +53,7 @@ impl FoloApp {
                         // mAP when the model has been evaluated.
                         Some(SharedString::from(format!(
                             "{}{}{}",
-                            m.arch.as_str(),
+                            self.store.model_arch(m).as_str(),
                             // Both heads named: each says how its boxes are made.
                             if self.model_e2e(m) { " · end-to-end" } else { " · NMS" },
                             m.metrics.as_ref().map_or(String::new(), |x| format!(" · {:.3}", x.map50_95)),
@@ -176,7 +176,7 @@ impl FoloApp {
                         // Identity and storage; the head is the NMS row's to say (once).
                         d.child(text(ty::SM, t.text_tertiary).child(format!(
                             "{} · {} px{}",
-                            m.arch.as_str(),
+                            self.store.model_arch(m).as_str(),
                             m.imgsz,
                             model_storage(m).map_or(String::new(), |s| format!(" · {s}")),
                         )))

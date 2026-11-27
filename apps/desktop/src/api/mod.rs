@@ -157,6 +157,19 @@ pub trait Backend: Send + Sync + 'static {
 
     fn models(&self) -> ApiResult<Vec<Model>>;
     fn model_eval(&self, id: &str) -> ApiResult<ModelEval>;
+    /// Probe the canonical architecture string (e.g. `"folo2-s"`) for a model from `GET /api/models/{id}`'s
+    /// `x-folo-arch` header (or backend metadata). Returns `Ok(None)` when unknown or v1-only.
+    fn model_arch(&self, _id: &str) -> ApiResult<Option<String>> {
+        Ok(None)
+    }
+    /// Snapshot of canonical `(run_archs, model_archs)` strings already known to this backend.
+    fn known_archs(
+        &self,
+    ) -> (std::collections::HashMap<String, String>, std::collections::HashMap<String, String>) {
+        Default::default()
+    }
+    /// Clears any backend-local architecture header cache (called on Retry / reconnect).
+    fn clear_arch_cache(&self) {}
     fn export_model(&self, id: &str, format: &str) -> ApiResult<ExportResult>;
     /// Exports a model with optional ONNX switches (`decode`, `dynamic_batch`, `dynamic_hw`, `half`).
     fn export_model_with_options(&self, id: &str, opts: ModelExportOptions) -> ApiResult<ExportResult> {
@@ -179,6 +192,10 @@ pub trait Backend: Send + Sync + 'static {
     #[allow(dead_code)]
     fn run(&self, id: &str) -> ApiResult<Run>;
     fn create_run(&self, config: TrainConfig) -> ApiResult<Run>;
+    /// Starts a run with an optional canonical `"arch"` wire override (e.g. `"folo2-s"`).
+    fn create_run_with_arch(&self, config: TrainConfig, _arch_override: Option<&str>) -> ApiResult<Run> {
+        self.create_run(config)
+    }
     fn stop_run(&self, id: &str) -> ApiResult<Run>;
     /// Deletes a run that is not active (`DELETE /api/runs/{id}`; `409 run_active` while running,
     /// stopping, or queued after it had started): its folder and weights, so its models go too. A
@@ -198,6 +215,14 @@ pub trait Backend: Send + Sync + 'static {
     /// a confidence.
     fn estimate_run(&self, _config: &TrainConfig) -> ApiResult<RunEstimate> {
         Err(ApiError::new("not_supported", "This server can't estimate a run"))
+    }
+    /// Estimates a run with an optional canonical `"arch"` wire override (e.g. `"folo2-s"`).
+    fn estimate_run_with_arch(
+        &self,
+        config: &TrainConfig,
+        _arch_override: Option<&str>,
+    ) -> ApiResult<RunEstimate> {
+        self.estimate_run(config)
     }
     /// The server's speed table (`GET /api/system/throughput`, servers with `throughput`): what it
     /// measured on its own devices, and the reference rows for everything it hasn't.

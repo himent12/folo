@@ -60,13 +60,36 @@ fn estimate_text(point: f64, lo: f64, hi: f64) -> (String, String) {
 }
 
 /// Rough training cost of a configuration on this machine: (seconds, VRAM GiB).
+#[cfg(test)]
 pub fn estimate(arch: usize, epochs: f32, batch: u32, imgsz: u32, images: u32) -> (f64, f32) {
-    const GFLOPS: [f32; 5] = [6.6, 21.5, 48.0, 104.0, 165.0];
-    const ACT_MB: [f32; 5] = [45., 80., 140., 210., 300.];
+    let ma = crate::arch::ModelArch::ALL_V1[arch.min(crate::arch::ModelArch::ALL_V1.len() - 1)];
+    estimate_arch(ma, epochs, batch, imgsz, images)
+}
+
+/// Rough training cost of any canonical architecture (`folo-*` or `folo2-*`): (seconds, VRAM GiB).
+pub fn estimate_arch(
+    arch: crate::arch::ModelArch,
+    epochs: f32,
+    batch: u32,
+    imgsz: u32,
+    images: u32,
+) -> (f64, f32) {
+    const GFLOPS_V1: [f32; 5] = [6.6, 21.5, 48.0, 104.0, 165.0];
+    const ACT_MB_V1: [f32; 5] = [45., 80., 140., 210., 300.];
+    let idx = crate::app::ARCHS.iter().position(|a| *a == arch.scale).unwrap_or(1);
+    let (gf, act_mb) = if arch.is_v2() {
+        // FOLO v2-Iso has ~5-8% higher FLOPs and activation footprint than v1 at the same scale.
+        let v1_ref = crate::arch::ModelArch::v1(arch.scale);
+        let gf_ratio = (arch.gflops_640() / v1_ref.gflops_640()) as f32;
+        let act_ratio = (arch.act_mib_640() / v1_ref.act_mib_640()) as f32;
+        (GFLOPS_V1[idx] * gf_ratio, ACT_MB_V1[idx] * act_ratio)
+    } else {
+        (GFLOPS_V1[idx], ACT_MB_V1[idx])
+    };
     let scale = (imgsz as f32 / 640.).powi(2);
-    let ips = 12_900. / (GFLOPS[arch] * scale);
+    let ips = 12_900. / (gf * scale);
     let secs = epochs as f64 * images as f64 / ips as f64 * 1.08;
-    let vram = 0.8 + batch as f32 * scale * ACT_MB[arch] / 1024.;
+    let vram = 0.8 + batch as f32 * scale * act_mb / 1024.;
     (secs, vram)
 }
 
@@ -76,7 +99,8 @@ pub(super) struct NewRunSummary {
     pub(super) ds: Option<crate::api::Dataset>,
     pub(super) cloud: Option<crate::api::CloudConnection>,
     pub(super) cloud_offer: Option<crate::api::CloudOffer>,
-    pub(super) arch: usize,
+    pub(super) model_arch: crate::arch::ModelArch,
+    pub(super) folo2_blocked: Option<&'static str>,
     pub(super) epochs: f32,
     pub(super) batch: u32,
     pub(super) imgsz: u32,
@@ -144,7 +168,8 @@ impl FoloApp {
             ds,
             cloud,
             cloud_offer,
-            arch,
+            model_arch,
+            folo2_blocked,
             epochs,
             batch,
             imgsz,
@@ -182,10 +207,15 @@ impl FoloApp {
         let same_kind = |e: &crate::api::RunEstimate| {
             (e.device == "cpu") == cpu && (e.device == "cloud") == cloud.is_some()
         };
+        let arch_probe_pending = self.nr_arch_probe_pending();
         let est = if ds.is_none() {
             Est::NoDataset
         } else if device_gone.is_some() {
             Est::NoDevice
+        } else if arch_probe_pending {
+            Est::Pending
+        } else if let Some(why) = folo2_blocked {
+            Est::Rejected(why.into())
         } else if epochs_bad
             || lr_bad
             || close_bad
@@ -213,7 +243,7 @@ impl FoloApp {
                 },
             }
         };
-        let (local_secs, local_vram) = estimate(arch, epochs, batch, imgsz, images as u32);
+        let (local_secs, local_vram) = estimate_arch(model_arch, epochs, batch, imgsz, images as u32);
         // Mixed precision trains in about 0.58x the memory (folo-n batch 16: 2022 vs 3474 MiB,
         // docs/BENCHMARKS.md) and no faster at 640 px (the epoch is bound elsewhere), so only the
         // memory moves.
@@ -453,6 +483,18 @@ impl FoloApp {
                 window,
                 cx,
             )
+        } else if arch_probe_pending {
+            self.button_disabled(
+                "nr-start",
+                go,
+                Btn::Primary,
+                Some(go_icon),
+                "Checking model architecture…",
+                window,
+                cx,
+            )
+        } else if let Some(why) = folo2_blocked {
+            self.button_disabled("nr-start", go, Btn::Primary, Some(go_icon), why, window, cx)
         } else if let Some(why) = compute_blocked {
             self.button_disabled("nr-start", go, Btn::Primary, Some(go_icon), why, window, cx)
         } else {

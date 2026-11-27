@@ -2,6 +2,7 @@
 //! metrics) with export.
 
 mod class_table;
+mod compare;
 mod confusion;
 mod confusion_ink;
 mod detail;
@@ -11,6 +12,7 @@ mod groups;
 mod list;
 mod pr;
 
+pub(crate) use compare::ModelCompareState;
 pub(crate) use export_builder::{MODEL_CLI_CONF, MODEL_CLI_IOU, ModelCliState};
 #[cfg(test)]
 pub(crate) use groups::group_models;

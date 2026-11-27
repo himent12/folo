@@ -190,11 +190,14 @@ impl FoloApp {
                     s.system
                 });
                 this.store.system = r.into();
+                this.probe_missing_model_archs(cx);
+                this.probe_missing_run_archs(cx);
             },
         );
     }
 
     pub fn ensure_run_data(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.probe_run_arch(id, cx);
         let spe = self.store.run(id).map_or(1, |r| r.steps_per_epoch);
         if self.store.run_data.get(id).is_none_or(|l| l.needs_fetch()) {
             self.store.run_data.insert(id.to_string(), Load::Loading);

@@ -10,13 +10,14 @@ use super::FoloApp;
 use super::forms::ARCHS;
 
 /// One Start from option: the weights' id (`None`: from scratch), its name, what it says beside it,
-/// and the architecture index picking it switches to.
+/// and the architecture family + scale index picking it switches to.
 #[derive(Clone, Debug, PartialEq)]
 pub struct StartChoice {
     pub id: Option<String>,
     pub label: String,
     pub detail: Option<String>,
     pub arch: Option<usize>,
+    pub family: Option<crate::arch::ArchFamily>,
 }
 
 /// Weights a run can start from: not an export (fused for inference only).
@@ -24,53 +25,66 @@ fn trainable(m: &Model) -> bool {
     m.fused != Some(true)
 }
 
-fn arch_index(m: &Model) -> Option<usize> {
-    ARCHS.iter().position(|a| *a == m.arch)
+fn arch_index(scale: crate::api::Arch) -> Option<usize> {
+    ARCHS.iter().position(|a| *a == scale)
 }
 
 fn score(m: &Model) -> f32 {
     m.metrics.as_ref().map_or(-1., |s| s.map50_95)
 }
 
-/// The options in the field's order, for a form on architecture `arch`; `current` (the form's
+/// The options in the field's order, for a form on `target` (`folo-*` or `folo2-*`); `current` (the form's
 /// weights) is kept as an option when the server doesn't list it but it is `base`'s, the weights
-/// of the run the form was prefilled from (one that started from a file). Weights picked here and
-/// gone since (deleted elsewhere) are not: [`FoloApp::nr_weights_gone`] says so.
-pub fn start_choices(
+/// of the run the form was prefilled from (one that started from a file).
+pub fn start_choices_with_arch(
     models: &[Model],
-    arch: usize,
+    target: crate::arch::ModelArch,
     current: Option<&str>,
     base: Option<&str>,
+    arch_of: impl Fn(&Model) -> crate::arch::ModelArch,
 ) -> Vec<StartChoice> {
-    let mut out = vec![StartChoice { id: None, label: "From scratch".into(), detail: None, arch: None }];
+    let mut out =
+        vec![StartChoice { id: None, label: "From scratch".into(), detail: None, arch: None, family: None }];
     let published = |m: &&Model| m.source == Some(ModelSource::Published);
     let mut trained: Vec<&Model> = models.iter().filter(|m| trainable(m) && !published(m)).collect();
-    // This size first, then the others (picking one switches the size), each best first.
+    // Exact architecture match first, then same family, then other architectures, each best first.
     trained.sort_by(|a, b| {
-        (arch_index(a) != Some(arch)).cmp(&(arch_index(b) != Some(arch))).then(score(b).total_cmp(&score(a)))
+        let (ma, mb) = (arch_of(a), arch_of(b));
+        (ma != target)
+            .cmp(&(mb != target))
+            .then((ma.family != target.family).cmp(&(mb.family != target.family)))
+            .then(score(b).total_cmp(&score(a)))
     });
     for m in trained {
-        let other = arch_index(m).filter(|&i| i != arch);
+        let ma = arch_of(m);
+        let diff = ma != target;
         let s = m.metrics.as_ref().map(|s| f3(s.map50_95));
-        let detail = match (other, s) {
-            (Some(i), Some(s)) => format!("{} · {s}", ARCHS[i].as_str()),
-            (Some(i), None) => ARCHS[i].as_str().to_string(),
-            (None, Some(s)) => s,
-            (None, None) => String::new(),
+        let detail = match (diff, s) {
+            (true, Some(s)) => format!("{} · {s}", ma.as_str()),
+            (true, None) => ma.as_str().to_string(),
+            (false, Some(s)) => s,
+            (false, None) => String::new(),
         };
         out.push(StartChoice {
             id: Some(m.id.clone()),
             label: m.name.clone(),
             detail: (!detail.is_empty()).then_some(detail),
-            arch: arch_index(m),
+            arch: arch_index(ma.scale),
+            family: Some(ma.family),
         });
     }
     for m in models.iter().filter(|m| trainable(m) && published(m)) {
+        let ma = arch_of(m);
         out.push(StartChoice {
             id: Some(m.id.clone()),
             label: m.name.clone(),
-            detail: Some("published".into()),
-            arch: arch_index(m),
+            detail: Some(if ma.is_v2() {
+                format!("{} · published", ma.as_str())
+            } else {
+                "published".into()
+            }),
+            arch: arch_index(ma.scale),
+            family: Some(ma.family),
         });
     }
     if let Some(w) = current.filter(|w| base == Some(*w) && !out.iter().any(|c| c.id.as_deref() == Some(*w)))
@@ -81,9 +95,23 @@ pub fn start_choices(
             label: file.to_string(),
             detail: Some("the earlier run's".into()),
             arch: None,
+            family: None,
         });
     }
     out
+}
+
+/// Legacy v1 helper wrapper kept for existing unit tests.
+#[cfg(test)]
+#[allow(dead_code)]
+pub fn start_choices(
+    models: &[Model],
+    arch: usize,
+    current: Option<&str>,
+    base: Option<&str>,
+) -> Vec<StartChoice> {
+    let target = crate::arch::ModelArch::v1(ARCHS[arch.min(ARCHS.len() - 1)]);
+    start_choices_with_arch(models, target, current, base, |m| crate::arch::ModelArch::v1(m.arch))
 }
 
 /// The dataset published weights' description names, the usual way ("… on COCO train2017 …"):
@@ -115,11 +143,12 @@ impl FoloApp {
     pub fn nr_start_choices(&self) -> Vec<StartChoice> {
         let Some(f) = self.new_run.as_ref() else { return Vec::new() };
         let models = self.store.models.ready().map(Vec::as_slice).unwrap_or_default();
-        start_choices(
+        start_choices_with_arch(
             models,
-            f.arch,
+            f.model_arch(),
             f.weights.as_deref(),
             f.base.as_ref().and_then(|b| b.weights.as_deref()),
+            |m| self.store.model_arch(m),
         )
     }
 
@@ -137,13 +166,20 @@ impl FoloApp {
         })
     }
 
-    /// Picks a Start from option: its weights, and their size (a fine-tune trains the weights' own).
+    /// Picks a Start from option: its weights, and their family + size (a fine-tune trains the weights' own).
     pub fn pick_start(&mut self, c: &StartChoice, cx: &mut Context<Self>) {
         let Some(f) = self.new_run.as_mut() else { return };
         f.weights = c.id.clone();
         f.weights_name = c.id.as_ref().map(|_| c.label.clone());
+        f.arch_touched = true;
         if let Some(a) = c.arch {
             f.arch = a;
+        }
+        if let Some(fam) = c.family {
+            f.arch_family = fam;
+        }
+        if let Some(wid) = c.id.as_deref() {
+            self.probe_model_arch(wid, cx);
         }
         self.resuggest_run_name(cx);
         cx.notify();
@@ -160,20 +196,32 @@ impl FoloApp {
     pub fn nr_set_arch(&mut self, arch: usize, cx: &mut Context<Self>) {
         let Some(f) = self.new_run.as_mut().filter(|f| f.arch != arch) else { return };
         f.arch = arch;
+        f.arch_touched = true;
         self.nr_arch_changed(cx);
     }
 
-    /// The architecture changed by hand: weights of another size can't start this run (the server
-    /// would train the weights' own size), so it trains from scratch again; so do weights whose
-    /// size isn't known here (not listed: a checkpoint the earlier run started from).
+    /// The architecture family (`FOLO v1` / `FOLO v2`) picked by hand.
+    pub fn nr_set_arch_family(&mut self, family: crate::arch::ArchFamily, cx: &mut Context<Self>) {
+        let Some(f) = self.new_run.as_mut().filter(|f| f.arch_family != family) else { return };
+        f.arch_family = family;
+        f.arch_touched = true;
+        self.nr_arch_changed(cx);
+    }
+
+    /// The architecture changed by hand: weights of another size or family can't start this run
+    /// (the server would train the weights' own architecture), so it trains from scratch again.
     pub fn nr_arch_changed(&mut self, cx: &mut Context<Self>) {
         let models = self.store.models.ready().map(Vec::as_slice).unwrap_or_default();
-        if let Some(f) = self.new_run.as_mut()
+        if let Some(f) = self.new_run.as_ref()
             && let Some(w) = f.weights.as_deref()
-            && models.iter().find(|m| m.id == w).is_none_or(|m| arch_index(m) != Some(f.arch))
         {
-            f.weights = None;
-            f.weights_name = None;
+            let target = f.model_arch();
+            let incompatible =
+                models.iter().find(|m| m.id == w).is_none_or(|m| self.store.model_arch(m) != target);
+            if incompatible && let Some(f) = self.new_run.as_mut() {
+                f.weights = None;
+                f.weights_name = None;
+            }
         }
         self.resuggest_run_name(cx);
     }

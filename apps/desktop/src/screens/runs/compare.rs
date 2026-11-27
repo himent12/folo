@@ -375,9 +375,10 @@ impl FoloApp {
             let options: Vec<(SharedString, Option<SharedString>)> = candidates
                 .iter()
                 .map(|c| {
+                    let arch = self.store.run_arch(c).as_str();
                     let detail = match &c.best {
-                        Some(b) => format!("{} · mAP {}", c.config.arch.as_str(), f3(b.map50_95)),
-                        None => format!("{} · {}", c.config.arch.as_str(), status_label(c).to_lowercase()),
+                        Some(b) => format!("{arch} · mAP {}", f3(b.map50_95)),
+                        None => format!("{arch} · {}", status_label(c).to_lowercase()),
                     };
                     (c.name.clone().into(), Some(detail.into()))
                 })

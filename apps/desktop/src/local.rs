@@ -8,9 +8,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Instant;
 
-use folo_core::Device;
-use folo_nn::io::{ModelFile, Purpose};
-use folo_vision::{FoloModel, PredictConfig, Predictor};
+use folo_core::{DType, Device};
+use folo_nn::io::ModelFile;
+use folo_vision::{Detector, PredictConfig, Predictor};
 
 use crate::api::{
     ApiError, ApiResult, Backend, ImageData, ImageSize, PredictInput, PredictRequest, PredictResponse,
@@ -159,12 +159,10 @@ fn predictor_with(
     };
     let (device, _) = device(target)?;
     let file = ModelFile::from_bytes(fresh.bytes).map_err(engine_error)?;
-    let mut model = FoloModel::from_file(&file, Purpose::Inference).map_err(engine_error)?.0;
-    model.fuse().map_err(engine_error)?;
-    let model = folo_vision::train::place_model(model, device).map_err(engine_error)?;
+    let model = Detector::from_file_for_inference(&file, device, DType::F32).map_err(engine_error)?;
     let cfg = PredictConfig { imgsz: model.imgsz(), ..PredictConfig::default() };
     let s = cfg.imgsz;
-    let predictor = Predictor::new(model, cfg).map_err(engine_error)?;
+    let predictor = Predictor::from_detector(model, cfg).map_err(engine_error)?;
     // A GPU's first pass builds its kernels (about a second): do it now, so the latency shown for
     // the first image is the model's, not the warm-up's.
     if target == Target::Gpu {
@@ -287,7 +285,8 @@ mod tests {
         static BYTES: OnceLock<Vec<u8>> = OnceLock::new();
         BYTES
             .get_or_init(|| {
-                let mut m = FoloModel::new(folo_vision::ModelConfig::new("n", 2).unwrap()).unwrap();
+                let mut m =
+                    folo_vision::FoloModel::new(folo_vision::ModelConfig::new("n", 2).unwrap()).unwrap();
                 m.set_classes(vec!["circle".into(), "square".into()]).unwrap();
                 m.set_imgsz(64);
                 let path = folo_test_support::TestFile::new("desktop-local", "m.folo");
@@ -295,6 +294,31 @@ mod tests {
                 std::fs::read(&path).unwrap()
             })
             .clone()
+    }
+
+    #[test]
+    fn folo2_weights_load_and_predict_locally() {
+        let _serial = lock(&SERIAL);
+        let mut m = folo_vision::FoloV2Model::new(folo_vision::FoloV2Config::new("n", 2).unwrap()).unwrap();
+        m.set_classes(vec!["circle".into(), "square".into()]).unwrap();
+        m.set_imgsz(64);
+        let path = folo_test_support::TestFile::new("desktop-local-v2", "m_v2.folo");
+        m.export(&path, folo_nn::io::FloatDType::F16).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let p = predictor_with("test-v2", "m_v2", Target::Cpu, generation(), |_| {
+            Ok(Some(Weights { bytes: bytes.clone(), etag: "\"v2\"".into() }))
+        })
+        .unwrap();
+        let req = PredictRequest {
+            model_id: "m_v2".into(),
+            input: PredictInput::File { name: "x.png".into(), bytes: Arc::new(png(64, 48)) },
+            conf: 0.05,
+            iou: 0.7,
+            max_det: 300,
+        };
+        let r = run(&p, &png(64, 48), &req, "CPU", &Ticket::take(&Arc::default())).unwrap();
+        assert_eq!((r.image.width, r.image.height), (64, 48));
+        assert_eq!(r.device, "local:CPU");
     }
 
     fn png(w: u32, h: u32) -> Vec<u8> {

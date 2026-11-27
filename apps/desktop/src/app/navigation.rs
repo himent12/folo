@@ -19,6 +19,8 @@ pub enum Route {
     RunCompare,
     Models,
     Model(String),
+    /// Side-by-side comparison of 2–4 models (summary metrics & per-class AP deltas).
+    ModelCompare,
     /// Vision benchmarks (servers with `vision_bench`).
     Benches,
     Bench(String),
@@ -61,6 +63,7 @@ impl Route {
             ("runs-compare" | "run-compare", None) => Route::RunCompare,
             ("models", None) => Route::Models,
             ("model", Some(id)) if valid_id(id) => Route::Model(id.to_string()),
+            ("models-compare" | "model-compare", None) => Route::ModelCompare,
             ("benchmarks" | "benches", None) => Route::Benches,
             ("bench", Some(id)) if valid_id(id) => Route::Bench(id.to_string()),
             ("bench-entry", Some(id)) => {
@@ -84,7 +87,7 @@ impl Route {
             Route::Overview => Section::Overview,
             Route::Datasets | Route::Dataset(_) => Section::Datasets,
             Route::Runs | Route::Run(_) | Route::RunCompare => Section::Runs,
-            Route::Models | Route::Model(_) => Section::Models,
+            Route::Models | Route::Model(_) | Route::ModelCompare => Section::Models,
             Route::Benches | Route::Bench(_) | Route::BenchEntry(..) | Route::BenchCompare(_) => {
                 Section::Benchmarks
             }
@@ -146,6 +149,7 @@ impl FoloApp {
         // toast set, say) doesn't wait there to make the list look empty later.
         if self.route == Route::Runs && !matches!(prev, Route::Run(_) | Route::RunCompare) {
             self.run_filter = super::RunFilter::All;
+            self.run_family_filter = None;
             self.run_arch_filter = None;
             self.run_search.update(cx, |i, cx| i.set_text("", cx));
         }
@@ -228,7 +232,7 @@ impl FoloApp {
         match &self.route {
             Route::Dataset(_) => Some(Route::Datasets),
             Route::Run(_) | Route::RunCompare => Some(Route::Runs),
-            Route::Model(_) => Some(Route::Models),
+            Route::Model(_) | Route::ModelCompare => Some(Route::Models),
             Route::Bench(_) => Some(Route::Benches),
             Route::BenchEntry(b, _) | Route::BenchCompare(b) => Some(Route::Bench(b.clone())),
             Route::LabelJob(_) => Some(Route::LabelJobs),

@@ -7,7 +7,7 @@ use folo_ui::{
 };
 
 use super::compare::{run_slot_color, slot_swatch};
-use super::compare_data::{best_map_winners, hyperparam_rows};
+use super::compare_data::{best_map_winners, hyperparam_rows_with_arch};
 use super::duration_of;
 use crate::api::{Run, time};
 use crate::app::{FoloApp, act};
@@ -239,7 +239,7 @@ impl FoloApp {
             .collect();
 
         // 2. Hyperparameter diff rows.
-        let all_hp = hyperparam_rows(
+        let all_hp = hyperparam_rows_with_arch(
             chosen,
             |r| self.store.run_dataset_name(r),
             |w| {
@@ -249,6 +249,7 @@ impl FoloApp {
                     .and_then(|ms| ms.iter().find(|m| m.id == w))
                     .map_or_else(|| w.to_string(), |m| m.name.clone())
             },
+            |r| self.store.run_arch(r),
         );
         let diff_rows: Vec<_> = all_hp.iter().filter(|r| r.differs).collect();
         let same_rows: Vec<_> = all_hp.iter().filter(|r| !r.differs).collect();

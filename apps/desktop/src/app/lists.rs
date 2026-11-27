@@ -407,6 +407,7 @@ impl FoloApp {
 
     fn install_models(&mut self, mut models: Vec<Model>, cx: &mut Context<Self>) {
         models.sort_by(|a, b| b.created.cmp(&a.created));
+        self.store.sync_known_archs();
         if self.store.models.ready() != Some(&models) {
             // A model gone from the list (its run deleted elsewhere).
             for (id, name) in gone_from(self.store.models.ready(), &models, |m| (&m.id, &m.name)) {
@@ -415,16 +416,204 @@ impl FoloApp {
             self.store.models = Load::Ready(models);
             self.close_menus();
         }
+        self.probe_missing_model_archs(cx);
         // The Playground's model is one of these, or replaced now.
         self.reconcile_play_model(cx);
     }
 
+    /// Whether `id` looks like a registered model id rather than a raw `.folo` filesystem path.
+    fn is_model_id_probeable(id: &str) -> bool {
+        let trimmed = id.trim();
+        !trimmed.is_empty()
+            && !trimmed.contains('/')
+            && !trimmed.contains('\\')
+            && !trimmed.ends_with(".folo")
+    }
+
+    /// Permanent client-side probe errors that should not be retried on every 2 s `/system` refresh.
+    fn is_permanent_probe_error(err: &ApiError) -> bool {
+        matches!(
+            err.code.as_str(),
+            "not_found"
+                | "model_not_found"
+                | "run_not_found"
+                | "invalid_config"
+                | "bad_request"
+                | "not_supported"
+                | "method_not_allowed"
+                | "gone"
+        )
+    }
+
+    /// Lazily resolves `x-folo-arch` (`folo2-*`) headers for one model id on HTTP backends when
+    /// `folo2_arch` is supported. Transient errors leave the id unprobed so a later pass can retry.
+    pub(super) fn probe_model_arch(&mut self, id: &str, cx: &mut Context<Self>) {
+        if self.hold_loading
+            || self.server_mode == super::ServerMode::Mock
+            || !self.store.supports_folo2()
+            || !Self::is_model_id_probeable(id)
+        {
+            return;
+        }
+        if self.store.model_archs.contains_key(id)
+            || self.store.probed_model_archs.contains(id)
+            || !self.store.probing_model_archs.insert(id.to_string())
+        {
+            return;
+        }
+        let probe_gen = self.store.arch_probe_gen;
+        let id = id.to_string();
+        let mid = id.clone();
+        self.fetch(
+            cx,
+            move |api| api.model_arch(&mid),
+            move |this, r, cx| {
+                if this.store.arch_probe_gen != probe_gen {
+                    return;
+                }
+                this.store.probing_model_archs.remove(&id);
+                match r {
+                    Ok(Some(raw)) => {
+                        this.store.probed_model_archs.insert(id.clone());
+                        if let Some(arch) = crate::arch::ModelArch::parse(&raw) {
+                            this.store.note_model_arch(&id, arch);
+                        }
+                        this.sync_new_run_arch_after_probe(cx);
+                    }
+                    Ok(None) => {
+                        this.store.probed_model_archs.insert(id.clone());
+                        this.sync_new_run_arch_after_probe(cx);
+                    }
+                    Err(e) => {
+                        if Self::is_permanent_probe_error(&e) {
+                            this.store.probed_model_archs.insert(id.clone());
+                        }
+                        cx.notify();
+                    }
+                }
+            },
+        );
+    }
+
+    /// Lazily resolves `x-folo-arch` (`folo2-*`) headers once per unseen model id on HTTP backends
+    /// when `folo2_arch` is supported (no-op once cached or in mock mode where `known_archs` already
+    /// populates every v2 model).
+    pub(super) fn probe_missing_model_archs(&mut self, cx: &mut Context<Self>) {
+        if self.hold_loading || self.server_mode == super::ServerMode::Mock || !self.store.supports_folo2() {
+            return;
+        }
+        let ids: Vec<String> = self
+            .store
+            .models
+            .ready()
+            .into_iter()
+            .flatten()
+            .filter(|m| {
+                !self.store.model_archs.contains_key(&m.id)
+                    && !self.store.probed_model_archs.contains(&m.id)
+                    && !self.store.probing_model_archs.contains(&m.id)
+            })
+            .map(|m| m.id.clone())
+            .collect();
+        for id in ids {
+            self.probe_model_arch(&id, cx);
+        }
+    }
+
+    /// Resolves a single run's canonical architecture on HTTP backends with `folo2_arch`:
+    /// - If the run has a linked model or fine-tune weights, probes `x-folo-arch` on that model.
+    /// - If the run trained from scratch (no weights) and `run_cli` is supported, probes
+    ///   `GET /api/runs/{id}/cli` to parse `--model folo2-*` even before a checkpoint exists.
+    pub(super) fn probe_run_arch(&mut self, id: &str, cx: &mut Context<Self>) {
+        if self.hold_loading || self.server_mode == super::ServerMode::Mock || !self.store.supports_folo2() {
+            return;
+        }
+        let Some(run) = self.store.run(id).cloned() else { return };
+        if self.store.run_archs.contains_key(&run.id) {
+            return;
+        }
+        if let Some(mid) = run.model_id.as_deref() {
+            if self.store.model_archs.contains_key(mid) {
+                return;
+            }
+            self.probe_model_arch(mid, cx);
+        }
+        if let Some(wid) = run.config.weights.as_deref() {
+            if self.store.model_archs.contains_key(wid) {
+                return;
+            }
+            self.probe_model_arch(wid, cx);
+            // Fine-tune `/cli` intentionally omits `--model`; the weights' header is authoritative.
+            return;
+        }
+        if !self.store.supports_run_cli()
+            || self.store.probed_run_archs.contains(&run.id)
+            || !self.store.probing_run_archs.insert(run.id.clone())
+        {
+            return;
+        }
+        let probe_gen = self.store.arch_probe_gen;
+        let rid = run.id.clone();
+        let key = run.id;
+        self.fetch(
+            cx,
+            move |api| api.run_cli(&rid),
+            move |this, r, cx| {
+                if this.store.arch_probe_gen != probe_gen {
+                    return;
+                }
+                this.store.probing_run_archs.remove(&key);
+                match r {
+                    Ok(c) => {
+                        this.store.probed_run_archs.insert(key.clone());
+                        if let Some(arch) = crate::arch::ModelArch::from_cli_argv(&c.argv) {
+                            this.store.note_run_arch(&key, arch);
+                        }
+                        this.sync_new_run_arch_after_probe(cx);
+                    }
+                    Err(e) => {
+                        if Self::is_permanent_probe_error(&e) {
+                            this.store.probed_run_archs.insert(key.clone());
+                        }
+                        cx.notify();
+                    }
+                }
+            },
+        );
+    }
+
+    /// Probes unseen HTTP runs that have no resolved architecture yet (e.g. active, queued, stopped,
+    /// or failed before writing a checkpoint) so badges and Clone/Retry reflect `folo2-*`.
+    pub(super) fn probe_missing_run_archs(&mut self, cx: &mut Context<Self>) {
+        if self.server_mode == super::ServerMode::Mock || !self.store.supports_folo2() {
+            return;
+        }
+        let ids: Vec<String> = self
+            .store
+            .runs
+            .ready()
+            .into_iter()
+            .flatten()
+            .filter(|r| {
+                !self.store.run_archs.contains_key(&r.id)
+                    && r.model_id.as_deref().is_none_or(|mid| !self.store.model_archs.contains_key(mid))
+                    && r.config.weights.as_deref().is_none_or(|wid| !self.store.model_archs.contains_key(wid))
+            })
+            .map(|r| r.id.clone())
+            .collect();
+        for id in ids {
+            self.probe_run_arch(&id, cx);
+        }
+    }
+
     fn install_runs(&mut self, runs: Vec<Run>, cx: &mut Context<Self>) {
+        self.store.sync_known_archs();
         for (id, name) in gone_from(self.store.runs.ready(), &runs, |r| (&r.id, &r.name)) {
             self.removed_elsewhere(&id, name, cx);
         }
         self.store.runs = Load::Ready(newest_first_runs(runs));
         self.store.sync_run_list();
+        self.probe_missing_run_archs(cx);
         self.subscribe_active(cx);
         self.settle_lost_streams(cx);
     }

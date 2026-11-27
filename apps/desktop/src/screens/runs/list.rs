@@ -16,8 +16,37 @@ use crate::screens::{FirstStep, loading_rows, page_header, th};
 use crate::theme::{theme, ty};
 use crate::ui::*;
 
-/// Filters `runs` by status, optional architecture, and case-insensitive substring query across
-/// run name, id, dataset name, architecture, and status label.
+/// Filters `runs` by status, optional architecture family, optional scale, and case-insensitive
+/// substring query across run name, id, dataset name, canonical architecture, and status label.
+pub fn filter_runs_with_family<'a>(
+    runs: &'a [Run],
+    status: RunFilter,
+    family: Option<crate::arch::ArchFamily>,
+    arch: Option<Arch>,
+    query: &str,
+    dataset_name: impl Fn(&Run) -> String,
+    arch_of: impl Fn(&Run) -> crate::arch::ModelArch,
+) -> Vec<&'a Run> {
+    let q = query.trim().to_lowercase();
+    runs.iter()
+        .filter(|r| matches_filter(r, status))
+        .filter(|r| {
+            let ra = arch_of(r);
+            family.is_none_or(|f| ra.family == f) && arch.is_none_or(|a| ra.scale == a)
+        })
+        .filter(|r| {
+            q.is_empty()
+                || r.name.to_lowercase().contains(&q)
+                || r.id.to_lowercase().contains(&q)
+                || arch_of(r).matches_query(&q)
+                || r.status.label().to_lowercase().contains(&q)
+                || dataset_name(r).to_lowercase().contains(&q)
+        })
+        .collect()
+}
+
+/// Filters `runs` by status, optional architecture, and case-insensitive substring query.
+#[cfg(test)]
 pub fn filter_runs<'a>(
     runs: &'a [Run],
     status: RunFilter,
@@ -25,19 +54,9 @@ pub fn filter_runs<'a>(
     query: &str,
     dataset_name: impl Fn(&Run) -> String,
 ) -> Vec<&'a Run> {
-    let q = query.trim().to_lowercase();
-    runs.iter()
-        .filter(|r| matches_filter(r, status))
-        .filter(|r| arch.is_none_or(|a| r.config.arch == a))
-        .filter(|r| {
-            q.is_empty()
-                || r.name.to_lowercase().contains(&q)
-                || r.id.to_lowercase().contains(&q)
-                || r.config.arch.as_str().to_lowercase().contains(&q)
-                || r.status.label().to_lowercase().contains(&q)
-                || dataset_name(r).to_lowercase().contains(&q)
-        })
-        .collect()
+    filter_runs_with_family(runs, status, None, arch, query, dataset_name, |r| {
+        crate::arch::ModelArch::v1(r.config.arch)
+    })
 }
 
 impl FoloApp {
@@ -188,8 +207,34 @@ impl FoloApp {
             cx,
             Rc::new(move |this, i, _, _| this.run_filter = filters[i]),
         );
+        let families = [None, Some(crate::arch::ArchFamily::Folo), Some(crate::arch::ArchFamily::Folo2)];
+        let fam_labels: Vec<String> = families
+            .iter()
+            .map(|&f| {
+                let name = match f {
+                    None => "All",
+                    Some(crate::arch::ArchFamily::Folo) => "v1",
+                    Some(crate::arch::ArchFamily::Folo2) => "v2",
+                };
+                let n = runs.iter().filter(|r| f.is_none_or(|w| self.store.run_arch(r).family == w)).count();
+                format!("{name}\u{a0}{n}")
+            })
+            .collect();
+        let fam_refs: Vec<&str> = fam_labels.iter().map(String::as_str).collect();
+        let fam_sel = families.iter().position(|f| *f == self.run_family_filter).unwrap_or(0);
+        let fam_seg = self.segmented(
+            "runs-family-filter",
+            &fam_refs,
+            fam_sel,
+            window,
+            cx,
+            Rc::new(move |this, i, _, cx| {
+                this.run_family_filter = families[i];
+                cx.notify();
+            }),
+        );
         let archs = [None, Some(Arch::N), Some(Arch::S), Some(Arch::M), Some(Arch::L), Some(Arch::X)];
-        let arch_labels = arch_filter_labels(&runs);
+        let arch_labels = arch_filter_labels(&runs, self.run_family_filter, |r| self.store.run_arch(r));
         let arch_refs: Vec<&str> = arch_labels.iter().map(String::as_str).collect();
         let arch_sel = archs.iter().position(|a| *a == self.run_arch_filter).unwrap_or(0);
         let arch_seg = self.segmented(
@@ -221,11 +266,18 @@ impl FoloApp {
             )
             .tooltip(crate::controls::tip("Pin 2–4 runs from the table to compare side by side", None))
         });
-        let extra_filter = self.run_arch_filter.is_some() || !query.trim().is_empty();
+        let extra_filter =
+            self.run_family_filter.is_some() || self.run_arch_filter.is_some() || !query.trim().is_empty();
         let now = self.store.api.now();
-        let mut visible: Vec<Run> = filter_runs(&runs, self.run_filter, self.run_arch_filter, &query, |r| {
-            self.store.run_dataset_name(r)
-        })
+        let mut visible: Vec<Run> = filter_runs_with_family(
+            &runs,
+            self.run_filter,
+            self.run_family_filter,
+            self.run_arch_filter,
+            &query,
+            |r| self.store.run_dataset_name(r),
+            |r| self.store.run_arch(r),
+        )
         .into_iter()
         .cloned()
         .collect();
@@ -403,19 +455,25 @@ impl FoloApp {
                                     .child(r.name.clone()),
                             ),
                     )
-                    // The architecture, and the same e2e tag as the model tables for an end-to-end run.
-                    .child(
+                    // The architecture, v2 badge for FOLO v2 (omitted when e2e is also shown so
+                    // `folo2-x` + `e2e` stays inside the 96 px column), and e2e tag for o2o.
+                    .child({
+                        let run_arch = self.store.run_arch(r);
+                        let is_e2e = r.config.head == crate::api::Head::O2o;
                         div()
                             .w(px(96.))
                             .flex_none()
                             .flex()
                             .items_center()
-                            .gap(px(6.))
-                            .child(text(ty::SM, t.text_secondary).child(r.config.arch.as_str()))
-                            .when(r.config.head == crate::api::Head::O2o, |d| {
-                                d.child(e2e_tag(&t, format!("e2e-r-{}", r.id)))
-                            }),
-                    )
+                            .gap(px(4.))
+                            .child(
+                                text(ty::SM, if run_arch.is_v2() { t.accent_text } else { t.text_secondary })
+                                    .whitespace_nowrap()
+                                    .child(run_arch.as_str()),
+                            )
+                            .when(run_arch.is_v2() && !is_e2e, |d| d.child(badge(&t, "v2", Tone::Accent)))
+                            .when(is_e2e, |d| d.child(e2e_tag(&t, format!("e2e-r-{}", r.id))))
+                    })
                     .when(c.dataset, |d| {
                         d.child(
                             text(ty::SM, t.text_secondary)
@@ -502,6 +560,7 @@ impl FoloApp {
                 cx,
                 act(|this, w, cx| {
                     this.run_filter = RunFilter::All;
+                    this.run_family_filter = None;
                     this.run_arch_filter = None;
                     this.run_search.update(cx, |i, cx| i.set_text("", cx));
                     w.focus(&this.run_search.read(cx).focus_handle(cx));
@@ -627,6 +686,7 @@ impl FoloApp {
             .items_center()
             .gap(px(12.))
             .child(seg)
+            .child(fam_seg)
             .child(arch_seg)
             .child(div().flex_1().min_w(px(8.)))
             .children(select_toggle)
@@ -675,7 +735,11 @@ fn cmp_opt_f64(a: Option<f64>, b: Option<f64>, desc: bool) -> std::cmp::Ordering
 }
 
 /// Labels with per-architecture counts for `runs-arch-filter` (`"All\u{a0}N"`, `"n\u{a0}K"`, ...).
-fn arch_filter_labels(runs: &[Run]) -> Vec<String> {
+fn arch_filter_labels(
+    runs: &[Run],
+    family: Option<crate::arch::ArchFamily>,
+    arch_of: impl Fn(&Run) -> crate::arch::ModelArch,
+) -> Vec<String> {
     const ARCHS: [(Option<Arch>, &str); 6] = [
         (None, "All"),
         (Some(Arch::N), "n"),
@@ -687,8 +751,13 @@ fn arch_filter_labels(runs: &[Run]) -> Vec<String> {
     ARCHS
         .iter()
         .map(|&(arch, name)| {
-            let n = runs.iter().filter(|r| arch.is_none_or(|w| r.config.arch == w)).count();
-            // A no-break space marks the count for the segmented control's quieter style.
+            let n = runs
+                .iter()
+                .filter(|r| {
+                    let ra = arch_of(r);
+                    family.is_none_or(|f| ra.family == f) && arch.is_none_or(|w| ra.scale == w)
+                })
+                .count();
             format!("{name}\u{a0}{n}")
         })
         .collect()
@@ -876,7 +945,7 @@ mod tests {
         };
         let runs = vec![mk(Arch::N), mk(Arch::N), mk(Arch::S), mk(Arch::L)];
         assert_eq!(
-            arch_filter_labels(&runs),
+            arch_filter_labels(&runs, None, |r| crate::arch::ModelArch::v1(r.config.arch)),
             vec!["All\u{a0}4", "n\u{a0}2", "s\u{a0}1", "m\u{a0}0", "l\u{a0}1", "x\u{a0}0"]
         );
     }
