@@ -3,7 +3,7 @@
 //! quantised conv's weights onto their s8 grid (mirroring per-part concat scale decoupling and direct `u8` stem),
 //! and everything else is the `f32` model.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use folo_core::cpu::q8::{PIXEL_SCALE, should_decouple_parts};
 use folo_core::{Tensor, TensorId};
@@ -13,10 +13,11 @@ use super::walk::{self, Exec};
 use super::{Calibration, QParam, int8_able, quantize_weights, stem_int8_able};
 use crate::model::FoloModel;
 
-/// A fake-quantised activation: its values (on the grid) and its per-tensor fallback grid.
+/// A fake-quantised activation: its values (on the grid, or raw `f32` until an int8 consumer reads it) and its
+/// per-tensor fallback grid.
 #[derive(Clone)]
 pub struct Fq {
-    /// The dequantised values.
+    /// The activation values.
     pub t: Tensor,
     /// The grid.
     pub q: QParam,
@@ -27,6 +28,9 @@ pub struct FakeQuant<'a> {
     cal: &'a Calibration,
     /// Per-channel grids tracked by tensor identity (keeps `Fq`'s public fields unchanged).
     ch_grids: HashMap<TensorId, Vec<QParam>>,
+    /// Tensors kept in unquantised `f32` (produced by `f32` convs, `f32` stem, or deferred `quantize`) until an
+    /// int8 op consumes them, matching [`super::Int8Plan`]'s lazy boundary quantisation.
+    f32_acts: HashSet<TensorId>,
 }
 
 /// Round every element of `t` onto `q`.
@@ -78,15 +82,17 @@ fn dims4(t: &Tensor) -> [usize; 4] {
 impl<'a> FakeQuant<'a> {
     /// The executor for `cal`.
     pub fn new(cal: &'a Calibration) -> Self {
-        FakeQuant { cal, ch_grids: HashMap::new() }
+        FakeQuant { cal, ch_grids: HashMap::new(), f32_acts: HashSet::new() }
     }
 
     /// Layers 0–22 of `model` on `x` with fake quantisation: the head's three inputs.
     pub fn features(&mut self, model: &FoloModel, x: &Tensor) -> Result<[Tensor; 3]> {
         self.ch_grids.clear();
+        self.f32_acts.clear();
         let _g = folo_core::no_grad();
         let res = folo_core::cpu::in_pool(|| walk::features(model, self, x));
         self.ch_grids.clear();
+        self.f32_acts.clear();
         res
     }
 
@@ -97,25 +103,54 @@ impl<'a> FakeQuant<'a> {
         vec![a.q; a.t.dims()[1]]
     }
 
-    fn wrap(&mut self, t: Tensor, q: QParam, grids: Vec<QParam>) -> Fq {
+    fn wrap_u8(&mut self, t: Tensor, q: QParam, grids: Vec<QParam>) -> Fq {
         self.ch_grids.insert(t.id(), grids);
         Fq { t, q }
     }
 
-    fn run(&mut self, name: &str, conv: &ConvBnAct, parts: &[&Fq], res: Option<&Fq>) -> Result<Tensor> {
+    fn wrap_f32(&mut self, t: Tensor, q: QParam, grids: Vec<QParam>) -> Fq {
+        let id = t.id();
+        self.ch_grids.insert(id, grids);
+        self.f32_acts.insert(id);
+        Fq { t, q }
+    }
+
+    /// Quantise `a` onto its boundary grid if it is still deferred `f32`, else return it as-is.
+    fn as_quantized_tensor(&self, a: &Fq, grids: &[QParam]) -> Result<Tensor> {
+        if self.f32_acts.contains(&a.t.id()) {
+            fake_quantize_per_channel(&a.t, grids)
+        } else {
+            Ok(a.t.clone())
+        }
+    }
+
+    fn is_f32_conv(&self, name: &str, conv: &ConvBnAct, parts: &[&Fq], res: Option<&Fq>) -> bool {
         let d = parts[0].t.dims();
         let c: usize = parts.iter().map(|p| p.t.dims()[1]).sum();
+        self.cal.is_f32(name)
+            || !parts.iter().all(|p| p.t.dims()[1].is_multiple_of(4))
+            || int8_able(conv, [d[0], c, d[2], d[3]], res.map(|r| dims4(&r.t))).is_none()
+    }
+
+    fn run(
+        &mut self,
+        name: &str,
+        conv: &ConvBnAct,
+        parts: &[&Fq],
+        res: Option<&Fq>,
+    ) -> Result<(Tensor, bool)> {
+        let c: usize = parts.iter().map(|p| p.t.dims()[1]).sum();
         let p = conv.conv.config().params();
-        if self.cal.is_f32(name) || int8_able(conv, [d[0], c, d[2], d[3]], res.map(|r| dims4(&r.t))).is_none()
-        {
+        if self.is_f32_conv(name, conv, parts, res) {
             let ts: Vec<&Tensor> = parts.iter().map(|p| &p.t).collect();
-            return Ok(Tensor::conv2d_act_cat(
+            let y = Tensor::conv2d_act_cat(
                 &ts,
                 &conv.conv.weight,
                 conv.conv.bias.as_ref(),
                 &p,
                 conv.act.unary_op(),
-            )?);
+            )?;
+            return Ok((y, true));
         }
         // Compute in the well-conditioned integer-code domain `(q_x - z) * (q_w * s_out)` so tiny/dead
         // per-channel `in_scales[ic]` (down to `1e-8`) never blow up `w / in_scales[ic]` inside f32 Winograd.
@@ -125,7 +160,10 @@ impl<'a> FakeQuant<'a> {
         let norm_parts: Vec<Tensor> = parts
             .iter()
             .zip(&owned_grids)
-            .map(|(a, gs)| divide_by_scales(&a.t, gs))
+            .map(|(a, gs)| {
+                let qt = self.as_quantized_tensor(a, gs)?;
+                divide_by_scales(&qt, gs)
+            })
             .collect::<Result<_>>()?;
         let o = conv.conv.config().out_channels;
         let taps = conv.conv.config().kernel * conv.conv.config().kernel;
@@ -187,7 +225,7 @@ impl<'a> FakeQuant<'a> {
             }
             Tensor::from_vec(rv, [n, oc_n, oh, ow])?
         };
-        conv.act.forward(&acc)
+        Ok((conv.act.forward(&acc)?, false))
     }
 }
 
@@ -239,7 +277,7 @@ impl Exec for FakeQuant<'_> {
         let q = self.cal.param(name)?;
         let o = conv.conv.config().out_channels;
         let grids = self.cal.channel_params(name, o)?;
-        let y = if self.cal.u8_stem && !self.cal.is_f32(name) && stem_int8_able(conv, dims4(x)).is_some() {
+        if self.cal.u8_stem && !self.cal.is_f32(name) && stem_int8_able(conv, dims4(x)).is_some() {
             let xq_vec: Vec<f32> = x
                 .to_vec::<f32>()?
                 .into_iter()
@@ -248,35 +286,53 @@ impl Exec for FakeQuant<'_> {
             let xq = Tensor::from_vec(xq_vec, x.dims().to_vec())?;
             let w = fake_weights(&conv.conv.weight, &[PIXEL_SCALE; 3])?;
             let p = conv.conv.config().params();
-            Tensor::conv2d_act_cat(&[&xq], &w, conv.conv.bias.as_ref(), &p, conv.act.unary_op())?
+            let y = Tensor::conv2d_act_cat(&[&xq], &w, conv.conv.bias.as_ref(), &p, conv.act.unary_op())?;
+            let t = fake_quantize_per_channel(&y, &grids)?;
+            Ok(self.wrap_u8(t, q, grids))
         } else {
-            conv.forward(x)?
-        };
-        let t = fake_quantize_per_channel(&y, &grids)?;
-        Ok(self.wrap(t, q, grids))
+            let y = conv.forward(x)?;
+            Ok(self.wrap_f32(y, q, grids))
+        }
     }
 
     fn conv(&mut self, name: &str, conv: &ConvBnAct, parts: &[&Fq], res: Option<&Fq>) -> Result<Fq> {
-        let y = self.run(name, conv, parts, res)?;
-        let y = match res {
-            Some(r) => r.t.add(&y)?,
-            None => y,
-        };
+        let (y, ran_f32) = self.run(name, conv, parts, res)?;
         let q = self.cal.param(name)?;
         let grids = self.cal.channel_params(name, y.dims()[1])?;
-        let t = fake_quantize_per_channel(&y, &grids)?;
-        Ok(self.wrap(t, q, grids))
+        if ran_f32 {
+            let y = match res {
+                Some(r) => r.t.add(&y)?,
+                None => y,
+            };
+            Ok(self.wrap_f32(y, q, grids))
+        } else {
+            let y = match res {
+                Some(r) => {
+                    let rg = self.grids_of(r);
+                    let rt = self.as_quantized_tensor(r, &rg)?;
+                    rt.add(&y)?
+                }
+                None => y,
+            };
+            let t = fake_quantize_per_channel(&y, &grids)?;
+            Ok(self.wrap_u8(t, q, grids))
+        }
     }
 
     fn conv_f32(&mut self, name: &str, conv: &ConvBnAct, x: &Fq) -> Result<Tensor> {
-        self.run(name, conv, &[x], None)
+        Ok(self.run(name, conv, &[x], None)?.0)
+    }
+
+    fn conv_out_f32(&mut self, name: &str, conv: &ConvBnAct, parts: &[&Fq]) -> Result<Tensor> {
+        let _ = self.cal.param(name)?;
+        let _ = self.cal.channel_params(name, conv.conv.config().out_channels)?;
+        Ok(self.run(name, conv, parts, None)?.0)
     }
 
     fn quantize(&mut self, name: &str, x: &Tensor) -> Result<Fq> {
         let q = self.cal.param(name)?;
         let grids = self.cal.channel_params(name, x.dims()[1])?;
-        let t = fake_quantize_per_channel(x, &grids)?;
-        Ok(self.wrap(t, q, grids))
+        Ok(self.wrap_f32(x.clone(), q, grids))
     }
 
     fn dequantize(&mut self, x: &Fq) -> Result<Tensor> {
@@ -286,19 +342,31 @@ impl Exec for FakeQuant<'_> {
     fn narrow(&mut self, x: &Fq, start: usize, len: usize) -> Result<Fq> {
         let t = x.t.narrow(1, start, len)?;
         let gs = self.grids_of(x)[start..start + len].to_vec();
-        Ok(self.wrap(t, x.q, gs))
+        if self.f32_acts.contains(&x.t.id()) {
+            Ok(self.wrap_f32(t, x.q, gs))
+        } else {
+            Ok(self.wrap_u8(t, x.q, gs))
+        }
     }
 
     fn max_pool(&mut self, x: &Fq, k: usize) -> Result<Fq> {
         let t = x.t.max_pool2d(k, 1, k / 2)?;
         let gs = self.grids_of(x);
-        Ok(self.wrap(t, x.q, gs))
+        if self.f32_acts.contains(&x.t.id()) {
+            Ok(self.wrap_f32(t, x.q, gs))
+        } else {
+            Ok(self.wrap_u8(t, x.q, gs))
+        }
     }
 
     fn upsample2(&mut self, x: &Fq) -> Result<Fq> {
         let t = x.t.upsample_nearest2d(2)?;
         let gs = self.grids_of(x);
-        Ok(self.wrap(t, x.q, gs))
+        if self.f32_acts.contains(&x.t.id()) {
+            Ok(self.wrap_f32(t, x.q, gs))
+        } else {
+            Ok(self.wrap_u8(t, x.q, gs))
+        }
     }
 
     fn dims(&self, x: &Fq) -> [usize; 4] {

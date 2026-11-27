@@ -8,7 +8,7 @@
 //! and its depthwise `pe`, and the head (P3, P4 and P5 are dequantised for it).
 
 use folo_core::Tensor;
-use folo_nn::{ConvBnAct, Forward, Result};
+use folo_nn::{ConvBnAct, Result};
 
 use crate::model::FoloModel;
 use crate::model::blocks::{Attention, Bottleneck, C2Psa, C3k, C3k2, C3k2Block, PsaBlock, Sppf};
@@ -32,7 +32,13 @@ pub trait Exec {
     ) -> Result<Self::A>;
     /// `act(conv(x))` dequantised: `qkv`, whose output stays `f32`.
     fn conv_f32(&mut self, name: &str, conv: &ConvBnAct, x: &Self::A) -> Result<Tensor>;
-    /// Quantise an `f32` tensor onto the grid of `name`.
+    /// `act(conv(cat(parts)))` directly as `f32`: used for the head-only P5 output (`neck.out5.cv2`) so an int8
+    /// conv writes `f32` directly without a `u8` round-trip, and an `f32` conv skips requantisation.
+    fn conv_out_f32(&mut self, name: &str, conv: &ConvBnAct, parts: &[&Self::A]) -> Result<Tensor> {
+        let y = self.conv(name, conv, parts, None)?;
+        self.dequantize(&y)
+    }
+    /// Quantise an `f32` tensor onto the grid of `name` (may be deferred until an int8 consumer reads it).
     fn quantize(&mut self, name: &str, x: &Tensor) -> Result<Self::A>;
     /// The `f32` values of an activation.
     fn dequantize(&mut self, x: &Self::A) -> Result<Tensor>;
@@ -60,8 +66,9 @@ fn c3k<E: Exec>(e: &mut E, p: &str, b: &C3k, x: &E::A) -> Result<E::A> {
     e.conv(&format!("{p}.cv3"), &b.cv3, &[&a, &c], None)
 }
 
-/// [`C3k2::forward_cat`]: `cv1` over the parts, the chain on its second half, `cv2` over `y` and the chain.
-fn c3k2<E: Exec>(e: &mut E, p: &str, b: &C3k2, xs: &[&E::A]) -> Result<E::A> {
+/// [`C3k2::forward_cat`] body: `cv1` over the parts and the block chain on its second half, returning `(y, outs)`
+/// for `cv2`.
+fn c3k2_parts<E: Exec>(e: &mut E, p: &str, b: &C3k2, xs: &[&E::A]) -> Result<(E::A, Vec<E::A>)> {
     let y = e.conv(&format!("{p}.cv1"), &b.cv1, xs, None)?;
     let c = b.cv1.conv.config().out_channels / 2;
     let mut outs: Vec<E::A> = Vec::with_capacity(b.blocks.len());
@@ -81,10 +88,25 @@ fn c3k2<E: Exec>(e: &mut E, p: &str, b: &C3k2, xs: &[&E::A]) -> Result<E::A> {
         };
         outs.push(next);
     }
+    Ok((y, outs))
+}
+
+/// [`C3k2::forward_cat`]: `cv1` over the parts, the chain on its second half, `cv2` over `y` and the chain.
+fn c3k2<E: Exec>(e: &mut E, p: &str, b: &C3k2, xs: &[&E::A]) -> Result<E::A> {
+    let (y, outs) = c3k2_parts(e, p, b, xs)?;
     let mut parts: Vec<&E::A> = Vec::with_capacity(1 + outs.len());
     parts.push(&y);
     parts.extend(&outs);
     e.conv(&format!("{p}.cv2"), &b.cv2, &parts, None)
+}
+
+/// [`c3k2`] whose final `cv2` outputs `f32` directly (for `neck.out5`, which only feeds the `f32` head).
+fn c3k2_f32<E: Exec>(e: &mut E, p: &str, b: &C3k2, xs: &[&E::A]) -> Result<Tensor> {
+    let (y, outs) = c3k2_parts(e, p, b, xs)?;
+    let mut parts: Vec<&E::A> = Vec::with_capacity(1 + outs.len());
+    parts.push(&y);
+    parts.extend(&outs);
+    e.conv_out_f32(&format!("{p}.cv2"), &b.cv2, &parts)
 }
 
 fn sppf<E: Exec>(e: &mut E, p: &str, b: &Sppf, x: &E::A) -> Result<E::A> {
@@ -96,21 +118,11 @@ fn sppf<E: Exec>(e: &mut E, p: &str, b: &Sppf, x: &E::A) -> Result<E::A> {
 }
 
 /// [`Attention::forward`] with `x` quantised: `qkv` dequantised, the attention and `pe` in `f32`, `proj`'s input
-/// quantised, and the block's residual (`x`) added in `proj`'s epilogue.
+/// quantised (lazily deferred if `proj` runs in `f32`), and the block's residual (`x`) added in `proj`'s epilogue.
 fn attention<E: Exec>(e: &mut E, p: &str, a: &Attention, x: &E::A) -> Result<E::A> {
     let [b, _, h, w] = e.dims(x);
-    let n = h * w;
-    let (heads, kd, hd) = (a.heads, a.key_dim, a.head_dim);
-    let c = heads * hd;
-    let qkv = e.conv_f32(&format!("{p}.qkv"), &a.qkv, x)?.reshape([b, heads, 2 * kd + hd, n])?;
-    let q = qkv.narrow(2, 0, kd)?;
-    let k = qkv.narrow(2, kd, kd)?;
-    let v = qkv.narrow(2, 2 * kd, hd)?;
-    let scale = (kd as f64).powf(-0.5) as f32;
-    let attn = q.transpose(2, 3)?.matmul(&k)?.mul_scalar(scale)?.softmax(-1)?;
-    let o = v.matmul(&attn.transpose(2, 3)?)?.reshape([b, c, h, w])?;
-    let v = v.reshape([b, c, h, w])?;
-    let pin = e.quantize(&format!("{p}.proj.in"), &o.add(&a.pe.forward(&v)?)?)?;
+    let qkv = e.conv_f32(&format!("{p}.qkv"), &a.qkv, x)?;
+    let pin = e.quantize(&format!("{p}.proj.in"), &a.attend_and_pe(&qkv, b, h, w)?)?;
     e.conv(&format!("{p}.proj"), &a.proj, &[&pin], Some(x))
 }
 
@@ -156,6 +168,6 @@ pub fn features<E: Exec>(model: &FoloModel, e: &mut E, x: &Tensor) -> Result<[Te
     let x19 = c3k2(e, "neck.out4", &nk.out4, &[&y, &x13])?;
     drop(x13);
     y = e.conv("neck.down4", &nk.down4, &[&x19], None)?;
-    let x22 = c3k2(e, "neck.out5", &nk.out5, &[&y, &x10])?;
-    Ok([e.dequantize(&x16)?, e.dequantize(&x19)?, e.dequantize(&x22)?])
+    let x22 = c3k2_f32(e, "neck.out5", &nk.out5, &[&y, &x10])?;
+    Ok([e.dequantize(&x16)?, e.dequantize(&x19)?, x22])
 }

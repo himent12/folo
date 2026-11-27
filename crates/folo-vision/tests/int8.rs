@@ -322,3 +322,174 @@ fn v1_calibration_keeps_coupled_concat_weights() {
         }
     }
 }
+
+#[test]
+fn f32_convs_subgraphs_skip_redundant_quantization_and_match_fake_quant() {
+    let m = model(29);
+    let x = input(2, 64, 96, 30);
+    let base_cal = Calibration { weights: None, ..calibrated(&m, &x) };
+    // Include P5 tail (`neck.out5.*`, consecutive f32 convs feeding the f32 head) plus the entire PSA
+    // attention/FFN block (`backbone.psa.*`, exercising deferred `proj.in`, `narrow`, `upsample2`, and the
+    // multi-consumer `x10` skip into both int8 `neck.td4.cv1` and f32 `neck.out5.cv1`).
+    let mut mixed_cal = base_cal.clone().with_p5_tail_f32(&m);
+    for name in [
+        "backbone.psa.cv1",
+        "backbone.psa.block0.attn.qkv",
+        "backbone.psa.block0.attn.proj",
+        "backbone.psa.block0.ffn1",
+        "backbone.psa.block0.ffn2",
+        "backbone.psa.cv2",
+    ] {
+        mixed_cal.f32_convs.push(name.to_string());
+    }
+
+    let _g = no_grad();
+    let want = FakeQuant::new(&mixed_cal).features(&m, &x).unwrap();
+    let plan = Int8Plan::new(mixed_cal.clone());
+    let got = folo_core::cpu::in_pool(|| quant::exec::features(&m, &plan, &x)).unwrap();
+    for (i, name) in ["neck.out3.cv2", "neck.out4.cv2", "neck.out5.cv2"].iter().enumerate() {
+        let s = mixed_cal.param(name).unwrap().scale;
+        let (a, b) = (want[i].to_vec::<f32>().unwrap(), got[i].to_vec::<f32>().unwrap());
+        let steps: Vec<f32> = a.iter().zip(&b).map(|(p, q)| ((p - q) / s).abs().round()).collect();
+        let exact = steps.iter().filter(|&&d| d == 0.0).count() as f64 / steps.len() as f64;
+        let worst = steps.iter().copied().fold(0f32, f32::max);
+        assert!(exact > 0.99 && worst <= 2.0, "mixed {name}: {:.4} exact, worst {worst} steps", exact);
+    }
+
+    // Thread-count bit-determinism on the mixed f32/int8 graph (exercises lazy QAct::F32 -> U8 caching on
+    // multi-consumer skips like `x10` into both int8 `neck.td4.cv1` and f32 `neck.out5.cv1`, with `no_grad`
+    // created inside each worker closure since `no_grad` is thread-local).
+    let mut m_mixed = model(29);
+    m_mixed.set_int8(Some(mixed_cal)).unwrap();
+    let y_t1 = pool(1).install(|| {
+        let _g = no_grad();
+        m_mixed.forward(&x).unwrap()
+    });
+    let y_t7 = pool(7).install(|| {
+        let _g = no_grad();
+        m_mixed.forward(&x).unwrap()
+    });
+    for (p, q) in [(&y_t1.box_raw, &y_t7.box_raw), (&y_t1.cls_raw, &y_t7.cls_raw)] {
+        let (p, q) = (p.to_vec::<f32>().unwrap(), q.to_vec::<f32>().unwrap());
+        assert!(
+            p.iter().zip(&q).all(|(u, v)| u.to_bits() == v.to_bits()),
+            "mixed int8 not thread-deterministic"
+        );
+    }
+
+    // When every boundary conv is in `f32_convs` (with `u8_stem: false`), lazy QAct::F32 skips every
+    // intermediate u8 quantise/dequantise boundary, matching the full `f32` model bit-for-bit.
+    let mut all_f32_cal = Calibration { u8_stem: false, ..base_cal };
+    all_f32_cal.f32_convs = all_f32_cal.ranges.keys().cloned().collect();
+    all_f32_cal.f32_convs.push("backbone.psa.block0.attn.qkv".to_string());
+    let f32_out = m.forward(&x).unwrap();
+    let mut m_all_f32 = model(29);
+    m_all_f32.set_int8(Some(all_f32_cal)).unwrap();
+    let y_all_f32 = m_all_f32.forward(&x).unwrap();
+    for (p, q) in [(&f32_out.box_raw, &y_all_f32.box_raw), (&f32_out.cls_raw, &y_all_f32.cls_raw)] {
+        let (p, q) = (p.to_vec::<f32>().unwrap(), q.to_vec::<f32>().unwrap());
+        assert!(
+            p.iter().zip(&q).all(|(u, v)| u.to_bits() == v.to_bits()),
+            "all-f32_convs int8 plan must skip all u8 ping-pong and match f32 bit-for-bit"
+        );
+    }
+}
+
+#[test]
+fn bias_in_place_mutation_repacks_int8_conv() {
+    let mut m = model(31);
+    let x = input(1, 64, 64, 32);
+    let cal = Calibration { weights: None, ..calibrated(&m, &x) };
+    m.set_int8(Some(cal.clone())).unwrap();
+    let _g = no_grad();
+    m.forward(&x).unwrap(); // populates BiasCache + Packed QConv on every conv
+
+    // Mutate `backbone.down2` bias in place (simulating weight/bias reload without replacing the Tensor).
+    let bias = m.backbone.down2.conv.bias.as_ref().expect("fused conv has bias");
+    let shifted: Vec<f32> = bias.to_vec::<f32>().unwrap().into_iter().map(|v| v + 0.5).collect();
+    let shifted_t = Tensor::from_vec(shifted, bias.dims().to_vec()).unwrap();
+    bias.copy_from(&shifted_t).unwrap();
+    let got = m.forward(&x).unwrap().box_raw.to_vec::<f32>().unwrap();
+
+    // Compare against a fresh model with the same shifted bias (nothing cached yet).
+    let mut fresh = model(31);
+    fresh.backbone.down2.conv.bias.as_ref().unwrap().copy_from(&shifted_t).unwrap();
+    fresh.set_int8(Some(cal)).unwrap();
+    let want = fresh.forward(&x).unwrap().box_raw.to_vec::<f32>().unwrap();
+    assert!(
+        got.iter().zip(&want).all(|(u, v)| u.to_bits() == v.to_bits()),
+        "stale BiasCache / QConv after in-place bias mutation"
+    );
+}
+
+#[test]
+fn fused_cpu_attention_matches_tensor_reference_and_is_thread_deterministic() {
+    use folo_nn::Forward;
+    use folo_vision::model::blocks::{Attention, Fuse, Init};
+
+    let mut rng = Rng::seed(37);
+    let mut attn = Attention::new(128, 2, &mut Init::new(&mut rng)).unwrap();
+    attn.fuse_().unwrap();
+
+    // Test standard 20×20 plus border edge cases (1×1, 1×3, 3×1, 2×2).
+    for (b, h, w) in [(1, 20, 20), (2, 4, 6), (1, 1, 1), (1, 1, 3), (1, 3, 1), (1, 2, 2)] {
+        let x = Tensor::rand_uniform([b, 128, h, w], -1.0, 1.0, &mut Rng::seed(100 + (h * 31 + w) as u64));
+        // With grad enabled, `Attention::forward` takes the generic tensor reference path.
+        let ref_y = attn.forward(&x).unwrap().to_vec::<f32>().unwrap();
+        // Under `no_grad` (created inside each worker closure because `no_grad` is thread-local),
+        // `Attention::forward` takes the fused CPU path.
+        let fast_t1 = pool(1).install(|| {
+            let _g = no_grad();
+            attn.forward(&x).unwrap().to_vec::<f32>().unwrap()
+        });
+        let fast_t7 = pool(7).install(|| {
+            let _g = no_grad();
+            attn.forward(&x).unwrap().to_vec::<f32>().unwrap()
+        });
+        assert!(
+            fast_t1.iter().zip(&fast_t7).all(|(u, v)| u.to_bits() == v.to_bits()),
+            "fused attention ({b}x128x{h}x{w}) differs across thread counts"
+        );
+        let max_err = ref_y.iter().zip(&fast_t1).map(|(u, v)| (u - v).abs()).fold(0.0f32, f32::max);
+        assert!(max_err < 1e-4, "fused attention ({b}x128x{h}x{w}) max err {max_err} >= 1e-4");
+    }
+
+    // Regression: cancelling large PE taps (+/- 2^24) must not swallow a small bias (0.5).
+    // With `v = 1.0` everywhere, attention output `o = 1.0`; with PE weights `+2^24` and `-2^24` on the
+    // left/right neighbors and bias `0.5`, center pixel (1, 1) must yield `1.0 + (0.0 + 0.5) = 1.5`
+    // (starting the accumulation with `bias` would round `0.5 + 2^24` to `2^24` and yield `1.0`).
+    let mut rng = Rng::seed(41);
+    let mut cancel_attn = Attention::new(4, 1, &mut Init::new(&mut rng)).unwrap();
+    cancel_attn.fuse_().unwrap();
+    let mut pe_w = vec![0.0f32; 4 * 9];
+    for ch in 0..4 {
+        pe_w[ch * 9 + 3] = 16_777_216.0; // +2^24 on left neighbor
+        pe_w[ch * 9 + 5] = -16_777_216.0; // -2^24 on right neighbor
+    }
+    cancel_attn.pe.conv.weight = Tensor::from_vec(pe_w, [4, 1, 3, 3]).unwrap();
+    cancel_attn.pe.conv.bias = Some(Tensor::from_vec(vec![0.5f32; 4], [4]).unwrap());
+    let c_qkv = cancel_attn.qkv.conv.config().out_channels;
+    cancel_attn.qkv.conv.weight = Tensor::zeros([c_qkv, 4, 1, 1]);
+    let mut qkv_b = vec![0.0f32; c_qkv];
+    for v_b in &mut qkv_b[2 * cancel_attn.key_dim..] {
+        *v_b = 1.0;
+    }
+    cancel_attn.qkv.conv.bias = Some(Tensor::from_vec(qkv_b, [c_qkv]).unwrap());
+    let mut eye = vec![0.0f32; 16];
+    for i in 0..4 {
+        eye[i * 4 + i] = 1.0;
+    }
+    cancel_attn.proj.conv.weight = Tensor::from_vec(eye, [4, 4, 1, 1]).unwrap();
+    cancel_attn.proj.conv.bias = Some(Tensor::zeros([4]));
+
+    let x_c = Tensor::zeros([1, 4, 3, 3]);
+    let ref_c = cancel_attn.forward(&x_c).unwrap().to_vec::<f32>().unwrap();
+    let fast_c = {
+        let _g = no_grad();
+        cancel_attn.forward(&x_c).unwrap().to_vec::<f32>().unwrap()
+    };
+    assert_eq!(ref_c, fast_c, "PE bias handling diverged from reference");
+    for ch in 0..4 {
+        assert_eq!(fast_c[ch * 9 + 4], 1.5, "center pixel lost bias on cancelling taps (ch {ch})");
+    }
+}
