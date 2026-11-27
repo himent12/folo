@@ -64,9 +64,7 @@ fn format_simd(simd: &CpuSimd, overrides: SimdOverrides) -> String {
     let mut notes = vec![format!("int8: {}", simd.int8_kernel)];
     let active = overrides.active_names();
     if !active.is_empty() {
-        let verb = if simd.int8_kernel == "portable"
-            && (simd.avx2 || simd.avx_vnni || simd.avx512_vnni || simd.neon)
-        {
+        let verb = if simd.int8_kernel == "portable" && (simd.avx2 || simd.avx_vnni || simd.avx512_vnni) {
             "disabled by"
         } else {
             "override:"

@@ -197,7 +197,7 @@ Desktop lives in its own cargo workspace so engine builds stay fast ([apps/deskt
 ## Use FOLO from an agent
 
 **MCP.** `folo mcp` is a [Model Context Protocol](https://modelcontextprotocol.io) server over stdio (MCP 2026-07-28 and
-2025-11-25) with 44 tools covering datasets, agent labeling, local and cloud training, evaluation, prediction, export,
+2025-11-25) with 45 tools covering datasets, agent labeling, local and cloud training, evaluation, prediction, export,
 and vision benchmarks — plus `folo://` resources and three prompts against `--data-dir` (default `~/.folo`).
 
 ```sh

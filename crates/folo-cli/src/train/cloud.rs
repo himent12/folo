@@ -22,7 +22,7 @@ use crate::cli::bounds::{
     CLOUD_DISK_GB, CLOUD_MAX_HOURS, CLOUD_MAX_PREEMPT_RETRIES, NON_NEGATIVE_FLOAT, TRAIN_EPOCHS, TRAIN_IMGSZ,
     TRAIN_LR0, TRAIN_SCALE, UNIT_INTERVAL,
 };
-use crate::cli::{FormatArg, HeadArg, OptimizerArg, TrainArgs};
+use crate::cli::{FormatArg, HeadArg, JsonEvents, OptimizerArg, TrainArgs};
 use crate::output::{CliError, ExitCode, Out};
 use crate::serve::{data_dir_in_use, data_dir_lock_failed};
 use crate::serve_lock::{self, Acquire, ServeLock};
@@ -274,8 +274,16 @@ pub(super) fn train_cloud(args: TrainArgs, out: Out) -> Result<(), CliError> {
     if let Some(w) = &args.weights {
         let model_arch = session.store.model_arch(w).map_err(api_error)?;
         let (parsed, ov) = parse_arch_override(&model_arch).map_err(api_error)?;
+        if ov.is_some() {
+            return Err(CliError::new(
+                ExitCode::Usage,
+                "invalid_config",
+                format!("`--weights {w}` uses {model_arch} (FOLO v2-Iso), which is not supported for cloud runs yet"),
+            )
+            .hint("use v1 weights (`folo-n`..`folo-x`) for `--cloud`, or omit `--cloud` to train locally"));
+        }
         arch = parsed;
-        arch_override = ov;
+        arch_override = None;
     }
 
     // Resolve offer: explicit `--offer`, else cheapest in-stock offer on the connection.
@@ -353,7 +361,7 @@ pub(super) fn train_cloud(args: TrainArgs, out: Out) -> Result<(), CliError> {
         run.id, run.name, connection_id, offer_id, configured_retries
     ));
 
-    follow_cloud_run(&session, &run.id, &stop, out)
+    follow_cloud_run(&session, &run.id, &stop, args.json_events, out)
 }
 
 fn select_default_offer(offers: &[CloudOffer], connection_id: &str) -> Result<String, CliError> {
@@ -389,16 +397,18 @@ fn follow_cloud_run(
     session: &CloudSession,
     run_id: &str,
     stop: &AtomicBool,
+    json_events: JsonEvents,
     out: Out,
 ) -> Result<(), CliError> {
     let poll = if session.local.is_some() { POLL_LOCAL } else { POLL_SERVER };
-    follow_cloud_run_with_poll(session, run_id, stop, out, poll)
+    follow_cloud_run_with_poll(session, run_id, stop, json_events, out, poll)
 }
 
 fn follow_cloud_run_with_poll(
     session: &CloudSession,
     run_id: &str,
     stop: &AtomicBool,
+    json_events: JsonEvents,
     out: Out,
     poll: Duration,
 ) -> Result<(), CliError> {
@@ -444,6 +454,8 @@ fn follow_cloud_run_with_poll(
                             "stop it manually in Studio, via `POST /api/runs/{run_id}/stop`, or check `folo cloud instances`"
                         )));
                     }
+                    std::thread::sleep(poll);
+                    continue;
                 }
             }
         }
@@ -452,7 +464,7 @@ fn follow_cloud_run_with_poll(
             status: run.status,
             phase: run.cloud.as_ref().map(|c| c.phase.as_str().to_string()),
             epoch: run.epoch,
-            step: run.step,
+            step: if json_events == JsonEvents::Epoch { 0 } else { run.step },
             preemption: preemption.as_ref().map(|p| (p.retries, p.max_retries, p.recovering)),
         };
         if last_sig.as_ref() != Some(&sig) {
@@ -788,6 +800,13 @@ mod tests {
                 unimplemented!()
             }
             fn get_run(&self, id: &str) -> folo_server::error::Result<Run> {
+                // Simulate a full server outage while `stop_calls <= fail_stops` so `get_run` also fails during
+                // the outage window and only succeeds once the server recovers.
+                if !self.stopped.load(Ordering::SeqCst)
+                    && self.stop_calls.load(Ordering::SeqCst) <= self.fail_stops.load(Ordering::SeqCst)
+                {
+                    return Err(ServerError::internal("server temporarily unreachable"));
+                }
                 let status = if self.stopped.load(Ordering::SeqCst) { "stopped" } else { "running" };
                 Ok(serde_json::from_value(json!({
                     "id": id,
@@ -855,7 +874,7 @@ mod tests {
             }
         }
 
-        // Case 1: first stop fails transiently, second succeeds -> cleanly stops.
+        // Case 1: first stop (and status GET during the same outage) fails transiently, second succeeds -> cleanly stops.
         let transient = Arc::new(StopStore {
             fail_stops: AtomicU32::new(1),
             stop_calls: AtomicU32::new(0),
@@ -863,11 +882,18 @@ mod tests {
         });
         let session = CloudSession { store: transient.clone(), local: None };
         let stop = AtomicBool::new(true);
-        follow_cloud_run_with_poll(&session, "run_t1", &stop, Out { json: false }, Duration::from_millis(1))
-            .unwrap();
+        follow_cloud_run_with_poll(
+            &session,
+            "run_t1",
+            &stop,
+            JsonEvents::All,
+            Out { json: false },
+            Duration::from_millis(1),
+        )
+        .unwrap();
         assert_eq!(transient.stop_calls.load(Ordering::SeqCst), 2);
 
-        // Case 2: persistent stop failure fails with run_id after MAX_STOP_RETRIES attempts.
+        // Case 2: persistent outage (both stop and status fail) fails with run_id after MAX_STOP_RETRIES attempts.
         let persistent = Arc::new(StopStore {
             fail_stops: AtomicU32::new(100),
             stop_calls: AtomicU32::new(0),
@@ -878,6 +904,7 @@ mod tests {
             &session2,
             "run_p1",
             &stop,
+            JsonEvents::Epoch,
             Out { json: false },
             Duration::from_millis(1),
         )
