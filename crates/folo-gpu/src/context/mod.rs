@@ -202,6 +202,10 @@ pub struct Capabilities {
     pub max_storage_buffer_binding_size: u64,
     /// Workgroup memory in bytes.
     pub max_workgroup_storage: u32,
+    /// Largest 1-D workgroup X dimension.
+    pub max_workgroup_size_x: u32,
+    /// Largest total invocations per workgroup.
+    pub max_workgroup_invocations: u32,
     /// Workgroups per dispatch dimension.
     pub max_workgroups_per_dim: u32,
     /// Uniform buffer offset alignment.

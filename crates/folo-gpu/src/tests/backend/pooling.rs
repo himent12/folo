@@ -766,3 +766,70 @@ fn stride1_vec4_max_pool_all_tiers_and_edges() {
     }
     assert!(ctx.kernels_without_registry().is_empty());
 }
+
+#[test]
+fn upsample_2x2_strided_channel_slice_backward_parity_and_trace() {
+    use folo_core::backend::{Backend, View};
+    use folo_core::{DType, Layout, Shape};
+
+    let dev = dev!();
+    let ctx = crate::context_for(dev).expect("registered");
+    let has_f16 = ctx.caps().shader_f16;
+
+    // 1. PANet-style `cat([upsample(x), skip], 1)` backward passes a channel-sliced (`narrow`) gradient to
+    //    `upsample_nearest2d_backward`. Test even widths (strided `pool_2x2_s2_vec4`) and odd widths (generic
+    //    fallback), plus both `F32` and `F16` and non-zero channel offsets.
+    for &(shape, skip_c) in &[([2usize, 4, 20, 20], 4usize), ([3, 5, 11, 14], 3), ([2, 3, 7, 9], 2)] {
+        let [n, _c, h, w] = shape;
+        let x = randn(&shape, 140 + w as u64);
+        let skip = randn(&[n, skip_c, h * 2, w * 2], 150 + w as u64);
+        check(dev, &[x.clone(), skip.clone()], 1e-6, 1e-5, &format!("upsample cat bwd {shape:?}"), |v| {
+            let up = v[0].upsample_nearest2d(2)?;
+            Tensor::cat(&[&v[1], &up], 1)
+        });
+        if has_f16 {
+            let xf = x.to_dtype(DType::F16).unwrap();
+            let sf = skip.to_dtype(DType::F16).unwrap();
+            let xc = xf.to_dtype(DType::F32).unwrap().detach().requires_grad_();
+            let sc = sf.to_dtype(DType::F32).unwrap().detach().requires_grad_();
+            let yc = Tensor::cat(&[&sc, &xc.upsample_nearest2d(2).unwrap()], 1).unwrap();
+            let gy = randn(yc.dims(), 160 + w as u64).to_dtype(DType::F16).unwrap();
+            let gxc = yc.backward_with(&gy.to_dtype(DType::F32).unwrap()).unwrap().get(&xc).unwrap().clone();
+
+            let xg = xf.to_device(dev).unwrap().detach().requires_grad_();
+            let sg = sf.to_device(dev).unwrap().detach().requires_grad_();
+            let yg = Tensor::cat(&[&sg, &xg.upsample_nearest2d(2).unwrap()], 1).unwrap();
+            let gxg = yg.backward_with(&gy.to_device(dev).unwrap()).unwrap().get(&xg).unwrap().clone();
+            assert_eq!(gxg.dtype(), DType::F16);
+            assert_close_t(
+                &gxg.to_dtype(DType::F32).unwrap(),
+                &gxc,
+                3e-3,
+                3e-3,
+                &format!("f16 up cat {shape:?}"),
+            );
+        }
+    }
+
+    // 2. Trace check: 2x2 even-width channel-slice backward dispatches `pool_2x2_s2_vec4` directly with zero
+    //    `move_vec4` pre-copy in both F32 and F16.
+    let fresh = crate::GpuContext::new().unwrap();
+    let backend = crate::GpuBackend::new(fresh.clone(), dev);
+    let dtypes: Vec<DType> =
+        if fresh.caps().shader_f16 { vec![DType::F32, DType::F16] } else { vec![DType::F32] };
+    for dt in dtypes {
+        let (n, c_parent, c_off, c, ih, iw) = (4usize, 96usize, 32usize, 64usize, 20usize, 20usize);
+        let (oh, ow) = (ih * 2, iw * 2);
+        let parent = backend.full(dev, dt, n * c_parent * oh * ow, 1.0).unwrap();
+        let l_slice = Layout::new(
+            Shape::new(&[n, c, oh, ow]),
+            vec![c_parent * oh * ow, oh * ow, ow, 1].into(),
+            c_off * oh * ow,
+        );
+        fresh.trace_begin();
+        let _ = backend.upsample_nearest2d_backward(View::new(&parent, &l_slice), [2, 2]).unwrap();
+        let ops: Vec<&str> = fresh.trace_end().iter().map(|o| o.name).collect();
+        assert_eq!(ops, vec!["pool_2x2_s2_vec4"], "strided upsample_bwd {dt:?} must skip move_vec4");
+    }
+    assert!(fresh.kernels_without_registry().is_empty());
+}

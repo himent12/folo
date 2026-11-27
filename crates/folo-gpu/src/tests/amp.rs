@@ -583,8 +583,9 @@ fn batch_norm_fused_single_dispatch_parity_and_trace() {
     }
 
     // Dispatch trace on a fresh context: register-cached fused single-dispatch (REGS=4/8 up to 2048 units),
-    // streaming fused single-dispatch (REGS=0 up to 6400 units with C >= 64), vs 3-pass multi-chunk above or with
-    // fewer channels. `bn_fused_bwd` requires 9 storage bindings; adapters capped at 8 fall back to 3-dispatch bwd.
+    // streaming fused single-dispatch (REGS=0 up to 6400 units with C >= 32, and up to 25600 units with C >= 64),
+    // vs 3-pass multi-chunk above or with fewer channels. `bn_fused_bwd` requires 9 storage bindings; adapters
+    // capped at 8 fall back to 3-dispatch bwd.
     let fresh = crate::GpuContext::new().unwrap();
     let backend = crate::GpuBackend::new(fresh.clone(), dev);
     let fused_bwd_trace = if fresh.caps().max_storage_buffers >= 9 {
@@ -595,14 +596,16 @@ fn batch_norm_fused_single_dispatch_parity_and_trace() {
     for (dims, expect_fwd, expect_bwd) in [
         ([4usize, 32, 8, 8], vec!["bn_fused_fwd"], fused_bwd_trace.clone()),
         ([16, 32, 20, 20], vec!["bn_fused_fwd"], fused_bwd_trace.clone()),
-        ([16, 64, 40, 40], vec!["bn_fused_fwd"], fused_bwd_trace),
+        ([16, 64, 40, 40], vec!["bn_fused_fwd"], fused_bwd_trace.clone()),
+        ([16, 32, 40, 40], vec!["bn_fused_fwd"], fused_bwd_trace.clone()),
+        ([16, 64, 80, 80], vec!["bn_fused_fwd"], fused_bwd_trace),
         (
-            [16, 32, 40, 40],
+            [16, 16, 40, 40],
             vec!["bn_stats", "bn_finalize", "bn_apply"],
             vec!["bn_bwd_reduce", "bn_bwd_finalize", "bn_bwd_dx"],
         ),
         (
-            [16, 64, 80, 80],
+            [16, 32, 80, 80],
             vec!["bn_stats", "bn_finalize", "bn_apply"],
             vec!["bn_bwd_reduce", "bn_bwd_finalize", "bn_bwd_dx"],
         ),

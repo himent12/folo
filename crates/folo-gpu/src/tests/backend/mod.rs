@@ -5,6 +5,7 @@
 //! CPU's); reductions, GEMM and convolutions to `1e-4` relative + a small absolute term scaled to the
 //! reduction length (different summation order, FMA); copies, casts and index ops exactly.
 
+mod batch_norm;
 mod conv;
 mod conv_cat;
 mod elementwise;

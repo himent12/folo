@@ -19,7 +19,6 @@ use crate::kernels::ew::EwOp;
 use crate::kernels::gemm_cat::{CAT_STORAGE_BUFFERS, MAX_CAT_PARTS};
 use crate::kernels::layout;
 use crate::kernels::muon;
-use crate::kernels::norm::{self, BnRunning};
 use crate::kernels::optim;
 use crate::kernels::pool_grad;
 use crate::kernels::pooling;
@@ -515,23 +514,7 @@ impl Backend for GpuBackend {
     }
 
     fn upsample_nearest2d_backward(&self, grad: View<'_>, scale: [usize; 2]) -> Result<Storage> {
-        let _p = profile::scope(|| format!("upsample_bwd {:?}", grad.shape().dims()));
-        let dtype = grad.storage.dtype();
-        let (n, c, oh, ow) = nchw(grad.shape());
-        let (h, w) = (oh / scale[0], ow / scale[1]);
-        let len = n * c * h * w;
-        let out = self.alloc(dtype, len)?;
-        let gd = self.dense(&grad)?;
-        pool_grad::upsample_nearest2d_backward(
-            &self.ctx,
-            gd.raw(),
-            out.raw(),
-            (n * c, h, w),
-            (scale[0], scale[1]),
-            kdt(dtype),
-        )
-        .core()?;
-        Ok(self.wrap(dtype, len, out))
+        self.run_upsample_nearest2d_backward(grad, scale)
     }
 
     fn index_select(&self, x: View<'_>, dim: usize, idx: View<'_>) -> Result<Storage> {
@@ -720,39 +703,7 @@ impl Backend for GpuBackend {
         act: Option<UnaryOp>,
         running: Option<RunningUpdate<'_>>,
     ) -> Result<(Storage, Storage, Storage)> {
-        let d = self.bn_desc(&x, act, "batch_norm_act")?;
-        let _p = profile::scope(|| format!("bn_fwd {:?} {:?}", x.shape().dims(), d.dtype));
-        let len = x.layout.numel();
-        let dtype = x.storage.dtype();
-        let (y, mean, invstd) =
-            (self.alloc(dtype, len)?, self.alloc(CoreDType::F32, d.c)?, self.alloc(CoreDType::F32, d.c)?);
-        let (xd, wd, bd) = (self.dense(&x)?, self.dense(&weight)?, self.dense(&bias)?);
-        let run = match &running {
-            Some(r) => Some(BnRunning {
-                mean: self.storage_buf(r.mean)?,
-                var: self.storage_buf(r.var)?,
-                momentum: r.momentum,
-            }),
-            None => None,
-        };
-        norm::batch_norm_forward(
-            &self.ctx,
-            &d,
-            xd.raw(),
-            wd.raw(),
-            bd.raw(),
-            eps,
-            run,
-            y.raw(),
-            mean.raw(),
-            invstd.raw(),
-        )
-        .core()?;
-        Ok((
-            self.wrap(dtype, len, y),
-            self.wrap(CoreDType::F32, d.c, mean),
-            self.wrap(CoreDType::F32, d.c, invstd),
-        ))
+        self.run_batch_norm_act(x, weight, bias, eps, act, running)
     }
 
     fn batch_norm_act_backward(
@@ -765,34 +716,7 @@ impl Backend for GpuBackend {
         invstd: View<'_>,
         act: Option<UnaryOp>,
     ) -> Result<(Storage, Storage, Storage)> {
-        let d = self.bn_desc(&x, act, "batch_norm_act_backward")?;
-        let _p = profile::scope(|| format!("bn_bwd {:?} {:?}", x.shape().dims(), d.dtype));
-        let len = x.layout.numel();
-        let dtype = x.storage.dtype();
-        let (dx, dw, db) =
-            (self.alloc(dtype, len)?, self.alloc(CoreDType::F32, d.c)?, self.alloc(CoreDType::F32, d.c)?);
-        let (xd, gd) = (self.dense(&x)?, self.dense(&grad)?);
-        let (wd, bd, md, id) =
-            (self.dense(&weight)?, self.dense(&bias)?, self.dense(&mean)?, self.dense(&invstd)?);
-        norm::batch_norm_backward(
-            &self.ctx,
-            &d,
-            xd.raw(),
-            gd.raw(),
-            wd.raw(),
-            bd.raw(),
-            md.raw(),
-            id.raw(),
-            dx.raw(),
-            dw.raw(),
-            db.raw(),
-        )
-        .core()?;
-        Ok((
-            self.wrap(dtype, len, dx),
-            self.wrap(CoreDType::F32, d.c, dw),
-            self.wrap(CoreDType::F32, d.c, db),
-        ))
+        self.run_batch_norm_act_backward(x, grad, weight, bias, mean, invstd, act)
     }
 
     fn optimizer_step(

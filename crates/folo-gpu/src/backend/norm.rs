@@ -1,11 +1,13 @@
 //! Fused `LayerNorm`, `RMSNorm`, and `softmax_backward` hooks for [`GpuBackend`].
 
-use folo_core::backend::{Backend, View};
+use folo_core::backend::{Backend, RunningUpdate, UnaryOp, View};
 use folo_core::{DType as CoreDType, Error, Result, Storage};
 
 use super::GpuBackend;
-use super::convert::{Core, kdt, split3};
-use crate::kernels::{layer_norm, reduce, softmax_bwd};
+use super::convert::{Core, kdt, nchw, split3};
+use super::encode::conv_input;
+use super::storage::Dense;
+use crate::kernels::{layer_norm, norm, pool_grad, reduce, softmax_bwd};
 use crate::profile;
 
 /// Requires `v` to hold `F32` storage.
@@ -291,5 +293,150 @@ impl GpuBackend {
             reduce::reduce_var(&self.ctx, xd.raw(), out.raw(), (outer, r, inner), unbiased).core()?;
         }
         Ok(self.wrap(CoreDType::F32, n, out))
+    }
+
+    /// Resolves `v` as a direct NCHW [`norm::BnView`] (dense or channel-slice) when addressable within 31-bit
+    /// indexing, otherwise materialises a dense copy.
+    fn bn_view<'a>(&self, v: &'a View<'a>, d: &norm::BnDesc) -> Result<(Option<Dense<'a>>, usize, usize)> {
+        if let Some(ci) = conv_input(v) {
+            let image = d.c * d.hw;
+            let span = (d.n.saturating_sub(1))
+                .checked_mul(ci.n_stride)
+                .and_then(|s| s.checked_add(image))
+                .and_then(|s| s.checked_add(ci.offset));
+            let aligned_ok =
+                !d.hw.is_multiple_of(4) || (ci.offset.is_multiple_of(4) && ci.n_stride.is_multiple_of(4));
+            if aligned_ok && span.is_some_and(|s| s < (1usize << 31)) {
+                return Ok((Some(Dense::Borrowed(self.buf(v)?)), ci.offset, ci.n_stride));
+            }
+        }
+        Ok((Some(self.dense(v)?), 0, d.c * d.hw))
+    }
+
+    pub(super) fn run_batch_norm_act(
+        &self,
+        x: View<'_>,
+        weight: View<'_>,
+        bias: View<'_>,
+        eps: f32,
+        act: Option<UnaryOp>,
+        running: Option<RunningUpdate<'_>>,
+    ) -> Result<(Storage, Storage, Storage)> {
+        let d = self.bn_desc(&x, act, "batch_norm_act")?;
+        let _p = profile::scope(|| format!("bn_fwd {:?} {:?}", x.shape().dims(), d.dtype));
+        let len = x.layout.numel();
+        let dtype = x.storage.dtype();
+        let (y, mean, invstd) =
+            (self.alloc(dtype, len)?, self.alloc(CoreDType::F32, d.c)?, self.alloc(CoreDType::F32, d.c)?);
+        let (xd, x_off, x_ns) = self.bn_view(&x, &d)?;
+        let xd = xd.expect("bn_view");
+        let (wd, bd) = (self.dense(&weight)?, self.dense(&bias)?);
+        let run = match &running {
+            Some(r) => Some(norm::BnRunning {
+                mean: self.storage_buf(r.mean)?,
+                var: self.storage_buf(r.var)?,
+                momentum: r.momentum,
+            }),
+            None => None,
+        };
+        norm::batch_norm_forward_strided(
+            &self.ctx,
+            &d,
+            norm::BnView { buf: xd.raw(), offset: x_off, n_stride: x_ns },
+            wd.raw(),
+            bd.raw(),
+            eps,
+            run,
+            y.raw(),
+            mean.raw(),
+            invstd.raw(),
+        )
+        .core()?;
+        Ok((
+            self.wrap(dtype, len, y),
+            self.wrap(CoreDType::F32, d.c, mean),
+            self.wrap(CoreDType::F32, d.c, invstd),
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn run_batch_norm_act_backward(
+        &self,
+        x: View<'_>,
+        grad: View<'_>,
+        weight: View<'_>,
+        bias: View<'_>,
+        mean: View<'_>,
+        invstd: View<'_>,
+        act: Option<UnaryOp>,
+    ) -> Result<(Storage, Storage, Storage)> {
+        let d = self.bn_desc(&x, act, "batch_norm_act_backward")?;
+        let _p = profile::scope(|| format!("bn_bwd {:?} {:?}", x.shape().dims(), d.dtype));
+        let len = x.layout.numel();
+        let dtype = x.storage.dtype();
+        let (dx, dw, db) =
+            (self.alloc(dtype, len)?, self.alloc(CoreDType::F32, d.c)?, self.alloc(CoreDType::F32, d.c)?);
+        let (xd, x_off, x_ns) = self.bn_view(&x, &d)?;
+        let (gd, g_off, g_ns) = self.bn_view(&grad, &d)?;
+        let (xd, gd) = (xd.expect("bn_view x"), gd.expect("bn_view g"));
+        let (wd, bd, md, id) =
+            (self.dense(&weight)?, self.dense(&bias)?, self.dense(&mean)?, self.dense(&invstd)?);
+        norm::batch_norm_backward_strided(
+            &self.ctx,
+            &d,
+            norm::BnView { buf: xd.raw(), offset: x_off, n_stride: x_ns },
+            norm::BnView { buf: gd.raw(), offset: g_off, n_stride: g_ns },
+            wd.raw(),
+            bd.raw(),
+            md.raw(),
+            id.raw(),
+            dx.raw(),
+            dw.raw(),
+            db.raw(),
+        )
+        .core()?;
+        Ok((
+            self.wrap(dtype, len, dx),
+            self.wrap(CoreDType::F32, d.c, dw),
+            self.wrap(CoreDType::F32, d.c, db),
+        ))
+    }
+
+    pub(super) fn run_upsample_nearest2d_backward(
+        &self,
+        grad: View<'_>,
+        scale: [usize; 2],
+    ) -> Result<Storage> {
+        let _p = profile::scope(|| format!("upsample_bwd {:?}", grad.shape().dims()));
+        let dtype = grad.storage.dtype();
+        let (n, c, oh, ow) = nchw(grad.shape());
+        let (h, w) = (oh / scale[0], ow / scale[1]);
+        let len = n * c * h * w;
+        let out = self.alloc(dtype, len)?;
+        if scale == [2, 2]
+            && let Some(ci) = conv_input(&grad)
+            && pool_grad::try_upsample_2x2_backward_strided(
+                &self.ctx,
+                self.buf(&grad)?,
+                (ci.offset, ci.n_stride),
+                out.raw(),
+                (n, c, h, w),
+                kdt(dtype),
+            )
+            .core()?
+        {
+            return Ok(self.wrap(dtype, len, out));
+        }
+        let gd = self.dense(&grad)?;
+        pool_grad::upsample_nearest2d_backward(
+            &self.ctx,
+            gd.raw(),
+            out.raw(),
+            (n * c, h, w),
+            (scale[0], scale[1]),
+            kdt(dtype),
+        )
+        .core()?;
+        Ok(self.wrap(dtype, len, out))
     }
 }
