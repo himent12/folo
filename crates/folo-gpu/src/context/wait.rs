@@ -120,7 +120,21 @@ impl GpuContext {
         if let Some(why) = self.lost_reason() {
             return Err(GpuError::DeviceLost(why));
         }
-        r.map_err(GpuError::Map)
+        match r {
+            Ok(()) => Ok(()),
+            Err(map_err) => {
+                // Drain any device error captured while submitting/mapping (e.g. an OOM that caused the staging
+                // map to fail) so the failing call sees the real cause instead of leaving it to poison the next
+                // unrelated readback.
+                self.take_error()?;
+                Err(GpuError::Map(map_err))
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn record_error_for_test(&self, msg: &str) {
+        self.inner.errors.lock().expect("error lock").push(msg.into());
     }
 
     pub(super) fn take_error(&self) -> Result<()> {

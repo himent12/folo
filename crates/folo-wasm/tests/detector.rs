@@ -1,6 +1,7 @@
-//! folo-wasm's detector, run natively: the CPU path against folo-vision's `Predictor` (identical results), the
-//! GPU path (`download_async` readback) against the CPU path, the result's JSON shape and the options parsing.
-//! The GPU test skips without a hardware adapter, like folo-vision's.
+//! folo-wasm's detector, run natively: single-pass, SAHI tiled inference, and TTA on CPU against folo-vision's
+//! `Predictor` (identical results), GPU paths (`download_async` readback) against the CPU paths, invalid
+//! parameter rejection, repeated-frame scratch reuse, and JS options JSON parsing. The GPU tests skip without a
+//! hardware adapter, like folo-vision's.
 
 use folo_core::no_grad;
 use folo_core::rng::Rng;
@@ -8,9 +9,14 @@ use folo_data::Image;
 use folo_nn::Module;
 use folo_nn::io::{ModelFile, Purpose};
 use folo_test_support::TestDir;
-use folo_vision::{FoloModel, ModelConfig, Precision, PredictConfig, Predictor};
+use folo_vision::fusion::BoxFusion;
+use folo_vision::{
+    FoloModel, ModelConfig, Precision, PredictConfig, Predictor, TileConfig, TileMergeMetric, TtaConfig,
+};
 use folo_wasm::detector::rgba_to_image;
-use folo_wasm::{Backend, BackendChoice, DetectOptions, Detector, LoadOptions};
+use folo_wasm::{
+    Backend, BackendChoice, DetectOptions, Detector, LoadOptions, TileDetectOptions, TtaDetectOptions,
+};
 
 /// A random folo-n with its class-output biases zeroed: the trained priors (MODEL.md §6.5) put every score near
 /// 1e-4, and the tests need detections. Made once.
@@ -59,10 +65,27 @@ fn load(bytes: Vec<u8>, backend: BackendChoice) -> Result<Detector, String> {
 }
 
 fn load_at(bytes: Vec<u8>, backend: BackendChoice, precision: Precision) -> Result<Detector, String> {
+    load_with_imgsz(bytes, backend, precision, 256)
+}
+
+fn load_with_imgsz(
+    bytes: Vec<u8>,
+    backend: BackendChoice,
+    precision: Precision,
+    imgsz: u32,
+) -> Result<Detector, String> {
     pollster::block_on(Detector::load(
         bytes,
-        LoadOptions { backend, model_id: Some("m_test".into()), imgsz: Some(256), precision },
+        LoadOptions { backend, model_id: Some("m_test".into()), imgsz: Some(imgsz), precision },
     ))
+}
+
+fn cpu_predictor(bytes: Vec<u8>, imgsz: u32, conf: f32, iou: f32, max_det: usize) -> Predictor {
+    let file = ModelFile::from_bytes(bytes).unwrap();
+    let (mut m, _) = FoloModel::from_file(&file, Purpose::Inference).unwrap();
+    m.fuse().unwrap();
+    let cfg = PredictConfig { imgsz, conf, iou, max_det, rect: true, head: None, ..PredictConfig::default() };
+    Predictor::new(m, cfg).unwrap()
 }
 
 fn has_gpu() -> bool {
@@ -81,6 +104,27 @@ fn has_gpu() -> bool {
     }
 }
 
+fn assert_gpu_matches_cpu_boxes(
+    gpu_boxes: &[folo_api::ScoredBox],
+    cpu_boxes: &[folo_api::ScoredBox],
+    score_tol: f32,
+    coord_tol: f32,
+    label: &str,
+) {
+    assert!(!cpu_boxes.is_empty(), "{label}: test needs CPU boxes");
+    assert_eq!(gpu_boxes.len(), cpu_boxes.len(), "{label}: box count mismatch");
+    for want in cpu_boxes {
+        let close = gpu_boxes.iter().any(|b| {
+            b.class == want.class
+                && (b.score - want.score).abs() < score_tol
+                && [b.x1 - want.x1, b.y1 - want.y1, b.x2 - want.x2, b.y2 - want.y2]
+                    .iter()
+                    .all(|d| d.abs() < coord_tol)
+        });
+        assert!(close, "{label}: no GPU box matches CPU box {want:?}");
+    }
+}
+
 #[test]
 fn cpu_matches_predictor() {
     let bytes = model_bytes();
@@ -90,19 +134,7 @@ fn cpu_matches_predictor() {
     let img = rgba(w, h);
     let res = pollster::block_on(det.detect(&img, w, h, OPTS)).unwrap();
 
-    let file = ModelFile::from_bytes(bytes).unwrap();
-    let (mut m, _) = FoloModel::from_file(&file, Purpose::Inference).unwrap();
-    m.fuse().unwrap();
-    let cfg = PredictConfig {
-        imgsz: 256,
-        conf: OPTS.conf,
-        iou: OPTS.iou,
-        max_det: OPTS.max_det,
-        rect: true,
-        head: None,
-        ..PredictConfig::default()
-    };
-    let p = Predictor::new(m, cfg).unwrap();
+    let p = cpu_predictor(bytes, 256, OPTS.conf, OPTS.iou, OPTS.max_det);
     let want = p.predict(&rgba_to_image(&img, w, h).unwrap()).unwrap();
     assert!(!want.detections.is_empty(), "the test needs some detections");
     assert_eq!(res.response.boxes, want.scored_boxes(p.classes()));
@@ -122,6 +154,116 @@ fn cpu_matches_predictor() {
     let info = det.info();
     assert_eq!((info.arch.as_str(), info.imgsz, info.classes.len()), ("folo-n", 256, 3));
     assert!(info.fallback.is_none() && info.adapter.is_none());
+
+    // Repeated frames reuse internal scratch buffers cleanly and return bit-identical boxes.
+    let res2 = pollster::block_on(det.detect(&img, w, h, OPTS)).unwrap();
+    assert_eq!(res2.response.boxes, res.response.boxes);
+}
+
+#[test]
+fn cpu_tiled_matches_predictor() {
+    let bytes = model_bytes();
+    let det = load_with_imgsz(bytes.clone(), BackendChoice::Cpu, Precision::F32, 128).unwrap();
+    let p = cpu_predictor(bytes, 128, OPTS.conf, OPTS.iou, OPTS.max_det);
+
+    let (w, h) = (260, 180);
+    let img = rgba(w, h);
+    let rgb = rgba_to_image(&img, w, h).unwrap();
+
+    // Multi-tile with full-image pass and default IoS + Vote fusion.
+    let tile_opts = TileDetectOptions {
+        conf: OPTS.conf,
+        iou: OPTS.iou,
+        max_det: OPTS.max_det,
+        tile_size: Some(140),
+        overlap: Some(0.25),
+        full_image: true,
+        tile_batch: 4,
+        merge_metric: TileMergeMetric::Ios,
+        merge_threshold: 0.5,
+        merge_fusion: BoxFusion::Vote,
+        class_agnostic: false,
+        ..TileDetectOptions::default()
+    };
+    let tile_cfg = tile_opts.to_tile_config().unwrap();
+    let got = pollster::block_on(det.detect_tiled(&img, w, h, tile_opts.clone())).unwrap();
+    let want = p.predict_tiled(&rgb, &tile_cfg).unwrap();
+    assert!(!want.detections.is_empty(), "tiled test needs detections");
+    assert_eq!(got.response.boxes, want.scored_boxes(p.classes()));
+    assert_eq!(got.response.image, folo_api::ImageSize { width: w, height: h });
+    assert_eq!(got.backend, Backend::Cpu);
+
+    // Multi-tile without full-image pass, using IoU merge and Sebf fusion.
+    let tile_opts_no_full = TileDetectOptions {
+        full_image: false,
+        merge_metric: TileMergeMetric::Iou,
+        merge_fusion: BoxFusion::Sebf,
+        ..tile_opts
+    };
+    let tile_cfg_no_full = tile_opts_no_full.to_tile_config().unwrap();
+    let got_nf = pollster::block_on(det.detect_tiled(&img, w, h, tile_opts_no_full)).unwrap();
+    let want_nf = p.predict_tiled(&rgb, &tile_cfg_no_full).unwrap();
+    assert_eq!(got_nf.response.boxes, want_nf.scored_boxes(p.classes()));
+
+    // Single-tile degradation (tile larger than image) matches single-pass predict bit for bit.
+    let single_opts = TileDetectOptions {
+        conf: OPTS.conf,
+        iou: OPTS.iou,
+        max_det: OPTS.max_det,
+        tile_size: Some(512),
+        ..TileDetectOptions::default()
+    };
+    let single_cfg: TileConfig = single_opts.to_tile_config().unwrap();
+    let got_single = pollster::block_on(det.detect_tiled(&img, w, h, single_opts)).unwrap();
+    let want_single = p.predict_tiled(&rgb, &single_cfg).unwrap();
+    assert_eq!(got_single.response.boxes, want_single.scored_boxes(p.classes()));
+}
+
+#[test]
+fn cpu_tta_matches_predictor() {
+    let bytes = model_bytes();
+    let det = load_with_imgsz(bytes.clone(), BackendChoice::Cpu, Precision::F32, 128).unwrap();
+    let p = cpu_predictor(bytes, 128, OPTS.conf, OPTS.iou, OPTS.max_det);
+
+    let (w, h) = (180, 120);
+    let img = rgba(w, h);
+    let rgb = rgba_to_image(&img, w, h).unwrap();
+
+    // Multi-scale + horizontal flip TTA (resolves 128 * [0.75, 1.0, 1.25] -> [96, 128, 160]).
+    let tta_opts = TtaDetectOptions {
+        conf: OPTS.conf,
+        iou: OPTS.iou,
+        max_det: OPTS.max_det,
+        hflip: true,
+        scales: vec![0.75, 1.0, 1.25],
+        merge_iou: Some(0.55),
+        merge_fusion: BoxFusion::Vote,
+        class_agnostic: false,
+    };
+    let tta_cfg: TtaConfig = tta_opts.to_tta_config().unwrap();
+    let got = pollster::block_on(det.detect_tta(&img, w, h, tta_opts.clone())).unwrap();
+    let want = p.predict_tta(&rgb, &tta_cfg).unwrap();
+    assert!(!want.detections.is_empty(), "TTA test needs detections");
+    assert_eq!(got.response.boxes, want.scored_boxes(p.classes()));
+    assert_eq!(det.info().imgsz, 128, "TTA must never corrupt base detector imgsz");
+
+    // Flip-only TTA with Sebf fusion.
+    let flip_opts = TtaDetectOptions {
+        scales: vec![1.0],
+        hflip: true,
+        merge_fusion: BoxFusion::Sebf,
+        ..tta_opts.clone()
+    };
+    let got_flip = pollster::block_on(det.detect_tta(&img, w, h, flip_opts.clone())).unwrap();
+    let want_flip = p.predict_tta(&rgb, &flip_opts.to_tta_config().unwrap()).unwrap();
+    assert_eq!(got_flip.response.boxes, want_flip.scored_boxes(p.classes()));
+
+    // Single unflipped view degrades cleanly to single-pass inference at the scaled imgsz.
+    let single_opts = TtaDetectOptions { scales: vec![1.25], hflip: false, ..tta_opts };
+    let got_single = pollster::block_on(det.detect_tta(&img, w, h, single_opts.clone())).unwrap();
+    let want_single = p.predict_tta(&rgb, &single_opts.to_tta_config().unwrap()).unwrap();
+    assert_eq!(got_single.response.boxes, want_single.scored_boxes(p.classes()));
+    assert_eq!(det.info().imgsz, 128);
 }
 
 #[test]
@@ -139,20 +281,7 @@ fn gpu_matches_cpu() {
     let c = pollster::block_on(cpu.detect(&img, w, h, OPTS)).unwrap();
     assert_eq!(g.response.device, "gpu:0");
     assert_eq!(g.backend, Backend::Webgpu);
-    assert!(!c.response.boxes.is_empty());
-    // f32 sums in another order: scores agree to ~1e-4, boxes to a few thousandths of a pixel. Boxes whose
-    // scores are that close can swap places, so match each CPU box among the GPU boxes.
-    assert_eq!(g.response.boxes.len(), c.response.boxes.len());
-    for want in &c.response.boxes {
-        let close = g.response.boxes.iter().any(|b| {
-            b.class == want.class
-                && (b.score - want.score).abs() < 1e-3
-                && [b.x1 - want.x1, b.y1 - want.y1, b.x2 - want.x2, b.y2 - want.y2]
-                    .iter()
-                    .all(|d| d.abs() < 0.05)
-        });
-        assert!(close, "no GPU box matches CPU box {want:?}");
-    }
+    assert_gpu_matches_cpu_boxes(&g.response.boxes, &c.response.boxes, 1e-3, 0.05, "single");
 
     // Exercise the >CANDIDATE_READBACK overflow readback path: a 256x256 canvas has 1,344 anchors
     // (32^2 + 16^2 + 8^2 > 1,024), so conf = 0.0 overflows the 1,024-record first download.
@@ -161,18 +290,85 @@ fn gpu_matches_cpu() {
     let overflow = DetectOptions { conf: 0.0, iou: 0.7, max_det: 50 };
     let go = pollster::block_on(gpu.detect(&sq, ow, oh, overflow)).unwrap();
     let co = pollster::block_on(cpu.detect(&sq, ow, oh, overflow)).unwrap();
-    assert_eq!(go.response.boxes.len(), co.response.boxes.len());
-    assert!(!go.response.boxes.is_empty());
-    for want in &co.response.boxes {
-        let close = go.response.boxes.iter().any(|b| {
-            b.class == want.class
-                && (b.score - want.score).abs() < 1e-3
-                && [b.x1 - want.x1, b.y1 - want.y1, b.x2 - want.x2, b.y2 - want.y2]
-                    .iter()
-                    .all(|d| d.abs() < 0.05)
-        });
-        assert!(close, "no overflow GPU box matches CPU box {want:?}");
+    assert_gpu_matches_cpu_boxes(&go.response.boxes, &co.response.boxes, 1e-3, 0.05, "overflow");
+}
+
+#[test]
+fn gpu_tiled_and_tta_match_predictor() {
+    if !has_gpu() {
+        return;
     }
+    let bytes = model_bytes();
+    let gpu = load_with_imgsz(bytes.clone(), BackendChoice::Webgpu, Precision::F32, 128).unwrap();
+
+    // Compare async batched WebGPU `detect_tiled` and `detect_tta` bit-for-bit against native GPU `Predictor`.
+    let gpu_dev = folo_gpu::init().unwrap();
+    let file = ModelFile::from_bytes(bytes).unwrap();
+    let (mut gm, _) = FoloModel::from_file(&file, Purpose::Inference).unwrap();
+    gm.fuse().unwrap();
+    gm.to_device(gpu_dev).unwrap();
+    let gpu_pred = Predictor::new(
+        gm,
+        PredictConfig {
+            imgsz: 128,
+            conf: OPTS.conf,
+            iou: OPTS.iou,
+            max_det: OPTS.max_det,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    // Batched WebGPU SAHI tiled inference (with and without full-image pass).
+    let (tw, th) = (240, 180);
+    let timg = rgba(tw, th);
+    let trgb = rgba_to_image(&timg, tw, th).unwrap();
+    for full_image in [true, false] {
+        let tile_opts = TileDetectOptions {
+            conf: OPTS.conf,
+            iou: OPTS.iou,
+            max_det: OPTS.max_det,
+            tile_size: Some(140),
+            overlap: Some(0.25),
+            full_image,
+            tile_batch: 4,
+            ..TileDetectOptions::default()
+        };
+        let tile_cfg = tile_opts.to_tile_config().unwrap();
+        let gt = pollster::block_on(gpu.detect_tiled(&timg, tw, th, tile_opts)).unwrap();
+        let want = gpu_pred.predict_tiled(&trgb, &tile_cfg).unwrap();
+        assert_eq!(gt.backend, Backend::Webgpu);
+        assert!(!want.detections.is_empty(), "GPU tiled test needs detections");
+        assert_eq!(
+            gt.response.boxes,
+            want.scored_boxes(gpu_pred.classes()),
+            "async WebGPU tiled (full_image={full_image}) must match native GPU Predictor bit for bit"
+        );
+    }
+
+    // Batched WebGPU TTA (multi-scale + hflip) and single-view degradation.
+    let (w, h) = (160, 128);
+    let img = rgba(w, h);
+    let rgb = rgba_to_image(&img, w, h).unwrap();
+    let tta_opts = TtaDetectOptions {
+        conf: OPTS.conf,
+        iou: OPTS.iou,
+        max_det: OPTS.max_det,
+        hflip: true,
+        scales: vec![0.75, 1.0, 1.25],
+        ..TtaDetectOptions::default()
+    };
+    let tta_cfg = tta_opts.to_tta_config().unwrap();
+    let ga = pollster::block_on(gpu.detect_tta(&img, w, h, tta_opts)).unwrap();
+    let want_tta = gpu_pred.predict_tta(&rgb, &tta_cfg).unwrap();
+    assert_eq!(ga.backend, Backend::Webgpu);
+    assert_eq!(gpu.info().imgsz, 128);
+    assert!(!want_tta.detections.is_empty(), "GPU TTA test needs detections");
+    assert_eq!(
+        ga.response.boxes,
+        want_tta.scored_boxes(gpu_pred.classes()),
+        "async WebGPU TTA must match native GPU Predictor bit for bit"
+    );
 }
 
 /// `precision: "f16"` on WebGPU runs the model in f16 (with shader-f16) and still matches the f32 CPU boxes, to
@@ -213,7 +409,7 @@ fn f16_precision_option() {
 }
 
 #[test]
-fn rejects_bad_images() {
+fn rejects_bad_images_and_invalid_parameters() {
     assert!(rgba_to_image(&[0; 16], 2, 2).is_ok());
     assert!(rgba_to_image(&[0; 15], 2, 2).unwrap_err().contains("expected 16 RGBA bytes"));
     assert!(rgba_to_image(&[], 0, 2).unwrap_err().contains("empty"));
@@ -221,10 +417,82 @@ fn rejects_bad_images() {
     let rgb = rgba_to_image(&[1, 2, 3, 4, 5, 6, 7, 8], 2, 1).unwrap();
     assert_eq!(rgb, Image { width: 2, height: 1, data: vec![1, 2, 3, 5, 6, 7] });
 
-    let det = load(model_bytes(), BackendChoice::Cpu).unwrap();
-    let bad = DetectOptions { conf: 1.5, ..DetectOptions::default() };
-    assert!(pollster::block_on(det.detect(&[0; 64], 4, 4, bad)).unwrap_err().contains("conf"));
+    // Invalid load inputs.
     assert!(load(b"not a folo file".to_vec(), BackendChoice::Cpu).is_err());
+    assert!(load_with_imgsz(model_bytes(), BackendChoice::Cpu, Precision::F32, 0).is_err());
+    assert!(load_with_imgsz(model_bytes(), BackendChoice::Cpu, Precision::F32, 50).is_err());
+    assert!(load_with_imgsz(model_bytes(), BackendChoice::Cpu, Precision::F32, 8224).is_err());
+
+    let det = load_with_imgsz(model_bytes(), BackendChoice::Cpu, Precision::F32, 128).unwrap();
+    let img = [0u8; 4 * 4 * 4];
+
+    // Single-pass detect parameter validation (NaN, Inf, negative, out-of-range, zero max_det).
+    for bad in [
+        DetectOptions { conf: 1.5, ..Default::default() },
+        DetectOptions { conf: -0.1, ..Default::default() },
+        DetectOptions { conf: f32::NAN, ..Default::default() },
+        DetectOptions { conf: f32::INFINITY, ..Default::default() },
+        DetectOptions { iou: f32::NAN, ..Default::default() },
+        DetectOptions { iou: 1.1, ..Default::default() },
+        DetectOptions { max_det: 0, ..Default::default() },
+    ] {
+        assert!(pollster::block_on(det.detect(&img, 4, 4, bad)).is_err(), "expected error for {bad:?}");
+    }
+
+    // SAHI tiled parameter validation.
+    for bad in [
+        TileDetectOptions { tile_size: Some(0), ..Default::default() },
+        TileDetectOptions { tile_size: Some(0), tile_width: Some(64), ..Default::default() },
+        TileDetectOptions { tile_width: Some(0), ..Default::default() },
+        TileDetectOptions { tile_height: Some(0), ..Default::default() },
+        TileDetectOptions { overlap: Some(-0.1), ..Default::default() },
+        TileDetectOptions { overlap: Some(1.0), ..Default::default() },
+        TileDetectOptions { overlap: Some(f32::NAN), ..Default::default() },
+        TileDetectOptions { overlap: Some(f32::INFINITY), ..Default::default() },
+        TileDetectOptions { overlap_x: Some(1.0), ..Default::default() },
+        TileDetectOptions { overlap_y: Some(f32::NEG_INFINITY), ..Default::default() },
+        TileDetectOptions { tile_batch: 0, ..Default::default() },
+        TileDetectOptions { merge_threshold: -0.01, ..Default::default() },
+        TileDetectOptions { merge_threshold: 1.01, ..Default::default() },
+        TileDetectOptions { merge_threshold: f32::NAN, ..Default::default() },
+        TileDetectOptions { conf: f32::NAN, ..Default::default() },
+        TileDetectOptions { iou: f32::INFINITY, ..Default::default() },
+        TileDetectOptions { max_det: 0, ..Default::default() },
+    ] {
+        assert!(
+            pollster::block_on(det.detect_tiled(&img, 4, 4, bad.clone())).is_err(),
+            "expected tiled error for {bad:?}"
+        );
+    }
+    assert!(pollster::block_on(det.detect_tiled(&[], 0, 4, TileDetectOptions::default())).is_err());
+    // Exceeding MAX_BROWSER_TILES (100x100 with tile_size = 1 -> 10,000 tiles > 4,096) rejects cleanly.
+    let img_100 = vec![0u8; 100 * 100 * 4];
+    let too_many_tiles = TileDetectOptions { tile_size: Some(1), overlap: Some(0.0), ..Default::default() };
+    let err = pollster::block_on(det.detect_tiled(&img_100, 100, 100, too_many_tiles)).unwrap_err();
+    assert!(err.contains("browser limit"), "{err}");
+
+    // TTA parameter validation.
+    for bad in [
+        TtaDetectOptions { scales: vec![], ..Default::default() },
+        TtaDetectOptions { scales: vec![0.0], ..Default::default() },
+        TtaDetectOptions { scales: vec![-0.5], ..Default::default() },
+        TtaDetectOptions { scales: vec![f32::NAN], ..Default::default() },
+        TtaDetectOptions { scales: vec![f32::INFINITY], ..Default::default() },
+        TtaDetectOptions { scales: vec![0.01], ..Default::default() }, // resolves < 32
+        TtaDetectOptions { scales: vec![100.0], ..Default::default() }, // resolves > 8192
+        TtaDetectOptions { merge_iou: Some(-0.1), ..Default::default() },
+        TtaDetectOptions { merge_iou: Some(1.1), ..Default::default() },
+        TtaDetectOptions { merge_iou: Some(f32::NAN), ..Default::default() },
+        TtaDetectOptions { conf: f32::NAN, ..Default::default() },
+        TtaDetectOptions { iou: 2.0, ..Default::default() },
+        TtaDetectOptions { max_det: 0, ..Default::default() },
+    ] {
+        assert!(
+            pollster::block_on(det.detect_tta(&img, 4, 4, bad.clone())).is_err(),
+            "expected TTA error for {bad:?}"
+        );
+    }
+    assert!(pollster::block_on(det.detect_tta(&[0; 12], 4, 4, TtaDetectOptions::default())).is_err());
 }
 
 #[test]
@@ -240,4 +508,85 @@ fn options_parse_from_js_json() {
     assert_eq!(l.precision, Precision::F16);
     assert!(serde_json::from_str::<LoadOptions>(r#"{"precision":"f8"}"#).is_err());
     assert!(serde_json::from_str::<LoadOptions>(r#"{"backend":"cuda"}"#).is_err());
+
+    // Tiled options JSON (camelCase + aliases `mergeIou` / `fullImagePass`).
+    let t: TileDetectOptions = serde_json::from_str(
+        r#"{"tileSize":320,"overlap":0.25,"mergeIou":0.45,"fullImagePass":false,"mergeMetric":"iou","mergeFusion":"sebf","classAgnostic":true,"tileBatch":4,"conf":0.4,"maxDet":50}"#,
+    )
+    .unwrap();
+    let tc = t.to_tile_config().unwrap();
+    assert_eq!((tc.tile_width, tc.tile_height), (320, 320));
+    assert_eq!((tc.overlap_x, tc.overlap_y), (0.25, 0.25));
+    assert!(!tc.full_image);
+    assert_eq!(tc.merge_metric, TileMergeMetric::Iou);
+    assert_eq!(tc.merge_threshold, 0.45);
+    assert_eq!(tc.merge_fusion, BoxFusion::Sebf);
+    assert!(tc.class_agnostic);
+    assert_eq!((tc.tile_batch, tc.max_det), (4, 50));
+
+    // TTA options JSON.
+    let a: TtaDetectOptions = serde_json::from_str(
+        r#"{"hflip":false,"scales":[0.75,1.0],"mergeIou":0.6,"mergeFusion":"none","classAgnostic":true,"conf":0.35,"maxDet":20}"#,
+    )
+    .unwrap();
+    let ac = a.to_tta_config().unwrap();
+    assert!(!ac.hflip);
+    assert_eq!(ac.scales, vec![0.75, 1.0]);
+    assert_eq!(ac.merge_iou, Some(0.6));
+    assert_eq!(ac.merge_fusion, BoxFusion::None);
+    assert!(ac.class_agnostic);
+    assert_eq!(ac.max_det, Some(20));
+
+    // Invalid enum values reject cleanly.
+    assert!(serde_json::from_str::<TileDetectOptions>(r#"{"mergeMetric":"giou"}"#).is_err());
+    assert!(serde_json::from_str::<TtaDetectOptions>(r#"{"mergeFusion":"invalid"}"#).is_err());
+}
+
+#[test]
+fn concurrent_detect_and_tta_futures_do_not_conflict() {
+    use std::future::Future;
+    use std::pin::pin;
+    use std::task::{Context, Poll, Waker};
+
+    let bytes = model_bytes();
+    let backend = if has_gpu() { BackendChoice::Webgpu } else { BackendChoice::Cpu };
+    let det = load_with_imgsz(bytes, backend, Precision::F32, 128).unwrap();
+    let (w, h) = (160, 128);
+    let img = rgba(w, h);
+    let tta_opts = TtaDetectOptions {
+        conf: OPTS.conf,
+        iou: OPTS.iou,
+        max_det: OPTS.max_det,
+        hflip: true,
+        scales: vec![0.75, 1.25],
+        ..Default::default()
+    };
+
+    let mut f_tta = pin!(det.detect_tta(&img, w, h, tta_opts));
+    let mut f_single = pin!(det.detect(&img, w, h, OPTS));
+    let mut cx = Context::from_waker(Waker::noop());
+    let mut r_tta = None;
+    let mut r_single = None;
+    for _ in 0..10_000 {
+        if r_tta.is_none()
+            && let Poll::Ready(res) = f_tta.as_mut().poll(&mut cx)
+        {
+            r_tta = Some(res.unwrap());
+        }
+        if r_single.is_none()
+            && let Poll::Ready(res) = f_single.as_mut().poll(&mut cx)
+        {
+            r_single = Some(res.unwrap());
+        }
+        if r_tta.is_some() && r_single.is_some() {
+            break;
+        }
+        std::thread::yield_now();
+    }
+    let single = r_single.expect("single detect future completed");
+    let tta = r_tta.expect("TTA future completed");
+    let baseline = pollster::block_on(det.detect(&img, w, h, OPTS)).unwrap();
+    assert_eq!(single.response.boxes, baseline.response.boxes);
+    assert!(!tta.response.boxes.is_empty());
+    assert_eq!(det.info().imgsz, 128);
 }

@@ -325,6 +325,12 @@ fn map_outcome_prefers_a_recorded_loss() {
     let ctx = crate::GpuContext::new().unwrap();
     assert!(matches!(ctx.map_outcome(Err("rejected".into())), Err(crate::GpuError::Map(_))));
     assert!(ctx.map_outcome(Ok(())).is_ok());
+    // A captured device OOM/validation error is drained on a failed map instead of leaking to the next call.
+    ctx.record_error_for_test("Out of Memory allocating staging buffer");
+    let drained = ctx.map_outcome(Err("map failed".into())).unwrap_err();
+    assert!(matches!(drained, crate::GpuError::Wgpu(ref m) if m.contains("Out of Memory")), "{drained:?}");
+    assert!(ctx.map_outcome(Ok(())).is_ok());
+    assert!(matches!(ctx.map_outcome(Err("rejected".into())), Err(crate::GpuError::Map(_))));
     ctx.destroy_device();
     assert!(ctx.sync().is_err());
     assert!(matches!(ctx.map_outcome(Err("rejected".into())), Err(crate::GpuError::DeviceLost(_))));
