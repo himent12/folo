@@ -7,19 +7,20 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use folo_api::{
-    Augment, Compute, DatasetFormat, Head, Optimizer, RegisterDataset, Run, RunStatus, TrainConfig,
+    Augment, CloudAvailability, CloudOffer, Compute, DatasetFormat, Head, Optimizer, RegisterDataset, Run,
+    RunStatus, TrainConfig,
 };
 use folo_mcp::proxy::HttpStore;
 use folo_server::RealStore;
 use folo_server::store::{
     AutoBatchOptions, CloudPreemptionStatus, DEFAULT_MAX_PREEMPT_RETRIES, RunOptions, Store,
-    check_auto_batch_options, check_max_preempt_retries, parse_arch_override,
+    check_max_preempt_retries, parse_arch_override,
 };
 use serde_json::json;
 
 use crate::cli::bounds::{
-    CLOUD_DISK_GB, CLOUD_MAX_HOURS, CLOUD_MAX_PREEMPT_RETRIES, NON_NEGATIVE_FLOAT, TRAIN_AUTO_BATCH_TARGET,
-    TRAIN_EPOCHS, TRAIN_IMGSZ, TRAIN_LR0, TRAIN_LRF, TRAIN_SCALE, UNIT_INTERVAL,
+    CLOUD_DISK_GB, CLOUD_MAX_HOURS, CLOUD_MAX_PREEMPT_RETRIES, NON_NEGATIVE_FLOAT, TRAIN_EPOCHS, TRAIN_IMGSZ,
+    TRAIN_LR0, TRAIN_SCALE, UNIT_INTERVAL,
 };
 use crate::cli::{FormatArg, HeadArg, OptimizerArg, TrainArgs};
 use crate::output::{CliError, ExitCode, Out};
@@ -28,15 +29,21 @@ use crate::serve_lock::{self, Acquire, ServeLock};
 
 const POLL_LOCAL: Duration = Duration::from_millis(250);
 const POLL_SERVER: Duration = Duration::from_millis(1000);
+const MAX_STOP_RETRIES: u32 = 5;
 
 /// Local-only flags that are rejected when explicitly passed alongside `--cloud`.
-const LOCAL_ONLY_FLAGS: [(&str, &str); 6] = [
+const LOCAL_ONLY_FLAGS: [(&str, &str); 11] = [
     ("project", "--project"),
     ("workers", "--workers"),
     ("cache", "--cache"),
     ("teacher", "--teacher"),
     ("set", "--set"),
     ("device", "--device"),
+    ("lrf", "--lrf"),
+    ("cos_lr", "--cos-lr"),
+    ("warmup_epochs", "--warmup-epochs"),
+    ("patience", "--patience"),
+    ("auto_batch_target", "--auto-batch-target"),
 ];
 
 /// Cloud-store connection flags that must not be explicitly passed on a local `folo train` run.
@@ -118,32 +125,30 @@ pub(super) fn validate_cloud_args(args: &TrainArgs) -> Result<(folo_api::Arch, O
             format!("--epochs must be in 1..=10000, got {}", args.epochs),
         ));
     }
-    if !args.batch.is_auto() {
-        let b = args.batch.fixed_or_default();
-        if !(1..=1024).contains(&b) {
-            return Err(CliError::new(
-                ExitCode::Usage,
-                "invalid_config",
-                format!("--batch must be in 1..=1024 or `auto`, got {b}"),
-            ));
-        }
-    }
-    let auto_batch =
-        AutoBatchOptions { enabled: args.batch.is_auto(), target_utilization: args.auto_batch_target };
-    if let Some(t) = args.auto_batch_target
-        && !TRAIN_AUTO_BATCH_TARGET.contains_f64(t)
-    {
+    if matches!(args.format, FormatArg::Voc) {
         return Err(CliError::new(
             ExitCode::Usage,
             "invalid_config",
-            format!(
-                "--auto-batch-target must be finite in {}..={}, got {t}",
-                folo_vision::train::MIN_AUTO_BATCH_UTILIZATION,
-                folo_vision::train::MAX_AUTO_BATCH_UTILIZATION
-            ),
+            "`--format voc` is not supported with `--cloud` (cloud training accepts `auto`, `yolo`, or `coco`)",
+        )
+        .hint("convert the dataset with `folo dataset convert` or omit `--format voc`"));
+    }
+    if args.batch.is_auto() {
+        return Err(CliError::new(
+            ExitCode::Usage,
+            "invalid_config",
+            "`--batch auto` is not supported for cloud runs yet (pass an explicit integer `--batch`)",
+        )
+        .hint("pick an integer `--batch` such as `--batch 16` for `--cloud`, or omit `--cloud` to auto-batch locally"));
+    }
+    let b = args.batch.fixed_or_default();
+    if !(1..=1024).contains(&b) {
+        return Err(CliError::new(
+            ExitCode::Usage,
+            "invalid_config",
+            format!("--batch must be in 1..=1024, got {b}"),
         ));
     }
-    check_auto_batch_options(&auto_batch).map_err(api_error)?;
     if !TRAIN_IMGSZ.contains_u64(u64::from(args.imgsz)) {
         return Err(CliError::new(
             ExitCode::Usage,
@@ -156,20 +161,6 @@ pub(super) fn validate_cloud_args(args: &TrainArgs) -> Result<(folo_api::Arch, O
             ExitCode::Usage,
             "invalid_config",
             format!("--lr0 must be in (0, 10), got {}", args.lr0),
-        ));
-    }
-    if !TRAIN_LRF.contains_f64(args.lrf) {
-        return Err(CliError::new(
-            ExitCode::Usage,
-            "invalid_config",
-            format!("--lrf must be in (0, 1], got {}", args.lrf),
-        ));
-    }
-    if !NON_NEGATIVE_FLOAT.contains_f64(args.warmup_epochs) {
-        return Err(CliError::new(
-            ExitCode::Usage,
-            "invalid_config",
-            format!("--warmup-epochs must be >= 0, got {}", args.warmup_epochs),
         ));
     }
     if !UNIT_INTERVAL.contains_f64(f64::from(args.mosaic))
@@ -192,11 +183,19 @@ pub(super) fn validate_cloud_args(args: &TrainArgs) -> Result<(folo_api::Arch, O
     if args.weights.is_some() {
         Ok((folo_api::Arch::N, None))
     } else {
-        parse_arch_override(&args.model).map_err(|e| {
-            CliError::new(ExitCode::Usage, "invalid_config", format!("--model: {}", e.body.message)).hint(
-                "pass a model architecture (folo-n..folo-x or folo2-n..folo2-x) or use --weights <MODEL_ID>",
+        let (arch, ov) = parse_arch_override(&args.model).map_err(|e| {
+            CliError::new(ExitCode::Usage, "invalid_config", format!("--model: {}", e.body.message))
+                .hint("pass a v1 model architecture (folo-n..folo-x) or use --weights <MODEL_ID>")
+        })?;
+        if ov.is_some() {
+            return Err(CliError::new(
+                ExitCode::Usage,
+                "invalid_config",
+                format!("`--model {}` (FOLO v2-Iso) is not supported for cloud runs yet", args.model),
             )
-        })
+            .hint("pick a v1 architecture (`folo-n`..`folo-x`) for `--cloud`, or omit `--cloud` to train locally"));
+        }
+        Ok((arch, None))
     }
 }
 
@@ -279,19 +278,12 @@ pub(super) fn train_cloud(args: TrainArgs, out: Out) -> Result<(), CliError> {
         arch_override = ov;
     }
 
-    // Resolve offer: explicit `--offer`, else cheapest available offer on the connection.
+    // Resolve offer: explicit `--offer`, else cheapest in-stock offer on the connection.
     let offer_id = match &args.offer {
         Some(id) => id.clone(),
         None => {
             let list = session.store.cloud_offers(&connection_id, false).map_err(api_error)?;
-            list.offers.first().map(|o| o.id.clone()).ok_or_else(|| {
-                CliError::new(
-                    ExitCode::NotFound,
-                    "offer_not_found",
-                    format!("connection '{connection_id}' returned no available offers"),
-                )
-                .hint("run `folo cloud offers <CONNECTION_ID>` to inspect availability")
-            })?
+            select_default_offer(&list.offers, &connection_id)?
         }
     };
 
@@ -364,6 +356,26 @@ pub(super) fn train_cloud(args: TrainArgs, out: Out) -> Result<(), CliError> {
     follow_cloud_run(&session, &run.id, &stop, out)
 }
 
+fn select_default_offer(offers: &[CloudOffer], connection_id: &str) -> Result<String, CliError> {
+    offers.iter().find(|o| o.availability != CloudAvailability::None).map(|o| o.id.clone()).ok_or_else(|| {
+        CliError::new(
+            ExitCode::NotFound,
+            "offer_not_found",
+            format!("connection '{connection_id}' has no in-stock offers right now"),
+        )
+        .hint("run `folo cloud offers <CONNECTION_ID>` to inspect availability or pass `--offer <OFFER_ID>`")
+    })
+}
+
+fn failed_run_error(run: &Run) -> CliError {
+    let code = run.error_code.as_deref().unwrap_or("training_failed");
+    CliError::new(
+        ExitCode::of(code),
+        code,
+        run.error.clone().unwrap_or_else(|| format!("cloud run {} failed", run.id)),
+    )
+}
+
 #[derive(PartialEq, Eq)]
 struct ProgressSig {
     status: RunStatus,
@@ -380,13 +392,60 @@ fn follow_cloud_run(
     out: Out,
 ) -> Result<(), CliError> {
     let poll = if session.local.is_some() { POLL_LOCAL } else { POLL_SERVER };
+    follow_cloud_run_with_poll(session, run_id, stop, out, poll)
+}
+
+fn follow_cloud_run_with_poll(
+    session: &CloudSession,
+    run_id: &str,
+    stop: &AtomicBool,
+    out: Out,
+    poll: Duration,
+) -> Result<(), CliError> {
     let mut last_sig: Option<ProgressSig> = None;
-    let mut asked_stop = false;
+    let mut stop_acknowledged = false;
+    let mut stop_failures: u32 = 0;
 
     loop {
-        if stop.load(Ordering::Relaxed) && !asked_stop {
-            asked_stop = true;
-            let _ = session.store.stop_run(run_id);
+        if stop.load(Ordering::Relaxed) && !stop_acknowledged {
+            match session.store.stop_run(run_id) {
+                Ok(_) => {
+                    stop_acknowledged = true;
+                    stop_failures = 0;
+                }
+                Err(e) if e.body.code == "run_not_active" => {
+                    stop_acknowledged = true;
+                }
+                Err(e) => {
+                    stop_failures += 1;
+                    out.record(&json!({
+                        "event": "stop_retry",
+                        "run_id": run_id,
+                        "attempt": stop_failures,
+                        "max_attempts": MAX_STOP_RETRIES,
+                        "code": e.body.code,
+                        "error": e.body.message,
+                    }));
+                    out.human(format!(
+                        "warning: stop request for cloud run {run_id} failed ({}/{MAX_STOP_RETRIES}): {}",
+                        stop_failures, e.body.message
+                    ));
+                    if stop_failures >= MAX_STOP_RETRIES {
+                        return Err(CliError::new(
+                            ExitCode::of(&e.body.code),
+                            &e.body.code,
+                            format!(
+                                "failed to stop cloud run {run_id} after Ctrl+C ({MAX_STOP_RETRIES} attempts): {}; \
+                                 the cloud instance may still be running",
+                                e.body.message
+                            ),
+                        )
+                        .hint(format!(
+                            "stop it manually in Studio, via `POST /api/runs/{run_id}/stop`, or check `folo cloud instances`"
+                        )));
+                    }
+                }
+            }
         }
         let (run, preemption) = session.store.get_run_with_preemption(run_id).map_err(api_error)?;
         let sig = ProgressSig {
@@ -411,11 +470,7 @@ fn follow_cloud_run(
             }
             RunStatus::Failed => {
                 emit_done(&run, preemption.as_ref(), out);
-                return Err(CliError::new(
-                    ExitCode::Runtime,
-                    "internal",
-                    run.error.unwrap_or_else(|| format!("cloud run {run_id} failed")),
-                ));
+                return Err(failed_run_error(&run));
             }
             RunStatus::Queued | RunStatus::Running | RunStatus::Stopping => {
                 std::thread::sleep(poll);
@@ -470,6 +525,7 @@ fn emit_done(run: &Run, preemption: Option<&CloudPreemptionStatus>, out: Out) {
         "best": run.best,
         "cost_usd": run.cloud.as_ref().and_then(|c| c.cost_usd),
         "error": run.error,
+        "error_code": run.error_code,
     });
     if let Some(p) = preemption {
         rec["cloud_preemption"] = json!(p);
@@ -482,7 +538,14 @@ fn emit_done(run: &Run, preemption: Option<&CloudPreemptionStatus>, out: Out) {
     if let Some(p) = preemption
         && p.retries > 0
     {
-        msg.push_str(&format!("; survived {} spot preemption(s) (limit {})", p.retries, p.max_retries));
+        if run.status == RunStatus::Completed {
+            msg.push_str(&format!("; survived {} spot preemption(s) (limit {})", p.retries, p.max_retries));
+        } else {
+            msg.push_str(&format!(
+                "; after {} spot preemption retry/retries (limit {})",
+                p.retries, p.max_retries
+            ));
+        }
     }
     out.human(msg);
 }
@@ -531,12 +594,39 @@ mod tests {
         let e = validate_cloud_args(&oob).unwrap_err();
         assert_eq!((e.exit, e.code.as_str()), (ExitCode::Usage, "invalid_config"));
 
-        // Local-only flag `--project` with `--cloud` is refused.
-        let local_flag =
-            parse_train(&["folo", "train", "--data", "d", "--cloud", "cc_1", "--project", "out"]);
-        let e = validate_cloud_args(&local_flag).unwrap_err();
-        assert_eq!((e.exit, e.code.as_str()), (ExitCode::Usage, "usage"));
-        assert!(e.message.contains("--project"), "{}", e.message);
+        // Local-only flags conflict with `--cloud` at clap parse time so `folo describe train` surfaces them too.
+        for extra in [
+            &["--project", "out"][..],
+            &["--workers", "2"],
+            &["--cache", "ram"],
+            &["--teacher", "m.folo"],
+            &["--set", "momentum=0.9"],
+            &["--device", "cpu"],
+            &["--lrf", "0.1"],
+            &["--cos-lr"],
+            &["--warmup-epochs", "5"],
+            &["--patience", "20"],
+            &["--auto-batch-target", "0.7"],
+        ] {
+            let mut argv = vec!["folo", "train", "--data", "d", "--cloud", "cc_1"];
+            argv.extend_from_slice(extra);
+            let err = Cli::try_parse_from(&argv).unwrap_err();
+            assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict, "{extra:?}: {err}");
+        }
+
+        // Explicit `--format voc`, `--batch auto`, and `folo2-*` models fail upfront before opening the store.
+        for (extra, needle) in [
+            (&["--format", "voc"][..], "--format voc"),
+            (&["--batch", "auto"], "--batch auto"),
+            (&["--model", "folo2-n"], "folo2-n"),
+        ] {
+            let mut argv = vec!["folo", "train", "--data", "d", "--cloud", "cc_1"];
+            argv.extend_from_slice(extra);
+            let parsed = parse_train(&argv);
+            let e = validate_cloud_args(&parsed).unwrap_err();
+            assert_eq!((e.exit, e.code.as_str()), (ExitCode::Usage, "invalid_config"), "{extra:?}");
+            assert!(e.message.contains(needle), "{extra:?}: {}", e.message);
+        }
 
         // Valid cloud args pass validation.
         let ok = parse_train(&[
@@ -555,10 +645,245 @@ mod tests {
             "--max-preempt-retries",
             "5",
             "--model",
-            "folo2-n",
+            "folo-s",
         ]);
         let (arch, ov) = validate_cloud_args(&ok).unwrap();
-        assert_eq!(arch, folo_api::Arch::N);
-        assert_eq!(ov.as_deref(), Some("folo2-n"));
+        assert_eq!(arch, folo_api::Arch::S);
+        assert_eq!(ov, None);
+    }
+
+    #[test]
+    fn default_offer_skips_out_of_stock_and_failed_run_preserves_error_code() {
+        let offer = |id: &str, price: f64, availability: CloudAvailability| CloudOffer {
+            id: id.into(),
+            gpu: "GPU".into(),
+            vram_bytes: 24 * 1024 * 1024 * 1024,
+            gpu_count: 1,
+            price_per_hour: Some(price),
+            region: None,
+            availability,
+            detail: None,
+        };
+        let offers = vec![
+            offer("cheap-oos", 0.10, CloudAvailability::None),
+            offer("in-stock", 0.45, CloudAvailability::Low),
+            offer("high-stock", 0.80, CloudAvailability::High),
+        ];
+        assert_eq!(select_default_offer(&offers, "cc_1").unwrap(), "in-stock");
+
+        let only_oos = vec![offer("cheap-oos", 0.10, CloudAvailability::None)];
+        let err = select_default_offer(&only_oos, "cc_1").unwrap_err();
+        assert_eq!((err.exit, err.code.as_str()), (ExitCode::NotFound, "offer_not_found"));
+
+        let mut run: Run = serde_json::from_value(json!({
+            "id": "run_fail",
+            "name": "spot",
+            "status": "failed",
+            "config": { "dataset_id": "ds_1" },
+            "created": "2026-11-27T00:00:00Z",
+            "started": null,
+            "finished": null,
+            "epoch": 0,
+            "epochs": 5,
+            "step": 0,
+            "steps_per_epoch": 0,
+            "eta_s": null,
+            "best": null,
+            "device": "gpu:0",
+            "model_id": null,
+            "error": "worker preempted",
+            "error_code": "cloud_instance_lost"
+        }))
+        .unwrap();
+        let e = failed_run_error(&run);
+        assert_eq!((e.exit, e.code.as_str()), (ExitCode::Runtime, "cloud_instance_lost"));
+        assert!(e.message.contains("worker preempted"));
+
+        run.error_code = Some("not_supported".into());
+        let e = failed_run_error(&run);
+        assert_eq!((e.exit, e.code.as_str()), (ExitCode::NotImplemented, "not_supported"));
+
+        run.error_code = None;
+        let e = failed_run_error(&run);
+        assert_eq!((e.exit, e.code.as_str()), (ExitCode::Runtime, "training_failed"));
+    }
+
+    #[test]
+    fn follow_retries_transient_stop_error_and_reports_persistent_stop_failure() {
+        use folo_server::error::Error as ServerError;
+        use std::sync::atomic::AtomicU32;
+
+        struct StopStore {
+            fail_stops: AtomicU32,
+            stop_calls: AtomicU32,
+            stopped: AtomicBool,
+        }
+        impl Store for StopStore {
+            fn is_mock(&self) -> bool {
+                true
+            }
+            fn gpus(&self) -> Vec<folo_api::GpuInfo> {
+                vec![]
+            }
+            fn list_datasets(&self) -> folo_server::error::Result<Vec<folo_api::Dataset>> {
+                unimplemented!()
+            }
+            fn register_dataset(&self, _: RegisterDataset) -> folo_server::error::Result<folo_api::Dataset> {
+                unimplemented!()
+            }
+            fn get_dataset(&self, _: &str) -> folo_server::error::Result<folo_api::Dataset> {
+                unimplemented!()
+            }
+            fn delete_dataset(&self, _: &str) -> folo_server::error::Result<()> {
+                unimplemented!()
+            }
+            fn list_images(
+                &self,
+                _: &str,
+                _: &folo_server::store::ImageQuery,
+            ) -> folo_server::error::Result<folo_api::ImagePage> {
+                unimplemented!()
+            }
+            fn create_synthetic(
+                &self,
+                _: folo_api::SyntheticDataset,
+            ) -> folo_server::error::Result<folo_api::Dataset> {
+                unimplemented!()
+            }
+            fn list_issues(
+                &self,
+                _: &str,
+                _: &folo_server::store::IssueQuery,
+            ) -> folo_server::error::Result<folo_api::IssuePage> {
+                unimplemented!()
+            }
+            fn image(
+                &self,
+                _: &str,
+                _: &str,
+                _: Option<u32>,
+            ) -> folo_server::error::Result<folo_server::store::ImageData> {
+                unimplemented!()
+            }
+            fn list_models(&self) -> folo_server::error::Result<Vec<folo_api::Model>> {
+                unimplemented!()
+            }
+            fn get_model(&self, _: &str) -> folo_server::error::Result<folo_api::Model> {
+                unimplemented!()
+            }
+            fn model_eval(&self, _: &str) -> folo_server::error::Result<folo_api::ModelEval> {
+                unimplemented!()
+            }
+            fn export_model(
+                &self,
+                _: &str,
+                _: folo_api::ExportSpec,
+            ) -> folo_server::error::Result<folo_api::ExportResult> {
+                unimplemented!()
+            }
+            fn list_runs(&self) -> folo_server::error::Result<Vec<Run>> {
+                unimplemented!()
+            }
+            fn create_run(&self, _: TrainConfig) -> folo_server::error::Result<Run> {
+                unimplemented!()
+            }
+            fn get_run(&self, id: &str) -> folo_server::error::Result<Run> {
+                let status = if self.stopped.load(Ordering::SeqCst) { "stopped" } else { "running" };
+                Ok(serde_json::from_value(json!({
+                    "id": id,
+                    "name": "spot",
+                    "status": status,
+                    "config": { "dataset_id": "ds_1" },
+                    "created": "2026-11-27T00:00:00Z",
+                    "started": null,
+                    "finished": null,
+                    "epoch": 1,
+                    "epochs": 5,
+                    "step": 2,
+                    "steps_per_epoch": 2,
+                    "eta_s": null,
+                    "best": null,
+                    "device": "gpu:0",
+                    "model_id": null,
+                    "error": null
+                }))
+                .unwrap())
+            }
+            fn stop_run(&self, id: &str) -> folo_server::error::Result<Run> {
+                let call = self.stop_calls.fetch_add(1, Ordering::SeqCst) + 1;
+                if call <= self.fail_stops.load(Ordering::SeqCst) {
+                    return Err(ServerError::internal("transient stop error"));
+                }
+                self.stopped.store(true, Ordering::SeqCst);
+                self.get_run(id)
+            }
+            fn move_run(&self, _: &str, _: folo_server::store::QueueMove) -> folo_server::error::Result<Run> {
+                unimplemented!()
+            }
+            fn delete_run(&self, _: &str) -> folo_server::error::Result<()> {
+                unimplemented!()
+            }
+            fn run_metrics(
+                &self,
+                _: &str,
+                _: &folo_server::store::MetricsQuery,
+            ) -> folo_server::error::Result<folo_api::RunMetrics> {
+                unimplemented!()
+            }
+            fn run_logs(
+                &self,
+                _: &str,
+                _: &folo_server::store::LogsQuery,
+            ) -> folo_server::error::Result<folo_api::RunLogs> {
+                unimplemented!()
+            }
+            fn run_samples(
+                &self,
+                _: &str,
+                _: Option<u32>,
+            ) -> folo_server::error::Result<folo_api::RunSamples> {
+                unimplemented!()
+            }
+            fn subscribe(&self, _: &str) -> folo_server::error::Result<folo_server::store::Subscription> {
+                unimplemented!()
+            }
+            fn predict(
+                &self,
+                _: folo_server::store::PredictInput,
+            ) -> folo_server::error::Result<folo_api::PredictResponse> {
+                unimplemented!()
+            }
+        }
+
+        // Case 1: first stop fails transiently, second succeeds -> cleanly stops.
+        let transient = Arc::new(StopStore {
+            fail_stops: AtomicU32::new(1),
+            stop_calls: AtomicU32::new(0),
+            stopped: AtomicBool::new(false),
+        });
+        let session = CloudSession { store: transient.clone(), local: None };
+        let stop = AtomicBool::new(true);
+        follow_cloud_run_with_poll(&session, "run_t1", &stop, Out { json: false }, Duration::from_millis(1))
+            .unwrap();
+        assert_eq!(transient.stop_calls.load(Ordering::SeqCst), 2);
+
+        // Case 2: persistent stop failure fails with run_id after MAX_STOP_RETRIES attempts.
+        let persistent = Arc::new(StopStore {
+            fail_stops: AtomicU32::new(100),
+            stop_calls: AtomicU32::new(0),
+            stopped: AtomicBool::new(false),
+        });
+        let session2 = CloudSession { store: persistent.clone(), local: None };
+        let err = follow_cloud_run_with_poll(
+            &session2,
+            "run_p1",
+            &stop,
+            Out { json: false },
+            Duration::from_millis(1),
+        )
+        .unwrap_err();
+        assert_eq!(persistent.stop_calls.load(Ordering::SeqCst), MAX_STOP_RETRIES);
+        assert_eq!(err.code, "internal");
+        assert!(err.message.contains("run_p1"), "{}", err.message);
     }
 }

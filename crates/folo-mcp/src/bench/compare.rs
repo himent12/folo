@@ -172,7 +172,9 @@ fn build_compare(
             let b_ms = b.as_ref().map(|s| s.ms_per_image);
             let c_ms = c.as_ref().map(|s| s.ms_per_image);
             let (delta_ms, speedup) = match (b_ms, c_ms) {
-                (Some(bm), Some(cm)) => (Some(cm - bm), (cm > 0.0).then_some(bm / cm)),
+                (Some(bm), Some(cm)) => {
+                    (Some(cm - bm), (bm > 0.0 && cm > 0.0).then_some(bm / cm).filter(|v| v.is_finite()))
+                }
                 _ => (None, None),
             };
             Some(BenchSpeedDelta {

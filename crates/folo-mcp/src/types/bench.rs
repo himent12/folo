@@ -454,7 +454,8 @@ pub struct CompareBenchEntriesArgs {
     pub benchmark_id: String,
     /// Baseline entry id (reference, e.g. `be_91c2`).
     pub baseline_entry_id: String,
-    /// Candidate entry id (compared against baseline; positive deltas mean candidate improved).
+    /// Candidate entry id (compared against baseline; deltas are `candidate - baseline`, where higher is better
+    /// for score/accuracy/robustness/IoU and lower is better for `ece_delta` and `delta_ms_per_image`).
     pub candidate_entry_id: String,
 }
 

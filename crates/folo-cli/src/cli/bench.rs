@@ -184,7 +184,7 @@ pub enum BenchCompareFormat {
     /// GitHub-flavored Markdown report.
     #[value(alias = "md")]
     Markdown,
-    /// RFC-4180 CSV rows (overall, accuracy, axes, calibration/localization, speed, and conditions).
+    /// CSV rows (overall, accuracy, axes, calibration/localization, speed, and conditions).
     Csv,
 }
 

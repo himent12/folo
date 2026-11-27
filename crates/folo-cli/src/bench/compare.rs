@@ -231,7 +231,18 @@ fn render_table(r: &BenchCompareResult) -> String {
 }
 
 fn md_escape(text: &str) -> String {
-    text.replace('|', "\\|").replace(['\r', '\n'], " ")
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '\r' | '\n' => out.push(' '),
+            '\\' | '|' | '[' | ']' | '*' | '_' | '`' | '<' | '>' | '~' => {
+                out.push('\\');
+                out.push(ch);
+            }
+            _ => out.push(ch),
+        }
+    }
+    out
 }
 
 fn render_markdown(r: &BenchCompareResult) -> String {
@@ -602,6 +613,10 @@ mod tests {
         assert!(md.contains("Outdoor \\| Smoke"), "{md}");
         assert!(md.contains("| Overall score |"), "{md}");
         assert!(md.contains("## Stress Conditions"), "{md}");
+        assert_eq!(
+            md_escape("[link](https://example.com) *bold* `x`"),
+            "\\[link\\](https://example.com) \\*bold\\* \\`x\\`"
+        );
 
         let csv = render(&r, BenchCompareFormat::Csv);
         assert!(csv.starts_with("section,metric,status,baseline,candidate,delta,unit,notes\n"), "{csv}");

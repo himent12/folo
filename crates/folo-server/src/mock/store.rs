@@ -477,6 +477,9 @@ impl Store for MockStore {
     ) -> Result<Run> {
         crate::store::check_auto_batch_options(&options.auto_batch)?;
         crate::store::check_max_preempt_retries(options.max_preempt_retries, config.compute.is_some())?;
+        if options.max_preempt_retries.is_some() {
+            return Err(Error::not_implemented("per-run cloud preemption retries"));
+        }
         if let Some(parsed) = crate::store::check_arch_override(options.arch.as_deref())? {
             config.arch = parsed;
             if !options.arch.as_deref().is_some_and(|a| a.starts_with("folo2-")) {

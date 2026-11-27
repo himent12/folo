@@ -621,18 +621,24 @@ impl Store for HttpStore {
             )
             .hint("update folo serve, or omit auto-batch fields when resuming"));
         }
-        if fields.get("max_preempt_retries").is_some_and(|v| !v.is_null())
-            && !self.has_feature(FEATURE_CLOUD_SPOT_RESUME)?
-        {
-            return Err(Error::new(
-                StatusCode::NOT_IMPLEMENTED,
-                "not_implemented",
-                format!(
-                    "the folo serve at {} is too old for per-run spot-preemption retries (`max_preempt_retries`)",
-                    self.base()
-                ),
-            )
-            .hint("update folo serve, or omit `max_preempt_retries` when resuming"));
+        let mut strip_null_spot = false;
+        if let Some(v) = fields.get("max_preempt_retries") {
+            let supported = self.has_feature(FEATURE_CLOUD_SPOT_RESUME)?;
+            if !supported {
+                if v.is_null() {
+                    strip_null_spot = true;
+                } else {
+                    return Err(Error::new(
+                        StatusCode::NOT_IMPLEMENTED,
+                        "not_implemented",
+                        format!(
+                            "the folo serve at {} is too old for per-run spot-preemption retries (`max_preempt_retries`)",
+                            self.base()
+                        ),
+                    )
+                    .hint("update folo serve, or omit `max_preempt_retries` when resuming"));
+                }
+            }
         }
         if let Some(raw_arch) = fields.get("arch").filter(|v| !v.is_null())
             && let Some(s) = raw_arch.as_str()
@@ -652,10 +658,15 @@ impl Store for HttpStore {
         }
         let mut body = fields.clone();
         // Strip explicit `null` additive control keys so older servers do not reject them as unknown fields.
-        for key in ["auto_batch", "auto_batch_target", "max_preempt_retries"] {
+        // For `max_preempt_retries`, keep `null` when the server supports `cloud_spot_resume` so a resume can
+        // reset a stored per-run override back to the server default (matching embedded `RealStore::resume_run`).
+        for key in ["auto_batch", "auto_batch_target"] {
             if body.get(key).is_some_and(serde_json::Value::is_null) {
                 body.remove(key);
             }
+        }
+        if strip_null_spot {
+            body.remove("max_preempt_retries");
         }
         body.insert("resume_run_id".into(), id.into());
         self.post("/runs", &serde_json::Value::Object(body))

@@ -679,6 +679,20 @@ pub trait Store: Send + Sync + 'static {
         let _ = (checkpoint, config);
         Err(crate::error::Error::not_implemented("continuing a checkpoint"))
     }
+    /// Like [`Store::continue_run`], forwarding per-run [`RunOptions`] such as `max_preempt_retries` for cloud
+    /// checkpoint continuations.
+    fn continue_run_with_options(
+        &self,
+        checkpoint: &str,
+        config: TrainConfig,
+        options: RunOptions,
+    ) -> Result<Run> {
+        check_max_preempt_retries(options.max_preempt_retries, config.compute.is_some())?;
+        if options.max_preempt_retries.is_some() {
+            return Err(crate::error::Error::not_implemented("per-run cloud preemption retries"));
+        }
+        self.continue_run(checkpoint, config)
+    }
     /// One run.
     fn get_run(&self, id: &str) -> Result<Run>;
     /// One run together with its cloud spot preemption auto-resume status, if it is a cloud run.

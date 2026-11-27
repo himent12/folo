@@ -44,7 +44,6 @@ fn features(st: &AppState) -> Vec<String> {
         crate::store::FEATURE_TRAIN_AUTO_BATCH,
         crate::store::FEATURE_FOLO2_ARCH,
         crate::store::FEATURE_THRESHOLD_CALIBRATION,
-        crate::store::FEATURE_CLOUD_SPOT_RESUME,
     ];
     let labeling = st.store.labeler().is_ok();
     let optional = [

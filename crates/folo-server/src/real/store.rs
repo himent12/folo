@@ -66,6 +66,7 @@ impl Store for RealStore {
             folo_api::FEATURE_RUN_CURSORS,
             folo_api::FEATURE_RUN_CHECKPOINT,
             folo_api::FEATURE_CLOUD,
+            crate::store::FEATURE_CLOUD_SPOT_RESUME,
         ]
     }
 
@@ -436,6 +437,16 @@ impl Store for RealStore {
     }
 
     fn continue_run(&self, checkpoint: &str, config: TrainConfig) -> Result<Run> {
+        self.continue_run_with_options(checkpoint, config, crate::store::RunOptions::default())
+    }
+
+    fn continue_run_with_options(
+        &self,
+        checkpoint: &str,
+        config: TrainConfig,
+        options: crate::store::RunOptions,
+    ) -> Result<Run> {
+        crate::store::check_max_preempt_retries(options.max_preempt_retries, config.compute.is_some())?;
         if config.weights.is_some() {
             return Err(Error::new(
                 StatusCode::BAD_REQUEST,
@@ -532,7 +543,11 @@ impl Store for RealStore {
         self.start_run_with_options(
             config,
             Some(snapshot),
-            crate::store::RunOptions { auto_batch: ckpt_auto, arch: ckpt_arch, max_preempt_retries: None },
+            crate::store::RunOptions {
+                auto_batch: ckpt_auto,
+                arch: ckpt_arch,
+                max_preempt_retries: options.max_preempt_retries,
+            },
         )
     }
 

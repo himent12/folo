@@ -246,6 +246,9 @@ pub(super) async fn create_run(
     crate::store::check_max_preempt_retries(max_preempt_retries, config.compute.is_some())?;
     let options = crate::store::RunOptions { auto_batch, arch: arch_override, max_preempt_retries };
     let run = match checkpoint {
+        Some(model) if !options.is_default() => {
+            blocking(&st, move |s| s.continue_run_with_options(&model, config, options)).await?
+        }
         Some(model) => blocking(&st, move |s| s.continue_run(&model, config)).await?,
         None if !options.is_default() => {
             blocking(&st, move |s| s.create_run_with_options(config, options)).await?
