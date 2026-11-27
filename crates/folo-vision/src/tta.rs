@@ -26,7 +26,7 @@ use crate::boxes::Xyxy;
 use crate::error::{Error, Result};
 use crate::fusion::BoxFusion;
 use crate::nms::Detection;
-use crate::predict::{Prediction, Predictor, Timing, ms, one_canvas};
+use crate::predict::{Prediction, Predictor, Timing, add_scaled_timing, ms, one_canvas};
 use crate::tile::{MergeOptions, TileConfig, TileMergeMetric, check_image, merge_detections};
 
 /// Default multi-scale factors for Test-Time Augmentation (`[0.83, 1.0, 1.17]`).
@@ -219,34 +219,34 @@ pub fn merge_tta_detections(
     )
 }
 
-/// Scale accumulated per-view `(pre, inf, post)` timings to actual `wall_ms` so parallel CPU sub-batches never
-/// double-count overlapping wall intervals while keeping stage proportions faithful.
-#[inline]
-fn add_scaled_timing(
-    pre_ms: &mut f64,
-    inf_ms: &mut f64,
-    post_ms: &mut f64,
-    b_pre: f64,
-    b_inf: f64,
-    b_post: f64,
-    wall_ms: f64,
-) {
-    let b_sum = b_pre + b_inf + b_post;
-    if b_sum > 0.0 {
-        let scale = wall_ms / b_sum;
-        *pre_ms += b_pre * scale;
-        *inf_ms += b_inf * scale;
-        *post_ms += b_post * scale;
-    } else {
-        *inf_ms += wall_ms;
+/// Execute `views`, recursively splitting in half on GPU out-of-memory / buffer-limit errors so flip-TTA
+/// batch doubling never fails on tight device limits while preserving the exact canvas chosen for the scale.
+fn run_views_with_oom_fallback<T>(
+    views: &[&Image],
+    run_chunk: &mut impl FnMut(&[&Image]) -> Result<Vec<T>>,
+) -> Result<Vec<T>> {
+    match run_chunk(views) {
+        Ok(out) => Ok(out),
+        Err(e) if views.len() > 1 && e.is_gpu_out_of_memory() => {
+            let mid = views.len() / 2;
+            let mut left = run_views_with_oom_fallback(&views[..mid], run_chunk)?;
+            let right = run_views_with_oom_fallback(&views[mid..], run_chunk)?;
+            left.extend(right);
+            Ok(left)
+        }
+        Err(e) => Err(e),
     }
 }
 
 impl Predictor {
+    fn run_tta_views(&self, views: &[&Image], rect: bool, imgsz: u32) -> Result<Vec<Prediction>> {
+        run_views_with_oom_fallback(views, &mut |chunk| self.run_with_imgsz(chunk, rect, imgsz))
+    }
+
     /// Predict one image with Test-Time Augmentation ([`TtaConfig`]): runs each resolved stride-32 scale (and
-    /// its horizontally flipped mirror when [`TtaConfig::hflip`] is enabled, batched together per scale),
-    /// un-flips mirrored boxes back to original-image pixels, and merges all view detections via
-    /// [`merge_tta_detections`].
+    /// its horizontally flipped mirror when [`TtaConfig::hflip`] is enabled, batched together per scale without
+    /// cloning the original RGB buffer), un-flips mirrored boxes back to original-image pixels, and merges all
+    /// view detections via [`merge_tta_detections`].
     ///
     /// When TTA resolves to a single unflipped view (`!tta_cfg.hflip && resolved_imgszs.len() == 1`), this
     /// degrades cleanly to one pass at that size (bit-identical to [`Predictor::predict`] when the size equals
@@ -258,7 +258,7 @@ impl Predictor {
 
         if !tta_cfg.hflip && imgszs.len() == 1 {
             let mut p = self
-                .run_with_imgsz(std::slice::from_ref(img), self.config().rect, imgszs[0])?
+                .run_with_imgsz(&[img], self.config().rect, imgszs[0])?
                 .pop()
                 .expect("one image in, one out");
             p.detections.truncate(max_det);
@@ -269,23 +269,31 @@ impl Predictor {
         let mut inf_ms = 0.0f64;
         let mut post_ms = 0.0f64;
 
-        let flipped_pair = if tta_cfg.hflip {
+        let flipped = if tta_cfg.hflip {
             let t_flip = Instant::now();
-            let flipped = img.oriented(2);
+            let fl = img.oriented(2);
             pre_ms += ms(t_flip);
-            Some([img.clone(), flipped])
+            Some(fl)
         } else {
             None
         };
-        let views: &[Image] = match &flipped_pair {
-            Some(pair) => pair.as_slice(),
-            None => std::slice::from_ref(img),
+        let pair: [&Image; 2];
+        let single: [&Image; 1];
+        let views: &[&Image] = match &flipped {
+            Some(fl) => {
+                pair = [img, fl];
+                &pair
+            }
+            None => {
+                single = [img];
+                &single
+            }
         };
 
         let mut all_dets: Vec<Detection> = Vec::new();
         for &imgsz in &imgszs {
             let t_scale = Instant::now();
-            let mut preds = self.run_with_imgsz(views, self.config().rect, imgsz)?;
+            let mut preds = self.run_tta_views(views, self.config().rect, imgsz)?;
             let scale_wall = ms(t_scale);
             let (mut b_pre, mut b_inf, mut b_post) = (0.0f64, 0.0f64, 0.0f64);
             for p in &preds {
@@ -295,22 +303,22 @@ impl Predictor {
             }
             add_scaled_timing(&mut pre_ms, &mut inf_ms, &mut post_ms, b_pre, b_inf, b_post, scale_wall);
 
+            let t_collect = Instant::now();
             if tta_cfg.hflip {
                 let flip_pred = preds.pop().expect("two views in, two out");
                 let orig_pred = preds.pop().expect("two views in, two out");
                 all_dets.extend(orig_pred.detections);
-                let t_unflip = Instant::now();
                 all_dets.extend(
                     flip_pred
                         .detections
                         .into_iter()
                         .map(|d| Detection { bbox: unflip_xyxy_h(d.bbox, img.width), ..d }),
                 );
-                post_ms += ms(t_unflip);
             } else {
                 let orig_pred = preds.pop().expect("one view in, one out");
                 all_dets.extend(orig_pred.detections);
             }
+            post_ms += ms(t_collect);
         }
 
         let t_merge = Instant::now();
@@ -334,8 +342,9 @@ impl Predictor {
 
     /// Predict a batch of images with Test-Time Augmentation ([`TtaConfig`]), in input order.
     ///
-    /// Original (and optional flipped) views are batched per resolved scale so same-canvas batches share one
-    /// `rect` letterbox pass (matching [`Predictor::predict_batch`]'s canvas rules).
+    /// Original (and optional flipped) views are batched per resolved scale without cloning the input RGB buffers
+    /// so same-canvas batches share one `rect` letterbox pass (matching [`Predictor::predict_batch`]'s canvas
+    /// rules), falling back to smaller view chunks on GPU memory / buffer-limit errors.
     pub fn predict_batch_tta(&self, imgs: &[Image], tta_cfg: &TtaConfig) -> Result<Vec<Prediction>> {
         let imgszs = tta_cfg.resolve_imgszs(self.config().imgsz)?;
         if imgs.is_empty() {
@@ -350,7 +359,8 @@ impl Predictor {
         let max_det = tta_cfg.max_det.unwrap_or(self.config().max_det);
         if !tta_cfg.hflip && imgszs.len() == 1 {
             let rect = self.config().rect && one_canvas(imgs, imgszs[0]);
-            let mut preds = self.run_with_imgsz(imgs, rect, imgszs[0])?;
+            let refs: Vec<&Image> = imgs.iter().collect();
+            let mut preds = self.run_with_imgsz(&refs, rect, imgszs[0])?;
             for p in &mut preds {
                 p.detections.truncate(max_det);
             }
@@ -363,24 +373,24 @@ impl Predictor {
         let mut inf_ms = 0.0f64;
         let mut post_ms = 0.0f64;
 
-        let combined_views: Option<Vec<Image>> = if tta_cfg.hflip {
+        let flipped: Vec<Image> = if tta_cfg.hflip {
             let t_flip = Instant::now();
-            let flipped: Vec<Image> = imgs.par_iter().map(|img| img.oriented(2)).collect();
-            let mut v = Vec::with_capacity(n * 2);
-            v.extend_from_slice(imgs);
-            v.extend(flipped);
+            let fl: Vec<Image> = imgs.par_iter().map(|img| img.oriented(2)).collect();
             pre_ms += ms(t_flip) * inv_n;
-            Some(v)
+            fl
         } else {
-            None
+            Vec::new()
         };
-        let views: &[Image] = combined_views.as_deref().unwrap_or(imgs);
+        let mut views: Vec<&Image> = Vec::with_capacity(n + flipped.len());
+        views.extend(imgs.iter());
+        views.extend(flipped.iter());
 
         let mut per_img_dets: Vec<Vec<Detection>> = vec![Vec::new(); n];
         for &imgsz in &imgszs {
-            let rect = self.config().rect && one_canvas(views, imgsz);
+            // `flipped[i]` has the exact same dimensions as `imgs[i]`, so scanning `imgs` alone suffices.
+            let rect = self.config().rect && one_canvas(imgs, imgsz);
             let t_scale = Instant::now();
-            let preds = self.run_with_imgsz(views, rect, imgsz)?;
+            let preds = self.run_tta_views(&views, rect, imgsz)?;
             let scale_wall = ms(t_scale);
             let (mut b_pre, mut b_inf, mut b_post) = (0.0f64, 0.0f64, 0.0f64);
             for p in &preds {
@@ -398,12 +408,12 @@ impl Predictor {
                 scale_wall * inv_n,
             );
 
+            let t_collect = Instant::now();
             let mut iter = preds.into_iter();
             for dets in &mut per_img_dets {
                 dets.extend(iter.next().expect("batch size matches").detections);
             }
             if tta_cfg.hflip {
-                let t_unflip = Instant::now();
                 for (i, dets) in per_img_dets.iter_mut().enumerate() {
                     let w = imgs[i].width;
                     let flip_pred = iter.next().expect("flipped batch matches");
@@ -414,8 +424,8 @@ impl Predictor {
                             .map(|d| Detection { bbox: unflip_xyxy_h(d.bbox, w), ..d }),
                     );
                 }
-                post_ms += ms(t_unflip) * inv_n;
             }
+            post_ms += ms(t_collect) * inv_n;
         }
 
         let t_merge = Instant::now();
@@ -597,11 +607,102 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].class, 0);
 
-        // Non-finite and empty-image guards.
+        // Non-finite and empty-image guards, plus invalid fallback thresholds/max_det.
         let bad = Detection { bbox: Xyxy::new(f32::NAN, 0.0, 10.0, 10.0), score: 0.9, class: 0 };
         assert!(
             merge_tta_detections(vec![bad], 200, 120, &TtaConfig::default(), 0.7, 300).unwrap().is_empty()
         );
         assert!(merge_tta_detections(vec![orig], 0, 120, &TtaConfig::default(), 0.7, 300).is_err());
+        assert!(merge_tta_detections(vec![orig], 200, 120, &TtaConfig::default(), f32::NAN, 300).is_err());
+        assert!(merge_tta_detections(vec![orig], 200, 120, &TtaConfig::default(), 1.5, 300).is_err());
+        assert!(merge_tta_detections(vec![orig], 200, 120, &TtaConfig::default(), 0.7, 0).is_err());
+    }
+
+    #[test]
+    fn merge_max_det_cap_retains_fusion_refinement_and_matches_uncapped_prefix() {
+        // Two high-scoring disjoint clusters with lower-scoring overlapping refinements arriving AFTER many
+        // disjoint lower-scoring candidates that exceed `max_det = 2`.
+        let mut dets = vec![
+            Detection { bbox: Xyxy::new(10.0, 10.0, 50.0, 50.0), score: 0.95, class: 0 },
+            Detection { bbox: Xyxy::new(100.0, 10.0, 140.0, 50.0), score: 0.90, class: 0 },
+        ];
+        // Disjoint lower-scoring candidates past `max_det = 2`.
+        for k in 0..8 {
+            let x = 200.0 + (k as f32) * 50.0;
+            dets.push(Detection {
+                bbox: Xyxy::new(x, 10.0, x + 30.0, 40.0),
+                score: 0.80 - (k as f32) * 0.02,
+                class: 0,
+            });
+        }
+        // Lower-scoring refinements overlapping the top-2 survivors.
+        dets.push(Detection { bbox: Xyxy::new(14.0, 12.0, 54.0, 52.0), score: 0.50, class: 0 });
+        dets.push(Detection { bbox: Xyxy::new(104.0, 12.0, 144.0, 52.0), score: 0.45, class: 0 });
+
+        for fusion in [BoxFusion::None, BoxFusion::Vote, BoxFusion::Sebf] {
+            let uncapped = TtaConfig {
+                merge_iou: Some(0.5),
+                merge_fusion: fusion,
+                max_det: Some(100),
+                ..Default::default()
+            };
+            let capped = TtaConfig { max_det: Some(2), ..uncapped.clone() };
+            let full = merge_tta_detections(dets.clone(), 1000, 200, &uncapped, 0.5, 100).unwrap();
+            let got = merge_tta_detections(dets.clone(), 1000, 200, &capped, 0.5, 100).unwrap();
+            assert_eq!(got, full[..2], "capped merge diverged from uncapped prefix for {fusion:?}");
+            if fusion != BoxFusion::None {
+                assert!(got[0].bbox.x1 > 10.0 && got[0].bbox.x1 < 14.0, "{:?}", got[0].bbox);
+                assert!(got[1].bbox.x1 > 100.0 && got[1].bbox.x1 < 104.0, "{:?}", got[1].bbox);
+            }
+        }
+    }
+
+    #[test]
+    fn oom_fallback_splits_view_batches_in_order_and_propagates_other_errors() {
+        let imgs: Vec<Image> = (0..6).map(|i| Image::new(8 + i, 8, [i as u8; 3])).collect();
+        let refs: Vec<&Image> = imgs.iter().collect();
+        let mut seen_sizes = Vec::new();
+        let out = run_views_with_oom_fallback(&refs, &mut |chunk| {
+            seen_sizes.push(chunk.len());
+            if chunk.len() > 2 {
+                return Err(Error::Core(folo_core::Error::Backend {
+                    backend: "wgpu",
+                    msg: "device limit exceeded: buffer of 200 bytes exceeds the device limit (128 bytes)"
+                        .into(),
+                }));
+            }
+            Ok(chunk.iter().map(|im| im.width).collect())
+        })
+        .unwrap();
+        assert_eq!(out, vec![8, 9, 10, 11, 12, 13]);
+        assert!(seen_sizes.contains(&6) && seen_sizes.iter().all(|&s| s <= 6));
+
+        // Non-OOM errors are NOT retried.
+        let mut calls = 0usize;
+        let err = run_views_with_oom_fallback::<u32>(&refs, &mut |_| {
+            calls += 1;
+            Err(Error::Config("bad input".into()))
+        });
+        assert!(err.is_err());
+        assert_eq!(calls, 1);
+
+        // Single-view OOM cannot split further and returns the error.
+        let err = run_views_with_oom_fallback::<u32>(&refs[..1], &mut |_| {
+            Err(Error::Core(folo_core::Error::Backend { backend: "wgpu", msg: "Out of Memory".into() }))
+        });
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn serde_json_round_trip_and_partial_defaults() {
+        let def: TtaConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(def, TtaConfig::default());
+        let json = serde_json::to_string(&def).unwrap();
+        assert_eq!(serde_json::from_str::<TtaConfig>(&json).unwrap(), def);
+
+        let opts_empty: PredictOptions = serde_json::from_str("{}").unwrap();
+        assert_eq!(opts_empty, PredictOptions::default());
+        let opts_tta: PredictOptions = serde_json::from_str(r#"{"tta": {}}"#).unwrap();
+        assert_eq!(opts_tta, PredictOptions::with_tta(TtaConfig::default()));
     }
 }

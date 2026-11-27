@@ -138,25 +138,129 @@ fn tta_is_deterministic_order_invariant_and_works_across_f32_int8_and_o2o() {
     assert!(!q8_a.detections.is_empty());
     assert_eq!(q8_a.detections, q8_b.detections);
 
-    // 3. o2o (NMS-free top-k) head + timing sanity.
+    // 3. o2o (NMS-free top-k) head.
     let m_o2o = fused_model(3, HeadMode::O2o, 31);
     let pred_o2o =
         Predictor::new(m_o2o, PredictConfig { imgsz: 64, conf: 0.0, max_det: 20, ..Default::default() })
             .unwrap();
-    let t_wall = std::time::Instant::now();
     let o2o_out = pred_o2o.predict_tta(&img, &TtaConfig::multi_scale(vec![0.5, 1.0])).unwrap();
-    let wall_ms = t_wall.elapsed().as_secs_f64() * 1e3;
     assert!(!o2o_out.detections.is_empty());
-    assert!(
-        o2o_out.timing.total_ms <= wall_ms + 2.0,
-        "TTA total_ms ({:.2}) must not double-count parallel CPU wall time ({:.2})",
-        o2o_out.timing.total_ms,
-        wall_ms
-    );
     for d in &o2o_out.detections {
         assert!(d.class < 3);
         assert!(d.bbox.x1 >= 0.0 && d.bbox.y1 >= 0.0 && d.bbox.x2 <= 128.0 && d.bbox.y2 <= 96.0);
     }
+
+    // Wall-time sanity on a >2-view batch (3 images × 2 flip views = 6 views > CPU_BATCH_CHUNK), verifying
+    // parallel CPU chunks do not double-count wall time.
+    let batch3 = vec![patterned_image(96, 64), patterned_image(96, 64), patterned_image(96, 64)];
+    let t_wall = std::time::Instant::now();
+    let b3_out = pred_o2o.predict_batch_tta(&batch3, &TtaConfig::flip_only()).unwrap();
+    let wall_ms = t_wall.elapsed().as_secs_f64() * 1e3;
+    let sum_total_ms: f64 = b3_out.iter().map(|p| p.timing.total_ms).sum();
+    assert!(
+        sum_total_ms <= wall_ms + 3.0,
+        "sum of batch TTA total_ms ({:.2}) must not double-count parallel CPU wall time ({:.2})",
+        sum_total_ms,
+        wall_ms
+    );
+}
+
+/// Multi-scale + horizontal-flip `predict_tta` matches manually running separate single-scale `Predictor`s at
+/// each resolved stride-32 `imgsz` (proving every scale actually runs at its resolved size, not base `imgsz`),
+/// and covers `hflip: false` multi-scale, single non-1.0 scale, and `predict_batch_tta` fast paths.
+#[test]
+fn multiscale_reference_parity_and_noflip_and_tile_option_paths() {
+    let dir = TestDir::new("tta-ref-parity");
+    let img = patterned_image(128, 96);
+    let m64 = fused_model(2, HeadMode::O2m, 53);
+    let m32 = fused_model(2, HeadMode::O2m, 53);
+    let m96 = fused_model(2, HeadMode::O2m, 53);
+    let pred64 = Predictor::new(
+        m64,
+        PredictConfig { imgsz: 64, conf: 0.0, iou: 0.6, max_det: 20, ..Default::default() },
+    )
+    .unwrap();
+    let pred32 = Predictor::new(
+        m32,
+        PredictConfig { imgsz: 32, conf: 0.0, iou: 0.6, max_det: 20, ..Default::default() },
+    )
+    .unwrap();
+    let pred96 = Predictor::new(
+        m96,
+        PredictConfig { imgsz: 96, conf: 0.0, iou: 0.6, max_det: 20, ..Default::default() },
+    )
+    .unwrap();
+
+    // 1. Reference multi-scale + flip parity against independent 32px and 96px Predictors.
+    let ms_flip = TtaConfig {
+        hflip: true,
+        scales: vec![0.5, 1.5], // resolves to [32, 96]
+        merge_iou: Some(0.55),
+        merge_fusion: BoxFusion::Vote,
+        class_agnostic: false,
+        max_det: Some(15),
+    };
+    let flipped = img.oriented(2);
+    let mut manual_dets = Vec::new();
+    for p in [&pred32, &pred96] {
+        manual_dets.extend(p.predict(&img).unwrap().detections);
+        manual_dets.extend(p.predict(&flipped).unwrap().detections.into_iter().map(|d| {
+            folo_vision::Detection { bbox: folo_vision::tta::unflip_xyxy_h(d.bbox, img.width), ..d }
+        }));
+    }
+    let expected =
+        folo_vision::tta::merge_tta_detections(manual_dets, img.width, img.height, &ms_flip, 0.6, 20)
+            .unwrap();
+    let got = pred64.predict_tta(&img, &ms_flip).unwrap();
+    assert_eq!(got.detections, expected);
+
+    // 2. Single non-1.0 scale (`hflip: false, scales: [1.5]`) matches a native `imgsz = 96` Predictor bit-for-bit.
+    let single_96 = TtaConfig { hflip: false, scales: vec![1.5], max_det: Some(12), ..Default::default() };
+    let mut want_96 = pred96.predict(&img).unwrap().detections;
+    want_96.truncate(12);
+    assert_eq!(pred64.predict_tta(&img, &single_96).unwrap().detections, want_96);
+
+    // 3. Multi-scale with `hflip: false` for both single and uniform batch (exact parity).
+    let noflip_ms = TtaConfig { hflip: false, scales: vec![0.5, 1.5], ..Default::default() };
+    let mut img2 = patterned_image(128, 96);
+    img2.fill_rect(30, 10, 70, 50, [60, 180, 240]);
+    let batch2 = vec![img.clone(), img2];
+    let b_noflip = pred64.predict_batch_tta(&batch2, &noflip_ms).unwrap();
+    for (p, im) in b_noflip.iter().zip(&batch2) {
+        assert_eq!(p.detections, pred64.predict_tta(im, &noflip_ms).unwrap().detections);
+    }
+
+    // 4. `predict_batch_tta` len==1 delegation and len==2 single-view fast path with `max_det` cap.
+    let b1 = pred64.predict_batch_tta(&batch2[..1], &ms_flip).unwrap();
+    assert_eq!(b1[0].detections, got.detections);
+
+    let single_view = TtaConfig { hflip: false, scales: vec![1.0], max_det: Some(4), ..Default::default() };
+    let b_fast = pred64.predict_batch_tta(&batch2, &single_view).unwrap();
+    let direct_batch = pred64.predict_batch(&batch2).unwrap();
+    for (fast, direct) in b_fast.iter().zip(&direct_batch) {
+        let want_len = direct.detections.len().min(4);
+        assert_eq!(fast.detections, direct.detections[..want_len]);
+    }
+
+    // 5. `PredictOptions::with_tile` dispatch across single, batch, and file entry points.
+    let tile_cfg =
+        TileConfig { tile_width: 80, tile_height: 80, overlap_x: 0.2, overlap_y: 0.2, ..Default::default() };
+    let tile_opts = PredictOptions::with_tile(tile_cfg.clone());
+    assert_eq!(
+        pred64.predict_with_options(&img, &tile_opts).unwrap().detections,
+        pred64.predict_tiled(&img, &tile_cfg).unwrap().detections
+    );
+    let b_tile_opts = pred64.predict_batch_with_options(&batch2, &tile_opts).unwrap();
+    let b_tile_ref = pred64.predict_batch_tiled(&batch2, &tile_cfg).unwrap();
+    for (a, b) in b_tile_opts.iter().zip(&b_tile_ref) {
+        assert_eq!(a.detections, b.detections);
+    }
+    let path = dir.path().join("tile_opt.png");
+    folo_data::write_image(&img, &path, folo_data::ImageFormat::Png).unwrap();
+    assert_eq!(
+        pred64.predict_file_with_options(&path, &tile_opts).unwrap().detections,
+        pred64.predict_file_tiled(&path, &tile_cfg).unwrap().detections
+    );
 }
 
 /// `predict_batch_tta`, `predict_file_tta`, and `predict_*_with_options` match single-image `predict_tta`

@@ -343,8 +343,12 @@ pub(crate) fn merge_detections(
 
     // Greedy suppression with exclusive ownership: `owners[i]` records the position in `kept` (`0..kept.len()`)
     // of the survivor that kept or absorbed candidate `i`, matching `fuse_boxes_sebf`'s owner convention.
+    // Once `kept` reaches `opts.max_det`, stop adding new survivors (`O(N * max_det)` instead of `O(N^2)`);
+    // for `Vote`/`Dfl`/`Sebf`, keep scanning remaining candidates so they still refine the retained survivors,
+    // which is bit-identical to keeping all survivors and truncating at the end because `kept` is scanned in
+    // ascending slot order. `BoxFusion::None` stops immediately at the cap.
     let n = clean.len();
-    let mut kept: Vec<usize> = Vec::new();
+    let mut kept: Vec<usize> = Vec::with_capacity(n.min(opts.max_det));
     let mut owners: Vec<u32> = vec![u32::MAX; n];
     for i in 0..n {
         let cand = &clean[i];
@@ -360,9 +364,12 @@ pub(crate) fn merge_detections(
         }
         if let Some(slot) = matched {
             owners[i] = slot as u32;
-        } else {
+        } else if kept.len() < opts.max_det {
             owners[i] = kept.len() as u32;
             kept.push(i);
+            if kept.len() == opts.max_det && opts.fusion == BoxFusion::None {
+                break;
+            }
         }
     }
 
@@ -374,6 +381,9 @@ pub(crate) fn merge_detections(
             let mut acc = vec![[0.0f64; 4]; kept.len()];
             let mut sum = vec![0.0f64; kept.len()];
             for (i, d) in clean.iter().enumerate() {
+                if owners[i] == u32::MAX {
+                    continue;
+                }
                 let slot = owners[i] as usize;
                 let owner = kept[slot];
                 if i != owner {
