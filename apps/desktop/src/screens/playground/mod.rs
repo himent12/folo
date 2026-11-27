@@ -14,6 +14,8 @@ mod side_compare;
 mod stage;
 mod stage_compare;
 
+#[cfg(test)]
+pub(crate) use batch::batch_action_labels;
 pub use batch::{
     BatchItemResult, BatchItemStatus, MAX_BATCH_FILES, PlayBatchItem, PlayBatchSource, PlayBatchState,
     bytes_fingerprint, disambiguate_file_labels, is_supported_image_ext, scan_image_folder,

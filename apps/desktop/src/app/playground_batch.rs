@@ -109,21 +109,7 @@ impl FoloApp {
                                     );
                                     return;
                                 }
-                                if truncated > 0 {
-                                    this.toast(
-                                        Tone::Info,
-                                        format!("Loaded first {MAX_BATCH_FILES} images"),
-                                        Some(
-                                            format!(
-                                                "{} additional images were skipped to keep the batch responsive.",
-                                                int(truncated as u64)
-                                            )
-                                            .into(),
-                                        ),
-                                        cx,
-                                    );
-                                }
-                                this.open_play_paths(paths, req, window, cx);
+                                this.apply_file_batch(paths, truncated, req, window, cx);
                             }
                             Err(e) => {
                                 this.toast(Tone::Danger, e.message, e.hint.map(Into::into), cx);
@@ -202,18 +188,7 @@ impl FoloApp {
                                 );
                                 return;
                             }
-                            if truncated > 0 {
-                                this.toast(
-                                    Tone::Info,
-                                    format!("Loaded first {MAX_BATCH_FILES} images"),
-                                    Some(
-                                        format!("{} additional images were skipped.", int(truncated as u64))
-                                            .into(),
-                                    ),
-                                    cx,
-                                );
-                            }
-                            this.apply_file_batch(files, req, window, cx);
+                            this.apply_file_batch(files, truncated, req, window, cx);
                         })
                     })
                     .ok();
@@ -221,12 +196,13 @@ impl FoloApp {
             .detach();
             return;
         }
-        self.apply_file_batch(paths, req, window, cx);
+        self.apply_file_batch(paths, 0, req, window, cx);
     }
 
     fn apply_file_batch(
         &mut self,
         paths: Vec<PathBuf>,
+        extra_truncated: usize,
         req: OpenRequest,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -256,6 +232,18 @@ impl FoloApp {
             );
             return;
         }
+        let single = supported.len() == 1;
+        if let Some((id, name)) = &req.model
+            && self.store.models.ready().is_some_and(|m| !m.iter().any(|m| m.id == *id))
+        {
+            let body = format!("Model {name} is no longer available.");
+            let title = if single { "The image was not opened" } else { "The batch was not opened" };
+            return self.toast(Tone::Neutral, title, Some(body.into()), cx);
+        }
+        if let Some(why) = self.open_image_blocked() {
+            let title = if single { "Can't open an image yet" } else { "Can't open images yet" };
+            return self.toast(Tone::Neutral, title, Some(why.into()), cx);
+        }
         if skipped > 0 {
             self.toast(
                 Tone::Info,
@@ -264,28 +252,22 @@ impl FoloApp {
                 cx,
             );
         }
-        if supported.len() == 1 {
+        if single {
             self.open_play_file(supported.into_iter().next().unwrap(), req, window, cx);
             return;
         }
+        let mut truncated = extra_truncated;
         if supported.len() > MAX_BATCH_FILES {
-            let extra = supported.len() - MAX_BATCH_FILES;
+            truncated += supported.len() - MAX_BATCH_FILES;
             supported.truncate(MAX_BATCH_FILES);
+        }
+        if truncated > 0 {
             self.toast(
                 Tone::Info,
                 format!("Loaded first {MAX_BATCH_FILES} images"),
-                Some(format!("{} additional images were skipped.", int(extra as u64)).into()),
+                Some(format!("{} additional images were skipped.", int(truncated as u64)).into()),
                 cx,
             );
-        }
-        if let Some((id, name)) = &req.model
-            && self.store.models.ready().is_some_and(|m| !m.iter().any(|m| m.id == *id))
-        {
-            let body = format!("Model {name} is no longer available.");
-            return self.toast(Tone::Neutral, "The batch was not opened", Some(body.into()), cx);
-        }
-        if let Some(why) = self.open_image_blocked() {
-            return self.toast(Tone::Neutral, "Can't open images yet", Some(why.into()), cx);
         }
         self.navigate(Route::Playground, window, cx);
         if let Some((id, _)) = req.model {
@@ -401,10 +383,25 @@ impl FoloApp {
         self.play_batch.clear();
     }
 
-    /// Cancels in-flight batch work and clears stale results after model, device, or IoU change.
+    /// Cancels in-flight batch work and clears stale inference results after a model, device, or
+    /// IoU change, while preserving an active unstaged item's load failure so its failure banner
+    /// stays visible while the previous image remains on screen.
     pub(super) fn invalidate_play_batch(&mut self) {
         self.play_batch.cancel();
+        let active = self.play_batch.active;
+        let active_unstaged_failure = (self.play_image.as_ref().and_then(|i| i.batch_ref)
+            != Some((self.play_batch.batch_id, active)))
+        .then(|| {
+            self.play_batch.items.get(active).and_then(|it| match &it.status {
+                BatchItemStatus::Failed(msg) => Some(msg.clone()),
+                _ => None,
+            })
+        })
+        .flatten();
         self.play_batch.invalidate_results();
+        if let (Some(msg), Some(slot)) = (active_unstaged_failure, self.play_batch.items.get_mut(active)) {
+            slot.status = BatchItemStatus::Failed(msg);
+        }
     }
 
     /// Selects item `idx` in the batch filmstrip and stages it on Playground.
@@ -465,10 +462,19 @@ impl FoloApp {
                         }
                     },
                     move |this, r, cx| {
-                        if seq != this.play_load_seq || batch_id != this.play_batch.batch_id {
+                        if seq != this.play_load_seq {
+                            if let Ok((image, _, _, _)) = r {
+                                cx.drop_image(image, None);
+                            }
                             return;
                         }
                         this.play_loading = None;
+                        if batch_id != this.play_batch.batch_id {
+                            if let Ok((image, _, _, _)) = r {
+                                cx.drop_image(image, None);
+                            }
+                            return;
+                        }
                         match r {
                             Ok((image, width, height, encoded)) => {
                                 if this.store.images_px.failed(&thumb) {
@@ -527,10 +533,19 @@ impl FoloApp {
                 cx.spawn(async move |this, cx| {
                     let r = read.await;
                     this.update(cx, |this, cx| {
-                        if seq != this.play_load_seq || batch_id != this.play_batch.batch_id {
+                        if seq != this.play_load_seq {
+                            if let Ok(img) = r {
+                                cx.drop_image(img.image, None);
+                            }
                             return;
                         }
                         this.play_loading = None;
+                        if batch_id != this.play_batch.batch_id {
+                            if let Ok(img) = r {
+                                cx.drop_image(img.image, None);
+                            }
+                            return;
+                        }
                         match r {
                             Ok(img) => this.stage_batch_image(batch_id, idx, img, cx),
                             Err(e) => {
@@ -804,21 +819,12 @@ impl FoloApp {
                 self.play_class,
                 e2e,
             );
-            let body = if s.failed > 0 {
-                format!("{} succeeded · {} failed", s.done, s.failed)
-            } else {
-                format!(
-                    "{} · {}",
-                    counted(s.done as u64, "image", "images"),
-                    plural(s.total_detections, "detection")
-                )
-            };
-            self.toast(
-                if s.failed > 0 { Tone::Warning } else { Tone::Success },
-                "Batch run complete",
-                Some(body.into()),
-                cx,
-            );
+            // Clean completion is already shown inline in the batch filmstrip header; avoid
+            // covering the bottom-right Batch JSON / Batch CSV export buttons with a success toast.
+            if s.failed > 0 {
+                let body = format!("{} succeeded · {} failed", s.done, s.failed);
+                self.toast(Tone::Warning, "Batch run finished with errors", Some(body.into()), cx);
+            }
         }
     }
 
