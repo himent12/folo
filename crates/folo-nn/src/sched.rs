@@ -459,6 +459,14 @@ impl LrSchedule {
         }
     }
 
+    /// Effective LR multiplier `lr(t) / base_lr` for non-bias parameter groups: matches [`Self::lf`] after
+    /// warmup, and includes the linear `0 -> lf(t)` warmup ramp while `t < warmup_iters`. Used by
+    /// LR-phase-coupled EMA (`PC-PEMA`).
+    pub fn effective_lf(&self, t: u64) -> f64 {
+        let f = self.lf(t);
+        if t < self.c.warmup_iters { interp(t, self.c.warmup_iters, 0.0, f) } else { f }
+    }
+
     /// The LR of a group at iteration `t`: `lr0 · lf(t)`, ramped from `warmup_bias_lr` (the `bias` group) or 0
     /// (every other group) during warmup. `lr0` is the group's base LR.
     pub fn lr_at(&self, t: u64, group: &ParamGroup) -> f64 {
@@ -806,5 +814,26 @@ mod tests {
         );
         let parsed: SchedContract = serde_json::from_str(&json).unwrap();
         assert_eq!(LrSchedule::from_contract(parsed).unwrap(), geo);
+    }
+
+    #[test]
+    fn effective_lf_ramps_during_warmup_and_matches_lf_after() {
+        let lr0 = 0.01;
+        let decay = ParamGroup::new("decay", vec![("w".into(), Tensor::zeros([1]))]).lr(lr0).momentum(0.937);
+        for kind in [DecayKind::Linear, DecayKind::Cosine, DecayKind::Wsd, DecayKind::Polynomial] {
+            let s = LrSchedule::with_warmup_iters(kind, 10, 10, 0.01, 20, 0.1, 0.8).unwrap();
+            assert_eq!(s.effective_lf(0), 0.0, "{kind:?} t=0");
+            for t in 0..100 {
+                let want = s.lr_at(t, &decay) / lr0;
+                assert!(
+                    (s.effective_lf(t) - want).abs() < 1e-14,
+                    "{kind:?} t={t}: effective_lf={} vs lr_at/lr0={want}",
+                    s.effective_lf(t)
+                );
+            }
+            for t in 20..100 {
+                assert_eq!(s.effective_lf(t), s.lf(t), "{kind:?} post-warmup t={t}");
+            }
+        }
     }
 }

@@ -61,12 +61,15 @@ is reproducible everywhere. Head priors (MODEL.md §6.5): `BOX_BIAS_PRIOR = 2.0`
   scale/gate parameters `gamma_id` and `alpha_raw` used by FOLO v2-Iso) and `bias` (every `*.bias`) groups;
   `into_groups(lr, momentum, wd)` gives decay to `decay` only.
 - `Sgd`: L2 (coupled) decay, `buf = μ·buf + g` (zero-initialised, so the first step is `buf = g`), Nesterov
-  `p −= lr·(g + μ·buf)`. `AdamW`: decoupled decay `p *= 1 − lr·wd`, bias-corrected moments, global step counter.
+  `p −= lr·(g + μ·buf)`. `AdamW`: decoupled decay `p *= 1 − lr·wd`, bias-corrected moments with per-parameter step
+  counters (so selectively frozen parameters keep exact `t = 1` bias correction on unfreeze; persisted via optional
+  `folo.optim.param_steps` only for entries differing from `step`).
   Both skip parameters without a gradient, update CPU tensors with non-FMA AVX2-vectorized fused loops (`optim/simd/`,
   bitwise identical to scalar and also used by Muon updates, gradient accumulation/clipping, and CPU AMP
-  unscaling/norm checks; parallel over parameters for large steps), update each parameter group on the GPU with one
-  multi-tensor call (`Tensor::optimizer_step_many_`: 16 parameters per dispatch, the per-element op order of the
-  single-parameter kernel `Tensor::optimizer_step_`, which is the fallback), and fall back to tensor ops with the same
+  unscaling/norm checks; parallel over parameters for large steps), update non-CPU parameters on the GPU with batched
+  multi-tensor calls (`Tensor::optimizer_step_many_`: 16 parameters per dispatch, coalescing across identical
+  `(OptimStep, Device)` buckets including mixed-step `AdamW` groups, with the per-element op order of the
+  single-parameter kernel `Tensor::optimizer_step_` as fallback), and fall back to tensor ops with the same
   arithmetic elsewhere.
 - `GradAccumulator` sums gradients over a window of backward passes into private buffers (reused across windows),
   implements `GradSource` for the step, and does MODEL.md's global-norm clipping (`clip_grad_norm`). On the GPU a pass
@@ -129,8 +132,9 @@ is reproducible everywhere. Head priors (MODEL.md §6.5): `BOX_BIAS_PRIOR = 2.0`
   - `CosineRestarts` (opt-in SGDR): after warmup, repeats cosine cycles starting at `restart_period` iterations and
     multiplying cycle length by `restart_mult` (`T_mult >= 1`) each restart (defaults: `3` equal cycles, `T_mult = 1`).
   Each optimizer step: `sched.apply(&mut opt)` (LR and momentum of every group at iteration `t`; the `bias` group
-  warms up from `warmup_bias_lr`), `opt.step(..)`, `sched.advance()`. `contract()` / `from_contract()` are
-  `folo.sched` (optional WSD / restart fields serialize only when set).
+  warms up from `warmup_bias_lr`), `opt.step(..)`, `sched.advance()`. `sched.effective_lf(t)` returns the effective
+  non-bias LR multiplier including linear warmup (`(t / W) · lf(t)` during warmup, `lf(t)` after), used by PC-PEMA.
+  `contract()` / `from_contract()` are `folo.sched` (optional WSD / restart fields serialize only when set).
 - `ModelEma<M>` keeps a second instance of the model (eval mode, no grad, on the source's device), caches its tracked
   parameter and floating-buffer handles to avoid repeated module-tree walks on every step, and updates them with
   either the legacy exponential ramp `d = decay · (1 − exp(−updates / tau))` (`EmaMode::Legacy`, default) or opt-in

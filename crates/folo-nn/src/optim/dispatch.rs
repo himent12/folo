@@ -369,6 +369,202 @@ pub(crate) fn step_many<'a>(
     Ok(Some(done))
 }
 
+/// Per-parameter completion flags returned by [`step_many_per_param`].
+pub(crate) struct StepDone {
+    params: Vec<Vec<bool>>,
+}
+
+impl StepDone {
+    #[inline]
+    pub(crate) fn is_done(&self, gi: usize, pi: usize) -> bool {
+        self.params[gi][pi]
+    }
+
+    #[inline]
+    pub(crate) fn all_done(&self) -> bool {
+        self.params.iter().all(|g| g.iter().all(|&v| v))
+    }
+}
+
+/// Multi-tensor device path when parameters within the same group can have different [`OptimStep`] coefficients
+/// (for example [`super::AdamW`] after `freeze_backbone_epochs` unfreezes the backbone).
+///
+/// When all active non-CPU parameters have pairwise-disjoint mutated storages, no gradient aliases any mutated
+/// storage, and every gradient is contiguous, active items are coalesced across groups by bitwise-identical
+/// `(OptimStep, Device, state arity)` into batched [`Tensor::optimizer_step_many_`] calls. Otherwise, strict
+/// canonical group order is preserved by dispatching only uniform non-CPU prefix groups via `optimizer_step_many_`
+/// and leaving the rest for the per-parameter fallback.
+pub(crate) fn step_many_per_param<'a>(
+    what: &str,
+    groups: &'a [ParamGroup],
+    grads: &'a dyn GradSource,
+    step: impl Fn(usize, usize) -> OptimStep,
+    state: impl Fn(usize, usize) -> Vec<&'a Tensor>,
+) -> Result<Option<StepDone>> {
+    if groups.iter().all(|grp| grp.params.iter().all(|(_, p)| p.device().is_cpu())) {
+        return Ok(None);
+    }
+    let _g = folo_core::no_grad();
+
+    struct Item<'a> {
+        gi: usize,
+        pi: usize,
+        dev: Device,
+        op: OptimStep,
+        p: &'a Tensor,
+        g: GradRef<'a>,
+        st: Vec<&'a Tensor>,
+    }
+
+    let mut done_params: Vec<Vec<bool>> = groups.iter().map(|g| vec![false; g.params.len()]).collect();
+    let mut group_items: Vec<(usize, Vec<Item<'a>>)> = Vec::new();
+    let mut has_mixed_dev_group = false;
+
+    for (gi, grp) in groups.iter().enumerate() {
+        if grp.params.iter().all(|(_, p)| p.device().is_cpu()) {
+            continue;
+        }
+        let mut items = Vec::new();
+        for (pi, (name, p)) in grp.params.iter().enumerate() {
+            let Some(g) = grads.grad(p) else {
+                done_params[gi][pi] = true;
+                continue;
+            };
+            if g.shape() != p.shape() {
+                return Err(crate::Error::Invalid(format!(
+                    "{what}: gradient of `{name}` is {:?}, parameter is {:?}",
+                    g.dims(),
+                    p.dims()
+                )));
+            }
+            if p.device().is_cpu() {
+                has_mixed_dev_group = true;
+            }
+            items.push(Item {
+                gi,
+                pi,
+                dev: p.device(),
+                op: step(gi, pi),
+                p,
+                g: GradRef::as_f32(g)?,
+                st: state(gi, pi),
+            });
+        }
+        if !items.is_empty() {
+            group_items.push((gi, items));
+        }
+    }
+
+    let total_items: usize = group_items.iter().map(|(_, v)| v.len()).sum();
+    if total_items == 0 {
+        return Ok(Some(StepDone { params: done_params }));
+    }
+
+    let mut globally_disjoint = !has_mixed_dev_group
+        && group_items
+            .iter()
+            .all(|(_, items)| items.iter().all(|it| !it.dev.is_cpu() && it.g.as_tensor().is_contiguous()));
+    if globally_disjoint {
+        let mut all_written: HashSet<usize> = HashSet::with_capacity(total_items * 3);
+        'check: for (_, items) in &group_items {
+            for it in items {
+                if !all_written.insert(storage_key(it.p)) {
+                    globally_disjoint = false;
+                    break 'check;
+                }
+                for s in &it.st {
+                    if !all_written.insert(storage_key(s)) {
+                        globally_disjoint = false;
+                        break 'check;
+                    }
+                }
+            }
+        }
+        if globally_disjoint {
+            'gcheck: for (_, items) in &group_items {
+                for it in items {
+                    if all_written.contains(&storage_key(it.g.as_tensor())) {
+                        globally_disjoint = false;
+                        break 'gcheck;
+                    }
+                }
+            }
+        }
+    }
+
+    if !globally_disjoint {
+        // Preserve strict canonical group order: dispatch contiguous uniform prefix groups and hand any
+        // remaining groups to the serial per-parameter fallback.
+        for (_, items) in &group_items {
+            let first = &items[0];
+            let uniform = !first.dev.is_cpu()
+                && items.iter().all(|it| {
+                    it.dev == first.dev
+                        && it.st.len() == first.st.len()
+                        && optim_step_bits_eq(&it.op, &first.op)
+                });
+            if !uniform {
+                break;
+            }
+            let ps: Vec<&Tensor> = items.iter().map(|it| it.p).collect();
+            let gr: Vec<&Tensor> = items.iter().map(|it| it.g.as_tensor()).collect();
+            let ss: Vec<Vec<&Tensor>> = items.iter().map(|it| it.st.clone()).collect();
+            if Tensor::optimizer_step_many_(&ps, &gr, &ss, &first.op)? {
+                for it in items {
+                    done_params[it.gi][it.pi] = true;
+                }
+            } else {
+                break;
+            }
+        }
+        return Ok(Some(StepDone { params: done_params }));
+    }
+
+    // Coalesce all disjoint non-CPU items by bitwise-identical (OptimStep, Device, state arity).
+    struct Bucket<'a> {
+        dev: Device,
+        state_arity: usize,
+        op: OptimStep,
+        coords: Vec<(usize, usize)>,
+        ps: Vec<&'a Tensor>,
+        gr: Vec<&'a Tensor>,
+        ss: Vec<Vec<&'a Tensor>>,
+    }
+    let mut buckets: Vec<Bucket<'_>> = Vec::new();
+    for (_, items) in &group_items {
+        for it in items {
+            let arity = it.st.len();
+            if let Some(b) = buckets
+                .iter_mut()
+                .find(|b| b.dev == it.dev && b.state_arity == arity && optim_step_bits_eq(&b.op, &it.op))
+            {
+                b.coords.push((it.gi, it.pi));
+                b.ps.push(it.p);
+                b.gr.push(it.g.as_tensor());
+                b.ss.push(it.st.clone());
+            } else {
+                buckets.push(Bucket {
+                    dev: it.dev,
+                    state_arity: arity,
+                    op: it.op,
+                    coords: vec![(it.gi, it.pi)],
+                    ps: vec![it.p],
+                    gr: vec![it.g.as_tensor()],
+                    ss: vec![it.st.clone()],
+                });
+            }
+        }
+    }
+    for b in &buckets {
+        if Tensor::optimizer_step_many_(&b.ps, &b.gr, &b.ss, &b.op)? {
+            for &(gi, pi) in &b.coords {
+                done_params[gi][pi] = true;
+            }
+        }
+    }
+    Ok(Some(StepDone { params: done_params }))
+}
+
 /// True if every tensor is a contiguous CPU `F32` tensor (the fused-kernel fast path applies).
 pub(crate) fn cpu_fast(ts: &[&Tensor]) -> bool {
     ts.iter().all(|t| t.device().is_cpu() && t.dtype() == DType::F32 && t.is_contiguous())

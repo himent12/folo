@@ -100,7 +100,7 @@ impl Trainer {
             mc.spd_stem = src.spd_stem;
             mc.plus = src.plus;
             mc.fullpad = src.fullpad;
-            if cfg.loss.mal_gamma > 0.0 {
+            if cfg.loss.uses_focal_bias_prior() {
                 mc.mal_bias_prior = Some(true);
             }
             Some(mc)
@@ -197,6 +197,17 @@ impl Trainer {
         let mut t = Self::build(cfg, data, opts, true, Some(&file.metadata().config))?;
         let ema = t.ema.as_mut().map(|e| e as &mut dyn EmaState);
         let r = file.resume(&t.model, t.opt.as_mut(), ema, Some(t.data.classes.clone()))?;
+        // Older AdamW checkpoints saved before `folo.optim.param_steps` existed restore every parameter's step
+        // count to `optim.step`. If the checkpoint was saved while the backbone was still frozen
+        // (`epoch <= freeze_backbone_epochs`), restore backbone counters to 0 so unfreezing gets `t = 1` bias
+        // correction (older checkpoints resumed past the freeze boundary keep the global-step fallback; FORMAT.md).
+        if c.optim.kind == OptimKind::AdamW
+            && c.optim.param_steps.is_empty()
+            && t.cfg.freeze_backbone_epochs > 0
+            && r.epoch <= t.cfg.freeze_backbone_epochs as u64
+        {
+            t.opt.reset_param_steps(&|name| name.starts_with("backbone."));
+        }
         let (want, got) = (t.sched.contract(), r.schedule.contract());
         if (want.epochs, want.steps_per_epoch, want.kind) != (got.epochs, got.steps_per_epoch, got.kind) {
             return Err(Error::Dataset(format!(
@@ -393,7 +404,7 @@ impl Trainer {
                     ModelConfig::new(cfg.scale()?, nc)?
                 };
                 mc.head = cfg.head.as_str().into();
-                if cfg.is_v2() && cfg.loss.mal_gamma > 0.0 {
+                if cfg.is_v2() && cfg.loss.uses_focal_bias_prior() {
                     mc.mal_bias_prior = Some(true);
                 }
                 mc
@@ -401,15 +412,16 @@ impl Trainer {
         };
         let mut init = Rng::seed(cfg.seed);
         let mut model = Detector::from_model_config(&mconf, &mut init)?;
-        // Safeguard #38: MAL requires focal bias prior b_0 = ln(0.01 / 0.99) = -4.59512 (not -11.54, which would
-        // collapse epoch-1 negative gradients via p_0^gamma ~ 3e-8). Always apply to freshly initialized heads so
-        // cross-class transfers (whose class bias is skipped by `transfer_from`) also start at -4.59512; same-class
-        // transfers and resumes overwrite it when loading weights.
-        if cfg.loss.mal_gamma > 0.0 {
-            const MAL_BIAS_PRIOR: f32 = -4.595_12;
+        // Safeguard #38: focal classification losses (MAL, VFL with vfl_gamma > 0, QFL with qfl_beta > 0) require
+        // the focal bias prior b_0 = ln(0.01 / 0.99) = -4.59512 (not -11.54, which would collapse epoch-1 negative
+        // gradients via p_0^gamma). Always apply to freshly initialized heads so cross-class transfers (whose class
+        // bias is skipped by `transfer_from`) also start at -4.59512; same-class transfers and resumes overwrite it
+        // when loading weights.
+        if cfg.loss.uses_focal_bias_prior() {
+            const FOCAL_BIAS_PRIOR: f32 = -4.595_12;
             for (name, p) in model.named_parameters() {
                 if is_cls_head_param(&name) && name.ends_with(".out.bias") {
-                    folo_nn::init::constant_(&p, MAL_BIAS_PRIOR)?;
+                    folo_nn::init::constant_(&p, FOCAL_BIAS_PRIOR)?;
                 }
             }
         }

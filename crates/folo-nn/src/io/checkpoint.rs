@@ -177,6 +177,12 @@ pub(crate) fn validate(file: &ModelFile) -> Result<CheckpointMeta> {
                 .into(),
         ));
     }
+    if !optim.param_steps.is_empty() && optim.kind != OptimKind::AdamW {
+        return Err(Error::Metadata(format!(
+            "folo.optim: `param_steps` on a `{}` contract",
+            optim.kind.as_str()
+        )));
+    }
 
     // Every model tensor is in exactly one group, and every group parameter is a model tensor.
     let model: BTreeSet<&str> = file.names(Namespace::Model).into_iter().collect();
@@ -214,6 +220,19 @@ pub(crate) fn validate(file: &ModelFile) -> Result<CheckpointMeta> {
             return Err(Error::Metadata(format!(
                 "folo.optim: `muon_depthwise` names `{p}` with shape {:?}, expected depthwise conv weight `[C > 1, 1, kH, kW]`",
                 info.shape
+            )));
+        }
+    }
+    for (p, &ps) in &optim.param_steps {
+        if !seen.contains(p.as_str()) {
+            return Err(Error::Metadata(format!(
+                "folo.optim: `param_steps` names `{p}`, which is not in any optimizer group"
+            )));
+        }
+        if ps > optim.step {
+            return Err(Error::Metadata(format!(
+                "folo.optim: `param_steps[{p}]` ({ps}) exceeds optimizer step ({})",
+                optim.step
             )));
         }
     }

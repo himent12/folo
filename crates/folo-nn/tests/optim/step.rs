@@ -318,3 +318,121 @@ fn large_multi_group_sgd_and_adamw_parallel_plan_is_exact() {
         }
     }
 }
+
+#[test]
+fn adamw_per_param_step_bias_correction_and_contract() {
+    // Parameter `bb` stays frozen (no grad) for 50 steps while `head` trains in the SAME group.
+    // When `bb` unfreezes, its first update must use t = 1 bias correction (matching a fresh AdamW),
+    // not t = 51 (which would overshoot by ~3x because sqrt(1 - 0.999^51) >> sqrt(1 - 0.999)).
+    let bb = param(&[1.0, -2.0]);
+    let head = param(&[0.5, 0.5]);
+    let grp = ParamGroup::new("decay", vec![("bb".into(), bb.clone()), ("head".into(), head.clone())])
+        .lr(0.01)
+        .momentum(0.9)
+        .weight_decay(0.05);
+    let mut opt = AdamW::new(vec![grp]).unwrap();
+
+    for _ in 0..50 {
+        opt.step(&grads_for(&head, &G1)).unwrap();
+    }
+    assert_eq!(opt.step_count(), 50);
+    assert_eq!(opt.param_step(0, 0), Some(0));
+    assert_eq!(opt.param_step(0, 1), Some(50));
+    assert_eq!(bb.to_vec::<f32>().unwrap(), [1.0, -2.0]);
+
+    // Contract records only the differing `param_steps` entry and round-trips through JSON + resume.
+    let c = opt.contract();
+    assert_eq!(c.param_steps.len(), 1);
+    assert_eq!(c.param_steps.get("bb"), Some(&0));
+    let json = serde_json::to_string(&c).unwrap();
+    let parsed: OptimContract = serde_json::from_str(&json).unwrap();
+    assert_eq!(parsed, c);
+
+    // Resume into a fresh AdamW and verify `bb`'s first unfrozen step matches a fresh 1-step AdamW bit-for-bit.
+    let bb_res = param(&[1.0, -2.0]);
+    let head_res = Tensor::from_vec(head.to_vec::<f32>().unwrap(), [2]).unwrap().requires_grad_();
+    let mut opt_res = AdamW::new(vec![
+        ParamGroup::new("decay", vec![("bb".into(), bb_res.clone()), ("head".into(), head_res.clone())])
+            .lr(0.01)
+            .momentum(0.9)
+            .weight_decay(0.05),
+    ])
+    .unwrap();
+    let st: std::collections::HashMap<String, Tensor> = opt.state_tensors().unwrap().into_iter().collect();
+    opt_res.apply_contract(&parsed).unwrap();
+    opt_res.load_state(parsed.step, &st).unwrap();
+    assert_eq!(opt_res.param_step(0, 0), Some(0));
+    assert_eq!(opt_res.param_step(0, 1), Some(50));
+
+    let bb_ref = param(&[1.0, -2.0]);
+    let mut opt_ref = AdamW::new(vec![
+        ParamGroup::new("decay", vec![("bb".into(), bb_ref.clone())])
+            .lr(0.01)
+            .momentum(0.9)
+            .weight_decay(0.05),
+    ])
+    .unwrap();
+
+    for g in [G1, G2] {
+        let mut both = grads_for(&bb, &g);
+        both.insert(&head, Tensor::from_slice(&g, [2]).unwrap());
+        opt.step(&both).unwrap();
+
+        let mut both_res = grads_for(&bb_res, &g);
+        both_res.insert(&head_res, Tensor::from_slice(&g, [2]).unwrap());
+        opt_res.step(&both_res).unwrap();
+
+        opt_ref.step(&grads_for(&bb_ref, &g)).unwrap();
+    }
+    let bits = |t: &Tensor| t.to_vec::<f32>().unwrap().into_iter().map(f32::to_bits).collect::<Vec<_>>();
+    assert_eq!(bits(&bb), bits(&bb_ref), "unfrozen param must match fresh AdamW bias correction");
+    assert_eq!(bits(&bb_res), bits(&bb_ref), "resumed AdamW must preserve per-param step count");
+    assert_eq!(bits(&head_res), bits(&head), "resumed head must match uninterrupted AdamW");
+    assert_eq!(opt.param_step(0, 0), Some(2));
+    assert_eq!(opt.param_step(0, 1), Some(52));
+
+    // Uniform AdamW omits `param_steps` from JSON for byte-identical compatibility with legacy checkpoints.
+    let uniform_json = serde_json::to_string(&opt_ref.contract()).unwrap();
+    assert!(!uniform_json.contains("param_steps"), "{uniform_json}");
+
+    // Reject unknown param name or step > optim.step without mutating groups, and reject `param_steps` on SGD.
+    let prev_lr = opt_res.groups()[0].base_lr;
+    let mut bad_unknown = parsed.clone();
+    bad_unknown.groups[0].lr = 0.777;
+    bad_unknown.param_steps.insert("nope".into(), 0);
+    assert!(opt_res.apply_contract(&bad_unknown).is_err());
+    assert_eq!(opt_res.groups()[0].base_lr, prev_lr, "failed apply_contract must not mutate groups");
+
+    let mut bad_gt = parsed.clone();
+    bad_gt.groups[0].lr = 0.888;
+    bad_gt.param_steps.insert("bb".into(), parsed.step + 1);
+    assert!(opt_res.apply_contract(&bad_gt).is_err());
+    assert_eq!(opt_res.groups()[0].base_lr, prev_lr, "failed apply_contract must not mutate groups");
+
+    // `load_state` rejects a step mismatch against stashed `param_steps` and clears stale overrides on error.
+    opt_res.apply_contract(&parsed).unwrap();
+    assert!(opt_res.load_state(10, &st).is_err(), "step != contract.step must fail");
+    let empty = std::collections::HashMap::new();
+    opt_res.load_state(0, &empty).unwrap();
+    assert_eq!(opt_res.step_count(), 0);
+    assert_eq!(opt_res.param_step(0, 0), Some(0));
+    assert_eq!(opt_res.param_step(0, 1), Some(0));
+
+    // Preflight gradient shapes in a mixed-step group: a malformed second gradient leaves the first param untouched.
+    let bb_before = bits(&bb);
+    let m0_before = bits(opt.moments(0, 0).unwrap().0);
+    let step_before = opt.step_count();
+    let ps0_before = opt.param_step(0, 0);
+    let mut bad_grads = grads_for(&bb, &G1);
+    bad_grads.insert(&head, Tensor::from_slice(&[1.0f32, 2.0, 3.0], [3]).unwrap());
+    assert!(opt.step(&bad_grads).is_err());
+    assert_eq!(bits(&bb), bb_before, "malformed later grad must not mutate earlier param");
+    assert_eq!(bits(opt.moments(0, 0).unwrap().0), m0_before, "malformed later grad must not mutate moments");
+    assert_eq!(opt.step_count(), step_before);
+    assert_eq!(opt.param_step(0, 0), ps0_before);
+
+    let mut sgd = Sgd::new(vec![ParamGroup::new("decay", vec![("bb".into(), param(&[1.0, -2.0]))])]).unwrap();
+    let mut sgd_c = sgd.contract();
+    sgd_c.param_steps.insert("bb".into(), 0);
+    assert!(sgd.apply_contract(&sgd_c).is_err());
+}

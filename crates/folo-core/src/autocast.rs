@@ -9,7 +9,9 @@
 //!   and bias themselves: its backward computes the input gradient in `F16` and writes the weight gradient
 //!   straight to `F32` ([`crate::backend::Backend::conv2d_backward_weight_as`]), so master weights never see an
 //!   `F16` gradient;
-//! - [`Tensor::matmul`](crate::Tensor::matmul) casts `F32` operands to `F16` (recorded casts);
+//! - [`Tensor::matmul`](crate::Tensor::matmul) runs the forward product in `F16` on non-recording `F16` copies
+//!   and records the op against the original operands: its backward computes gradients for any `F32` operand (such
+//!   as `Linear` master weights) in `F32` and keeps `F16` operands in `F16`;
 //! - [`Tensor::softmax`](crate::Tensor::softmax) and [`Tensor::log_softmax`](crate::Tensor::log_softmax) run an
 //!   `F16` input in `F32` (a recorded cast; the result is `F32`), as `torch.autocast` does: their backward cancels.
 //!

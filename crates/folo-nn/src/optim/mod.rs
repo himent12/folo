@@ -42,7 +42,7 @@ mod ortho;
 mod sgd;
 pub(crate) mod simd;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use folo_core::{Device, Grads, Tensor};
 use serde::{Deserialize, Serialize};
@@ -50,7 +50,8 @@ use serde::{Deserialize, Serialize};
 pub use adamw::AdamW;
 pub use agc::{AGC_DEFAULT_CLIP_FACTOR, AGC_DEFAULT_EPS, AgcStats, clip_grad_agc_tensor};
 pub(crate) use dispatch::{
-    GradRef, PAR_THRESHOLD, ParamPlan, cpu_fast, for_each_param_planned, step_many, storage_key,
+    GradRef, PAR_THRESHOLD, ParamPlan, cpu_fast, for_each_param_planned, step_many, step_many_per_param,
+    storage_key,
 };
 pub use grads::{DeviceUnscaleClip, GradAccumulator, global_grad_norm};
 pub use musgd::{MUON_SCALE, MuSgd, MuSgdWeights, is_muon_group};
@@ -314,6 +315,10 @@ pub trait Optimizer: Send {
     fn apply_contract(&mut self, c: &OptimContract) -> Result<()> {
         apply_group_contract(self, c)
     }
+
+    /// Reset per-parameter step counters (used by [`AdamW`] bias correction) to zero for every parameter whose
+    /// name satisfies `pred`. Optimizers without per-parameter step counters ignore this call.
+    fn reset_param_steps(&mut self, _pred: &dyn Fn(&str) -> bool) {}
 }
 
 /// The part of `folo.optim` every optimizer has: type, groups and step (no `musgd`).
@@ -327,6 +332,7 @@ fn group_contract<O: Optimizer + ?Sized>(o: &O) -> OptimContract {
         muon_ortho: None,
         muon_geo: None,
         muon_depthwise: Vec::new(),
+        param_steps: BTreeMap::new(),
     }
 }
 
@@ -366,6 +372,12 @@ fn apply_group_contract<O: Optimizer + ?Sized>(o: &mut O, c: &OptimContract) -> 
             "folo.optim: `muon_depthwise` is only valid on a `musgd` contract with `muon_geo: \"geo\"`"
                 .into(),
         ));
+    }
+    if !c.param_steps.is_empty() && kind != OptimKind::AdamW {
+        return Err(Error::Load(format!(
+            "folo.optim: a `{}` contract cannot have `param_steps`",
+            kind.as_str()
+        )));
     }
     check_param_sets(o.groups(), &c.groups)?;
     if !c.muon_depthwise.is_empty() {
@@ -436,6 +448,11 @@ pub struct OptimContract {
     /// Omitted when empty or in legacy mode so existing checkpoints stay byte-for-byte identical.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub muon_depthwise: Vec<String>,
+    /// Per-parameter step counts for `AdamW` parameters whose step differs from `step` (for example during or
+    /// after `freeze_backbone_epochs`). Omitted when every parameter shares `step` so existing checkpoints stay
+    /// byte-for-byte identical.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub param_steps: BTreeMap<String, u64>,
 }
 
 /// One group of `folo.optim`. Only the fields that apply to the optimizer type are present.
