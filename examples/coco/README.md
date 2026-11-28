@@ -38,7 +38,7 @@ behind the published YOLO11s (0.470) and YOLO26s (0.480), and the first full-sca
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="../../docs/img/charts/coco-curves-dark.svg">
-    <img src="../../docs/img/charts/coco-curves-light.svg" alt="Validation mAP50-95 after each epoch for the three COCO runs from scratch: folo-n reaches 0.310 after 50 epochs, folo-n v2 0.313 at epoch 62 of 300, where it is paused, and folo-s 0.412 after 56 epochs. Every curve is still rising at its last epoch." width="720">
+    <img src="../../docs/img/charts/coco-curves-light.svg" alt="Validation mAP50-95 after each epoch for the three COCO runs from scratch: folo-n reaches 0.310 after 50 epochs, folo-n v2 0.313 at epoch 62 of 300, where it is paused, and folo-s 0.412 after 56 epochs. Every curve is still rising at its last epoch." width="840">
   </picture>
 </p>
 
