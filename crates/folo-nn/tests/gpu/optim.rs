@@ -342,3 +342,118 @@ fn deferred_unscale_clip_and_live_finite_probe_match_sync() {
     let frozen = RunningStats::capture_training(&m).unwrap();
     assert!(matches!(frozen.prepare_live_finite_check().unwrap(), LiveFiniteCheck::Ready(true)));
 }
+
+#[test]
+fn mixed_step_adamw_gpu_coalescing_alias_and_preflight() {
+    let dev = gpu!();
+    let mut rng = Rng::seed(2029);
+
+    // 1. Mixed per-parameter step counts inside shared decay/bias groups (as after `freeze_backbone_epochs`
+    // with `backbone_lr_scale = 1.0`) stay GPU-batched via `step_many_per_param` and match CPU.
+    let mk_ps = |d: Device, vals: &[Vec<f32>]| -> Vec<Tensor> {
+        vals.iter()
+            .map(|v| {
+                Tensor::from_vec(v.clone(), [v.len()])
+                    .unwrap()
+                    .to_device(d)
+                    .unwrap()
+                    .detach()
+                    .requires_grad_()
+            })
+            .collect()
+    };
+    let init: Vec<Vec<f32>> = [32, 32, 16, 16]
+        .iter()
+        .map(|&n| Tensor::randn([n], 0.0, 0.5, &mut rng).to_vec::<f32>().unwrap())
+        .collect();
+    let cpu_ps = mk_ps(Device::Cpu, &init);
+    let gpu_ps = mk_ps(dev, &init);
+    let mk_groups = |ps: &[Tensor]| {
+        vec![
+            ParamGroup::new("decay", vec![("bb_w".into(), ps[0].clone()), ("hd_w".into(), ps[1].clone())])
+                .lr(0.01)
+                .momentum(0.9)
+                .weight_decay(0.02),
+            ParamGroup::new("bias", vec![("bb_b".into(), ps[2].clone()), ("hd_b".into(), ps[3].clone())])
+                .lr(0.01)
+                .momentum(0.9),
+        ]
+    };
+    let mut opt_c = AdamW::new(mk_groups(&cpu_ps)).unwrap();
+    let mut opt_g = AdamW::new(mk_groups(&gpu_ps)).unwrap();
+
+    // 20 frozen-backbone steps (only head params receive grads), then 5 joint steps with mixed step counts.
+    for s in 0..25 {
+        let mut gc = folo_core::Grads::default();
+        let mut gg = folo_core::Grads::default();
+        for (i, (cp, gp)) in cpu_ps.iter().zip(&gpu_ps).enumerate() {
+            if s < 20 && (i == 0 || i == 2) {
+                continue;
+            }
+            let g = Tensor::randn(cp.shape().clone(), 0.0, 0.2, &mut rng);
+            gc.insert(cp, g.clone());
+            gg.insert(gp, g.to_device(dev).unwrap());
+        }
+        opt_c.step(&gc).unwrap();
+        opt_g.step(&gg).unwrap();
+    }
+    assert_eq!(opt_g.param_step(0, 0), Some(5));
+    assert_eq!(opt_g.param_step(0, 1), Some(25));
+    for (i, (cp, gp)) in cpu_ps.iter().zip(&gpu_ps).enumerate() {
+        close(gp, cp, 1e-5, 1e-5, &format!("mixed-step AdamW param {i}"));
+    }
+
+    // 2. Malformed gradient on a later param in a mixed-step GPU group must fail in preflight without
+    // mutating earlier params, moments, or step counters.
+    let before_p0 = gpu_ps[0].to_vec::<f32>().unwrap();
+    let before_m0 = opt_g.moments(0, 0).unwrap().0.to_vec::<f32>().unwrap();
+    let mut bad = folo_core::Grads::default();
+    bad.insert(&gpu_ps[0], Tensor::ones([32]).to_device(dev).unwrap());
+    bad.insert(&gpu_ps[1], Tensor::ones([7]).to_device(dev).unwrap());
+    assert!(opt_g.step(&bad).is_err());
+    assert_eq!(gpu_ps[0].to_vec::<f32>().unwrap(), before_p0);
+    assert_eq!(opt_g.moments(0, 0).unwrap().0.to_vec::<f32>().unwrap(), before_m0);
+    assert_eq!(opt_g.step_count(), 25);
+    assert_eq!(opt_g.param_step(0, 0), Some(5));
+
+    // 3. Cross-group storage alias in mixed-step GPU AdamW preserves strict canonical order (matches CPU).
+    let a0_c = Tensor::from_slice(&[1.0f32, 2.0, 3.0, 4.0], [4]).unwrap().requires_grad_();
+    let a1_c = Tensor::from_slice(&[5.0f32, 6.0, 7.0, 8.0], [4]).unwrap().requires_grad_();
+    let a2_c = Tensor::from_slice(&[-1.0f32, 0.5, -0.5, 2.0], [4]).unwrap().requires_grad_();
+    let a0_g = a0_c.to_device(dev).unwrap().detach().requires_grad_();
+    let a1_g = a1_c.to_device(dev).unwrap().detach().requires_grad_();
+    let a2_g = a2_c.to_device(dev).unwrap().detach().requires_grad_();
+    let mk_alias = |p0: &Tensor, p1: &Tensor, p2: &Tensor| {
+        AdamW::new(vec![
+            ParamGroup::new("g0", vec![("p0".into(), p0.clone()), ("p1".into(), p1.clone())])
+                .lr(0.05)
+                .momentum(0.9),
+            ParamGroup::new("g1", vec![("p2".into(), p2.clone())]).lr(0.05).momentum(0.9),
+        ])
+        .unwrap()
+    };
+    let mut ac = mk_alias(&a0_c, &a1_c, &a2_c);
+    let mut ag = mk_alias(&a0_g, &a1_g, &a2_g);
+    let g_step = Tensor::from_slice(&[0.5f32, -0.5, 1.0, -1.0], [4]).unwrap();
+    // Advance p1 once so g0 has mixed step counts (p0 at 0, p1 at 1).
+    let mut gc0 = folo_core::Grads::default();
+    gc0.insert(&a1_c, g_step.clone());
+    let mut gg0 = folo_core::Grads::default();
+    gg0.insert(&a1_g, g_step.to_device(dev).unwrap());
+    ac.step(&gc0).unwrap();
+    ag.step(&gg0).unwrap();
+    // Now g1's gradient aliases g0's p0 storage.
+    let mut gc1 = folo_core::Grads::default();
+    gc1.insert(&a0_c, g_step.clone());
+    gc1.insert(&a1_c, g_step.clone());
+    gc1.insert(&a2_c, a0_c.detach());
+    let mut gg1 = folo_core::Grads::default();
+    gg1.insert(&a0_g, g_step.to_device(dev).unwrap());
+    gg1.insert(&a1_g, g_step.to_device(dev).unwrap());
+    gg1.insert(&a2_g, a0_g.detach());
+    ac.step(&gc1).unwrap();
+    ag.step(&gg1).unwrap();
+    close(&a0_g, &a0_c, 1e-5, 1e-5, "mixed-step alias p0");
+    close(&a1_g, &a1_c, 1e-5, 1e-5, "mixed-step alias p1");
+    close(&a2_g, &a2_c, 1e-5, 1e-5, "mixed-step alias p2");
+}

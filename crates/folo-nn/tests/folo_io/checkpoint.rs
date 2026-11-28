@@ -296,4 +296,44 @@ fn invalid_checkpoints_and_resume_mismatches() {
     e2.opt = Box::new(Sgd::new(groups).unwrap());
     let e = f.resume(&e2.model, e2.opt.as_mut(), Some(&mut e2.ema), None).unwrap_err().to_string();
     assert!(e.contains("parameter set"), "{e}");
+
+    // `folo.optim.param_steps` validation on open (`checkpoint::validate`).
+    let mut sgd_ps_map = map.clone();
+    let mut sgd_opt: Value = serde_json::from_str(&sgd_ps_map["folo.optim"]).unwrap();
+    sgd_opt["param_steps"] = serde_json::json!({ "backbone.stem.conv.weight": 0 });
+    sgd_ps_map.insert("folo.optim".into(), sgd_opt.to_string());
+    assert!(err(&sgd_ps_map, &tensors).contains("param_steps"));
+
+    let mut ar = new_run(OptimKind::AdamW, 12);
+    train_steps(&mut ar, 2);
+    let aparts = CheckpointParts {
+        model: &ar.model,
+        ema: Some(&ar.ema),
+        optimizer: ar.opt.as_ref(),
+        schedule: &ar.sched,
+        rng: &ar.rng,
+        epoch: 1,
+        best: BestState::default(),
+        train_config: &train,
+    };
+    let (amap, atensors) = checkpoint_contents(&meta(FileKind::Checkpoint, 3), &aparts).unwrap();
+    // Unknown parameter in `param_steps`.
+    let mut bad_unk = amap.clone();
+    let mut aopt: Value = serde_json::from_str(&bad_unk["folo.optim"]).unwrap();
+    aopt["param_steps"] = serde_json::json!({ "not.a.param": 0 });
+    bad_unk.insert("folo.optim".into(), aopt.to_string());
+    assert!(err(&bad_unk, &atensors).contains("param_steps"));
+    // `param_steps[p] > optim.step`.
+    let mut bad_gt = amap.clone();
+    let mut aopt2: Value = serde_json::from_str(&bad_gt["folo.optim"]).unwrap();
+    aopt2["param_steps"] = serde_json::json!({ "backbone.stem.conv.weight": 99 });
+    bad_gt.insert("folo.optim".into(), aopt2.to_string());
+    assert!(err(&bad_gt, &atensors).contains("exceeds optimizer step"));
+    // Valid `param_steps` opens cleanly.
+    let mut good_ps = amap.clone();
+    let mut aopt3: Value = serde_json::from_str(&good_ps["folo.optim"]).unwrap();
+    aopt3["param_steps"] = serde_json::json!({ "backbone.stem.conv.weight": 0 });
+    good_ps.insert("folo.optim".into(), aopt3.to_string());
+    let opened = rewrite(&good_ps, &atensors).unwrap();
+    assert_eq!(opened.checkpoint().unwrap().optim.param_steps.get("backbone.stem.conv.weight"), Some(&0));
 }

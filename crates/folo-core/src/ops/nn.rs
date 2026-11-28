@@ -100,42 +100,54 @@ impl Tensor {
         let b = x16.backend()?;
         let s = super::with_views([&x16, &y16], [&la, &lb], |[a, bv]| b.matmul(a, bv))?;
         let out = Tensor::wrap(s, shape_of(m, n), "matmul")?;
-        let (x, y) = (self.clone(), other.clone());
+        let (x_req, x_dt, x_shape, x_rank) =
+            (self.requires_grad(), self.dtype(), self.shape().clone(), self.rank());
+        let (y_req, y_dt, y_shape, y_rank) =
+            (other.requires_grad(), other.dtype(), other.shape().clone(), other.rank());
+        // Save only the F16 forward operands needed by backward so gradients match the actual F16-rounded forward
+        // graph (matching `conv2d_autocast`) without retaining the original F32 input buffers.
+        let saved_x16 = y_req.then_some(x16);
+        let saved_y16 = x_req.then_some(y16);
         Ok(out.track("matmul", &[self, other], move |g| {
-            let need_g32 = (x.requires_grad() && x.dtype() == DType::F32)
-                || (y.requires_grad() && y.dtype() == DType::F32);
+            let need_g32 = (x_req && x_dt == DType::F32) || (y_req && y_dt == DType::F32);
             let g32 = if need_g32 { Some(g.to_dtype(DType::F32)?) } else { None };
-            let ga = if !x.requires_grad() {
+            let ga = if !x_req {
                 None
-            } else if x.dtype() == DType::F32 {
-                let y32 = y.to_dtype(DType::F32)?;
-                Some(g32.as_ref().expect("g32").matmul_raw(&y32.t()?)?.sum_to(x.shape())?)
             } else {
-                let g16 = g.to_dtype(DType::F16)?;
-                Some(g16.matmul_raw(&y16.t()?)?.sum_to(x.shape())?)
-            };
-            let gb = if !y.requires_grad() {
-                None
-            } else if y.dtype() == DType::F32 {
-                let x32 = x.to_dtype(DType::F32)?;
-                let g32 = g32.as_ref().expect("g32");
-                if y.rank() == 2 && x.rank() > 2 {
-                    let rows: usize = x32.dims()[..x32.rank() - 1].iter().product();
-                    let xk = x32.contiguous()?.reshape([rows, k])?;
-                    let gn = g32.contiguous()?.reshape([rows, n])?;
-                    Some(xk.t()?.matmul_raw(&gn)?)
+                let y16 = saved_y16.as_ref().expect("saved_y16");
+                if x_dt == DType::F32 {
+                    let y32 = y16.to_dtype(DType::F32)?;
+                    Some(g32.as_ref().expect("g32").matmul_raw(&y32.t()?)?.sum_to(&x_shape)?)
                 } else {
-                    Some(x32.t()?.matmul_raw(g32)?.sum_to(y.shape())?)
+                    let g16 = g.to_dtype(DType::F16)?;
+                    Some(g16.matmul_raw(&y16.t()?)?.sum_to(&x_shape)?)
                 }
+            };
+            let gb = if !y_req {
+                None
             } else {
-                let g16 = g.to_dtype(DType::F16)?;
-                if y.rank() == 2 && x.rank() > 2 {
-                    let rows: usize = x16.dims()[..x16.rank() - 1].iter().product();
-                    let xk = x16.contiguous()?.reshape([rows, k])?;
-                    let gn = g16.contiguous()?.reshape([rows, n])?;
-                    Some(xk.t()?.matmul_raw(&gn)?)
+                let x16 = saved_x16.as_ref().expect("saved_x16");
+                if y_dt == DType::F32 {
+                    let x32 = x16.to_dtype(DType::F32)?;
+                    let g32 = g32.as_ref().expect("g32");
+                    if y_rank == 2 && x_rank > 2 {
+                        let rows: usize = x32.dims()[..x32.rank() - 1].iter().product();
+                        let xk = x32.reshape([rows, k])?;
+                        let gn = g32.reshape([rows, n])?;
+                        Some(xk.t()?.matmul_raw(&gn)?)
+                    } else {
+                        Some(x32.t()?.matmul_raw(g32)?.sum_to(&y_shape)?)
+                    }
                 } else {
-                    Some(x16.t()?.matmul_raw(&g16)?.sum_to(y.shape())?)
+                    let g16 = g.to_dtype(DType::F16)?;
+                    if y_rank == 2 && x_rank > 2 {
+                        let rows: usize = x16.dims()[..x16.rank() - 1].iter().product();
+                        let xk = x16.reshape([rows, k])?;
+                        let gn = g16.reshape([rows, n])?;
+                        Some(xk.t()?.matmul_raw(&gn)?)
+                    } else {
+                        Some(x16.t()?.matmul_raw(&g16)?.sum_to(&y_shape)?)
+                    }
                 }
             };
             Ok(grads![ga, gb])

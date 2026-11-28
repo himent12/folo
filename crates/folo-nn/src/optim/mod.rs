@@ -50,7 +50,8 @@ use serde::{Deserialize, Serialize};
 pub use adamw::AdamW;
 pub use agc::{AGC_DEFAULT_CLIP_FACTOR, AGC_DEFAULT_EPS, AgcStats, clip_grad_agc_tensor};
 pub(crate) use dispatch::{
-    GradRef, PAR_THRESHOLD, ParamPlan, cpu_fast, for_each_param_planned, step_many, storage_key,
+    GradRef, PAR_THRESHOLD, ParamPlan, cpu_fast, for_each_param_planned, step_many, step_many_per_param,
+    storage_key,
 };
 pub use grads::{DeviceUnscaleClip, GradAccumulator, global_grad_norm};
 pub use musgd::{MUON_SCALE, MuSgd, MuSgdWeights, is_muon_group};
@@ -314,6 +315,10 @@ pub trait Optimizer: Send {
     fn apply_contract(&mut self, c: &OptimContract) -> Result<()> {
         apply_group_contract(self, c)
     }
+
+    /// Reset per-parameter step counters (used by [`AdamW`] bias correction) to zero for every parameter whose
+    /// name satisfies `pred`. Optimizers without per-parameter step counters ignore this call.
+    fn reset_param_steps(&mut self, _pred: &dyn Fn(&str) -> bool) {}
 }
 
 /// The part of `folo.optim` every optimizer has: type, groups and step (no `musgd`).

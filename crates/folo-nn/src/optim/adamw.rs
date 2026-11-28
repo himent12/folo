@@ -9,7 +9,7 @@ use super::cautious::{adamw_cautious_slice, cautious_mask_and_scale_tensor};
 use super::simd::adamw_slice;
 use super::{
     GradSource, OptimContract, OptimKind, Optimizer, ParamGroup, ParamPlan, apply_group_contract, cpu_fast,
-    for_each_param_planned, group_contract, step_many, take_state, validate_groups,
+    for_each_param_planned, group_contract, step_many_per_param, take_state, validate_groups,
 };
 use crate::{Error, Result};
 
@@ -28,10 +28,10 @@ pub struct AdamW {
     state: Vec<Vec<(Tensor, Tensor)>>,
     /// Completed updates per parameter (for accurate bias correction when parameters are selectively frozen).
     param_steps: Vec<Vec<u64>>,
-    /// Pending per-parameter step overrides validated in [`Optimizer::apply_contract`] for [`Optimizer::load_state`].
-    loaded_param_steps: Option<BTreeMap<String, u64>>,
+    /// Pending `(contract_step, param_steps)` overrides validated in [`Optimizer::apply_contract`] for
+    /// [`Optimizer::load_state`].
+    loaded_param_steps: Option<(u64, BTreeMap<String, u64>)>,
     plan: ParamPlan,
-    coefs: Vec<Coef>,
     step: u64,
 }
 
@@ -42,8 +42,7 @@ impl AdamW {
         let state = zero_state(&groups)?;
         let param_steps = groups.iter().map(|g| vec![0; g.params.len()]).collect();
         let plan = ParamPlan::from_groups(&groups);
-        let coefs = Vec::with_capacity(groups.len());
-        Ok(AdamW { groups, state, param_steps, loaded_param_steps: None, plan, coefs, step: 0 })
+        Ok(AdamW { groups, state, param_steps, loaded_param_steps: None, plan, step: 0 })
     }
 
     /// `(exp_avg, exp_avg_sq)` of a parameter.
@@ -204,43 +203,23 @@ impl Optimizer for AdamW {
 
     fn step(&mut self, grads: &dyn GradSource) -> Result<()> {
         self.plan.sync(&self.groups);
-        let mut group_uniform_step: Vec<Option<u64>> = Vec::with_capacity(self.groups.len());
-        let mut all_groups_uniform = true;
-        for (gi, g) in self.groups.iter().enumerate() {
-            let mut uniform: Option<u64> = None;
-            let mut mixed = false;
-            for (pi, (_, p)) in g.params.iter().enumerate() {
-                if grads.grad(p).is_none() {
-                    continue;
+        // Preflight every active gradient shape before any parameter or moment buffer is mutated.
+        for g in &self.groups {
+            for (name, p) in &g.params {
+                if let Some(grad) = grads.grad(p)
+                    && grad.shape() != p.shape()
+                {
+                    return Err(Error::Invalid(format!(
+                        "adamw: gradient of `{name}` is {:?}, parameter is {:?}",
+                        grad.dims(),
+                        p.dims()
+                    )));
                 }
-                let s = self.param_steps[gi][pi];
-                match uniform {
-                    None => uniform = Some(s),
-                    Some(prev) if prev != s => {
-                        mixed = true;
-                        break;
-                    }
-                    Some(_) => {}
-                }
-            }
-            if mixed {
-                all_groups_uniform = false;
-                group_uniform_step.push(None);
-            } else {
-                group_uniform_step.push(uniform);
             }
         }
-        self.coefs.clear();
-        self.coefs.extend(
-            self.groups
-                .iter()
-                .enumerate()
-                .map(|(gi, g)| coef_for(g, group_uniform_step[gi].unwrap_or(self.step))),
-        );
-        let (groups, state, param_steps, plan, coefs) =
-            (&self.groups, &self.state, &self.param_steps, &self.plan, &self.coefs);
-        let adamw = |gi: usize| {
-            let c = &coefs[gi];
+        let (groups, state, param_steps, plan) = (&self.groups, &self.state, &self.param_steps, &self.plan);
+        let adamw = |gi: usize, pi: usize| {
+            let c = coef_for(&groups[gi], param_steps[gi][pi]);
             OptimStep::AdamW {
                 decay: c.decay,
                 beta1: c.b1,
@@ -252,32 +231,23 @@ impl Optimizer for AdamW {
                 eps: c.eps,
             }
         };
-        let done = if groups.iter().any(|g| g.cautious) || !all_groups_uniform {
+        let done = if groups.iter().any(|g| g.cautious) {
             None
         } else {
-            step_many("adamw", groups, grads, adamw, |gi, pi| vec![&state[gi][pi].0, &state[gi][pi].1])?
+            step_many_per_param("adamw", groups, grads, adamw, |gi, pi| {
+                vec![&state[gi][pi].0, &state[gi][pi].1]
+            })?
         };
-        if done.as_ref().is_none_or(|d| d.iter().any(|&v| !v)) {
+        if done.as_ref().is_none_or(|d| !d.all_done()) {
             for_each_param_planned(plan, groups, grads, |gi, pi| {
-                if done.as_ref().is_some_and(|d| d[gi]) {
+                if done.as_ref().is_some_and(|d| d.is_done(gi, pi)) {
                     return Ok(());
                 }
-                let (name, p) = &groups[gi].params[pi];
+                let (_, p) = &groups[gi].params[pi];
                 let Some(g) = grads.grad(p) else { return Ok(()) };
-                if g.shape() != p.shape() {
-                    return Err(Error::Invalid(format!(
-                        "adamw: gradient of `{name}` is {:?}, parameter is {:?}",
-                        g.dims(),
-                        p.dims()
-                    )));
-                }
                 let (m, v) = &state[gi][pi];
-                if group_uniform_step[gi].is_some() {
-                    update(p, g, m, v, &coefs[gi])
-                } else {
-                    let c = coef_for(&groups[gi], param_steps[gi][pi]);
-                    update(p, g, m, v, &c)
-                }
+                let c = coef_for(&groups[gi], param_steps[gi][pi]);
+                update(p, g, m, v, &c)
             })?;
         }
         for (gi, g) in self.groups.iter().enumerate() {
@@ -308,8 +278,7 @@ impl Optimizer for AdamW {
     }
 
     fn apply_contract(&mut self, c: &OptimContract) -> Result<()> {
-        apply_group_contract(self, c)?;
-        if !c.param_steps.is_empty() {
+        if c.kind == OptimKind::AdamW && !c.param_steps.is_empty() {
             let known: HashSet<&str> =
                 self.groups.iter().flat_map(|g| g.params.iter().map(|(n, _)| n.as_str())).collect();
             for (name, &s) in &c.param_steps {
@@ -325,11 +294,20 @@ impl Optimizer for AdamW {
                     )));
                 }
             }
-            self.loaded_param_steps = Some(c.param_steps.clone());
-        } else {
-            self.loaded_param_steps = None;
         }
+        apply_group_contract(self, c)?;
+        self.loaded_param_steps = (!c.param_steps.is_empty()).then(|| (c.step, c.param_steps.clone()));
         Ok(())
+    }
+
+    fn reset_param_steps(&mut self, pred: &dyn Fn(&str) -> bool) {
+        for (g, steps) in self.groups.iter().zip(&mut self.param_steps) {
+            for ((name, _), s) in g.params.iter().zip(steps.iter_mut()) {
+                if pred(name) {
+                    *s = 0;
+                }
+            }
+        }
     }
 
     fn state_tensors(&self) -> Result<Vec<(String, Tensor)>> {
@@ -344,6 +322,22 @@ impl Optimizer for AdamW {
     }
 
     fn load_state(&mut self, step: u64, state: &HashMap<String, Tensor>) -> Result<()> {
+        // Consume any stashed contract overrides up front so a failed load never leaves stale overrides armed.
+        let overrides = self.loaded_param_steps.take();
+        if let Some((expected_step, ref map)) = overrides {
+            if expected_step != step {
+                return Err(Error::Load(format!(
+                    "AdamW state: step ({step}) disagrees with contract step ({expected_step}) for `param_steps`"
+                )));
+            }
+            for (name, &s) in map {
+                if s > step {
+                    return Err(Error::Load(format!(
+                        "AdamW state: `param_steps[{name}]` ({s}) exceeds step ({step})"
+                    )));
+                }
+            }
+        }
         let mut problems = Vec::new();
         let mut loaded = Vec::new();
         for (gi, g) in self.groups.iter().enumerate() {
@@ -365,14 +359,15 @@ impl Optimizer for AdamW {
             let dst = if k == 0 { m } else { v };
             dst.copy_from(&t.to_device(dst.device())?)?;
         }
-        let overrides = self.loaded_param_steps.take();
         self.param_steps = self
             .groups
             .iter()
             .map(|g| {
                 g.params
                     .iter()
-                    .map(|(name, _)| overrides.as_ref().and_then(|m| m.get(name).copied()).unwrap_or(step))
+                    .map(|(name, _)| {
+                        overrides.as_ref().and_then(|(_, m)| m.get(name).copied()).unwrap_or(step)
+                    })
                     .collect()
             })
             .collect();

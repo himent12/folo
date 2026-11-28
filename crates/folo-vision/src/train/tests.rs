@@ -677,23 +677,39 @@ fn vfl_and_qfl_initialize_focal_bias_prior() {
     use crate::loss::{ClsLossKind, LossConfig};
     use folo_data::synthetic::{SyntheticConfig, SyntheticDataset};
 
-    let shapes = SyntheticConfig {
-        images: 4,
-        classes: vec!["circle".into(), "square".into()],
-        imgsz: 64,
-        seed: 7,
-        val_fraction: 0.5,
-        ..SyntheticConfig::default()
-    };
-    let make_data = || {
+    let make_data = |classes: &[&str]| {
+        let shapes = SyntheticConfig {
+            images: 4,
+            classes: classes.iter().map(|s| (*s).into()).collect(),
+            imgsz: 64,
+            seed: 7,
+            val_fraction: 0.5,
+            ..SyntheticConfig::default()
+        };
         let split = |s| Arc::new(SyntheticDataset::new(shapes.clone(), s).unwrap());
         TrainData {
             train: split(folo_data::Split::Train),
             val: split(folo_data::Split::Val),
-            classes: shapes.classes.clone(),
+            classes: shapes.classes,
         }
     };
     const FOCAL_PRIOR: f32 = -4.595_12;
+    const V1_CLS_BIASES: [(&str, u32); 6] = [
+        ("head.cls.p3.out.bias", 8),
+        ("head.cls.p4.out.bias", 16),
+        ("head.cls.p5.out.bias", 32),
+        ("head.o2o.cls.p3.out.bias", 8),
+        ("head.o2o.cls.p4.out.bias", 16),
+        ("head.o2o.cls.p5.out.bias", 32),
+    ];
+    const V2_CLS_BIASES: [(&str, u32); 6] = [
+        ("head.cls.p3.out.bias", 8),
+        ("head.cls.p4.out.bias", 16),
+        ("head.cls.p5.out.bias", 32),
+        ("head.o2o.p3.cls.out.bias", 8),
+        ("head.o2o.p4.cls.out.bias", 16),
+        ("head.o2o.p5.cls.out.bias", 32),
+    ];
     let cases = [
         ("folo-n", LossConfig { cls_loss: ClsLossKind::Vfl, vfl_gamma: 2.0, ..LossConfig::default() }, true),
         ("folo2-n", LossConfig { cls_loss: ClsLossKind::Vfl, vfl_gamma: 2.0, ..LossConfig::default() }, true),
@@ -706,6 +722,7 @@ fn vfl_and_qfl_initialize_focal_bias_prior() {
     for (arch, loss, expect_focal) in cases {
         let cfg = TrainConfig {
             arch: arch.into(),
+            head: crate::model::HeadMode::O2o,
             epochs: 1,
             batch: 2,
             imgsz: 64,
@@ -715,34 +732,90 @@ fn vfl_and_qfl_initialize_focal_bias_prior() {
             augment: folo_data::AugmentConfig::none(),
             ..TrainConfig::default()
         };
-        let t = Trainer::new(cfg, make_data(), TrainOptions::default()).unwrap();
-        let mut checked = 0usize;
-        for (name, p) in t.detector().named_parameters() {
-            if super::setup::is_cls_head_param(&name) && name.ends_with(".out.bias") {
-                let vals = p.to_vec::<f32>().unwrap();
-                checked += 1;
-                if expect_focal {
-                    assert!(
-                        vals.iter().all(|v| (v - FOCAL_PRIOR).abs() < 1e-5),
-                        "{arch} {loss:?} `{name}` expected focal prior {FOCAL_PRIOR}, got {vals:?}"
-                    );
-                } else {
-                    let stride = if name.contains(".p3.") {
-                        8
-                    } else if name.contains(".p4.") {
-                        16
-                    } else {
-                        32
-                    };
-                    let bce_prior = folo_nn::init::cls_bias_prior(2, stride);
-                    assert!(
-                        vals.iter().all(|v| (v - bce_prior).abs() < 1e-5),
-                        "{arch} {loss:?} `{name}` should keep standard BCE prior {bce_prior}, got {vals:?}"
-                    );
-                }
-            }
+        let t = Trainer::new(cfg, make_data(&["circle", "square"]), TrainOptions::default()).unwrap();
+        let params: std::collections::HashMap<_, _> = t.detector().named_parameters().into_iter().collect();
+        let expected = if arch == "folo2-n" { &V2_CLS_BIASES } else { &V1_CLS_BIASES };
+        for &(name, stride) in expected {
+            let vals = params
+                .get(name)
+                .unwrap_or_else(|| panic!("{arch}: missing `{name}`"))
+                .to_vec::<f32>()
+                .unwrap();
+            let want = if expect_focal { FOCAL_PRIOR } else { folo_nn::init::cls_bias_prior(2, stride) };
+            assert!(
+                vals.iter().all(|v| (v - want).abs() < 1e-5),
+                "{arch} {loss:?} `{name}` expected {want}, got {vals:?}"
+            );
         }
-        assert!(checked > 0, "{arch}: expected at least one cls head .out.bias");
+    }
+
+    // Cross-class `--weights` transfer keeps focal bias prior on skipped cls heads; same-class transfer and
+    // checkpoint resume preserve the loaded/saved bias values.
+    let dir = folo_test_support::TestDir::new("focal-bias-transfer");
+    let src_w = dir.join("src.folo");
+    let mut base_cfg = TrainConfig {
+        arch: "folo-n".into(),
+        head: crate::model::HeadMode::O2o,
+        epochs: 2,
+        batch: 2,
+        imgsz: 64,
+        device: "cpu".into(),
+        workers: 0,
+        loss: LossConfig { cls_loss: ClsLossKind::Vfl, vfl_gamma: 2.0, ..LossConfig::default() },
+        augment: folo_data::AugmentConfig::none(),
+        ..TrainConfig::default()
+    };
+    let src =
+        Trainer::new(base_cfg.clone(), make_data(&["circle", "square"]), TrainOptions::default()).unwrap();
+    for &(name, _) in &V1_CLS_BIASES {
+        let p = src.detector().named_parameters().into_iter().find(|(n, _)| n == name).unwrap().1;
+        folo_nn::init::constant_(&p, -1.25).unwrap();
+    }
+    folo_nn::io::save_weights(&src_w, &src.detector().metadata().unwrap(), src.detector()).unwrap();
+
+    // Cross-class transfer (3 classes vs 2): cls head is skipped and keeps FOCAL_PRIOR.
+    let t_x = Trainer::new(
+        base_cfg.clone(),
+        make_data(&["circle", "square", "triangle"]),
+        TrainOptions { weights: Some(src_w.clone()), ..TrainOptions::default() },
+    )
+    .unwrap();
+    for &(name, _) in &V1_CLS_BIASES {
+        let p = t_x.detector().named_parameters().into_iter().find(|(n, _)| n == name).unwrap().1;
+        assert!(p.to_vec::<f32>().unwrap().iter().all(|v| (v - FOCAL_PRIOR).abs() < 1e-5));
+    }
+
+    // Same-class transfer: loaded -1.25 overwrites FOCAL_PRIOR.
+    let t_same = Trainer::new(
+        base_cfg.clone(),
+        make_data(&["circle", "square"]),
+        TrainOptions { weights: Some(src_w), ..TrainOptions::default() },
+    )
+    .unwrap();
+    for &(name, _) in &V1_CLS_BIASES {
+        let p = t_same.detector().named_parameters().into_iter().find(|(n, _)| n == name).unwrap().1;
+        assert!(p.to_vec::<f32>().unwrap().iter().all(|v| (v + 1.25).abs() < 1e-5));
+    }
+
+    // Checkpoint resume keeps saved cls biases untouched.
+    let ckpt = dir.join("last.folo");
+    base_cfg.epochs = 2;
+    let t_ck = Trainer::new(base_cfg, make_data(&["circle", "square"]), TrainOptions::default()).unwrap();
+    for &(name, _) in &V1_CLS_BIASES {
+        let p = t_ck.detector().named_parameters().into_iter().find(|(n, _)| n == name).unwrap().1;
+        folo_nn::init::constant_(&p, -2.5).unwrap();
+    }
+    t_ck.save_checkpoint(&ckpt).unwrap();
+    let t_res = Trainer::resume(
+        &ckpt,
+        make_data(&["circle", "square"]),
+        TrainOptions::default(),
+        ResumeOverrides::default(),
+    )
+    .unwrap();
+    for &(name, _) in &V1_CLS_BIASES {
+        let p = t_res.detector().named_parameters().into_iter().find(|(n, _)| n == name).unwrap().1;
+        assert!(p.to_vec::<f32>().unwrap().iter().all(|v| (v + 2.5).abs() < 1e-5));
     }
 }
 
@@ -770,20 +843,132 @@ fn pc_pema_uses_warmup_effective_lf() {
         imgsz: 64,
         device: "cpu".into(),
         optimizer: OptimizerChoice::Adamw,
-        lr0: 0.002,
+        lr0: 0.1,
         warmup_epochs: 3.0,
         ema_mode: folo_nn::EmaMode::Power,
         workers: 0,
         augment: folo_data::AugmentConfig::none(),
         ..TrainConfig::default()
     };
-    let t = Trainer::new(cfg, data, TrainOptions::default()).unwrap();
+    let mut t = Trainer::new(cfg, data, TrainOptions::default()).unwrap();
     let power = t.ema.as_ref().unwrap().contract().power.expect("PC-PEMA config");
-    assert!(t.sched.warmup_iters() > 1);
-    let step = 1u64;
-    let lf_raw = t.sched.lf(step);
-    let lf_eff = t.sched.effective_lf(step);
-    assert!(lf_eff < lf_raw * 0.5, "warmup effective_lf ({lf_eff}) should be well below raw lf ({lf_raw})");
-    // Using u = 5 (u > 1 so decay > 0): lower effective_lf during warmup must yield a smaller decay.
-    assert!(power.decay_at(5, lf_eff) < power.decay_at(5, lf_raw));
+    assert!(t.sched.warmup_iters() > 2);
+
+    // Run two warmup optimizer steps on a single parameter: step 0 has u = 1 (decay = 0, shadow copies model);
+    // step 1 has u = 2 (decay > 0) while still inside warmup, so shadow must match `effective_lf(1)`, not `lf(1)`.
+    let p0 = t.model.parameters()[0].clone();
+    let step_once = |tr: &mut Trainer, p: &folo_core::Tensor| {
+        let g = folo_core::Tensor::full(p.dims(), 0.25f32);
+        let grads = p.mul(&g).unwrap().sum_all().unwrap().backward().unwrap();
+        tr.acc.add_owned(grads).unwrap();
+        tr.optimizer_step(0, 0).unwrap();
+    };
+    step_once(&mut t, &p0);
+    let ema_after_1 = t.ema.as_ref().unwrap().module().parameters()[0].to_vec::<f32>().unwrap();
+    let lf_raw = t.sched.lf(1);
+    let lf_eff = t.sched.effective_lf(1);
+    assert!(lf_eff < lf_raw * 0.5);
+
+    step_once(&mut t, &p0);
+    let live_after_2 = p0.to_vec::<f32>().unwrap();
+    let ema_after_2 = t.ema.as_ref().unwrap().module().parameters()[0].to_vec::<f32>().unwrap();
+    let d_eff = power.decay_at(2, lf_eff) as f32;
+    let d_raw = power.decay_at(2, lf_raw) as f32;
+    assert!(d_eff < d_raw);
+    let mut saw_diff = false;
+    for ((&prev, &live), &got) in ema_after_1.iter().zip(&live_after_2).zip(&ema_after_2) {
+        let want_eff = d_eff * prev + (1.0 - d_eff) * live;
+        let want_raw = d_raw * prev + (1.0 - d_raw) * live;
+        assert!((got - want_eff).abs() < 1e-6, "EMA shadow {got} must match effective_lf decay {want_eff}");
+        if (want_eff - want_raw).abs() > 1e-6 {
+            assert!((got - want_raw).abs() > 1e-6);
+            saw_diff = true;
+        }
+    }
+    assert!(saw_diff, "parameter must move on warmup step 2 so effective_lf vs lf decay is observable");
+}
+
+#[test]
+fn adamw_freeze_backbone_checkpoint_and_legacy_resume() {
+    use folo_data::synthetic::{SyntheticConfig, SyntheticDataset};
+    let dir = folo_test_support::TestDir::new("adamw-freeze-resume");
+    let shapes = SyntheticConfig {
+        images: 4,
+        classes: vec!["circle".into(), "square".into()],
+        imgsz: 64,
+        seed: 13,
+        val_fraction: 0.5,
+        ..SyntheticConfig::default()
+    };
+    let make_data = || {
+        let split = |s| Arc::new(SyntheticDataset::new(shapes.clone(), s).unwrap());
+        TrainData {
+            train: split(folo_data::Split::Train),
+            val: split(folo_data::Split::Val),
+            classes: shapes.classes.clone(),
+        }
+    };
+    let cfg = TrainConfig {
+        arch: "folo-n".into(),
+        epochs: 2,
+        batch: 2,
+        nbs: 2,
+        imgsz: 64,
+        device: "cpu".into(),
+        optimizer: OptimizerChoice::Adamw,
+        freeze_backbone_epochs: 1,
+        workers: 0,
+        augment: folo_data::AugmentConfig::none(),
+        ..TrainConfig::default()
+    };
+    let run_dir = dir.join("run");
+    let mut t = Trainer::new(
+        cfg,
+        make_data(),
+        TrainOptions { run_dir: Some(run_dir.clone()), ..TrainOptions::default() },
+    )
+    .unwrap();
+    // Run epoch 0 (backbone frozen) and save checkpoint at epoch 1 == freeze_backbone_epochs.
+    let mut clock = super::epoch::Clock::default();
+    t.train_epoch(0, &mut clock).unwrap();
+    t.epoch = 1;
+    let ckpt = dir.join("epoch1.folo");
+    t.save_checkpoint(&ckpt).unwrap();
+
+    // New checkpoint writes `param_steps` with 0 for every `backbone.*` parameter.
+    let f = folo_nn::io::ModelFile::open(&ckpt).unwrap();
+    let oc = &f.checkpoint().unwrap().optim;
+    assert!(oc.step > 0);
+    assert!(!oc.param_steps.is_empty());
+    assert!(oc.param_steps.iter().all(|(k, &v)| k.starts_with("backbone.") && v == 0));
+
+    // Legacy checkpoint without `param_steps` saved at epoch 1 <= freeze_backbone_epochs restores backbone
+    // counters to 0 on `Trainer::resume`.
+    let legacy_ckpt = dir.join("legacy-epoch1.folo");
+    let mut meta = f.metadata().clone();
+    let mut optim_v: serde_json::Value = serde_json::from_str(&meta.extra["folo.optim"]).unwrap();
+    optim_v.as_object_mut().unwrap().remove("param_steps");
+    meta.extra.insert("folo.optim".into(), optim_v.to_string());
+    let tensors: Vec<(String, folo_core::Tensor)> = f
+        .names(folo_nn::io::Namespace::Model)
+        .into_iter()
+        .chain(f.names(folo_nn::io::Namespace::Ema))
+        .chain(f.names(folo_nn::io::Namespace::Optim))
+        .chain(f.names(folo_nn::io::Namespace::Sched))
+        .map(|n| (n.to_string(), f.tensor(n).unwrap()))
+        .collect();
+    let mut hdr = meta.to_map();
+    hdr.insert("folo.optim".into(), optim_v.to_string());
+    folo_nn::io::safetensors::write_file(&legacy_ckpt, Some(&hdr), &tensors).unwrap();
+    drop(f);
+
+    let t_res =
+        Trainer::resume(&legacy_ckpt, make_data(), TrainOptions::default(), ResumeOverrides::default())
+            .unwrap();
+    let res_oc = t_res.opt.contract();
+    assert!(
+        !res_oc.param_steps.is_empty(),
+        "legacy resume during freeze must reset backbone param_steps to 0"
+    );
+    assert!(res_oc.param_steps.iter().all(|(k, &v)| k.starts_with("backbone.") && v == 0));
 }

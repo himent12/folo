@@ -395,14 +395,41 @@ fn adamw_per_param_step_bias_correction_and_contract() {
     let uniform_json = serde_json::to_string(&opt_ref.contract()).unwrap();
     assert!(!uniform_json.contains("param_steps"), "{uniform_json}");
 
-    // Reject unknown param name or step > optim.step, and reject `param_steps` on SGD.
+    // Reject unknown param name or step > optim.step without mutating groups, and reject `param_steps` on SGD.
+    let prev_lr = opt_res.groups()[0].base_lr;
     let mut bad_unknown = parsed.clone();
+    bad_unknown.groups[0].lr = 0.777;
     bad_unknown.param_steps.insert("nope".into(), 0);
     assert!(opt_res.apply_contract(&bad_unknown).is_err());
+    assert_eq!(opt_res.groups()[0].base_lr, prev_lr, "failed apply_contract must not mutate groups");
 
     let mut bad_gt = parsed.clone();
+    bad_gt.groups[0].lr = 0.888;
     bad_gt.param_steps.insert("bb".into(), parsed.step + 1);
     assert!(opt_res.apply_contract(&bad_gt).is_err());
+    assert_eq!(opt_res.groups()[0].base_lr, prev_lr, "failed apply_contract must not mutate groups");
+
+    // `load_state` rejects a step mismatch against stashed `param_steps` and clears stale overrides on error.
+    opt_res.apply_contract(&parsed).unwrap();
+    assert!(opt_res.load_state(10, &st).is_err(), "step != contract.step must fail");
+    let empty = std::collections::HashMap::new();
+    opt_res.load_state(0, &empty).unwrap();
+    assert_eq!(opt_res.step_count(), 0);
+    assert_eq!(opt_res.param_step(0, 0), Some(0));
+    assert_eq!(opt_res.param_step(0, 1), Some(0));
+
+    // Preflight gradient shapes in a mixed-step group: a malformed second gradient leaves the first param untouched.
+    let bb_before = bits(&bb);
+    let m0_before = bits(opt.moments(0, 0).unwrap().0);
+    let step_before = opt.step_count();
+    let ps0_before = opt.param_step(0, 0);
+    let mut bad_grads = grads_for(&bb, &G1);
+    bad_grads.insert(&head, Tensor::from_slice(&[1.0f32, 2.0, 3.0], [3]).unwrap());
+    assert!(opt.step(&bad_grads).is_err());
+    assert_eq!(bits(&bb), bb_before, "malformed later grad must not mutate earlier param");
+    assert_eq!(bits(opt.moments(0, 0).unwrap().0), m0_before, "malformed later grad must not mutate moments");
+    assert_eq!(opt.step_count(), step_before);
+    assert_eq!(opt.param_step(0, 0), ps0_before);
 
     let mut sgd = Sgd::new(vec![ParamGroup::new("decay", vec![("bb".into(), param(&[1.0, -2.0]))])]).unwrap();
     let mut sgd_c = sgd.contract();

@@ -197,6 +197,17 @@ impl Trainer {
         let mut t = Self::build(cfg, data, opts, true, Some(&file.metadata().config))?;
         let ema = t.ema.as_mut().map(|e| e as &mut dyn EmaState);
         let r = file.resume(&t.model, t.opt.as_mut(), ema, Some(t.data.classes.clone()))?;
+        // Older AdamW checkpoints saved before `folo.optim.param_steps` existed restore every parameter's step
+        // count to `optim.step`. If the checkpoint was saved while the backbone was still frozen
+        // (`epoch <= freeze_backbone_epochs`), restore backbone counters to 0 so unfreezing gets `t = 1` bias
+        // correction (older checkpoints resumed past the freeze boundary keep the global-step fallback; FORMAT.md).
+        if c.optim.kind == OptimKind::AdamW
+            && c.optim.param_steps.is_empty()
+            && t.cfg.freeze_backbone_epochs > 0
+            && r.epoch <= t.cfg.freeze_backbone_epochs as u64
+        {
+            t.opt.reset_param_steps(&|name| name.starts_with("backbone."));
+        }
         let (want, got) = (t.sched.contract(), r.schedule.contract());
         if (want.epochs, want.steps_per_epoch, want.kind) != (got.epochs, got.steps_per_epoch, got.kind) {
             return Err(Error::Dataset(format!(
@@ -592,7 +603,7 @@ impl Trainer {
 
 /// Whether parameter `name` belongs to a classification head branch (v1 `head.cls.*` / `head.o2o.cls.*` or v2
 /// `head.o2o.{p3,p4,p5}.cls.*`).
-pub(super) fn is_cls_head_param(name: &str) -> bool {
+fn is_cls_head_param(name: &str) -> bool {
     name.starts_with("head.cls.")
         || name.starts_with("head.o2o.cls.")
         || (name.starts_with("head.o2o.") && name.contains(".cls."))

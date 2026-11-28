@@ -896,7 +896,8 @@ fn batch_norm_streaming_fused_matches_cpu_f32_and_f16() {
 #[test]
 fn autocast_matmul_keeps_f32_weight_grad_without_f16_overflow() {
     let dev = dev16!();
-    // 16 rows × 1.0 · upstream 2.0 · scale 65536.0 -> dW_entry = 16 * 1 * 2 * 65536 = 2_097_152 (> f16::MAX = 65504).
+    // Upstream gradient in F16 is finite (8192 <= 65504), while its contraction over 16 rows into dW reaches
+    // 16 * 8192 = 131_072 (> f16::MAX = 65504), which overflows if dW is computed in F16.
     let x = Tensor::ones([16, 4]).to_device(dev).unwrap().to_dtype(DType::F16).unwrap().requires_grad_();
     let w = Tensor::full([4, 4], 0.25f32).to_device(dev).unwrap().requires_grad_();
     let y = {
@@ -904,8 +905,6 @@ fn autocast_matmul_keeps_f32_weight_grad_without_f16_overflow() {
         x.matmul(&w.t().unwrap()).unwrap()
     };
     assert_eq!(y.dtype(), DType::F16);
-    // Upstream gradient in F16 is finite (2.0 * 65536 / 16 = 8192 <= 65504), while its contraction over 16 rows
-    // into dW reaches 16 * 8192 = 131_072 (> f16::MAX = 65504), which overflows if dW is computed in F16.
     let g_up = Tensor::full([16, 4], 8192.0f32).to_device(dev).unwrap().to_dtype(DType::F16).unwrap();
     let loss = y.mul(&g_up).unwrap().to_dtype(DType::F32).unwrap().sum_all().unwrap();
     let grads = loss.backward().unwrap();
@@ -921,5 +920,37 @@ fn autocast_matmul_keeps_f32_weight_grad_without_f16_overflow() {
     let gx_vals = gx.to_dtype(DType::F32).unwrap().to_vec::<f32>().unwrap();
     for &v in &gx_vals {
         assert!((v - 8192.0).abs() < 1.0, "expected 8192.0, got {v}");
+    }
+
+    // F32 @ F32 with a value that rounds in F16 (2049 -> 2048): backward must use the F16-rounded forward
+    // operands (matching conv2d_autocast) and still work when backward() runs inside autocast().
+    let a = Tensor::from_slice(&[2049.0f32], [1, 1]).unwrap().to_device(dev).unwrap().requires_grad_();
+    let b = Tensor::from_slice(&[1.0f32], [1, 1]).unwrap().to_device(dev).unwrap().requires_grad_();
+    let g_ab = {
+        let _a = autocast();
+        let prod = a.matmul(&b).unwrap();
+        assert_eq!(prod.dtype(), DType::F16);
+        assert_eq!(prod.to_dtype(DType::F32).unwrap().to_vec::<f32>().unwrap(), [2048.0]);
+        prod.to_dtype(DType::F32).unwrap().sum_all().unwrap().backward().unwrap()
+    };
+    assert_eq!(g_ab.get(&a).unwrap().dtype(), DType::F32);
+    assert_eq!(g_ab.get(&b).unwrap().dtype(), DType::F32);
+    assert_eq!(g_ab.get(&b).unwrap().to_vec::<f32>().unwrap(), [2048.0]);
+    assert_eq!(g_ab.get(&a).unwrap().to_vec::<f32>().unwrap(), [1.0]);
+
+    // 3D x 2D folded weight-grad path under autocast (also running backward() inside autocast()).
+    let x3 = Tensor::ones([2, 8, 4]).to_device(dev).unwrap().to_dtype(DType::F16).unwrap().requires_grad_();
+    let w2 = Tensor::full([4, 3], 0.5f32).to_device(dev).unwrap().requires_grad_();
+    let g3 = {
+        let _a = autocast();
+        let y3 = x3.matmul(&w2).unwrap();
+        assert_eq!(y3.dtype(), DType::F16);
+        let gu = Tensor::full([2, 8, 3], 8192.0f32).to_device(dev).unwrap().to_dtype(DType::F16).unwrap();
+        y3.mul(&gu).unwrap().to_dtype(DType::F32).unwrap().sum_all().unwrap().backward().unwrap()
+    };
+    let gw2 = g3.get(&w2).unwrap();
+    assert_eq!(gw2.dtype(), DType::F32);
+    for v in gw2.to_vec::<f32>().unwrap() {
+        assert!((v - 131_072.0).abs() < 1e-1, "3D x 2D folded dW expected 131072.0, got {v}");
     }
 }

@@ -1048,7 +1048,7 @@ Not tried: other windows than `h = 0.25` with the selection-free protocol (0.1 a
 
 **PC-PEMA (opt-in power-law EMA, `ema_mode = power`).** Prior-Shifted LR-Phase-Coupled Power-Law EMA
 (`folo_nn::EmaMode::Power`, `EmaPowerConfig`) replaces the exponential ramp with a power-law decay whose effective
-exponent couples to the current LR schedule factor `lf_u = sched.lf(t)`:
+exponent couples to the current effective LR schedule factor `lf_u = sched.effective_lf(t)` (including warmup):
 ```
 denom     = u + t₀                                       (u = 1, 2, … after increment)
 β_u       = 0                                            if denom ≤ 1
