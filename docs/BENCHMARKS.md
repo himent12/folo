@@ -30,7 +30,7 @@ been measured again with that longer warm-up. The CPU rows warm up with 5 calls 
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="img/charts/speed-by-size-dark.svg">
-    <img src="img/charts/speed-by-size-light.svg" alt="How many times faster FOLO is than the YOLO26 model of the same size, folo-n and folo-s. GPU forward at batch 1: 4.5 and 2.3 times in f32, 5.9 and 3.7 times with the fastest precision of each. GPU forward at batch 16: 1.4 and 1.3 times in f32, 1.8 and 1.6 times in f16. GPU end to end: 4.3 and 3.2 times at batch 1, 3.9 and 3.1 times at batch 16. CPU forward 1.8 and 1.5 times, CPU end to end 1.8 and 1.7 times. Training step: 1.9 and 1.5 times in f32, 2.4 and 1.6 times with mixed precision." width="720">
+    <img src="img/charts/speed-by-size-light.svg" alt="How many times faster FOLO is than the YOLO26 model of the same size, folo-n and folo-s. GPU forward at batch 1: 4.5 and 2.3 times in f32, 5.9 and 3.7 times with the fastest precision of each. GPU forward at batch 16: 1.4 and 1.3 times in f32, 1.8 and 1.6 times in f16. GPU end to end: 4.3 and 3.2 times at batch 1, 3.9 and 3.1 times at batch 16. CPU forward 1.8 and 1.5 times, CPU end to end 1.8 and 1.7 times. Training step: 1.9 and 1.5 times in f32, 2.4 and 1.6 times with mixed precision." width="840">
   </picture>
 </p>
 
@@ -44,7 +44,7 @@ the same AP per epoch, and fine-tuned on four small datasets folo-n and yolo26n 
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="img/charts/accuracy-dark.svg">
-    <img src="img/charts/accuracy-light.svg" alt="Accuracy, FOLO against YOLO26. COCO val2017 AP: folo-n 0.370 against 0.409 for yolo26n, folo-s 0.416 against 0.480 for yolo26s; FOLO trained on COCO alone from random weights for 56 (folo-s) and 128 epochs (folo-n, 96 of them distilled from folo-s), the YOLO26 numbers are the published ones. Fine-tuned AP, folo-n against yolo26n: blood cells 0.607 against 0.626, brain tumours 0.452 against 0.436, signatures 0.989 against 0.982, medical pills 0.804 against 0.803." width="720">
+    <img src="img/charts/accuracy-light.svg" alt="Accuracy, FOLO against YOLO26. COCO val2017 AP: folo-n 0.370 against 0.409 for yolo26n, folo-s 0.416 against 0.480 for yolo26s; FOLO trained on COCO alone from random weights for 56 (folo-s) and 128 epochs (folo-n, 96 of them distilled from folo-s), the YOLO26 numbers are the published ones. Fine-tuned AP, folo-n against yolo26n: blood cells 0.607 against 0.626, brain tumours 0.452 against 0.436, signatures 0.989 against 0.982, medical pills 0.804 against 0.803." width="840">
   </picture>
 </p>
 
@@ -1171,7 +1171,7 @@ into those causes, and no equal-budget COCO comparison has been run.
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="img/charts/coco-curves-dark.svg">
-    <img src="img/charts/coco-curves-light.svg" alt="Validation mAP50-95 after each epoch for the three COCO runs from scratch: folo-n reaches 0.310 after 50 epochs, folo-n v2 0.313 at epoch 62 of 300, where it is paused, and folo-s 0.412 after 56 epochs. Every curve is still rising at its last epoch." width="720">
+    <img src="img/charts/coco-curves-light.svg" alt="Validation mAP50-95 after each epoch for the three COCO runs from scratch: folo-n reaches 0.310 after 50 epochs, folo-n v2 0.313 at epoch 62 of 300, where it is paused, and folo-s 0.412 after 56 epochs. Every curve is still rising at its last epoch." width="840">
   </picture>
 </p>
 

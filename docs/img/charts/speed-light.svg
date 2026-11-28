@@ -1,0 +1,166 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 840 626" width="840" height="626" role="img" aria-labelledby="t d" font-family="Geist, system-ui, -apple-system, 'Segoe UI', sans-serif">
+<title id="t">Speed &amp; memory: folo-n vs yolo26n</title>
+<desc id="d">2x2 dashboard comparing folo-n against yolo26n. Latency at batch 1 (GPU on 0-7 ms scale, CPU on 0-25 ms scale): GPU forward 1.09 vs 4.95 ms, GPU end to end 1.60 vs 6.92 ms, CPU forward 12.7 vs 22.8 ms, CPU end to end 13.6 vs 24.8 ms. Batch-16 GPU inference throughput: GPU forward, f32 2081 vs 1454 img/s, GPU forward, f16 4159 vs 2370 img/s, GPU end to end 2428 vs 615 img/s. Batch-16 training throughput: Training step, f32 380 vs 202 img/s, Training step, AMP 594 vs 252 img/s, Whole trainer, f32 388 vs 199 img/s, Whole trainer, AMP 613 vs 224 img/s. Peak GPU memory: Training step, f32 3467 vs 4517 MiB, Training step, AMP 2022 vs 2646 MiB.</desc>
+<defs>
+<linearGradient id="g-series0" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stop-color="#0875AF"/><stop offset="100%" stop-color="#0A89CD"/></linearGradient>
+</defs>
+<rect x="0.5" y="0.5" width="839" height="625" rx="10" fill="#FFFFFF" stroke="#E4E5E5"/>
+<text x="22" y="38" font-size="17" font-weight="600" letter-spacing="-0.015em" fill="#0C0E12">Speed &amp; memory: folo-n vs yolo26n</text>
+<text x="22" y="57" font-size="12" fill="#646B75">RTX 4080 SUPER, Core i7-14700KF, 640×640 input · Ultralytics 8.4.198</text>
+<rect x="574.08" y="29" width="9" height="9" rx="2.5" fill="#0A8FD6"/>
+<text x="588.08" y="37.5" font-size="12" font-weight="500" fill="#0C0E12">folo-n</text>
+<rect x="637.2" y="29" width="9" height="9" rx="2.5" fill="#646B75"/>
+<text x="651.2" y="37.5" font-size="12" fill="#4F5661">yolo26n (best config per row)</text>
+<rect x="22" y="70" width="391" height="272" rx="8" fill="#F8F9FA" stroke="#F0F0F0"/>
+<text x="38" y="96" font-size="13" font-weight="600" fill="#0C0E12">Latency · batch 1</text>
+<text x="397" y="96" font-size="11" text-anchor="end" fill="#646B75">↓ ms, lower is better</text>
+<text x="38" y="121" font-size="10.5" font-weight="600" letter-spacing="0.03em" fill="#4F5661">GPU</text>
+<text x="278" y="121" font-size="10.5" font-family="'Geist Mono', ui-monospace, 'SF Mono', 'Cascadia Mono', Consolas, monospace" text-anchor="end" fill="#646B75">0–7 ms</text>
+<text x="38" y="146" font-size="12.5" font-weight="500" fill="#0C0E12">GPU forward</text>
+<text x="38" y="160" font-size="10.5" fill="#646B75">f32, on device</text>
+<rect x="152" y="138" width="126" height="10" rx="3" fill="#EEEFF0"/>
+<path d="M152 138h16.12a3.5 3.5 0 0 1 3.5 3.5v3a3.5 3.5 0 0 1 -3.5 3.5h-16.12z" fill="url(#g-series0)"/>
+<text x="339" y="146.8" font-size="11.5" font-family="'Geist Mono', ui-monospace, 'SF Mono', 'Cascadia Mono', Consolas, monospace" font-weight="600" text-anchor="end" fill="#0C0E12">1.09 ms</text>
+<rect x="152" y="152" width="126" height="10" rx="3" fill="#EEEFF0"/>
+<path d="M152 152h85.6a3.5 3.5 0 0 1 3.5 3.5v3a3.5 3.5 0 0 1 -3.5 3.5h-85.6z" fill="#646B75"/>
+<text x="339" y="160.8" font-size="11.5" font-family="'Geist Mono', ui-monospace, 'SF Mono', 'Cascadia Mono', Consolas, monospace" text-anchor="end" fill="#4F5661">4.95 ms</text>
+<rect x="349" y="139" width="48" height="22" rx="6" fill="#E8F0D7" stroke="#D4E0BB"/>
+<text x="373" y="153.74" font-size="11" font-family="'Geist Mono', ui-monospace, 'SF Mono', 'Cascadia Mono', Consolas, monospace" font-weight="600" text-anchor="middle" fill="#4A7500">4.5×</text>
+<text x="38" y="190" font-size="12.5" font-weight="500" fill="#0C0E12">GPU end to end</text>
+<text x="38" y="204" font-size="10.5" fill="#646B75">image in, boxes out</text>
+<rect x="152" y="182" width="126" height="10" rx="3" fill="#EEEFF0"/>
+<path d="M152 182h25.3a3.5 3.5 0 0 1 3.5 3.5v3a3.5 3.5 0 0 1 -3.5 3.5h-25.3z" fill="url(#g-series0)"/>
+<text x="339" y="190.8" font-size="11.5" font-family="'Geist Mono', ui-monospace, 'SF Mono', 'Cascadia Mono', Consolas, monospace" font-weight="600" text-anchor="end" fill="#0C0E12">1.60 ms</text>
+<rect x="152" y="196" width="126" height="10" rx="3" fill="#EEEFF0"/>
+<path d="M152 196h121.06a3.5 3.5 0 0 1 3.5 3.5v3a3.5 3.5 0 0 1 -3.5 3.5h-121.06z" fill="#646B75"/>
+<text x="339" y="204.8" font-size="11.5" font-family="'Geist Mono', ui-monospace, 'SF Mono', 'Cascadia Mono', Consolas, monospace" text-anchor="end" fill="#4F5661">6.92 ms</text>
+<rect x="349" y="183" width="48" height="22" rx="6" fill="#E8F0D7" stroke="#D4E0BB"/>
+<text x="373" y="197.74" font-size="11" font-family="'Geist Mono', ui-monospace, 'SF Mono', 'Cascadia Mono', Consolas, monospace" font-weight="600" text-anchor="middle" fill="#4A7500">4.3×</text>
+<path d="M38 221L397 221" stroke="#E9EAEC" stroke-width="1" fill="none"/>
+<text x="38" y="237" font-size="10.5" font-weight="600" letter-spacing="0.03em" fill="#4F5661">CPU</text>
+<text x="278" y="237" font-size="10.5" font-family="'Geist Mono', ui-monospace, 'SF Mono', 'Cascadia Mono', Consolas, monospace" text-anchor="end" fill="#646B75">0–25 ms</text>
+<text x="38" y="262" font-size="12.5" font-weight="500" fill="#0C0E12">CPU forward</text>
+<text x="38" y="276" font-size="10.5" fill="#646B75">f32, best threads</text>
+<rect x="152" y="254" width="126" height="10" rx="3" fill="#EEEFF0"/>
+<path d="M152 254h60.71a3.5 3.5 0 0 1 3.5 3.5v3a3.5 3.5 0 0 1 -3.5 3.5h-60.71z" fill="url(#g-series0)"/>
+<text x="339" y="262.8" font-size="11.5" font-family="'Geist Mono', ui-monospace, 'SF Mono', 'Cascadia Mono', Consolas, monospace" font-weight="600" text-anchor="end" fill="#0C0E12">12.7 ms</text>
+<rect x="152" y="268" width="126" height="10" rx="3" fill="#EEEFF0"/>
+<path d="M152 268h111.41a3.5 3.5 0 0 1 3.5 3.5v3a3.5 3.5 0 0 1 -3.5 3.5h-111.41z" fill="#646B75"/>
+<text x="339" y="276.8" font-size="11.5" font-family="'Geist Mono', ui-monospace, 'SF Mono', 'Cascadia Mono', Consolas, monospace" text-anchor="end" fill="#4F5661">22.8 ms</text>
+<rect x="349" y="255" width="48" height="22" rx="6" fill="#E8F0D7" stroke="#D4E0BB"/>
+<text x="373" y="269.74" font-size="11" font-family="'Geist Mono', ui-monospace, 'SF Mono', 'Cascadia Mono', Consolas, monospace" font-weight="600" text-anchor="middle" fill="#4A7500">1.8×</text>
+<text x="38" y="306" font-size="12.5" font-weight="500" fill="#0C0E12">CPU end to end</text>
+<text x="38" y="320" font-size="10.5" fill="#646B75">image in, boxes out</text>
+<rect x="152" y="298" width="126" height="10" rx="3" fill="#EEEFF0"/>
+<path d="M152 298h64.89a3.5 3.5 0 0 1 3.5 3.5v3a3.5 3.5 0 0 1 -3.5 3.5h-64.89z" fill="url(#g-series0)"/>
+<text x="339" y="306.8" font-size="11.5" font-family="'Geist Mono', ui-monospace, 'SF Mono', 'Cascadia Mono', Consolas, monospace" font-weight="600" text-anchor="end" fill="#0C0E12">13.6 ms</text>
+<rect x="152" y="312" width="126" height="10" rx="3" fill="#EEEFF0"/>
+<path d="M152 312h121.49a3.5 3.5 0 0 1 3.5 3.5v3a3.5 3.5 0 0 1 -3.5 3.5h-121.49z" fill="#646B75"/>
+<text x="339" y="320.8" font-size="11.5" font-family="'Geist Mono', ui-monospace, 'SF Mono', 'Cascadia Mono', Consolas, monospace" text-anchor="end" fill="#4F5661">24.8 ms</text>
+<rect x="349" y="299" width="48" height="22" rx="6" fill="#E8F0D7" stroke="#D4E0BB"/>
+<text x="373" y="313.74" font-size="11" font-family="'Geist Mono', ui-monospace, 'SF Mono', 'Cascadia Mono', Consolas, monospace" font-weight="600" text-anchor="middle" fill="#4A7500">1.8×</text>
+<rect x="427" y="70" width="391" height="272" rx="8" fill="#F8F9FA" stroke="#F0F0F0"/>
+<text x="443" y="96" font-size="13" font-weight="600" fill="#0C0E12">Training · batch 16</text>
+<text x="802" y="96" font-size="11" text-anchor="end" fill="#646B75">↑ img/s, higher is better</text>
+<text x="443" y="128" font-size="12.5" font-weight="500" fill="#0C0E12">Train step, f32</text>
+<text x="443" y="142" font-size="10.5" fill="#646B75">fwd + loss + bwd + SGD</text>
+<rect x="571" y="120" width="97" height="10" rx="3" fill="#EEEFF0"/>
+<path d="M571 120h56.63a3.5 3.5 0 0 1 3.5 3.5v3a3.5 3.5 0 0 1 -3.5 3.5h-56.63z" fill="url(#g-series0)"/>
+<text x="744" y="128.8" font-size="11.5" font-family="'Geist Mono', ui-monospace, 'SF Mono', 'Cascadia Mono', Consolas, monospace" font-weight="600" text-anchor="end" fill="#0C0E12">380 img/s</text>
+<rect x="571" y="134" width="97" height="10" rx="3" fill="#EEEFF0"/>
+<path d="M571 134h28.46a3.5 3.5 0 0 1 3.5 3.5v3a3.5 3.5 0 0 1 -3.5 3.5h-28.46z" fill="#646B75"/>
+<text x="744" y="142.8" font-size="11.5" font-family="'Geist Mono', ui-monospace, 'SF Mono', 'Cascadia Mono', Consolas, monospace" text-anchor="end" fill="#4F5661">202 img/s</text>
+<rect x="754" y="121" width="48" height="22" rx="6" fill="#E8F0D7" stroke="#D4E0BB"/>
+<text x="778" y="135.74" font-size="11" font-family="'Geist Mono', ui-monospace, 'SF Mono', 'Cascadia Mono', Consolas, monospace" font-weight="600" text-anchor="middle" fill="#4A7500">1.9×</text>
+<text x="443" y="172" font-size="12.5" font-weight="500" fill="#0C0E12">Train step, AMP</text>
+<text x="443" y="186" font-size="10.5" fill="#646B75">mixed precision</text>
+<rect x="571" y="164" width="97" height="10" rx="3" fill="#EEEFF0"/>
+<path d="M571 164h90.49a3.5 3.5 0 0 1 3.5 3.5v3a3.5 3.5 0 0 1 -3.5 3.5h-90.49z" fill="url(#g-series0)"/>
+<text x="744" y="172.8" font-size="11.5" font-family="'Geist Mono', ui-monospace, 'SF Mono', 'Cascadia Mono', Consolas, monospace" font-weight="600" text-anchor="end" fill="#0C0E12">594 img/s</text>
+<rect x="571" y="178" width="97" height="10" rx="3" fill="#EEEFF0"/>
+<path d="M571 178h36.38a3.5 3.5 0 0 1 3.5 3.5v3a3.5 3.5 0 0 1 -3.5 3.5h-36.38z" fill="#646B75"/>
+<text x="744" y="186.8" font-size="11.5" font-family="'Geist Mono', ui-monospace, 'SF Mono', 'Cascadia Mono', Consolas, monospace" text-anchor="end" fill="#4F5661">252 img/s</text>
+<rect x="754" y="165" width="48" height="22" rx="6" fill="#E8F0D7" stroke="#D4E0BB"/>
+<text x="778" y="179.74" font-size="11" font-family="'Geist Mono', ui-monospace, 'SF Mono', 'Cascadia Mono', Consolas, monospace" font-weight="600" text-anchor="middle" fill="#4A7500">2.4×</text>
+<text x="443" y="216" font-size="12.5" font-weight="500" fill="#0C0E12">Whole trainer, f32</text>
+<text x="443" y="230" font-size="10.5" fill="#646B75">loader + mosaic, 8w</text>
+<rect x="571" y="208" width="97" height="10" rx="3" fill="#EEEFF0"/>
+<path d="M571 208h57.9a3.5 3.5 0 0 1 3.5 3.5v3a3.5 3.5 0 0 1 -3.5 3.5h-57.9z" fill="url(#g-series0)"/>
+<text x="744" y="216.8" font-size="11.5" font-family="'Geist Mono', ui-monospace, 'SF Mono', 'Cascadia Mono', Consolas, monospace" font-weight="600" text-anchor="end" fill="#0C0E12">388 img/s</text>
+<rect x="571" y="222" width="97" height="10" rx="3" fill="#EEEFF0"/>
+<path d="M571 222h27.99a3.5 3.5 0 0 1 3.5 3.5v3a3.5 3.5 0 0 1 -3.5 3.5h-27.99z" fill="#646B75"/>
+<text x="744" y="230.8" font-size="11.5" font-family="'Geist Mono', ui-monospace, 'SF Mono', 'Cascadia Mono', Consolas, monospace" text-anchor="end" fill="#4F5661">199 img/s</text>
+<rect x="754" y="209" width="48" height="22" rx="6" fill="#E8F0D7" stroke="#D4E0BB"/>
+<text x="778" y="223.74" font-size="11" font-family="'Geist Mono', ui-monospace, 'SF Mono', 'Cascadia Mono', Consolas, monospace" font-weight="600" text-anchor="middle" fill="#4A7500">1.9×</text>
+<text x="443" y="260" font-size="12.5" font-weight="500" fill="#0C0E12">Whole trainer, AMP</text>
+<text x="443" y="274" font-size="10.5" fill="#646B75">sustained / epoch</text>
+<rect x="571" y="252" width="97" height="10" rx="3" fill="#EEEFF0"/>
+<path d="M571 252h93.5a3.5 3.5 0 0 1 3.5 3.5v3a3.5 3.5 0 0 1 -3.5 3.5h-93.5z" fill="url(#g-series0)"/>
+<text x="744" y="260.8" font-size="11.5" font-family="'Geist Mono', ui-monospace, 'SF Mono', 'Cascadia Mono', Consolas, monospace" font-weight="600" text-anchor="end" fill="#0C0E12">613 img/s</text>
+<rect x="571" y="266" width="97" height="10" rx="3" fill="#EEEFF0"/>
+<path d="M571 266h31.95a3.5 3.5 0 0 1 3.5 3.5v3a3.5 3.5 0 0 1 -3.5 3.5h-31.95z" fill="#646B75"/>
+<text x="744" y="274.8" font-size="11.5" font-family="'Geist Mono', ui-monospace, 'SF Mono', 'Cascadia Mono', Consolas, monospace" text-anchor="end" fill="#4F5661">224 img/s</text>
+<rect x="754" y="253" width="48" height="22" rx="6" fill="#E8F0D7" stroke="#D4E0BB"/>
+<text x="778" y="267.74" font-size="11" font-family="'Geist Mono', ui-monospace, 'SF Mono', 'Cascadia Mono', Consolas, monospace" font-weight="600" text-anchor="middle" fill="#4A7500">2.7×</text>
+<rect x="22" y="356" width="391" height="182" rx="8" fill="#F8F9FA" stroke="#F0F0F0"/>
+<text x="38" y="382" font-size="13" font-weight="600" fill="#0C0E12">GPU inference · batch 16</text>
+<text x="397" y="382" font-size="11" text-anchor="end" fill="#646B75">↑ img/s, higher is better</text>
+<text x="38" y="414" font-size="12.5" font-weight="500" fill="#0C0E12">Forward, f32</text>
+<text x="38" y="428" font-size="10.5" fill="#646B75">yolo26n uses TF32</text>
+<rect x="152" y="406" width="104" height="10" rx="3" fill="#EEEFF0"/>
+<path d="M152 406h48.54a3.5 3.5 0 0 1 3.5 3.5v3a3.5 3.5 0 0 1 -3.5 3.5h-48.54z" fill="url(#g-series0)"/>
+<text x="339" y="414.8" font-size="11.5" font-family="'Geist Mono', ui-monospace, 'SF Mono', 'Cascadia Mono', Consolas, monospace" font-weight="600" text-anchor="end" fill="#0C0E12">2081 img/s</text>
+<rect x="152" y="420" width="104" height="10" rx="3" fill="#EEEFF0"/>
+<path d="M152 420h32.86a3.5 3.5 0 0 1 3.5 3.5v3a3.5 3.5 0 0 1 -3.5 3.5h-32.86z" fill="#646B75"/>
+<text x="339" y="428.8" font-size="11.5" font-family="'Geist Mono', ui-monospace, 'SF Mono', 'Cascadia Mono', Consolas, monospace" text-anchor="end" fill="#4F5661">1454 img/s</text>
+<rect x="349" y="407" width="48" height="22" rx="6" fill="#E8F0D7" stroke="#D4E0BB"/>
+<text x="373" y="421.74" font-size="11" font-family="'Geist Mono', ui-monospace, 'SF Mono', 'Cascadia Mono', Consolas, monospace" font-weight="600" text-anchor="middle" fill="#4A7500">1.4×</text>
+<text x="38" y="458" font-size="12.5" font-weight="500" fill="#0C0E12">Forward, f16</text>
+<text x="38" y="472" font-size="10.5" fill="#646B75">FOLO tensor cores</text>
+<rect x="152" y="450" width="104" height="10" rx="3" fill="#EEEFF0"/>
+<path d="M152 450h100.5a3.5 3.5 0 0 1 3.5 3.5v3a3.5 3.5 0 0 1 -3.5 3.5h-100.5z" fill="url(#g-series0)"/>
+<text x="339" y="458.8" font-size="11.5" font-family="'Geist Mono', ui-monospace, 'SF Mono', 'Cascadia Mono', Consolas, monospace" font-weight="600" text-anchor="end" fill="#0C0E12">4159 img/s</text>
+<rect x="152" y="464" width="104" height="10" rx="3" fill="#EEEFF0"/>
+<path d="M152 464h55.76a3.5 3.5 0 0 1 3.5 3.5v3a3.5 3.5 0 0 1 -3.5 3.5h-55.76z" fill="#646B75"/>
+<text x="339" y="472.8" font-size="11.5" font-family="'Geist Mono', ui-monospace, 'SF Mono', 'Cascadia Mono', Consolas, monospace" text-anchor="end" fill="#4F5661">2370 img/s</text>
+<rect x="349" y="451" width="48" height="22" rx="6" fill="#E8F0D7" stroke="#D4E0BB"/>
+<text x="373" y="465.74" font-size="11" font-family="'Geist Mono', ui-monospace, 'SF Mono', 'Cascadia Mono', Consolas, monospace" font-weight="600" text-anchor="middle" fill="#4A7500">1.8×</text>
+<text x="38" y="502" font-size="12.5" font-weight="500" fill="#0C0E12">End to end, f16</text>
+<text x="38" y="516" font-size="10.5" fill="#646B75">decoded images in</text>
+<rect x="152" y="494" width="104" height="10" rx="3" fill="#EEEFF0"/>
+<path d="M152 494h57.21a3.5 3.5 0 0 1 3.5 3.5v3a3.5 3.5 0 0 1 -3.5 3.5h-57.21z" fill="url(#g-series0)"/>
+<text x="339" y="502.8" font-size="11.5" font-family="'Geist Mono', ui-monospace, 'SF Mono', 'Cascadia Mono', Consolas, monospace" font-weight="600" text-anchor="end" fill="#0C0E12">2428 img/s</text>
+<rect x="152" y="508" width="104" height="10" rx="3" fill="#EEEFF0"/>
+<path d="M152 508h11.88a3.5 3.5 0 0 1 3.5 3.5v3a3.5 3.5 0 0 1 -3.5 3.5h-11.88z" fill="#646B75"/>
+<text x="339" y="516.8" font-size="11.5" font-family="'Geist Mono', ui-monospace, 'SF Mono', 'Cascadia Mono', Consolas, monospace" text-anchor="end" fill="#4F5661">615 img/s</text>
+<rect x="349" y="495" width="48" height="22" rx="6" fill="#E8F0D7" stroke="#D4E0BB"/>
+<text x="373" y="509.74" font-size="11" font-family="'Geist Mono', ui-monospace, 'SF Mono', 'Cascadia Mono', Consolas, monospace" font-weight="600" text-anchor="middle" fill="#4A7500">3.9×</text>
+<rect x="427" y="356" width="391" height="182" rx="8" fill="#F8F9FA" stroke="#F0F0F0"/>
+<text x="443" y="382" font-size="13" font-weight="600" fill="#0C0E12">Peak GPU memory · batch 16</text>
+<text x="802" y="382" font-size="11" text-anchor="end" fill="#646B75">↓ MiB, lower is better</text>
+<text x="443" y="414" font-size="12.5" font-weight="500" fill="#0C0E12">Train step, f32</text>
+<text x="443" y="428" font-size="10.5" fill="#646B75">peak live tensors</text>
+<rect x="557" y="406" width="115" height="10" rx="3" fill="#EEEFF0"/>
+<path d="M557 406h84.77a3.5 3.5 0 0 1 3.5 3.5v3a3.5 3.5 0 0 1 -3.5 3.5h-84.77z" fill="url(#g-series0)"/>
+<text x="740" y="414.8" font-size="11.5" font-family="'Geist Mono', ui-monospace, 'SF Mono', 'Cascadia Mono', Consolas, monospace" font-weight="600" text-anchor="end" fill="#0C0E12">3467 MiB</text>
+<rect x="557" y="420" width="115" height="10" rx="3" fill="#EEEFF0"/>
+<path d="M557 420h111.5a3.5 3.5 0 0 1 3.5 3.5v3a3.5 3.5 0 0 1 -3.5 3.5h-111.5z" fill="#646B75"/>
+<text x="740" y="428.8" font-size="11.5" font-family="'Geist Mono', ui-monospace, 'SF Mono', 'Cascadia Mono', Consolas, monospace" text-anchor="end" fill="#4F5661">4517 MiB</text>
+<rect x="750" y="407" width="52" height="22" rx="6" fill="#E8F0D7" stroke="#D4E0BB"/>
+<text x="776" y="421.74" font-size="11" font-family="'Geist Mono', ui-monospace, 'SF Mono', 'Cascadia Mono', Consolas, monospace" font-weight="600" text-anchor="middle" fill="#4A7500">−23%</text>
+<text x="443" y="458" font-size="12.5" font-weight="500" fill="#0C0E12">Train step, AMP</text>
+<text x="443" y="472" font-size="10.5" fill="#646B75">peak live tensors</text>
+<rect x="557" y="450" width="115" height="10" rx="3" fill="#EEEFF0"/>
+<path d="M557 450h47.98a3.5 3.5 0 0 1 3.5 3.5v3a3.5 3.5 0 0 1 -3.5 3.5h-47.98z" fill="url(#g-series0)"/>
+<text x="740" y="458.8" font-size="11.5" font-family="'Geist Mono', ui-monospace, 'SF Mono', 'Cascadia Mono', Consolas, monospace" font-weight="600" text-anchor="end" fill="#0C0E12">2022 MiB</text>
+<rect x="557" y="464" width="115" height="10" rx="3" fill="#EEEFF0"/>
+<path d="M557 464h63.87a3.5 3.5 0 0 1 3.5 3.5v3a3.5 3.5 0 0 1 -3.5 3.5h-63.87z" fill="#646B75"/>
+<text x="740" y="472.8" font-size="11.5" font-family="'Geist Mono', ui-monospace, 'SF Mono', 'Cascadia Mono', Consolas, monospace" text-anchor="end" fill="#4F5661">2646 MiB</text>
+<rect x="750" y="451" width="52" height="22" rx="6" fill="#E8F0D7" stroke="#D4E0BB"/>
+<text x="776" y="465.74" font-size="11" font-family="'Geist Mono', ui-monospace, 'SF Mono', 'Cascadia Mono', Consolas, monospace" font-weight="600" text-anchor="middle" fill="#4A7500">−24%</text>
+<text x="443" y="524" font-size="11" fill="#646B75">Peak allocated by live tensors; both allocators reserve more.</text>
+<text x="22" y="562" font-size="11.5" fill="#646B75">FOLO: medians of alternated runs (2026-11-12/13; end to end on trained weights). YOLO26: fastest config per row (2026-11-07). Full method:</text>
+<text x="22" y="578" font-size="11.5" fill="#646B75">docs/BENCHMARKS.md.</text>
+<text x="22" y="594" font-size="11.5" fill="#646B75">GPU batch-1 latency: both warm up with 25 calls (forward) or 10 (end to end); FOLO's bench then keeps warming until a second has passed,</text>
+<text x="22" y="610" font-size="11.5" fill="#646B75">YOLO26's does not.</text>
+</svg>

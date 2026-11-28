@@ -1,72 +1,134 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 662" width="720" height="662" role="img" aria-labelledby="t d" font-family="Geist, system-ui, -apple-system, 'Segoe UI', sans-serif">
-<title id="t">Accuracy: FOLO against YOLO26</title>
-<desc id="d">Grouped bars of AP on one scale. On COCO val2017, FOLO trained on COCO alone is behind the published YOLO26 models. Fine-tuned on four small datasets, folo-n and yolo26n are level on three and yolo26n is ahead on one. Nano: 0.370 against 0.409. Small: 0.416 against 0.480. Blood cells (BCCD): 0.607 against 0.626. Brain tumours (MRI): 0.452 against 0.436. Signatures: 0.989 against 0.982. Medical pills: 0.804 against 0.803.</desc>
-<rect x="0.5" y="0.5" width="719" height="661" rx="8" fill="#0E1013" stroke="#242628"/>
-<text x="28" y="43" font-size="17" font-weight="600" letter-spacing="-0.01em" fill="#EDEFF2">Accuracy: FOLO against YOLO26</text>
-<text x="28" y="66" font-size="13" fill="#A1A7B0">AP@[.5:.95], pycocotools</text>
-<rect x="28" y="84" width="10" height="10" rx="2" fill="#5CC8FF"/>
-<text x="44" y="93.5" font-size="13" fill="#A1A7B0">FOLO</text>
-<rect x="101.36" y="84" width="10" height="10" rx="2" fill="#646A73"/>
-<text x="117.36" y="93.5" font-size="13" fill="#A1A7B0">Ultralytics YOLO26</text>
-<path d="M28 112.5L692 112.5" stroke="#1C1E21" stroke-width="1" fill="none"/>
-<text x="28" y="138" font-size="13" xml:space="preserve"><tspan font-weight="600" fill="#EDEFF2">COCO val2017</tspan><tspan font-size="12.5" fill="#80868F">   higher is better. Not like for like: see below</tspan></text>
-<text x="28" y="172" font-size="13" font-weight="500" fill="#EDEFF2">Nano</text>
-<text x="28" y="189" font-size="12.5" fill="#80868F">folo-n v5: 128 epochs, distilled</text>
-<path d="M236 162h79.36a4 4 0 0 1 4 4v4a4 4 0 0 1 -4 4h-79.36z" fill="#5CC8FF"/>
-<text x="327.36" y="172.4" font-size="13" xml:space="preserve"><tspan font-weight="600" fill="#EDEFF2">0.370</tspan></text>
-<path d="M236 178h88.15a4 4 0 0 1 4 4v4a4 4 0 0 1 -4 4h-88.15z" fill="#646A73"/>
-<text x="336.15" y="188.4" font-size="13" xml:space="preserve"><tspan font-weight="400" fill="#A1A7B0">0.409</tspan></text>
-<text x="692" y="174" font-size="16" font-weight="600" text-anchor="end" fill="#EDEFF2">−0.039</text>
-<text x="692" y="190" font-size="12.5" text-anchor="end" fill="#80868F">AP</text>
-<text x="28" y="224" font-size="13" font-weight="500" fill="#EDEFF2">Small</text>
-<text x="28" y="241" font-size="12.5" fill="#80868F">folo-s: 56 epochs from scratch</text>
-<path d="M236 214h89.72a4 4 0 0 1 4 4v4a4 4 0 0 1 -4 4h-89.72z" fill="#5CC8FF"/>
-<text x="337.72" y="224.4" font-size="13" xml:space="preserve"><tspan font-weight="600" fill="#EDEFF2">0.416</tspan></text>
-<path d="M236 230h104.14a4 4 0 0 1 4 4v4a4 4 0 0 1 -4 4h-104.14z" fill="#646A73"/>
-<text x="352.14" y="240.4" font-size="13" xml:space="preserve"><tspan font-weight="400" fill="#A1A7B0">0.480</tspan></text>
-<text x="692" y="226" font-size="16" font-weight="600" text-anchor="end" fill="#EDEFF2">−0.064</text>
-<text x="692" y="242" font-size="12.5" text-anchor="end" fill="#80868F">AP</text>
-<path d="M235.5 154L235.5 250" stroke="#303234" stroke-width="1" fill="none"/>
-<path d="M28 266.5L692 266.5" stroke="#1C1E21" stroke-width="1" fill="none"/>
-<text x="28" y="292" font-size="13" xml:space="preserve"><tspan font-weight="600" fill="#EDEFF2">Fine-tuned on small datasets</tspan><tspan font-size="12.5" fill="#80868F">   folo-n and yolo26n, one scorer for both: mean and range of 3 seeds</tspan></text>
-<text x="28" y="326" font-size="13" font-weight="500" fill="#EDEFF2">Blood cells (BCCD)</text>
-<text x="28" y="343" font-size="12.5" fill="#80868F">205 training images</text>
-<path d="M236 316h132.75a4 4 0 0 1 4 4v4a4 4 0 0 1 -4 4h-132.75z" fill="#5CC8FF"/>
-<text x="380.75" y="326.4" font-size="13" xml:space="preserve"><tspan font-weight="600" fill="#EDEFF2">0.607</tspan><tspan font-size="12.5" fill="#80868F">  0.606 to 0.607</tspan></text>
-<path d="M236 332h137.04a4 4 0 0 1 4 4v4a4 4 0 0 1 -4 4h-137.04z" fill="#646A73"/>
-<text x="385.04" y="342.4" font-size="13" xml:space="preserve"><tspan font-weight="400" fill="#A1A7B0">0.626</tspan><tspan font-size="12.5" fill="#80868F">  0.621 to 0.634</tspan></text>
-<text x="692" y="328" font-size="16" font-weight="600" text-anchor="end" fill="#EDEFF2">−0.020</text>
-<text x="692" y="344" font-size="12.5" text-anchor="end" fill="#80868F">behind</text>
-<text x="28" y="378" font-size="13" font-weight="500" fill="#EDEFF2">Brain tumours (MRI)</text>
-<text x="28" y="395" font-size="12.5" fill="#80868F">893 training images</text>
-<path d="M236 368h97.83a4 4 0 0 1 4 4v4a4 4 0 0 1 -4 4h-97.83z" fill="#5CC8FF"/>
-<text x="345.83" y="378.4" font-size="13" xml:space="preserve"><tspan font-weight="600" fill="#EDEFF2">0.452</tspan><tspan font-size="12.5" fill="#80868F">  0.439 to 0.460</tspan></text>
-<path d="M236 384h94.23a4 4 0 0 1 4 4v4a4 4 0 0 1 -4 4h-94.23z" fill="#646A73"/>
-<text x="342.23" y="394.4" font-size="13" xml:space="preserve"><tspan font-weight="400" fill="#A1A7B0">0.436</tspan><tspan font-size="12.5" fill="#80868F">  0.413 to 0.459</tspan></text>
-<text x="692" y="380" font-size="16" font-weight="600" text-anchor="end" fill="#EDEFF2">+0.017</text>
-<text x="692" y="396" font-size="12.5" text-anchor="end" fill="#80868F">level</text>
-<text x="28" y="430" font-size="13" font-weight="500" fill="#EDEFF2">Signatures</text>
-<text x="28" y="447" font-size="12.5" fill="#80868F">143 training images</text>
-<path d="M236 420h218.82a4 4 0 0 1 4 4v4a4 4 0 0 1 -4 4h-218.82z" fill="#5CC8FF"/>
-<text x="466.82" y="430.4" font-size="13" xml:space="preserve"><tspan font-weight="600" fill="#EDEFF2">0.989</tspan><tspan font-size="12.5" fill="#80868F">  0.987 to 0.992</tspan></text>
-<path d="M236 436h217.24a4 4 0 0 1 4 4v4a4 4 0 0 1 -4 4h-217.24z" fill="#646A73"/>
-<text x="465.24" y="446.4" font-size="13" xml:space="preserve"><tspan font-weight="400" fill="#A1A7B0">0.982</tspan><tspan font-size="12.5" fill="#80868F">  0.975 to 0.987</tspan></text>
-<text x="692" y="432" font-size="16" font-weight="600" text-anchor="end" fill="#EDEFF2">+0.007</text>
-<text x="692" y="448" font-size="12.5" text-anchor="end" fill="#80868F">level</text>
-<text x="28" y="482" font-size="13" font-weight="500" fill="#EDEFF2">Medical pills</text>
-<text x="28" y="499" font-size="12.5" fill="#80868F">92 training images</text>
-<path d="M236 472h177.14a4 4 0 0 1 4 4v4a4 4 0 0 1 -4 4h-177.14z" fill="#5CC8FF"/>
-<text x="425.14" y="482.4" font-size="13" xml:space="preserve"><tspan font-weight="600" fill="#EDEFF2">0.804</tspan><tspan font-size="12.5" fill="#80868F">  0.801 to 0.807</tspan></text>
-<path d="M236 488h176.91a4 4 0 0 1 4 4v4a4 4 0 0 1 -4 4h-176.91z" fill="#646A73"/>
-<text x="424.91" y="498.4" font-size="13" xml:space="preserve"><tspan font-weight="400" fill="#A1A7B0">0.803</tspan><tspan font-size="12.5" fill="#80868F">  0.800 to 0.806</tspan></text>
-<text x="692" y="484" font-size="16" font-weight="600" text-anchor="end" fill="#EDEFF2">+0.002</text>
-<text x="692" y="500" font-size="12.5" text-anchor="end" fill="#80868F">level</text>
-<path d="M235.5 308L235.5 508" stroke="#303234" stroke-width="1" fill="none"/>
-<path d="M28 524.5L692 524.5" stroke="#1C1E21" stroke-width="1" fill="none"/>
-<text x="28" y="548" font-size="12.5" fill="#80868F">COCO: FOLO trained on COCO alone from random weights, 56 epochs (folo-s) and 128 (folo-n: 96 of them</text>
-<text x="28" y="566" font-size="12.5" fill="#80868F">distilled from folo-s). The YOLO26 numbers are the published ones, from models pretrained on Objects365 and</text>
-<text x="28" y="584" font-size="12.5" fill="#80868F">trained for far longer.</text>
-<text x="28" y="602" font-size="12.5" fill="#80868F">Fine-tuning: each from its own COCO weights, at its defaults, 100 epochs; the differences are of the unrounded</text>
-<text x="28" y="620" font-size="12.5" fill="#80868F">means. &quot;level&quot;: inside the spread of the seeds, or on a set both saturate (signatures). Details:</text>
-<text x="28" y="638" font-size="12.5" fill="#80868F">docs/BENCHMARKS.md, Accuracy.</text>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 840 392" width="840" height="392" role="img" aria-labelledby="t d" font-family="Geist, system-ui, -apple-system, 'Segoe UI', sans-serif">
+<title id="t">Accuracy: FOLO vs Ultralytics YOLO26</title>
+<desc id="d">Two-panel chart of AP on one shared 0 to 1 scale. COCO val2017 (not like for like): Nano 0.370 vs 0.409, Small 0.416 vs 0.480. Fine-tuned on four small datasets (folo-n vs yolo26n, 3-seed mean): Blood cells (BCCD) 0.607 vs 0.626 (behind), Brain tumours (MRI) 0.452 vs 0.436 (level), Signatures 0.989 vs 0.982 (level), Medical pills 0.804 vs 0.803 (level).</desc>
+<defs>
+<linearGradient id="g-series0" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stop-color="#4FACDB"/><stop offset="100%" stop-color="#6CCEFF"/></linearGradient>
+</defs>
+<rect x="0.5" y="0.5" width="839" height="391" rx="10" fill="#0E1013" stroke="#242628"/>
+<text x="22" y="38" font-size="17" font-weight="600" letter-spacing="-0.015em" fill="#EDEFF2">Accuracy: FOLO vs Ultralytics YOLO26</text>
+<text x="22" y="57" font-size="12" fill="#80868F">AP@[.5:.95] (pycocotools) · higher is better · 0–1 shared scale · whiskers show 3-seed min–max</text>
+<rect x="630" y="29" width="9" height="9" rx="2.5" fill="#5CC8FF"/>
+<text x="644" y="37.5" font-size="12" font-weight="500" fill="#EDEFF2">FOLO</text>
+<rect x="692.64" y="29" width="9" height="9" rx="2.5" fill="#646A73"/>
+<text x="706.64" y="37.5" font-size="12" fill="#A1A7B0">Ultralytics YOLO26</text>
+<rect x="22" y="70" width="391" height="266" rx="8" fill="#14171B" stroke="#1A1C1F"/>
+<text x="38" y="96" font-size="13" font-weight="600" fill="#EDEFF2">COCO val2017</text>
+<text x="397" y="96" font-size="11" text-anchor="end" fill="#80868F">not like for like</text>
+<text x="38" y="128" font-size="12.5" font-weight="500" fill="#EDEFF2">folo-n v5 vs 26n</text>
+<text x="38" y="142" font-size="10.5" fill="#80868F">128 ep, distilled</text>
+<rect x="156" y="120" width="128" height="10" rx="3" fill="#1C1F23"/>
+<path d="M156 120h43.86a3.5 3.5 0 0 1 3.5 3.5v3a3.5 3.5 0 0 1 -3.5 3.5h-43.86z" fill="url(#g-series0)"/>
+<text x="331" y="128.8" font-size="11.5" font-family="'Geist Mono', ui-monospace, 'SF Mono', 'Cascadia Mono', Consolas, monospace" font-weight="600" text-anchor="end" fill="#EDEFF2">0.370</text>
+<rect x="156" y="134" width="128" height="10" rx="3" fill="#1C1F23"/>
+<path d="M156 134h48.85a3.5 3.5 0 0 1 3.5 3.5v3a3.5 3.5 0 0 1 -3.5 3.5h-48.85z" fill="#646A73"/>
+<text x="331" y="142.8" font-size="11.5" font-family="'Geist Mono', ui-monospace, 'SF Mono', 'Cascadia Mono', Consolas, monospace" text-anchor="end" fill="#A1A7B0">0.409</text>
+<rect x="341" y="121" width="56" height="22" rx="6" fill="#1D2024" stroke="#202327"/>
+<text x="369" y="135.74" font-size="11" font-family="'Geist Mono', ui-monospace, 'SF Mono', 'Cascadia Mono', Consolas, monospace" font-weight="600" text-anchor="middle" fill="#A1A7B0">−0.039</text>
+<text x="38" y="172" font-size="12.5" font-weight="500" fill="#EDEFF2">folo-s vs 26s</text>
+<text x="38" y="186" font-size="10.5" fill="#80868F">56 ep, scratch</text>
+<rect x="156" y="164" width="128" height="10" rx="3" fill="#1C1F23"/>
+<path d="M156 164h49.75a3.5 3.5 0 0 1 3.5 3.5v3a3.5 3.5 0 0 1 -3.5 3.5h-49.75z" fill="url(#g-series0)"/>
+<text x="331" y="172.8" font-size="11.5" font-family="'Geist Mono', ui-monospace, 'SF Mono', 'Cascadia Mono', Consolas, monospace" font-weight="600" text-anchor="end" fill="#EDEFF2">0.416</text>
+<rect x="156" y="178" width="128" height="10" rx="3" fill="#1C1F23"/>
+<path d="M156 178h57.94a3.5 3.5 0 0 1 3.5 3.5v3a3.5 3.5 0 0 1 -3.5 3.5h-57.94z" fill="#646A73"/>
+<text x="331" y="186.8" font-size="11.5" font-family="'Geist Mono', ui-monospace, 'SF Mono', 'Cascadia Mono', Consolas, monospace" text-anchor="end" fill="#A1A7B0">0.480</text>
+<rect x="341" y="165" width="56" height="22" rx="6" fill="#1D2024" stroke="#202327"/>
+<text x="369" y="179.74" font-size="11" font-family="'Geist Mono', ui-monospace, 'SF Mono', 'Cascadia Mono', Consolas, monospace" font-weight="600" text-anchor="middle" fill="#A1A7B0">−0.064</text>
+<text x="38" y="307" font-size="11" fill="#80868F">FOLO trained on COCO alone from scratch (128 / 56 ep). YOLO26</text>
+<text x="38" y="322" font-size="11" fill="#80868F">pretrained on Objects365 and trained longer.</text>
+<rect x="427" y="70" width="391" height="266" rx="8" fill="#14171B" stroke="#1A1C1F"/>
+<text x="443" y="96" font-size="13" font-weight="600" fill="#EDEFF2">Fine-tuned on small datasets</text>
+<text x="802" y="96" font-size="11" text-anchor="end" fill="#80868F">folo-n vs yolo26n · 3 seeds</text>
+<text x="443" y="128" font-size="12.5" font-weight="500" fill="#EDEFF2">Blood cells</text>
+<text x="443" y="142" font-size="10.5" fill="#80868F">205 train imgs</text>
+<rect x="561" y="120" width="128" height="10" rx="3" fill="#1C1F23"/>
+<path d="M561 120h74.2a3.5 3.5 0 0 1 3.5 3.5v3a3.5 3.5 0 0 1 -3.5 3.5h-74.2z" fill="url(#g-series0)"/>
+<path d="M638.57 125L638.7 125" stroke="#08090B" stroke-width="3.2" fill="none"/>
+<path d="M638.57 121.5L638.57 128.5" stroke="#08090B" stroke-width="3.2" fill="none"/>
+<path d="M638.7 121.5L638.7 128.5" stroke="#08090B" stroke-width="3.2" fill="none"/>
+<path d="M638.57 125L638.7 125" stroke="#EDEFF2" stroke-width="1.5" fill="none"/>
+<path d="M638.57 122L638.57 128" stroke="#EDEFF2" stroke-width="1.5" fill="none"/>
+<path d="M638.7 122L638.7 128" stroke="#EDEFF2" stroke-width="1.5" fill="none"/>
+<text x="736" y="128.8" font-size="11.5" font-family="'Geist Mono', ui-monospace, 'SF Mono', 'Cascadia Mono', Consolas, monospace" font-weight="600" text-anchor="end" fill="#EDEFF2">0.607</text>
+<rect x="561" y="134" width="128" height="10" rx="3" fill="#1C1F23"/>
+<path d="M561 134h76.63a3.5 3.5 0 0 1 3.5 3.5v3a3.5 3.5 0 0 1 -3.5 3.5h-76.63z" fill="#646A73"/>
+<path d="M640.49 139L642.15 139" stroke="#08090B" stroke-width="3.2" fill="none"/>
+<path d="M640.49 135.5L640.49 142.5" stroke="#08090B" stroke-width="3.2" fill="none"/>
+<path d="M642.15 135.5L642.15 142.5" stroke="#08090B" stroke-width="3.2" fill="none"/>
+<path d="M640.49 139L642.15 139" stroke="#EDEFF2" stroke-width="1.5" fill="none"/>
+<path d="M640.49 136L640.49 142" stroke="#EDEFF2" stroke-width="1.5" fill="none"/>
+<path d="M642.15 136L642.15 142" stroke="#EDEFF2" stroke-width="1.5" fill="none"/>
+<text x="736" y="142.8" font-size="11.5" font-family="'Geist Mono', ui-monospace, 'SF Mono', 'Cascadia Mono', Consolas, monospace" text-anchor="end" fill="#A1A7B0">0.626</text>
+<rect x="746" y="121" width="56" height="22" rx="6" fill="#312A20" stroke="#483A25"/>
+<text x="774" y="135.74" font-size="11" font-family="'Geist Mono', ui-monospace, 'SF Mono', 'Cascadia Mono', Consolas, monospace" font-weight="600" text-anchor="middle" fill="#FFC266">−0.020</text>
+<text x="443" y="172" font-size="12.5" font-weight="500" fill="#EDEFF2">Brain tumours</text>
+<text x="443" y="186" font-size="10.5" fill="#80868F">893 train imgs</text>
+<rect x="561" y="164" width="128" height="10" rx="3" fill="#1C1F23"/>
+<path d="M561 164h54.36a3.5 3.5 0 0 1 3.5 3.5v3a3.5 3.5 0 0 1 -3.5 3.5h-54.36z" fill="url(#g-series0)"/>
+<path d="M617.19 169L619.88 169" stroke="#08090B" stroke-width="3.2" fill="none"/>
+<path d="M617.19 165.5L617.19 172.5" stroke="#08090B" stroke-width="3.2" fill="none"/>
+<path d="M619.88 165.5L619.88 172.5" stroke="#08090B" stroke-width="3.2" fill="none"/>
+<path d="M617.19 169L619.88 169" stroke="#EDEFF2" stroke-width="1.5" fill="none"/>
+<path d="M617.19 166L617.19 172" stroke="#EDEFF2" stroke-width="1.5" fill="none"/>
+<path d="M619.88 166L619.88 172" stroke="#EDEFF2" stroke-width="1.5" fill="none"/>
+<text x="736" y="172.8" font-size="11.5" font-family="'Geist Mono', ui-monospace, 'SF Mono', 'Cascadia Mono', Consolas, monospace" font-weight="600" text-anchor="end" fill="#EDEFF2">0.452</text>
+<rect x="561" y="178" width="128" height="10" rx="3" fill="#1C1F23"/>
+<path d="M561 178h52.31a3.5 3.5 0 0 1 3.5 3.5v3a3.5 3.5 0 0 1 -3.5 3.5h-52.31z" fill="#646A73"/>
+<path d="M613.86 183L619.75 183" stroke="#08090B" stroke-width="3.2" fill="none"/>
+<path d="M613.86 179.5L613.86 186.5" stroke="#08090B" stroke-width="3.2" fill="none"/>
+<path d="M619.75 179.5L619.75 186.5" stroke="#08090B" stroke-width="3.2" fill="none"/>
+<path d="M613.86 183L619.75 183" stroke="#EDEFF2" stroke-width="1.5" fill="none"/>
+<path d="M613.86 180L613.86 186" stroke="#EDEFF2" stroke-width="1.5" fill="none"/>
+<path d="M619.75 180L619.75 186" stroke="#EDEFF2" stroke-width="1.5" fill="none"/>
+<text x="736" y="186.8" font-size="11.5" font-family="'Geist Mono', ui-monospace, 'SF Mono', 'Cascadia Mono', Consolas, monospace" text-anchor="end" fill="#A1A7B0">0.436</text>
+<rect x="746" y="165" width="56" height="22" rx="6" fill="#25272B" stroke="#292C30"/>
+<text x="774" y="179.74" font-size="11" font-family="'Geist Mono', ui-monospace, 'SF Mono', 'Cascadia Mono', Consolas, monospace" font-weight="600" text-anchor="middle" fill="#A1A7B0">level</text>
+<text x="443" y="216" font-size="12.5" font-weight="500" fill="#EDEFF2">Signatures</text>
+<text x="443" y="230" font-size="10.5" fill="#80868F">143 train imgs</text>
+<rect x="561" y="208" width="128" height="10" rx="3" fill="#1C1F23"/>
+<path d="M561 208h123.09a3.5 3.5 0 0 1 3.5 3.5v3a3.5 3.5 0 0 1 -3.5 3.5h-123.09z" fill="url(#g-series0)"/>
+<path d="M687.34 213L687.98 213" stroke="#08090B" stroke-width="3.2" fill="none"/>
+<path d="M687.34 209.5L687.34 216.5" stroke="#08090B" stroke-width="3.2" fill="none"/>
+<path d="M687.98 209.5L687.98 216.5" stroke="#08090B" stroke-width="3.2" fill="none"/>
+<path d="M687.34 213L687.98 213" stroke="#EDEFF2" stroke-width="1.5" fill="none"/>
+<path d="M687.34 210L687.34 216" stroke="#EDEFF2" stroke-width="1.5" fill="none"/>
+<path d="M687.98 210L687.98 216" stroke="#EDEFF2" stroke-width="1.5" fill="none"/>
+<text x="736" y="216.8" font-size="11.5" font-family="'Geist Mono', ui-monospace, 'SF Mono', 'Cascadia Mono', Consolas, monospace" font-weight="600" text-anchor="end" fill="#EDEFF2">0.989</text>
+<rect x="561" y="222" width="128" height="10" rx="3" fill="#1C1F23"/>
+<path d="M561 222h122.2a3.5 3.5 0 0 1 3.5 3.5v3a3.5 3.5 0 0 1 -3.5 3.5h-122.2z" fill="#646A73"/>
+<path d="M685.8 227L687.34 227" stroke="#08090B" stroke-width="3.2" fill="none"/>
+<path d="M685.8 223.5L685.8 230.5" stroke="#08090B" stroke-width="3.2" fill="none"/>
+<path d="M687.34 223.5L687.34 230.5" stroke="#08090B" stroke-width="3.2" fill="none"/>
+<path d="M685.8 227L687.34 227" stroke="#EDEFF2" stroke-width="1.5" fill="none"/>
+<path d="M685.8 224L685.8 230" stroke="#EDEFF2" stroke-width="1.5" fill="none"/>
+<path d="M687.34 224L687.34 230" stroke="#EDEFF2" stroke-width="1.5" fill="none"/>
+<text x="736" y="230.8" font-size="11.5" font-family="'Geist Mono', ui-monospace, 'SF Mono', 'Cascadia Mono', Consolas, monospace" text-anchor="end" fill="#A1A7B0">0.982</text>
+<rect x="746" y="209" width="56" height="22" rx="6" fill="#25272B" stroke="#292C30"/>
+<text x="774" y="223.74" font-size="11" font-family="'Geist Mono', ui-monospace, 'SF Mono', 'Cascadia Mono', Consolas, monospace" font-weight="600" text-anchor="middle" fill="#A1A7B0">level</text>
+<text x="443" y="260" font-size="12.5" font-weight="500" fill="#EDEFF2">Medical pills</text>
+<text x="443" y="274" font-size="10.5" fill="#80868F">92 train imgs</text>
+<rect x="561" y="252" width="128" height="10" rx="3" fill="#1C1F23"/>
+<path d="M561 252h99.41a3.5 3.5 0 0 1 3.5 3.5v3a3.5 3.5 0 0 1 -3.5 3.5h-99.41z" fill="url(#g-series0)"/>
+<path d="M663.53 257L664.3 257" stroke="#08090B" stroke-width="3.2" fill="none"/>
+<path d="M663.53 253.5L663.53 260.5" stroke="#08090B" stroke-width="3.2" fill="none"/>
+<path d="M664.3 253.5L664.3 260.5" stroke="#08090B" stroke-width="3.2" fill="none"/>
+<path d="M663.53 257L664.3 257" stroke="#EDEFF2" stroke-width="1.5" fill="none"/>
+<path d="M663.53 254L663.53 260" stroke="#EDEFF2" stroke-width="1.5" fill="none"/>
+<path d="M664.3 254L664.3 260" stroke="#EDEFF2" stroke-width="1.5" fill="none"/>
+<text x="736" y="260.8" font-size="11.5" font-family="'Geist Mono', ui-monospace, 'SF Mono', 'Cascadia Mono', Consolas, monospace" font-weight="600" text-anchor="end" fill="#EDEFF2">0.804</text>
+<rect x="561" y="266" width="128" height="10" rx="3" fill="#1C1F23"/>
+<path d="M561 266h99.28a3.5 3.5 0 0 1 3.5 3.5v3a3.5 3.5 0 0 1 -3.5 3.5h-99.28z" fill="#646A73"/>
+<path d="M663.4 271L664.17 271" stroke="#08090B" stroke-width="3.2" fill="none"/>
+<path d="M663.4 267.5L663.4 274.5" stroke="#08090B" stroke-width="3.2" fill="none"/>
+<path d="M664.17 267.5L664.17 274.5" stroke="#08090B" stroke-width="3.2" fill="none"/>
+<path d="M663.4 271L664.17 271" stroke="#EDEFF2" stroke-width="1.5" fill="none"/>
+<path d="M663.4 268L663.4 274" stroke="#EDEFF2" stroke-width="1.5" fill="none"/>
+<path d="M664.17 268L664.17 274" stroke="#EDEFF2" stroke-width="1.5" fill="none"/>
+<text x="736" y="274.8" font-size="11.5" font-family="'Geist Mono', ui-monospace, 'SF Mono', 'Cascadia Mono', Consolas, monospace" text-anchor="end" fill="#A1A7B0">0.803</text>
+<rect x="746" y="253" width="56" height="22" rx="6" fill="#25272B" stroke="#292C30"/>
+<text x="774" y="267.74" font-size="11" font-family="'Geist Mono', ui-monospace, 'SF Mono', 'Cascadia Mono', Consolas, monospace" font-weight="600" text-anchor="middle" fill="#A1A7B0">level</text>
+<text x="443" y="307" font-size="11" fill="#80868F">100 epochs from own COCO weights (folo-n-coco-v2), one</text>
+<text x="443" y="322" font-size="11" fill="#80868F">pycocotools scorer.</text>
+<text x="22" y="360" font-size="11.5" fill="#80868F">&quot;level&quot;: inside 3-seed spread or saturated (Signatures). Opt-in SEBF + DFL-CGR (--iou 0.78 --max-det 1000) adds +0.0065–0.0076 AP on COCO;</text>
+<text x="22" y="376" font-size="11.5" fill="#80868F">full tables in docs/BENCHMARKS.md.</text>
 </svg>

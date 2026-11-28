@@ -4,8 +4,8 @@
 > `folo` CLI (every command supports `--json`, with stable exit codes), an HTTP + SSE API (`folo serve`), an MCP
 > server for agents (`folo mcp`), the FOLO Studio web app, the FOLO Desktop native app, and in-browser inference
 > (wasm + WebGPU). Status: v0.1, early. COCO-pretrained weights are published and download over HTTPS (`folo weights
-> pull folo-s-coco`, folo-s, val2017 AP 0.416; `folo weights pull folo-n-coco-v5`, folo-n, AP 0.370). Binaries for
-> Windows and Linux are in the GitHub release (README, Install); anywhere else, build from source.
+> pull folo-s-coco`, folo-s, val2017 AP 0.416; `folo weights pull folo-n-coco-v5`, folo-n, AP 0.370). Build from source
+> (README, Install); prebuilt Windows and Linux installers apply once a tagged binary release is published.
 
 Fastest path for an agent:
 - **MCP:** `folo mcp` (stdio; `--data-dir DIR`, default `~/.folo`). It has 45 tools: folo_info, list_datasets, get_dataset,
@@ -28,8 +28,8 @@ Fastest path for an agent:
 
 ## Start here
 - [README](README.md): what FOLO is and the end-to-end workflow, the speed and accuracy charts against Ultralytics
-  yolo26n, quickstart, Studio and Desktop, agent setup (Claude Code / Codex / Antigravity / .mcp.json), architecture at a glance,
-  where each folder is, and project status
+  yolo26n, quickstart, Studio and Desktop, agent setup (Claude Code / Codex / Antigravity; JSON configs in docs/MCP.md),
+  architecture at a glance, where each folder is, and project status
 - [Docs index](docs/README.md): every doc in docs/, grouped by task (use FOLO, drive it from an agent, the apps, the
   internals, measuring, contributing), and a reading order for a new contributor
 - [Quickstart](docs/QUICKSTART.md): the longer walkthrough. It covers building, synthetic data, training on your

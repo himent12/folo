@@ -3,11 +3,12 @@
 //   node tools/charts/render.mjs            write the files
 //   node tools/charts/render.mjs --check    exit 1 if the committed files are not exactly what the data gives (CI)
 // No dependencies. The numbers live in data.json with the document each one was copied from; the layouts are in
-// bars.mjs and lines.mjs.
+// grid.mjs, bars.mjs and lines.mjs.
 
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { barsFigure } from './bars.mjs';
+import { dashboardFigure } from './grid.mjs';
 import { theme } from './lib.mjs';
 import { linesFigure } from './lines.mjs';
 
@@ -28,50 +29,181 @@ for (const group of [data.inference.latency, data.inference.throughput, data.tra
 const times = (ratio) => `${ratio.toFixed(1)}×`;
 /** How many times better the first value is than the second. */
 const speedup = ([folo, other], better) => (better === 'lower' ? other / folo : folo / other);
-const withSpeedup = (rows, better) => rows.map((row) => ({ ...row, note: times(speedup(row.values, better)), noteSub: 'faster' }));
+const withSpeedBadge = (rows, better) =>
+  rows.map((row) => ({ ...row, badge: times(speedup(row.values, better)), badgeTone: 'accent' }));
 
 const FOLO_N = { label: 'folo-n', colour: 'series0', strong: true };
-const YOLO_N = { label: 'yolo26n (Ultralytics 8.4.198), its best configuration for each row', colour: 'reference' };
+const YOLO_N = { label: 'yolo26n (best config per row)', colour: 'reference' };
+
+// Short sub-labels keep the 2×2 dashboard crisp while preserving exact numbers from data.json.
+const compactRow = (row, label, detail) => ({ ...row, label, detail });
+
+const gpuLatency = withSpeedBadge(
+  [
+    compactRow(data.inference.latency[0], 'GPU forward', 'f32, on device'),
+    compactRow(data.inference.latency[1], 'GPU end to end', 'image in, boxes out'),
+  ],
+  'lower',
+);
+const cpuLatency = withSpeedBadge(
+  [
+    compactRow(data.inference.latency[2], 'CPU forward', 'f32, best threads'),
+    compactRow(data.inference.latency[3], 'CPU end to end', 'image in, boxes out'),
+  ],
+  'lower',
+);
+const gpuThroughput = withSpeedBadge(
+  [
+    compactRow(data.inference.throughput[0], 'Forward, f32', 'yolo26n uses TF32'),
+    compactRow(data.inference.throughput[1], 'Forward, f16', 'FOLO tensor cores'),
+    compactRow(data.inference.throughput[2], 'End to end, f16', 'decoded images in'),
+  ],
+  'higher',
+);
+const trainThroughput = withSpeedBadge(
+  [
+    compactRow(data.training.throughput[0], 'Train step, f32', 'fwd + loss + bwd + SGD'),
+    compactRow(data.training.throughput[1], 'Train step, AMP', 'mixed precision'),
+    compactRow(data.training.throughput[2], 'Whole trainer, f32', 'loader + mosaic, 8w'),
+    compactRow(data.training.throughput[3], 'Whole trainer, AMP', 'sustained / epoch'),
+  ],
+  'higher',
+);
+const trainMemory = data.training.memory.map((row, i) => ({
+  ...compactRow(row, i === 0 ? 'Train step, f32' : 'Train step, AMP', 'peak live tensors'),
+  badge: `−${Math.round((1 - row.values[0] / row.values[1]) * 100)}%`,
+  badgeTone: 'accent',
+}));
 
 const figures = {
-  'speed-inference': (t) =>
-    barsFigure(
+  speed: (t) =>
+    dashboardFigure(
       {
-        title: 'Inference speed: folo-n against yolo26n',
-        subtitle: data.machine,
+        title: 'Speed & memory: folo-n vs yolo26n',
+        subtitle: `${data.machine} · Ultralytics 8.4.198`,
         desc:
-          'Grouped bars. Latency at batch 1 in milliseconds and throughput at batch 16 in images per second, on the GPU and the CPU, for folo-n and yolo26n. ' +
-          [...data.inference.latency.map((r) => `${r.label}: ${r.text[0]} ms against ${r.text[1]} ms.`), ...data.inference.throughput.map((r) => `${r.label}: ${r.text[0]} against ${r.text[1]} images per second.`)].join(' '),
+          '2x2 dashboard comparing folo-n against yolo26n. Latency at batch 1 (GPU on 0-7 ms scale, CPU on 0-25 ms scale): ' +
+          data.inference.latency.map((r) => `${r.label} ${r.text[0]} vs ${r.text[1]} ms`).join(', ') +
+          '. Batch-16 GPU inference throughput: ' +
+          data.inference.throughput.map((r) => `${r.label} ${r.text[0]} vs ${r.text[1]} img/s`).join(', ') +
+          '. Batch-16 training throughput: ' +
+          data.training.throughput.map((r) => `${r.label} ${r.text[0]} vs ${r.text[1]} img/s`).join(', ') +
+          '. Peak GPU memory: ' +
+          data.training.memory.map((r) => `${r.label} ${r.text[0]} vs ${r.text[1]} MiB`).join(', ') +
+          '.',
         series: [FOLO_N, YOLO_N],
-        panels: [
-          { title: 'Latency at batch 1', hint: 'milliseconds, lower is better', unit: 'ms', notes: true, rows: withSpeedup(data.inference.latency, 'lower') },
-          { title: 'Throughput at batch 16', hint: 'images per second, higher is better', unit: 'img/s', notes: true, rows: withSpeedup(data.inference.throughput, 'higher') },
+        grid: [
+          [
+            {
+              title: 'Latency · batch 1',
+              hint: '↓ ms, lower is better',
+              unit: 'ms',
+              labelW: 114,
+              pillW: 48,
+              groups: [
+                { title: 'GPU', scale: '0–7 ms', max: 7, rows: gpuLatency },
+                { title: 'CPU', scale: '0–25 ms', max: 25, rows: cpuLatency },
+              ],
+            },
+            {
+              title: 'Training · batch 16',
+              hint: '↑ img/s, higher is better',
+              unit: 'img/s',
+              labelW: 128,
+              pillW: 48,
+              groups: [{ rows: trainThroughput }],
+            },
+          ],
+          [
+            {
+              title: 'GPU inference · batch 16',
+              hint: '↑ img/s, higher is better',
+              unit: 'img/s',
+              labelW: 114,
+              pillW: 48,
+              groups: [{ rows: gpuThroughput }],
+            },
+            {
+              title: 'Peak GPU memory · batch 16',
+              hint: '↓ MiB, lower is better',
+              unit: 'MiB',
+              labelW: 114,
+              pillW: 52,
+              note: 'Peak allocated by live tensors; both allocators reserve more.',
+              groups: [{ rows: trainMemory }],
+            },
+          ],
         ],
-        footer: [data.method, data.warmup],
+        footer: [
+          'FOLO: medians of alternated runs (2026-11-12/13; end to end on trained weights). YOLO26: fastest config per row (2026-11-07). Full method: docs/BENCHMARKS.md.',
+          data.warmup,
+        ],
       },
       t,
     ),
 
-  'speed-training': (t) =>
-    barsFigure(
+  accuracy: (t) =>
+    dashboardFigure(
       {
-        title: 'Training speed: folo-n against yolo26n',
-        subtitle: data.machine,
+        title: 'Accuracy: FOLO vs Ultralytics YOLO26',
+        subtitle: 'AP@[.5:.95] (pycocotools) · higher is better · 0–1 shared scale · whiskers show 3-seed min–max',
         desc:
-          'Grouped bars. Training throughput at batch 16 in images per second and peak GPU memory allocated by a training step in MiB, for folo-n and yolo26n. ' +
-          [...data.training.throughput.map((r) => `${r.label}: ${r.text[0]} against ${r.text[1]} images per second.`), ...data.training.memory.map((r) => `${r.label}: ${r.text[0]} against ${r.text[1]} MiB.`)].join(' '),
-        series: [FOLO_N, YOLO_N],
-        panels: [
-          { title: 'Throughput at batch 16', hint: 'images per second, higher is better', unit: 'img/s', notes: true, rows: withSpeedup(data.training.throughput, 'higher') },
-          {
-            title: 'Peak GPU memory allocated at batch 16',
-            hint: 'MiB, lower is better',
-            unit: 'MiB',
-            notes: true,
-            rows: data.training.memory.map((row) => ({ ...row, note: `${Math.round((1 - row.values[0] / row.values[1]) * 100)}%`, noteSub: 'less' })),
-          },
+          'Two-panel chart of AP on one shared 0 to 1 scale. COCO val2017 (not like for like): ' +
+          data.accuracy.coco.rows.map((r) => `${r.label} ${r.text[0]} vs ${r.text[1]}`).join(', ') +
+          '. Fine-tuned on four small datasets (folo-n vs yolo26n, 3-seed mean): ' +
+          data.accuracy.finetune.rows.map((r) => `${r.label} ${r.text[0]} vs ${r.text[1]} (${r.verdict})`).join(', ') +
+          '.',
+        series: [
+          { label: 'FOLO', colour: 'series0', strong: true },
+          { label: 'Ultralytics YOLO26', colour: 'reference' },
         ],
-        footer: [data.method, 'Memory is what live tensors hold at the peak; both allocators reserve more than that (row 11 there).'],
+        grid: [
+          [
+            {
+              title: 'COCO val2017',
+              hint: 'not like for like',
+              flex: 1,
+              labelW: 118,
+              pillW: 56,
+              sharedMax: 1.0,
+              note: 'FOLO trained on COCO alone from scratch (128 / 56 ep). YOLO26 pretrained on Objects365 and trained longer.',
+              groups: [
+                {
+                  rows: data.accuracy.coco.rows.map((row, i) => ({
+                    ...row,
+                    label: i === 0 ? 'folo-n v5 vs 26n' : 'folo-s vs 26s',
+                    detail: i === 0 ? '128 ep, distilled' : '56 ep, scratch',
+                    badge: row.delta,
+                    badgeTone: 'muted',
+                  })),
+                },
+              ],
+            },
+            {
+              title: 'Fine-tuned on small datasets',
+              hint: 'folo-n vs yolo26n · 3 seeds',
+              flex: 1,
+              labelW: 118,
+              pillW: 56,
+              sharedMax: 1.0,
+              note: '100 epochs from own COCO weights (folo-n-coco-v2), one pycocotools scorer.',
+              groups: [
+                {
+                  rows: data.accuracy.finetune.rows.map((row) => ({
+                    ...row,
+                    label: row.label.replace(' (BCCD)', '').replace(' (MRI)', ''),
+                    detail: row.detail.replace(' training images', ' train imgs'),
+                    badge: row.verdict === 'level' ? 'level' : row.delta,
+                    badgeTone: row.verdict === 'level' ? 'neutral' : 'warn',
+                  })),
+                },
+              ],
+            },
+          ],
+        ],
+        footer: [
+          '"level": inside 3-seed spread or saturated (Signatures). Opt-in SEBF + DFL-CGR (--iou 0.78 --max-det 1000) adds +0.0065–0.0076 AP on COCO; full tables in docs/BENCHMARKS.md.',
+        ],
       },
       t,
     ),
@@ -85,13 +217,13 @@ const figures = {
           'Grouped bars of how many times faster FOLO is than the YOLO26 model of the same size, for the nano and the small models. ' +
           data.by_size.rows.map((r) => `${r.label}, ${r.detail}: ${times(speedup(r.n, r.better))} for folo-n, ${times(speedup(r.s, r.better))} for folo-s.`).join(' '),
         series: [
-          { label: 'folo-n against yolo26n', colour: 'series0', strong: true },
-          { label: 'folo-s against yolo26s', colour: 'series1', strong: true },
+          { label: 'folo-n vs yolo26n', colour: 'series0', strong: true },
+          { label: 'folo-s vs yolo26s', colour: 'series1', strong: true },
         ],
         panels: [
           {
             title: 'Times faster',
-            hint: 'latency: YOLO26 over FOLO; throughput: FOLO over YOLO26',
+            hint: 'latency: YOLO26 / FOLO · throughput: FOLO / YOLO26',
             refLine: { value: 1, label: '1× = YOLO26' },
             rows: data.by_size.rows.map((row) => {
               const values = [speedup(row.n, row.better), speedup(row.s, row.better)];
@@ -99,41 +231,9 @@ const figures = {
             }),
           },
         ],
-        footer: ["Each bar divides two numbers of the FOLO targets table in docs/BENCHMARKS.md: FOLO's median and the best YOLO26 configuration of that row (measured 2026-11-12 and 2026-11-07).", data.warmup],
-      },
-      t,
-    ),
-
-  accuracy: (t) =>
-    barsFigure(
-      {
-        title: 'Accuracy: FOLO against YOLO26',
-        subtitle: 'AP@[.5:.95], pycocotools',
-        desc:
-          'Grouped bars of AP on one scale. On COCO val2017, FOLO trained on COCO alone is behind the published YOLO26 models. Fine-tuned on four small datasets, folo-n and yolo26n are level on three and yolo26n is ahead on one. ' +
-          [...data.accuracy.coco.rows, ...data.accuracy.finetune.rows].map((r) => `${r.label}: ${r.text[0]} against ${r.text[1]}.`).join(' '),
-        sharedScale: true,
-        series: [
-          { label: 'FOLO', colour: 'series0', strong: true },
-          { label: 'Ultralytics YOLO26', colour: 'reference' },
-        ],
-        panels: [
-          {
-            title: 'COCO val2017',
-            hint: 'higher is better. Not like for like: see below',
-            notes: true,
-            rows: data.accuracy.coco.rows.map((row) => ({ ...row, note: row.delta, noteSub: 'AP' })),
-          },
-          {
-            title: 'Fine-tuned on small datasets',
-            hint: 'folo-n and yolo26n, one scorer for both: mean and range of 3 seeds',
-            notes: true,
-            rows: data.accuracy.finetune.rows.map((row) => ({ ...row, note: row.delta, noteSub: row.verdict })),
-          },
-        ],
         footer: [
-          'COCO: FOLO trained on COCO alone from random weights, 56 epochs (folo-s) and 128 (folo-n: 96 of them distilled from folo-s). The YOLO26 numbers are the published ones, from models pretrained on Objects365 and trained for far longer.',
-          'Fine-tuning: each from its own COCO weights, at its defaults, 100 epochs; the differences are of the unrounded means. "level": inside the spread of the seeds, or on a set both saturate (signatures). Details: docs/BENCHMARKS.md, Accuracy.',
+          "Ratios from the FOLO targets table in docs/BENCHMARKS.md: FOLO's median vs YOLO26's best config per row (measured 2026-11-12/13 and 2026-11-07).",
+          data.warmup,
         ],
       },
       t,
@@ -155,8 +255,7 @@ const figures = {
         yFormat: (v, end) => (end ? v.toFixed(3) : v === 0 ? '0' : v.toFixed(1)),
         series: data.coco_curves.series,
         footer: [
-          `Each run was still rising at its last epoch: v2 in mid-schedule, the other two at the end of their learning-rate decay. ${data.coco_curves.final_ap}`,
-          'Runs and commands: examples/coco/README.md.',
+          `Each run was still rising at its last epoch. ${data.coco_curves.final_ap} Runs & commands: examples/coco/README.md.`,
         ],
       },
       t,
