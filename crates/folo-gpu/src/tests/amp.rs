@@ -889,3 +889,37 @@ fn batch_norm_streaming_fused_matches_cpu_f32_and_f16() {
         );
     }
 }
+
+/// `Tensor::matmul` under `autocast()` computes forward in `F16`, but must compute backward gradients for `F32`
+/// operands (such as `Linear::weight`) in `F32` so `GradScaler`-scaled weight gradients above `f16::MAX` (65504)
+/// never overflow to `Inf`.
+#[test]
+fn autocast_matmul_keeps_f32_weight_grad_without_f16_overflow() {
+    let dev = dev16!();
+    // 16 rows × 1.0 · upstream 2.0 · scale 65536.0 -> dW_entry = 16 * 1 * 2 * 65536 = 2_097_152 (> f16::MAX = 65504).
+    let x = Tensor::ones([16, 4]).to_device(dev).unwrap().to_dtype(DType::F16).unwrap().requires_grad_();
+    let w = Tensor::full([4, 4], 0.25f32).to_device(dev).unwrap().requires_grad_();
+    let y = {
+        let _a = autocast();
+        x.matmul(&w.t().unwrap()).unwrap()
+    };
+    assert_eq!(y.dtype(), DType::F16);
+    // Upstream gradient in F16 is finite (2.0 * 65536 / 16 = 8192 <= 65504), while its contraction over 16 rows
+    // into dW reaches 16 * 8192 = 131_072 (> f16::MAX = 65504), which overflows if dW is computed in F16.
+    let g_up = Tensor::full([16, 4], 8192.0f32).to_device(dev).unwrap().to_dtype(DType::F16).unwrap();
+    let loss = y.mul(&g_up).unwrap().to_dtype(DType::F32).unwrap().sum_all().unwrap();
+    let grads = loss.backward().unwrap();
+    let gw = grads.get(&w).unwrap();
+    assert_eq!(gw.dtype(), DType::F32);
+    let vals = gw.to_vec::<f32>().unwrap();
+    assert!(vals.iter().all(|v| v.is_finite()), "F32 weight gradient overflowed through F16: {vals:?}");
+    for &v in &vals {
+        assert!((v - 131_072.0).abs() < 1e-1, "expected 131072.0, got {v}");
+    }
+    let gx = grads.get(&x).unwrap();
+    assert_eq!(gx.dtype(), DType::F16, "F16 activation gradient stays F16");
+    let gx_vals = gx.to_dtype(DType::F32).unwrap().to_vec::<f32>().unwrap();
+    for &v in &gx_vals {
+        assert!((v - 8192.0).abs() < 1.0, "expected 8192.0, got {v}");
+    }
+}

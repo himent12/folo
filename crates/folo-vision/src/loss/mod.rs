@@ -201,6 +201,17 @@ impl LossConfig {
         Self { tal, ..*self }
     }
 
+    /// Whether this classification loss applies `p^γ` focal negative down-weighting and therefore requires the
+    /// focal class-bias prior (`b_0 = ln(0.01 / 0.99) = -4.59512`) instead of the standard BCE prior (`≈ -11.54`)
+    /// to prevent epoch-1 negative-gradient collapse.
+    pub fn uses_focal_bias_prior(&self) -> bool {
+        match self.cls_loss {
+            ClsLossKind::Bce => self.mal_gamma > 0.0,
+            ClsLossKind::Vfl => self.vfl_gamma > 0.0,
+            ClsLossKind::Qfl => self.qfl_beta > 0.0,
+        }
+    }
+
     /// Validate all loss hyper-parameters (shared by [`detection_loss`] and `TrainConfig::validate`).
     pub fn validate_params(&self) -> std::result::Result<(), String> {
         if !(self.mal_gamma.is_finite() && (0.0..=5.0).contains(&self.mal_gamma)) {

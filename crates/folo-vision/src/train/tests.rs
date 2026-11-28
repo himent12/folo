@@ -606,3 +606,184 @@ fn cpu_optimizer_step_skips_when_grad_norm_is_nonfinite() {
         assert_eq!(got, want, "parameter was mutated despite non-finite gradient norm");
     }
 }
+
+#[test]
+fn cpu_optimizer_step_skips_nonfinite_grad_when_clip_disabled() {
+    let mut t = micro(1, 100, TrainOptions::default());
+    t.cfg.clip_grad_norm = 0.0;
+    let params = t.model.parameters();
+    let p_nan = &params[0];
+    let before: Vec<Vec<u32>> =
+        params.iter().map(|p| p.to_vec::<f32>().unwrap().into_iter().map(f32::to_bits).collect()).collect();
+    let (step_before, sched_before, ema_before) =
+        (t.opt.step_count(), t.sched.step(), t.ema.as_ref().map(|e| e.updates()));
+
+    let g_nan = folo_core::Tensor::full(p_nan.dims(), f32::NAN);
+    let grads = p_nan.mul(&g_nan).unwrap().sum_all().unwrap().backward().unwrap();
+    t.acc.add_owned(grads).unwrap();
+
+    t.optimizer_step(0, 0).unwrap();
+
+    assert_eq!(t.opt.step_count(), step_before);
+    assert_eq!(t.sched.step(), sched_before);
+    assert_eq!(t.ema.as_ref().map(|e| e.updates()), ema_before);
+    for (p, want) in params.iter().zip(before) {
+        let got: Vec<u32> = p.to_vec::<f32>().unwrap().into_iter().map(f32::to_bits).collect();
+        assert_eq!(got, want, "parameter was mutated despite non-finite gradient with clip_grad_norm = 0");
+    }
+}
+
+#[test]
+fn gpu_non_amp_optimizer_step_skips_nonfinite_grad() {
+    let ctx = match folo_gpu::GpuContext::shared() {
+        Ok(c) => c,
+        Err(e) => return eprintln!("note: skipping GPU non-AMP test, no adapter: {e}"),
+    };
+    if ctx.summary().device_type == "Cpu" && std::env::var("FOLO_GPU_TEST_SOFTWARE").is_err() {
+        return eprintln!("note: skipping GPU non-AMP test on software adapter {}", ctx.summary().name);
+    }
+    let dev = folo_gpu::init().unwrap();
+    for clip in [10.0, 0.0] {
+        let mut t = micro_on("gpu:0", 1, 100, TrainOptions::default());
+        assert!(t.scaler.is_none(), "must exercise non-AMP GPU path");
+        t.cfg.clip_grad_norm = clip;
+        let params = t.model.parameters();
+        let p_inf = &params[0];
+        let before: Vec<Vec<u32>> = params
+            .iter()
+            .map(|p| p.to_vec::<f32>().unwrap().into_iter().map(f32::to_bits).collect())
+            .collect();
+        let (step_before, sched_before, ema_before) =
+            (t.opt.step_count(), t.sched.step(), t.ema.as_ref().map(|e| e.updates()));
+
+        let g_inf = folo_core::Tensor::full(p_inf.dims(), f32::INFINITY).to_device(dev).unwrap();
+        let grads = p_inf.mul(&g_inf).unwrap().sum_all().unwrap().backward().unwrap();
+        t.acc.add_owned(grads).unwrap();
+
+        t.optimizer_step(0, 0).unwrap();
+
+        assert_eq!(t.opt.step_count(), step_before, "clip={clip}: optimizer must skip non-finite GPU grad");
+        assert_eq!(t.sched.step(), sched_before, "clip={clip}: schedule must not advance");
+        assert_eq!(t.ema.as_ref().map(|e| e.updates()), ema_before, "clip={clip}: EMA must not update");
+        for (p, want) in params.iter().zip(before) {
+            let got: Vec<u32> = p.to_vec::<f32>().unwrap().into_iter().map(f32::to_bits).collect();
+            assert_eq!(got, want, "clip={clip}: GPU parameter was poisoned by non-finite grad");
+        }
+    }
+}
+
+#[test]
+fn vfl_and_qfl_initialize_focal_bias_prior() {
+    use crate::loss::{ClsLossKind, LossConfig};
+    use folo_data::synthetic::{SyntheticConfig, SyntheticDataset};
+
+    let shapes = SyntheticConfig {
+        images: 4,
+        classes: vec!["circle".into(), "square".into()],
+        imgsz: 64,
+        seed: 7,
+        val_fraction: 0.5,
+        ..SyntheticConfig::default()
+    };
+    let make_data = || {
+        let split = |s| Arc::new(SyntheticDataset::new(shapes.clone(), s).unwrap());
+        TrainData {
+            train: split(folo_data::Split::Train),
+            val: split(folo_data::Split::Val),
+            classes: shapes.classes.clone(),
+        }
+    };
+    const FOCAL_PRIOR: f32 = -4.595_12;
+    let cases = [
+        ("folo-n", LossConfig { cls_loss: ClsLossKind::Vfl, vfl_gamma: 2.0, ..LossConfig::default() }, true),
+        ("folo2-n", LossConfig { cls_loss: ClsLossKind::Vfl, vfl_gamma: 2.0, ..LossConfig::default() }, true),
+        ("folo-n", LossConfig { cls_loss: ClsLossKind::Qfl, qfl_beta: 2.0, ..LossConfig::default() }, true),
+        ("folo2-n", LossConfig { cls_loss: ClsLossKind::Qfl, qfl_beta: 2.0, ..LossConfig::default() }, true),
+        ("folo-n", LossConfig { cls_loss: ClsLossKind::Vfl, vfl_gamma: 0.0, ..LossConfig::default() }, false),
+        ("folo-n", LossConfig { cls_loss: ClsLossKind::Qfl, qfl_beta: 0.0, ..LossConfig::default() }, false),
+        ("folo-n", LossConfig::default(), false),
+    ];
+    for (arch, loss, expect_focal) in cases {
+        let cfg = TrainConfig {
+            arch: arch.into(),
+            epochs: 1,
+            batch: 2,
+            imgsz: 64,
+            device: "cpu".into(),
+            workers: 0,
+            loss,
+            augment: folo_data::AugmentConfig::none(),
+            ..TrainConfig::default()
+        };
+        let t = Trainer::new(cfg, make_data(), TrainOptions::default()).unwrap();
+        let mut checked = 0usize;
+        for (name, p) in t.detector().named_parameters() {
+            if super::setup::is_cls_head_param(&name) && name.ends_with(".out.bias") {
+                let vals = p.to_vec::<f32>().unwrap();
+                checked += 1;
+                if expect_focal {
+                    assert!(
+                        vals.iter().all(|v| (v - FOCAL_PRIOR).abs() < 1e-5),
+                        "{arch} {loss:?} `{name}` expected focal prior {FOCAL_PRIOR}, got {vals:?}"
+                    );
+                } else {
+                    let stride = if name.contains(".p3.") {
+                        8
+                    } else if name.contains(".p4.") {
+                        16
+                    } else {
+                        32
+                    };
+                    let bce_prior = folo_nn::init::cls_bias_prior(2, stride);
+                    assert!(
+                        vals.iter().all(|v| (v - bce_prior).abs() < 1e-5),
+                        "{arch} {loss:?} `{name}` should keep standard BCE prior {bce_prior}, got {vals:?}"
+                    );
+                }
+            }
+        }
+        assert!(checked > 0, "{arch}: expected at least one cls head .out.bias");
+    }
+}
+
+#[test]
+fn pc_pema_uses_warmup_effective_lf() {
+    use folo_data::synthetic::{SyntheticConfig, SyntheticDataset};
+    let shapes = SyntheticConfig {
+        images: 8,
+        classes: vec!["circle".into(), "square".into()],
+        imgsz: 64,
+        seed: 9,
+        val_fraction: 0.25,
+        ..SyntheticConfig::default()
+    };
+    let split = |s| Arc::new(SyntheticDataset::new(shapes.clone(), s).unwrap());
+    let data = TrainData {
+        train: split(folo_data::Split::Train),
+        val: split(folo_data::Split::Val),
+        classes: shapes.classes.clone(),
+    };
+    let cfg = TrainConfig {
+        epochs: 10,
+        batch: 2,
+        nbs: 2,
+        imgsz: 64,
+        device: "cpu".into(),
+        optimizer: OptimizerChoice::Adamw,
+        lr0: 0.002,
+        warmup_epochs: 3.0,
+        ema_mode: folo_nn::EmaMode::Power,
+        workers: 0,
+        augment: folo_data::AugmentConfig::none(),
+        ..TrainConfig::default()
+    };
+    let t = Trainer::new(cfg, data, TrainOptions::default()).unwrap();
+    let power = t.ema.as_ref().unwrap().contract().power.expect("PC-PEMA config");
+    assert!(t.sched.warmup_iters() > 1);
+    let step = 1u64;
+    let lf_raw = t.sched.lf(step);
+    let lf_eff = t.sched.effective_lf(step);
+    assert!(lf_eff < lf_raw * 0.5, "warmup effective_lf ({lf_eff}) should be well below raw lf ({lf_raw})");
+    // Using u = 5 (u > 1 so decay > 0): lower effective_lf during warmup must yield a smaller decay.
+    assert!(power.decay_at(5, lf_eff) < power.decay_at(5, lf_raw));
+}

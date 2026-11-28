@@ -100,7 +100,7 @@ impl Trainer {
             mc.spd_stem = src.spd_stem;
             mc.plus = src.plus;
             mc.fullpad = src.fullpad;
-            if cfg.loss.mal_gamma > 0.0 {
+            if cfg.loss.uses_focal_bias_prior() {
                 mc.mal_bias_prior = Some(true);
             }
             Some(mc)
@@ -393,7 +393,7 @@ impl Trainer {
                     ModelConfig::new(cfg.scale()?, nc)?
                 };
                 mc.head = cfg.head.as_str().into();
-                if cfg.is_v2() && cfg.loss.mal_gamma > 0.0 {
+                if cfg.is_v2() && cfg.loss.uses_focal_bias_prior() {
                     mc.mal_bias_prior = Some(true);
                 }
                 mc
@@ -401,15 +401,16 @@ impl Trainer {
         };
         let mut init = Rng::seed(cfg.seed);
         let mut model = Detector::from_model_config(&mconf, &mut init)?;
-        // Safeguard #38: MAL requires focal bias prior b_0 = ln(0.01 / 0.99) = -4.59512 (not -11.54, which would
-        // collapse epoch-1 negative gradients via p_0^gamma ~ 3e-8). Always apply to freshly initialized heads so
-        // cross-class transfers (whose class bias is skipped by `transfer_from`) also start at -4.59512; same-class
-        // transfers and resumes overwrite it when loading weights.
-        if cfg.loss.mal_gamma > 0.0 {
-            const MAL_BIAS_PRIOR: f32 = -4.595_12;
+        // Safeguard #38: focal classification losses (MAL, VFL with vfl_gamma > 0, QFL with qfl_beta > 0) require
+        // the focal bias prior b_0 = ln(0.01 / 0.99) = -4.59512 (not -11.54, which would collapse epoch-1 negative
+        // gradients via p_0^gamma). Always apply to freshly initialized heads so cross-class transfers (whose class
+        // bias is skipped by `transfer_from`) also start at -4.59512; same-class transfers and resumes overwrite it
+        // when loading weights.
+        if cfg.loss.uses_focal_bias_prior() {
+            const FOCAL_BIAS_PRIOR: f32 = -4.595_12;
             for (name, p) in model.named_parameters() {
                 if is_cls_head_param(&name) && name.ends_with(".out.bias") {
-                    folo_nn::init::constant_(&p, MAL_BIAS_PRIOR)?;
+                    folo_nn::init::constant_(&p, FOCAL_BIAS_PRIOR)?;
                 }
             }
         }
@@ -591,7 +592,7 @@ impl Trainer {
 
 /// Whether parameter `name` belongs to a classification head branch (v1 `head.cls.*` / `head.o2o.cls.*` or v2
 /// `head.o2o.{p3,p4,p5}.cls.*`).
-fn is_cls_head_param(name: &str) -> bool {
+pub(super) fn is_cls_head_param(name: &str) -> bool {
     name.starts_with("head.cls.")
         || name.starts_with("head.o2o.cls.")
         || (name.starts_with("head.o2o.") && name.contains(".cls."))

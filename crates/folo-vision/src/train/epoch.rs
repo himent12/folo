@@ -528,37 +528,37 @@ impl Trainer {
         }
     }
 
+    /// Unscale (by `inv_scale`), clip (`cfg.clip_grad_norm`), apply the LR/momentum schedule, and verify that
+    /// every accumulated gradient is finite. On GPU, overlaps the 4-byte finiteness readback with in-place
+    /// scaling and schedule application.
+    fn prepare_and_check_grads(&mut self, e: u32, inv_scale: f32) -> Result<bool> {
+        if let Some(ctx) = folo_gpu::context_for(self.device) {
+            if self.cfg.clip_grad_norm > 0.0 {
+                if let Some(plan) =
+                    self.acc.unscale_clip_device_prepare(inv_scale, self.cfg.clip_grad_norm)?
+                {
+                    // Submit the norm reduction and finiteness readback before in-place scaling so the
+                    // scaling pass and schedule update overlap with the GPU wait.
+                    let dl = folo_gpu::download_deferred(&ctx, plan.finite_scalar())?;
+                    plan.apply()?;
+                    ctx.flush();
+                    self.apply_schedule(e);
+                    return Ok(dl.finish()?.item::<f32>()?.is_finite());
+                }
+            } else if let Some(flag) = self.acc.unscale_prepare_device(inv_scale)? {
+                let dl = folo_gpu::download_deferred(&ctx, &flag)?;
+                self.apply_schedule(e);
+                return Ok(dl.finish()?.to_vec::<u32>()?[0] == 0);
+            }
+        }
+        self.apply_schedule(e);
+        Ok(self.acc.unscale_clip(inv_scale, self.cfg.clip_grad_norm)?)
+    }
+
     pub(super) fn optimizer_step(&mut self, e: u32, k: usize) -> Result<()> {
         if let Some(scaler) = self.scaler.as_ref() {
             let inv_scale = scaler.inv_scale();
-            let finite = if let Some(ctx) = folo_gpu::context_for(self.device) {
-                if self.cfg.clip_grad_norm > 0.0 {
-                    if let Some(plan) =
-                        self.acc.unscale_clip_device_prepare(inv_scale, self.cfg.clip_grad_norm)?
-                    {
-                        // Submit the norm reduction and finiteness readback before in-place scaling so the
-                        // scaling pass and schedule update overlap with the GPU wait.
-                        let dl = folo_gpu::download_deferred(&ctx, plan.finite_scalar())?;
-                        plan.apply()?;
-                        ctx.flush();
-                        self.apply_schedule(e);
-                        dl.finish()?.item::<f32>()?.is_finite()
-                    } else {
-                        self.apply_schedule(e);
-                        self.acc.unscale_clip(inv_scale, self.cfg.clip_grad_norm)?
-                    }
-                } else if let Some(flag) = self.acc.unscale_prepare_device(inv_scale)? {
-                    let dl = folo_gpu::download_deferred(&ctx, &flag)?;
-                    self.apply_schedule(e);
-                    dl.finish()?.to_vec::<u32>()?[0] == 0
-                } else {
-                    self.apply_schedule(e);
-                    self.acc.unscale_clip(inv_scale, self.cfg.clip_grad_norm)?
-                }
-            } else {
-                self.apply_schedule(e);
-                self.acc.unscale_clip(inv_scale, self.cfg.clip_grad_norm)?
-            };
+            let finite = self.prepare_and_check_grads(e, inv_scale)?;
             let scaler = self.scaler.as_mut().expect("checked");
             let scale = scaler.scale();
             if scaler.update(!finite) == ScaleUpdate::BackedOff {
@@ -584,27 +584,18 @@ impl Trainer {
                 return Ok(());
             }
         } else {
-            self.apply_schedule(e);
-            if self.cfg.clip_grad_norm > 0.0 {
-                let norm = self.acc.clip_grad_norm(self.cfg.clip_grad_norm)?;
-                // On GPU `clip_grad_norm` clips on-device without reading back and returns `NaN`; on CPU it returns
-                // the exact global L2 norm, so a non-finite norm skips the step before corrupting weights or state.
-                if self.device.is_cpu() && !norm.is_finite() {
-                    self.emitter.log(
-                        LogLevel::Warn,
-                        format!(
-                            "epoch {} batch {}: non-finite gradient norm ({norm}); optimizer step skipped",
-                            e + 1,
-                            k + 1
-                        ),
-                    );
-                    return Ok(());
-                }
+            let finite = self.prepare_and_check_grads(e, 1.0)?;
+            if !finite {
+                self.emitter.log(
+                    LogLevel::Warn,
+                    format!("epoch {} batch {}: non-finite gradient; optimizer step skipped", e + 1, k + 1),
+                );
+                return Ok(());
             }
         }
         self.opt.step(&self.acc)?;
         if let Some(ema) = &mut self.ema {
-            let lf = self.sched.lf(self.sched.step());
+            let lf = self.sched.effective_lf(self.sched.step());
             ema.update_with_lf(&self.model, lf)?;
         }
         self.sched.advance();

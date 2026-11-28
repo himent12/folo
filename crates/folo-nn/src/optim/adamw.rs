@@ -1,6 +1,6 @@
 //! AdamW: Adam with decoupled weight decay.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use folo_core::backend::OptimStep;
 use folo_core::{DType, Tensor};
@@ -8,13 +8,14 @@ use folo_core::{DType, Tensor};
 use super::cautious::{adamw_cautious_slice, cautious_mask_and_scale_tensor};
 use super::simd::adamw_slice;
 use super::{
-    GradSource, OptimKind, Optimizer, ParamGroup, ParamPlan, cpu_fast, for_each_param_planned, step_many,
-    take_state, validate_groups,
+    GradSource, OptimContract, OptimKind, Optimizer, ParamGroup, ParamPlan, apply_group_contract, cpu_fast,
+    for_each_param_planned, group_contract, step_many, take_state, validate_groups,
 };
 use crate::{Error, Result};
 
-/// AdamW, docs/MODEL.md §8.2, with the step counter `t` = number of steps so far + 1 and the group's current
-/// `lr`, `β1` (its `momentum`, which warmup ramps), `β2`, `ε`:
+/// AdamW, docs/MODEL.md §8.2, with each parameter's own step counter `t` = number of updates that parameter has
+/// received + 1 (so parameters frozen during early epochs keep exact bias correction when unfrozen) and the
+/// group's current `lr`, `β1` (its `momentum`, which warmup ramps), `β2`, `ε`:
 /// ```text
 /// p = p · (1 − lr · wd)                                    (if the group's weight_decay > 0: decoupled)
 /// m = β1 · m + (1 − β1) · g;   v = β2 · v + (1 − β2) · g²
@@ -25,6 +26,10 @@ pub struct AdamW {
     groups: Vec<ParamGroup>,
     /// `(exp_avg, exp_avg_sq)` per parameter.
     state: Vec<Vec<(Tensor, Tensor)>>,
+    /// Completed updates per parameter (for accurate bias correction when parameters are selectively frozen).
+    param_steps: Vec<Vec<u64>>,
+    /// Pending per-parameter step overrides validated in [`Optimizer::apply_contract`] for [`Optimizer::load_state`].
+    loaded_param_steps: Option<BTreeMap<String, u64>>,
     plan: ParamPlan,
     coefs: Vec<Coef>,
     step: u64,
@@ -35,14 +40,36 @@ impl AdamW {
     pub fn new(groups: Vec<ParamGroup>) -> Result<Self> {
         validate_groups(&groups)?;
         let state = zero_state(&groups)?;
+        let param_steps = groups.iter().map(|g| vec![0; g.params.len()]).collect();
         let plan = ParamPlan::from_groups(&groups);
         let coefs = Vec::with_capacity(groups.len());
-        Ok(AdamW { groups, state, plan, coefs, step: 0 })
+        Ok(AdamW { groups, state, param_steps, loaded_param_steps: None, plan, coefs, step: 0 })
     }
 
     /// `(exp_avg, exp_avg_sq)` of a parameter.
     pub fn moments(&self, group: usize, param: usize) -> Option<(&Tensor, &Tensor)> {
         self.state.get(group)?.get(param).map(|(m, v)| (m, v))
+    }
+
+    /// Number of updates applied to parameter `(group, param)`.
+    pub fn param_step(&self, group: usize, param: usize) -> Option<u64> {
+        self.param_steps.get(group)?.get(param).copied()
+    }
+}
+
+fn coef_for(g: &ParamGroup, step_before: u64) -> Coef {
+    let t = (step_before.saturating_add(1)).min(i32::MAX as u64) as i32;
+    let (b1, b2) = (g.momentum, g.beta2);
+    Coef {
+        decay: (g.weight_decay != 0.0).then_some((1.0 - g.lr * g.weight_decay) as f32),
+        b1: b1 as f32,
+        one_minus_b1: (1.0 - b1) as f32,
+        b2: b2 as f32,
+        one_minus_b2: (1.0 - b2) as f32,
+        step_size: (g.lr / (1.0 - b1.powi(t))) as f32,
+        bc2_sqrt: (1.0 - b2.powi(t)).sqrt() as f32,
+        eps: g.eps as f32,
+        cautious: g.cautious,
     }
 }
 
@@ -176,24 +203,42 @@ impl Optimizer for AdamW {
     }
 
     fn step(&mut self, grads: &dyn GradSource) -> Result<()> {
-        let t = (self.step + 1) as i32;
         self.plan.sync(&self.groups);
-        self.coefs.clear();
-        self.coefs.extend(self.groups.iter().map(|g| {
-            let (b1, b2) = (g.momentum, g.beta2);
-            Coef {
-                decay: (g.weight_decay != 0.0).then_some((1.0 - g.lr * g.weight_decay) as f32),
-                b1: b1 as f32,
-                one_minus_b1: (1.0 - b1) as f32,
-                b2: b2 as f32,
-                one_minus_b2: (1.0 - b2) as f32,
-                step_size: (g.lr / (1.0 - b1.powi(t))) as f32,
-                bc2_sqrt: (1.0 - b2.powi(t)).sqrt() as f32,
-                eps: g.eps as f32,
-                cautious: g.cautious,
+        let mut group_uniform_step: Vec<Option<u64>> = Vec::with_capacity(self.groups.len());
+        let mut all_groups_uniform = true;
+        for (gi, g) in self.groups.iter().enumerate() {
+            let mut uniform: Option<u64> = None;
+            let mut mixed = false;
+            for (pi, (_, p)) in g.params.iter().enumerate() {
+                if grads.grad(p).is_none() {
+                    continue;
+                }
+                let s = self.param_steps[gi][pi];
+                match uniform {
+                    None => uniform = Some(s),
+                    Some(prev) if prev != s => {
+                        mixed = true;
+                        break;
+                    }
+                    Some(_) => {}
+                }
             }
-        }));
-        let (groups, state, plan, coefs) = (&self.groups, &self.state, &self.plan, &self.coefs);
+            if mixed {
+                all_groups_uniform = false;
+                group_uniform_step.push(None);
+            } else {
+                group_uniform_step.push(uniform);
+            }
+        }
+        self.coefs.clear();
+        self.coefs.extend(
+            self.groups
+                .iter()
+                .enumerate()
+                .map(|(gi, g)| coef_for(g, group_uniform_step[gi].unwrap_or(self.step))),
+        );
+        let (groups, state, param_steps, plan, coefs) =
+            (&self.groups, &self.state, &self.param_steps, &self.plan, &self.coefs);
         let adamw = |gi: usize| {
             let c = &coefs[gi];
             OptimStep::AdamW {
@@ -207,7 +252,7 @@ impl Optimizer for AdamW {
                 eps: c.eps,
             }
         };
-        let done = if groups.iter().any(|g| g.cautious) {
+        let done = if groups.iter().any(|g| g.cautious) || !all_groups_uniform {
             None
         } else {
             step_many("adamw", groups, grads, adamw, |gi, pi| vec![&state[gi][pi].0, &state[gi][pi].1])?
@@ -227,8 +272,20 @@ impl Optimizer for AdamW {
                     )));
                 }
                 let (m, v) = &state[gi][pi];
-                update(p, g, m, v, &coefs[gi])
+                if group_uniform_step[gi].is_some() {
+                    update(p, g, m, v, &coefs[gi])
+                } else {
+                    let c = coef_for(&groups[gi], param_steps[gi][pi]);
+                    update(p, g, m, v, &c)
+                }
             })?;
+        }
+        for (gi, g) in self.groups.iter().enumerate() {
+            for (pi, (_, p)) in g.params.iter().enumerate() {
+                if grads.grad(p).is_some() {
+                    self.param_steps[gi][pi] += 1;
+                }
+            }
         }
         self.step += 1;
         Ok(())
@@ -236,6 +293,43 @@ impl Optimizer for AdamW {
 
     fn step_count(&self) -> u64 {
         self.step
+    }
+
+    fn contract(&self) -> OptimContract {
+        let mut c = group_contract(self);
+        for (g, steps) in self.groups.iter().zip(&self.param_steps) {
+            for ((name, _), &s) in g.params.iter().zip(steps) {
+                if s != self.step {
+                    c.param_steps.insert(name.clone(), s);
+                }
+            }
+        }
+        c
+    }
+
+    fn apply_contract(&mut self, c: &OptimContract) -> Result<()> {
+        apply_group_contract(self, c)?;
+        if !c.param_steps.is_empty() {
+            let known: HashSet<&str> =
+                self.groups.iter().flat_map(|g| g.params.iter().map(|(n, _)| n.as_str())).collect();
+            for (name, &s) in &c.param_steps {
+                if !known.contains(name.as_str()) {
+                    return Err(Error::Load(format!(
+                        "folo.optim: `param_steps` names `{name}`, which is not a parameter of this run"
+                    )));
+                }
+                if s > c.step {
+                    return Err(Error::Load(format!(
+                        "folo.optim: `param_steps[{name}]` ({s}) exceeds optimizer step ({})",
+                        c.step
+                    )));
+                }
+            }
+            self.loaded_param_steps = Some(c.param_steps.clone());
+        } else {
+            self.loaded_param_steps = None;
+        }
+        Ok(())
     }
 
     fn state_tensors(&self) -> Result<Vec<(String, Tensor)>> {
@@ -271,6 +365,17 @@ impl Optimizer for AdamW {
             let dst = if k == 0 { m } else { v };
             dst.copy_from(&t.to_device(dst.device())?)?;
         }
+        let overrides = self.loaded_param_steps.take();
+        self.param_steps = self
+            .groups
+            .iter()
+            .map(|g| {
+                g.params
+                    .iter()
+                    .map(|(name, _)| overrides.as_ref().and_then(|m| m.get(name).copied()).unwrap_or(step))
+                    .collect()
+            })
+            .collect();
         self.state = fresh;
         self.step = step;
         Ok(())

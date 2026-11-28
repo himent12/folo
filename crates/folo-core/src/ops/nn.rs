@@ -8,12 +8,17 @@ use crate::{DType, Error, Result, Shape, Storage, Tensor, no_grad};
 
 impl Tensor {
     /// Matrix product. Both operands need rank >= 2: `[.., m, k] @ [.., k, n] -> [.., m, n]`, with the batch
-    /// dims broadcast (so `[B, m, k] @ [k, n]` works and runs as one large GEMM). Under [`crate::autocast`], `F32`
-    /// operands are cast to `F16` first (recorded casts) and the product is `F16`.
+    /// dims broadcast (so `[B, m, k] @ [k, n]` works and runs as one large GEMM). Under [`crate::autocast`], the
+    /// forward product runs in `F16` while backward computes gradients for any `F32` operand (such as `Linear`
+    /// master weights) in `F32` so scaled weight gradients never overflow or round through `F16`.
     pub fn matmul(&self, other: &Tensor) -> Result<Tensor> {
         if casts(self) || casts(other) {
-            return self.to_dtype(DType::F16)?.matmul(&other.to_dtype(DType::F16)?);
+            return self.matmul_autocast(other);
         }
+        self.matmul_raw(other)
+    }
+
+    fn matmul_raw(&self, other: &Tensor) -> Result<Tensor> {
         self.check_same_device(other, "matmul")?;
         self.check_float("matmul")?;
         other.check_float_like(self, "matmul")?;
@@ -43,7 +48,7 @@ impl Tensor {
         let out = Tensor::wrap(s, shape_of(m, n), "matmul")?;
         let (x, y) = (self.clone(), other.clone());
         Ok(out.track("matmul", &[self, other], move |g| {
-            let ga = if x.requires_grad() { Some(g.matmul(&y.t()?)?.sum_to(x.shape())?) } else { None };
+            let ga = if x.requires_grad() { Some(g.matmul_raw(&y.t()?)?.sum_to(x.shape())?) } else { None };
             let gb = if !y.requires_grad() {
                 None
             } else if y.rank() == 2 && x.rank() > 2 {
@@ -51,9 +56,87 @@ impl Tensor {
                 let rows: usize = x.dims()[..x.rank() - 1].iter().product();
                 let xk = x.reshape([rows, k])?;
                 let gn = g.reshape([rows, n])?;
-                Some(xk.t()?.matmul(&gn)?)
+                Some(xk.t()?.matmul_raw(&gn)?)
             } else {
-                Some(x.t()?.matmul(g)?.sum_to(y.shape())?)
+                Some(x.t()?.matmul_raw(g)?.sum_to(y.shape())?)
+            };
+            Ok(grads![ga, gb])
+        }))
+    }
+
+    /// The autocast matmul: forward runs in `F16` on non-recording `F16` copies, recorded directly against
+    /// `[self, other]`. In backward, any operand that was `F32` (for example `Linear::weight` master weights or
+    /// `F32` activations) receives its gradient from an `F32` matmul so `GradScaler`-scaled weight gradients never
+    /// overflow or underflow `F16`; `F16` operands keep fast `F16` backward matmuls.
+    fn matmul_autocast(&self, other: &Tensor) -> Result<Tensor> {
+        self.check_same_device(other, "matmul")?;
+        self.check_float("matmul")?;
+        other.check_float("matmul")?;
+        let mismatch =
+            || Error::ShapeMismatch { op: "matmul", lhs: self.shape().clone(), rhs: other.shape().clone() };
+        if self.rank() < 2 || other.rank() < 2 {
+            return Err(mismatch());
+        }
+        let (ra, rb) = (self.rank(), other.rank());
+        let (m, k) = (self.dims()[ra - 2], self.dims()[ra - 1]);
+        let (k2, n) = (other.dims()[rb - 2], other.dims()[rb - 1]);
+        if k != k2 {
+            return Err(mismatch());
+        }
+        let ba = Shape::new(&self.dims()[..ra - 2]);
+        let bb = Shape::new(&other.dims()[..rb - 2]);
+        let batch = ba.broadcast(&bb, "matmul").map_err(|_| mismatch())?;
+        let shape_of = |r: usize, c: usize| {
+            let mut d: DimVec = batch.dims().iter().copied().collect();
+            d.extend([r, c]);
+            Shape::from(d)
+        };
+        let (x16, y16) = {
+            let _g = no_grad();
+            (self.to_dtype(DType::F16)?, other.to_dtype(DType::F16)?)
+        };
+        let la = x16.layout().broadcast_to(&shape_of(m, k), "matmul")?;
+        let lb = y16.layout().broadcast_to(&shape_of(k, n), "matmul")?;
+        let b = x16.backend()?;
+        let s = super::with_views([&x16, &y16], [&la, &lb], |[a, bv]| b.matmul(a, bv))?;
+        let out = Tensor::wrap(s, shape_of(m, n), "matmul")?;
+        let (x, y) = (self.clone(), other.clone());
+        Ok(out.track("matmul", &[self, other], move |g| {
+            let need_g32 = (x.requires_grad() && x.dtype() == DType::F32)
+                || (y.requires_grad() && y.dtype() == DType::F32);
+            let g32 = if need_g32 { Some(g.to_dtype(DType::F32)?) } else { None };
+            let ga = if !x.requires_grad() {
+                None
+            } else if x.dtype() == DType::F32 {
+                let y32 = y.to_dtype(DType::F32)?;
+                Some(g32.as_ref().expect("g32").matmul_raw(&y32.t()?)?.sum_to(x.shape())?)
+            } else {
+                let g16 = g.to_dtype(DType::F16)?;
+                Some(g16.matmul_raw(&y16.t()?)?.sum_to(x.shape())?)
+            };
+            let gb = if !y.requires_grad() {
+                None
+            } else if y.dtype() == DType::F32 {
+                let x32 = x.to_dtype(DType::F32)?;
+                let g32 = g32.as_ref().expect("g32");
+                if y.rank() == 2 && x.rank() > 2 {
+                    let rows: usize = x32.dims()[..x32.rank() - 1].iter().product();
+                    let xk = x32.contiguous()?.reshape([rows, k])?;
+                    let gn = g32.contiguous()?.reshape([rows, n])?;
+                    Some(xk.t()?.matmul_raw(&gn)?)
+                } else {
+                    Some(x32.t()?.matmul_raw(g32)?.sum_to(y.shape())?)
+                }
+            } else {
+                let g16 = g.to_dtype(DType::F16)?;
+                if y.rank() == 2 && x.rank() > 2 {
+                    let rows: usize = x16.dims()[..x16.rank() - 1].iter().product();
+                    let xk = x16.contiguous()?.reshape([rows, k])?;
+                    let gn = g16.contiguous()?.reshape([rows, n])?;
+                    Some(xk.t()?.matmul_raw(&gn)?)
+                } else {
+                    Some(x16.t()?.matmul_raw(&g16)?.sum_to(y.shape())?)
+                }
             };
             Ok(grads![ga, gb])
         }))
