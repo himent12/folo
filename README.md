@@ -70,7 +70,7 @@ Trained from random weights on COCO alone, `folo-n` (`folo-n-coco-v5`, 128 epoch
 **0.370** val2017 AP and `folo-s` reaches **0.416** (56 epochs); opt-in SEBF + DFL-CGR post-processing
 (`--fusion sebf --score dfl-cgr --iou 0.78 --max-det 1000`) reaches **0.378** and **0.423**. On one 20-epoch COCO
 subset from scratch, `folo-n` matches Ultralytics **YOLO11n** per epoch with the same optimizer, and fine-tuned on four
-small datasets `folo-n` is level with `yolo26n` on three of four ([examples/coco](examples/coco/README.md),
+small datasets (`folo-n-coco-v2` vs `yolo26n`) `folo-n` is level on three of four ([examples/coco](examples/coco/README.md),
 [bench/finetune](bench/finetune/README.md)).
 
 <p align="center">
@@ -89,8 +89,8 @@ Build from source on Linux, Windows, or macOS (requires Rust stable; `cargo folo
 
 ```sh
 git clone https://github.com/himent12/folo && cd folo
-npm --prefix web ci && npm --prefix web run build   # build Studio once (skip for CLI/API only)
-cargo install --path crates/folo-cli --features embed-web
+npm --prefix web ci && npm --prefix web run build          # build Studio once
+cargo install --path crates/folo-cli --features embed-web  # or omit --features embed-web for CLI/API only
 ```
 
 For in-browser WebGPU/Wasm inference in Studio, build `folo-wasm` before `npm --prefix web run build`
@@ -124,7 +124,8 @@ folo train --data datasets/shapes --model folo-n --imgsz 320 --epochs 30  # ~83 
 folo predict --model runs/shapes-n/weights/best.folo datasets/shapes/images/val --save runs/shapes-n/pred
 ```
 
-Start the web UI with demo data (or without `--mock` for your own runs in `~/.folo`):
+Start the web UI with demo data (or copy `runs/shapes-n/weights/best.folo` into `<data dir>/models/`, default
+`~/.folo/models/`, and run `folo serve` without `--mock` to test your trained model in Studio):
 
 ```sh
 folo serve --mock   # serves FOLO Studio at http://127.0.0.1:7878 (open in your browser)

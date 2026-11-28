@@ -88,6 +88,11 @@ export function barsFigure(spec, t) {
 
     const hx = cardX + CARD_PAD_X;
     let py = y + CARD_PAD_Y;
+    fits(
+      `header of "${panel.title}"`,
+      textWidth(panel.title, 13, 600) + (panel.hint ? textWidth(panel.hint, 11.5) + 12 : 0),
+      cardW - 2 * CARD_PAD_X,
+    );
     out.push(text(hx, py + 12, panel.title, { size: 13, weight: 600, fill: t.ink }));
     if (panel.hint) out.push(text(valRightX, py + 12, panel.hint, { size: 11.5, fill: t.ink3, anchor: 'end' }));
     py += 26;

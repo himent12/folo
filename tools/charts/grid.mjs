@@ -147,20 +147,28 @@ export function dashboardFigure(spec, t) {
           ry += GROUP_GAP;
         }
         if (group.title || group.scale) {
+          if (group.title && group.scale) {
+            fits(
+              `subgroup header "${group.title}"`,
+              textWidth(group.title, 10.5, 600) + textWidth(group.scale, 10.5, 400, true) + 12,
+              barX + barMaxW - hx,
+            );
+          }
           if (group.title) out.push(text(hx, ry + 11, group.title, { size: 10.5, weight: 600, fill: t.ink2, tracking: '0.03em' }));
           if (group.scale) out.push(text(barX + barMaxW, ry + 11, group.scale, { size: 10.5, fill: t.ink3, anchor: 'end', mono: true }));
           ry += GROUP_HEAD_H;
         }
-        const groupTop =
-          sharedTop ??
-          group.max ??
-          Math.max(
-            ...group.rows.flatMap((r) => [
-              ...r.values,
-              ...(r.ranges ? r.ranges.flatMap((rg) => rg) : []),
-            ]),
-          );
+        const dataTop = Math.max(
+          ...group.rows.flatMap((r) => [
+            ...r.values,
+            ...(r.ranges ? r.ranges.flatMap((rg) => rg) : []),
+          ]),
+        );
+        const groupTop = sharedTop ?? group.max ?? dataTop;
         if (!(groupTop > 0)) throw new Error(`${spec.title} / ${card.title}: group scale must be positive (got ${groupTop})`);
+        if (dataTop > groupTop) {
+          throw new Error(`${spec.title} / ${card.title}: value ${dataTop} exceeds fixed scale ceiling ${groupTop}`);
+        }
         const scale = barMaxW / groupTop;
 
         for (const item of group.rows) {

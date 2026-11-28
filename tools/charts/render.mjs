@@ -186,7 +186,7 @@ const figures = {
               labelW: 118,
               pillW: 56,
               sharedMax: 1.0,
-              note: '100 epochs from own COCO weights, one pycocotools scorer.',
+              note: '100 epochs from own COCO weights (folo-n-coco-v2), one pycocotools scorer.',
               groups: [
                 {
                   rows: data.accuracy.finetune.rows.map((row) => ({
