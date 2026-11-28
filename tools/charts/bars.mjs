@@ -72,9 +72,11 @@ export function barsFigure(spec, t) {
 
   const extent = (panel) => {
     const labelRoom = Math.ceil(Math.max(...panel.rows.flatMap((row) => row.values.map((_, i) => textWidth(valueText(panel, row, i), VALUE_SIZE, 600, true))))) + 14;
+    const top = Math.max(panel.refLine?.value ?? 0, ...panel.rows.flatMap((row) => row.values));
+    if (!(top > 0)) throw new Error(`${spec.title} / ${panel.title}: scale must be positive (got ${top})`);
     return {
       width: valRightX - barX - labelRoom,
-      top: Math.max(panel.refLine?.value ?? 0, ...panel.rows.flatMap((row) => row.values)),
+      top,
     };
   };
   const extents = spec.panels.map(extent);
@@ -110,7 +112,8 @@ export function barsFigure(spec, t) {
         const s = spec.series[i];
         const tip = x(row.values[i]);
         out.push(`<rect x="${n(barX)}" y="${n(by)}" width="${n(barMaxW)}" height="${BAR_H}" rx="3" fill="${t.track}"/>`);
-        out.push(bar(barX, by, tip - barX, BAR_H, colourOf(s.colour, t)));
+        const barEl = bar(barX, by, tip - barX, BAR_H, colourOf(s.colour, t));
+        if (barEl) out.push(barEl);
         out.push(
           text(valRightX, by + BAR_H / 2 + 4, valueText(panel, row, i), {
             size: VALUE_SIZE,

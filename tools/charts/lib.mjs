@@ -31,8 +31,7 @@ export const blend = (hex, other, amount) => {
 
 /**
  * The colours of one theme, all opaque. `series` is `chart.series` in its fixed order (design/README.md, Colour).
- * `reference` is the grey of whatever FOLO is compared with (`chart.context` in dark, `text.tertiary` in light:
- * both >= 3:1 on the raised card surface).
+ * Every bar gradient endpoint stays >= 3:1 against the bar track, and every pill ink stays >= 4.5:1 on its pill fill.
  */
 export function theme(mode) {
   const c = tokens.color[mode];
@@ -40,8 +39,8 @@ export function theme(mode) {
   const card = c.bg.raised;
   const track = mode === 'dark' ? over('#FFFFFF09', card) : over('#0A0E140B', card);
   const seriesGrad = c.chart.series.map((col) => ({
-    from: mode === 'dark' ? blend(col, '#000000', 0.14) : blend(col, '#000000', 0.1),
-    to: mode === 'dark' ? blend(col, '#FFFFFF', 0.1) : blend(col, '#FFFFFF', 0.08),
+    from: mode === 'dark' ? blend(col, '#000000', 0.14) : blend(col, '#000000', 0.18),
+    to: mode === 'dark' ? blend(col, '#FFFFFF', 0.1) : blend(col, '#000000', 0.04),
   }));
   return {
     mode,
@@ -68,7 +67,7 @@ export function theme(mode) {
     neutralText: c.text.secondary,
     mutedBg: over(c.bg.hover, card),
     mutedBorder: over(c.line.subtle, card),
-    mutedText: c.text.tertiary,
+    mutedText: c.text.secondary,
     warnBg: over(c.warning.muted, card),
     warnBorder: mode === 'dark' ? over('#FFB54738', card) : over('#BD780038', card),
     warnText: c.warning.text,
@@ -105,15 +104,33 @@ export function textWidth(str, size, weight = 400, mono = false) {
   return em * size * (weight >= 600 ? 1.05 : 1);
 }
 
-/** `str` broken into lines of at most `width` px at `size` px, by the same estimate. */
+/** `str` broken into lines of at most `width` px at `size` px, splitting overlong tokens when needed. */
 export function wrap(str, size, width) {
   const lines = [];
   let cur = '';
+  const pushToken = (word) => {
+    if (textWidth(word, size) <= width) {
+      cur = word;
+      return;
+    }
+    let chunk = '';
+    for (const ch of word) {
+      if (chunk && textWidth(chunk + ch, size) > width) {
+        lines.push(chunk);
+        chunk = ch;
+      } else {
+        chunk += ch;
+      }
+    }
+    cur = chunk;
+  };
   for (const word of String(str).split(' ')) {
     const next = cur ? `${cur} ${word}` : word;
     if (cur && textWidth(next, size) > width) {
       lines.push(cur);
-      cur = word;
+      pushToken(word);
+    } else if (!cur && textWidth(word, size) > width) {
+      pushToken(word);
     } else {
       cur = next;
     }
@@ -153,16 +170,21 @@ export function runs(x, y, parts, { size = 13, anchor = 'start', mono = false } 
   return `<text x="${n(x)}" y="${n(y)}" font-size="${size}"${mono ? ` font-family="${esc(FONT_MONO)}"` : ''}${anchor !== 'start' ? ` text-anchor="${anchor}"` : ''} xml:space="preserve">${spans}</text>`;
 }
 
-/** A horizontal bar from `x` growing right: square at the baseline, gently rounded at the data end. */
+/** A horizontal bar from `x` growing right: square at the baseline, gently rounded at the data end. Zero draws nothing. */
 export function bar(x, y, w, h, fill) {
+  if (!(w > 0)) return '';
   const width = Math.max(w, 2);
   const r = Math.min(3.5, h / 2, width);
   return `<path d="M${n(x)} ${n(y)}h${n(width - r)}a${n(r)} ${n(r)} 0 0 1 ${n(r)} ${n(r)}v${n(h - 2 * r)}a${n(r)} ${n(r)} 0 0 1 ${n(-r)} ${n(r)}h${n(-(width - r))}z" fill="${fill}"/>`;
 }
 
+/** Pixel width a pill needs for `str`. */
+export const pillWidth = (str, { size = 11.5, weight = 600, mono = true, padX = 8, minW = 0 } = {}) =>
+  Math.max(minW, Math.ceil(textWidth(str, size, weight, mono) + padX * 2));
+
 /** A rounded badge pill, aligned on its right edge (`anchor: 'end'`) or left edge (`anchor: 'start'`). */
 export function pill(x, y, str, { bg, border, fill, size = 11.5, weight = 600, mono = true, anchor = 'end', padX = 8, height = 22, minW = 0 } = {}) {
-  const w = Math.max(minW, Math.ceil(textWidth(str, size, weight, mono) + padX * 2));
+  const w = pillWidth(str, { size, weight, mono, padX, minW });
   const rx = anchor === 'end' ? x - w : anchor === 'middle' ? x - w / 2 : x;
   const cx = rx + w / 2;
   const ty = y + height / 2 + size * 0.34;

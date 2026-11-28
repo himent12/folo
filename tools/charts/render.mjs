@@ -82,7 +82,7 @@ const figures = {
         title: 'Speed & memory: folo-n vs yolo26n',
         subtitle: `${data.machine} · Ultralytics 8.4.198`,
         desc:
-          '2x2 dashboard comparing folo-n against yolo26n. Latency at batch 1: ' +
+          '2x2 dashboard comparing folo-n against yolo26n. Latency at batch 1 (GPU on 0-7 ms scale, CPU on 0-25 ms scale): ' +
           data.inference.latency.map((r) => `${r.label} ${r.text[0]} vs ${r.text[1]} ms`).join(', ') +
           '. Batch-16 GPU inference throughput: ' +
           data.inference.throughput.map((r) => `${r.label} ${r.text[0]} vs ${r.text[1]} img/s`).join(', ') +
@@ -100,10 +100,13 @@ const figures = {
               unit: 'ms',
               labelW: 114,
               pillW: 48,
-              groups: [{ rows: gpuLatency }, { rows: cpuLatency }],
+              groups: [
+                { title: 'GPU', scale: '0–7 ms', max: 7, rows: gpuLatency },
+                { title: 'CPU', scale: '0–25 ms', max: 25, rows: cpuLatency },
+              ],
             },
             {
-              title: 'Training throughput · batch 16',
+              title: 'Training · batch 16',
               hint: '↑ img/s, higher is better',
               unit: 'img/s',
               labelW: 128,
@@ -132,7 +135,8 @@ const figures = {
           ],
         ],
         footer: [
-          'FOLO: medians of alternated runs (2026-11-12/13; end-to-end on trained weights). YOLO26: fastest config per row (2026-11-07). GPU b1 warms FOLO for 1 s vs 25/10 calls; full method in docs/BENCHMARKS.md.',
+          'FOLO: medians of alternated runs (2026-11-12/13; end to end on trained weights). YOLO26: fastest config per row (2026-11-07). Full method: docs/BENCHMARKS.md.',
+          data.warmup,
         ],
       },
       t,
@@ -142,9 +146,9 @@ const figures = {
     dashboardFigure(
       {
         title: 'Accuracy: FOLO vs Ultralytics YOLO26',
-        subtitle: 'AP@[.5:.95] (pycocotools) · higher is better · whiskers show 3-seed min–max',
+        subtitle: 'AP@[.5:.95] (pycocotools) · higher is better · 0–1 shared scale · whiskers show 3-seed min–max',
         desc:
-          'Two-panel chart of AP on a 0 to 1 scale. COCO val2017 (not like for like): ' +
+          'Two-panel chart of AP on one shared 0 to 1 scale. COCO val2017 (not like for like): ' +
           data.accuracy.coco.rows.map((r) => `${r.label} ${r.text[0]} vs ${r.text[1]}`).join(', ') +
           '. Fine-tuned on four small datasets (folo-n vs yolo26n, 3-seed mean): ' +
           data.accuracy.finetune.rows.map((r) => `${r.label} ${r.text[0]} vs ${r.text[1]} (${r.verdict})`).join(', ') +
@@ -158,11 +162,11 @@ const figures = {
             {
               title: 'COCO val2017',
               hint: 'not like for like',
-              flex: 0.96,
+              flex: 1,
               labelW: 118,
               pillW: 56,
               sharedMax: 1.0,
-              note: 'FOLO trained on COCO alone from scratch (56 / 128 ep). YOLO26 pretrained on Objects365 and trained longer.',
+              note: 'FOLO trained on COCO alone from scratch (128 / 56 ep). YOLO26 pretrained on Objects365 and trained longer.',
               groups: [
                 {
                   rows: data.accuracy.coco.rows.map((row, i) => ({
@@ -178,7 +182,7 @@ const figures = {
             {
               title: 'Fine-tuned on small datasets',
               hint: 'folo-n vs yolo26n · 3 seeds',
-              flex: 1.04,
+              flex: 1,
               labelW: 118,
               pillW: 56,
               sharedMax: 1.0,
@@ -198,7 +202,7 @@ const figures = {
           ],
         ],
         footer: [
-          '"level": inside 3-seed spread or saturated (Signatures). Opt-in SEBF + DFL-CGR adds +0.007 AP on COCO; full tables in docs/BENCHMARKS.md.',
+          '"level": inside 3-seed spread or saturated (Signatures). Opt-in SEBF + DFL-CGR (--iou 0.78 --max-det 1000) adds +0.0065–0.0076 AP on COCO; full tables in docs/BENCHMARKS.md.',
         ],
       },
       t,
@@ -228,7 +232,8 @@ const figures = {
           },
         ],
         footer: [
-          "Ratios from the FOLO targets table in docs/BENCHMARKS.md: FOLO's median vs YOLO26's best config per row. GPU b1 warms FOLO for 1 s vs 25/10 calls.",
+          "Ratios from the FOLO targets table in docs/BENCHMARKS.md: FOLO's median vs YOLO26's best config per row (measured 2026-11-12/13 and 2026-11-07).",
+          data.warmup,
         ],
       },
       t,
